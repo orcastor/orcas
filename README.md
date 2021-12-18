@@ -1,4 +1,4 @@
-# 🐋 orcas
+# 🐋 Orcas
 
 <p align="center">An out-of-the-box standalone object storage framework.</p>
 <p align="center">
