@@ -84,7 +84,7 @@ func to32BitsMD5(s string) string {
 func (ddo *DefaultDataOperator) Write(c context.Context, fileName string, buf []byte) error {
 	hash := to32BitsMD5(fileName)
 
-	dirPath := filepath.Join(Conf().Path, hash[len(hash)-3:])
+	dirPath := filepath.Join(Conf().Path, DATA_DIR, hash[len(hash)-3:])
 	// 不用判断是否存在，以及是否创建成功，如果失败，下面写入文件之前会报错
 	os.MkdirAll(dirPath, 0766)
 
@@ -116,14 +116,14 @@ func (ddo *DefaultDataOperator) Write(c context.Context, fileName string, buf []
 func (ddo *DefaultDataOperator) Read(c context.Context, fileName string) ([]byte, error) {
 	hash := to32BitsMD5(fileName)
 	// path/<文件名hash的最后三个字节>/hash
-	path := filepath.Join(Conf().Path, hash[len(hash)-3:], hash)
+	path := filepath.Join(Conf().Path, DATA_DIR, hash[len(hash)-3:], hash)
 	return os.ReadFile(path)
 }
 
 func (ddo *DefaultDataOperator) ReadBytes(c context.Context, fileName string, offset, size int64) ([]byte, error) {
 	hash := to32BitsMD5(fileName)
 	// path/<文件名hash的最后三个字节>/hash
-	path := filepath.Join(Conf().Path, hash[len(hash)-3:], hash)
+	path := filepath.Join(Conf().Path, DATA_DIR, hash[len(hash)-3:], hash)
 
 	f, err := os.Open(path)
 	if err != nil {

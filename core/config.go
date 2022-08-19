@@ -1,5 +1,13 @@
 package core
 
+const (
+	DATA_DIR = "data"
+
+	BKT_TBL  = "bkt"
+	OBJ_TBL  = "obj"
+	DATA_TBL = "data"
+)
+
 var config *CoreConfig
 
 type CoreConfig struct {
