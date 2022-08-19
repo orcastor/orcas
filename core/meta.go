@@ -116,9 +116,20 @@ func (dmo *DefaultMetaOperator) GetDataInfo(c context.Context, id int64) (d *Dat
 }
 
 func (dmo *DefaultMetaOperator) Create(c context.Context, o []*ObjectInfo) ([]uint64, error) {
-	return nil, nil
+	db, err := GetDB("meta.db")
+	defer db.Close()
+
+	t := b.Table(db, OBJ_TBL, c)
+	_, err = t.ReplaceInto(&o)
+	return nil, err
 }
 
-func (dmo *DefaultMetaOperator) Get(c context.Context, id int64) (*ObjectInfo, error) {
-	return nil, nil
+func (dmo *DefaultMetaOperator) Get(c context.Context, id int64) (o *ObjectInfo, err error) {
+	db, err := GetDB("meta.db")
+	defer db.Close()
+
+	t := b.Table(db, OBJ_TBL, c)
+	o = &ObjectInfo{}
+	_, err = t.Select(o, b.Where(b.Eq("id", id)))
+	return
 }
