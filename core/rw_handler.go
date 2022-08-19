@@ -9,7 +9,11 @@ func (ch *RWHanlder) New(Hanlder) Hanlder {
 	return ch
 }
 
-// 只有文件长度、HdrCRC32是预校验，如果成功返回DataID，失败返回0
+// 只有文件长度、HdrCRC32是预校验，如果成功返回true，失败返回false
+func (ch *RWHanlder) TryRef(d []*DataInfo) ([]bool, error) {
+	return nil, nil
+}
+
 // 有文件长度、CRC32、MD5，成功返回引用的DataID，失败返回0，客户端发现DataID有变化，说明不需要上传数据
 // 如果非预校验DataID传0，说明跳过了预校验
 func (ch *RWHanlder) Ref(d []*DataInfo) ([]uint64, error) {

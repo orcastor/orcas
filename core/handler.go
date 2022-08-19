@@ -4,7 +4,8 @@ type Hanlder interface {
 	// 传入underlying，返回当前的，构成链式调用
 	New(h Hanlder) Hanlder
 
-	// 只有文件长度、HdrCRC32是预校验，如果成功返回DataID，失败返回0
+	// 只有文件长度、HdrCRC32是预校验，如果成功返回true，失败返回false
+	TryRef(d []*DataInfo) ([]bool, error)
 	// 有文件长度、CRC32、MD5，成功返回引用的DataID，失败返回0，客户端发现DataID有变化，说明不需要上传数据
 	// 如果非预校验DataID传0，说明跳过了预校验
 	Ref(d []*DataInfo) ([]uint64, error)

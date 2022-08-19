@@ -111,7 +111,7 @@ type BucketInfo struct {
 
 type ObjectOpConfig struct {
 	PwroffProtection int    // Power-off Protection Method，强制每次写入数据后刷到磁盘
-	TryRef           int    // None / Ref / PreRef+Ref
+	TryRef           int    // None / Ref / TryRef+Ref
 	SameNameConflict int    // Throw / Merge / Rename
 	ConflictTail     string // "-副本" / "{\d}"
 	ServSideDecompr  int    // 服务端解压，PS：必须是非加密数据
