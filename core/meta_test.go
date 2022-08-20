@@ -16,7 +16,7 @@ func init() {
 
 func TestPutDataInfo(t *testing.T) {
 	Convey("normal", t, func() {
-		Convey("sync write one file", func() {
+		Convey("put data info", func() {
 			dmo := &DefaultMetaOperator{}
 			InitBucket("meta.db")
 			id, _ := idgen.NewIDGen(nil, 0).New()
@@ -31,7 +31,7 @@ func TestPutDataInfo(t *testing.T) {
 
 func TestGetDataInfo(t *testing.T) {
 	Convey("normal", t, func() {
-		Convey("sync write one file", func() {
+		Convey("get data info", func() {
 			dmo := &DefaultMetaOperator{}
 			InitBucket("meta.db")
 			id, _ := idgen.NewIDGen(nil, 0).New()
