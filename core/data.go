@@ -81,6 +81,13 @@ func to32BitsMD5(s string) string {
 	return fmt.Sprintf("%x", md5.Sum([]byte(s)))[8:24]
 }
 
+func ToFileName(dataID int64, sn int) string {
+	if sn == -1 {
+		return fmt.Sprint(dataID)
+	}
+	return fmt.Sprintf("%d-%d", dataID, sn)
+}
+
 func (ddo *DefaultDataOperator) Write(c context.Context, fileName string, buf []byte) error {
 	hash := to32BitsMD5(fileName)
 
