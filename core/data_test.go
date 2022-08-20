@@ -100,7 +100,7 @@ func TestWriteSyncConcurrent(t *testing.T) {
 				Options: Option{
 					Sync: true,
 				}}
-			for i := 0; i < 10000; i++ {
+			for i := 0; i < 20000; i++ {
 				So(ddo.Write(context.TODO(), fmt.Sprint(i), []byte(fmt.Sprint(i))), ShouldBeNil)
 			}
 		})
@@ -111,7 +111,7 @@ func TestWriteAsyncConcurrent(t *testing.T) {
 	Convey("normal", t, func() {
 		Convey("async write files", func() {
 			ddo := &DefaultDataOperator{}
-			for i := 0; i < 10000; i++ {
+			for i := 0; i < 20000; i++ {
 				So(ddo.Write(context.TODO(), fmt.Sprint(i), []byte(fmt.Sprint(i))), ShouldBeNil)
 			}
 			for HasInflight() {

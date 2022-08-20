@@ -26,7 +26,7 @@ type DataOperator interface {
 
 const interval = time.Second
 
-var buffer = ecache.NewLRUCache(16, 1024, interval)
+var buffer = ecache.NewLRUCache(16, 256, interval)
 
 func init() {
 	buffer.Inspect(func(action int, key string, iface *interface{}, bytes []byte, status int) {
