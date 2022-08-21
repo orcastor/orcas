@@ -139,7 +139,9 @@ func (ddo *DefaultDataOperator) ReadBytes(c context.Context, fileName string, of
 	}
 	defer f.Close()
 
-	f.Seek(offset, io.SeekStart)
+	if offset > 0 {
+		f.Seek(offset, io.SeekStart)
+	}
 
 	var buf []byte
 	if size == -1 {
