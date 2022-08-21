@@ -32,7 +32,6 @@ type ObjectInfo struct {
 type DataInfo struct {
 	ID       int64  `borm:"id"`        // 数据ID（对象ID/版本ID，idgen随机生成的id）
 	Size     int64  `borm:"size"`      // 数据的大小
-	Checksum uint64 `borm:"checksum"`  // 整个对象的MD5值（最终数据，用于一致性审计）
 	HdrCRC32 uint64 `borm:"hdr_crc32"` // 头部100KB的CRC32校验值
 	CRC32    uint64 `borm:"crc32"`     // 整个对象的CRC32校验值（最原始数据）
 	MD5      uint64 `borm:"md5"`       // 整个对象的MD5值（最原始数据）
@@ -90,7 +89,6 @@ func InitBucket(bktName string) error {
 
 	db.Exec(`CREATE TABLE data (id BIGINT PRIMARY KEY NOT NULL,
 		size BIGINT NOT NULL,
-		checksum UNSIGNED BIG INT NOT NULL,
 		hdr_crc32 UNSIGNED BIG INT NOT NULL,
 		crc32 UNSIGNED BIG INT NOT NULL,
 		md5 UNSIGNED BIG INT NOT NULL,
