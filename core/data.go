@@ -32,18 +32,19 @@ func init() {
 	buffer.Inspect(func(action int, key string, iface *interface{}, bytes []byte, status int) {
 		// evicted / updated / deleted
 		if (action == ecache.PUT && status <= 0) || (action == ecache.DEL && status == 1) {
-			w := (*iface).(*AsyncHandles)
+			w := (*iface).(*AsyncHandle)
 			w.B.Flush()
 			w.F.Close()
 		}
 	})
 
 	go func() {
-		// manual evict expired items
+		// manually evict expired items
 		for {
+			now := time.Now().UnixNano()
 			keys := []string{}
 			buffer.Walk(func(key string, iface *interface{}, bytes []byte, expireAt int64) bool {
-				if expireAt < time.Now().UnixNano() {
+				if expireAt < now {
 					keys = append(keys, key)
 				}
 				return true
@@ -64,7 +65,7 @@ func HasInflight() (b bool) {
 	return b
 }
 
-type AsyncHandles struct {
+type AsyncHandle struct {
 	F *os.File
 	B *bufio.Writer
 }
@@ -115,7 +116,7 @@ func (ddo *DefaultDataOperator) Write(c context.Context, fileName string, buf []
 		err = b.Flush()
 	} else {
 		go b.Flush()
-		buffer.Put(path, &AsyncHandles{F: f, B: b})
+		buffer.Put(path, &AsyncHandle{F: f, B: b})
 	}
 	return err
 }
