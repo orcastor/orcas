@@ -25,8 +25,8 @@ type Hanlder interface {
 	Create(c context.Context, o []*ObjectInfo) ([]int64, error)
 	List(c context.Context, o *ObjectInfo, opt ListOptions) ([]*ObjectInfo, error)
 
-	Rename(c context.Context, o *ObjectInfo, newName string) error
-	MoveTo(c context.Context, o, newParent *ObjectInfo) error
+	// 变更name或者pid，重命名或者移动
+	MoveTo(c context.Context, o *ObjectInfo) error
 
 	Recycle(c context.Context, o *ObjectInfo) error
 	Delete(c context.Context, o *ObjectInfo) error
@@ -85,18 +85,15 @@ func (ch *RWHanlder) GetData(c context.Context, o *ObjectInfo, sn int, offset ..
 
 // 垃圾回收时有数据没有元数据引用的为脏数据（需要留出窗口时间），有元数据没有数据的为损坏数据
 func (ch *RWHanlder) Create(c context.Context, o []*ObjectInfo) ([]int64, error) {
-	return nil, nil
+	return ch.mo.Create(c, o)
 }
 
 func (ch *RWHanlder) List(c context.Context, o *ObjectInfo, opt ListOptions) ([]*ObjectInfo, error) {
 	return nil, nil
 }
 
-func (ch *RWHanlder) Rename(c context.Context, o *ObjectInfo, newName string) error {
-	return nil
-}
-
-func (ch *RWHanlder) MoveTo(c context.Context, o, newParent *ObjectInfo) error {
+// 变更name或者pid，重命名或者移动
+func (ch *RWHanlder) MoveTo(c context.Context, o *ObjectInfo) error {
 	return nil
 }
 
