@@ -95,7 +95,7 @@ func (ddo *DefaultDataOperator) Write(c context.Context, dataID int64, sn int, b
 	// 不用判断是否存在，以及是否创建成功，如果失败，下面写入文件之前会报错
 	os.MkdirAll(dirPath, 0766)
 
-	path := filepath.Join(dirPath, fmt.Sprintf("%d_%s", sn, fmt.Sprintf("%x", md5.Sum(buf))[8:24]))
+	path := filepath.Join(dirPath, fmt.Sprintf("%d_%d", dataID, sn))
 	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0666)
 	if err != nil {
 		return err
@@ -113,7 +113,7 @@ func (ddo *DefaultDataOperator) Write(c context.Context, dataID int64, sn int, b
 	if ddo.Options.Sync {
 		err = b.Flush()
 	} else {
-		// go b.Flush()
+		go b.Flush()
 		buffer.Put(path, &AsyncHandle{F: f, B: b})
 	}
 	return err
@@ -136,20 +136,13 @@ func FindFileNameByPrefix(path string, sn int) string {
 func (ddo *DefaultDataOperator) Read(c context.Context, dataID int64, sn int) ([]byte, error) {
 	hash := toHash(dataID)
 	// path/<文件名hash的最后三个字节>/hash
-	if f := FindFileNameByPrefix(filepath.Join(Conf().Path, DATA_DIR, hash[len(hash)-3:], hash), sn); f != "" {
-		return os.ReadFile(f)
-	}
-	return nil, nil
+	return os.ReadFile(filepath.Join(Conf().Path, DATA_DIR, hash[len(hash)-3:], hash, fmt.Sprintf("%d_%d", dataID, sn)))
 }
 
 func (ddo *DefaultDataOperator) ReadBytes(c context.Context, dataID int64, sn int, offset, size int64) ([]byte, error) {
 	hash := toHash(dataID)
 	// path/<文件名hash的最后三个字节>/hash
-	path := FindFileNameByPrefix(filepath.Join(Conf().Path, DATA_DIR, hash[len(hash)-3:], hash), sn)
-	if path == "" {
-		return nil, nil
-	}
-
+	path := filepath.Join(Conf().Path, DATA_DIR, hash[len(hash)-3:], hash, fmt.Sprintf("%d_%d", dataID, sn))
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
