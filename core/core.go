@@ -1,62 +1,10 @@
 package core
 
-/*
-这里定义文件的接口：
+import (
+	"context"
 
-批量写入文件（单次文件数据量不超过4MB）同时可以带部分文件的秒传/秒传预筛选
-读取文件
-列举目录：无限加载模式，支持按文件名、文件类型过滤，支持文件名称、大小、时间排序
-随机读取文件的一部分（在线播放和在线预览等）
-
-id生成器，默认单机的，如果是分布式的，可能需要改成分布式的
-
-【文件的属性包括】
-父级的id
-文件名称
-文件大小
-创建时间
-修改时间（如果没有，那就是创建时间）
-访问时间（如果没有，那就是修改时间>创建时间）
-创建时的冲突解决方式（合并、重命名）
-文件的类型
-是否秒传
-存储块id、存储块偏移位置
-快照版本
-幂等操作id
-【附加属性】
-是否压缩
-原始MD5值
-原始CRC32值
-前32KB crc32值
-
-【存储块】
-MD5值
-8KB对齐，最大尽量在4MB以内
-
-端到端的实现：
-在客户端做加解密和解压缩
-本地的实现，数据直接写入存储；远端的实现，数据通过rpc传输，调用方无法感觉到差别
-
-如何识别出服务端发生过异常或者断电？
--> 有写数据的bucket记录并刷盘，定期清理不再继续写入的bucket
-如何识别由此导致的数据不完整或者丢失？
--> 重新启动以后，对上次还在写入数据的bucket最新写入的文件进行扫描，不完整的标记畸形
-或者说断电一致性保障方案？
-
-元数据和数据的时序以及是否实时刷盘？
-写入是先数据后元数据，删除是先元数据后数据，只有在刷盘以后才做后一步
-
-数据一致性通过auditor来定期扫描实现
-auditor扫描低频
-
-单独的job处理文件数量、文件大小、删除等
-
-上传文件的过程：
-hdrCRC32和长度来预检查是否可能秒传（可以用阈值来优化小对象直接跳过预检查）
-没有可能的直接上传
-有可能的，计算整个文件的MD5和CRC32后尝试秒传
-秒传失败，转普通上传
-*/
+	"github.com/orca-zhang/idgen"
+)
 
 type ListOptions struct {
 	Word  string // 过滤词
@@ -66,28 +14,101 @@ type ListOptions struct {
 	Order string // 排序方式，time/name/size 前缀 +: 升序（默认） -: 降序，多个字段用逗号分割
 }
 
-type ObjectOpConfig struct {
-	DataSync     int    // Power-off Protection Method，强制每次写入数据后刷到磁盘
-	TryRef       int    // None / Ref / TryRef+Ref
-	Conflict     int    // Throw / Merge / Rename，同名冲突后
-	ConflictTail string // "-副本" / "{\d}"
-	SSideDecompr int    // 服务端解压，PS：必须是非加密数据
+type Hanlder interface {
+	// 传入underlying，返回当前的，构成链式调用
+	New(h Hanlder) Hanlder
+
+	// 只有文件长度、HdrCRC32是预Ref，如果成功返回新DataID，失败返回0
+	// 有文件长度、CRC32、MD5，成功返回引用的DataID，失败返回0，客户端发现DataID有变化，说明不需要上传数据
+	// 如果非预Ref DataID传0，说明跳过了预Ref
+	Ref(c context.Context, d []*DataInfo) ([]int64, error)
+	// 打包上传或者小文件，sn传-1，大文件sn从0开始，DataID不传默认创建一个新的
+	PutData(c context.Context, dataID int64, sn int, buf []byte) (int64, error)
+	// 上传完数据以后，再创建元数据
+	PutDataInfo(c context.Context, d []*DataInfo) error
+	// 只传一个参数说明是sn，传两个参数说明是sn+offset，传三个参数说明是sn+offset+size
+	GetData(c context.Context, o *ObjectInfo, sn int, offset ...int64) ([]byte, error)
+
+	// 垃圾回收时有数据没有元数据引用的为脏数据（需要留出窗口时间），有元数据没有数据的为损坏数据
+	Create(c context.Context, o []*ObjectInfo) ([]int64, error)
+	List(c context.Context, o *ObjectInfo, opt ListOptions) ([]*ObjectInfo, error)
+
+	// 变更name或者pid，重命名或者移动
+	MoveTo(c context.Context, o *ObjectInfo) error
+
+	Recycle(c context.Context, o *ObjectInfo) error
+	Delete(c context.Context, o *ObjectInfo) error
 }
 
-type Bucket interface {
-	Info() (*BucketInfo, error)
+type RWHanlder struct {
+	mo MetaOperator
+	do DataOperator
+	ig *idgen.IDGen
 }
 
-type Object interface {
-	Info() (*ObjectInfo, error)
+func New() Hanlder {
+	return &RWHanlder{
+		mo: &DefaultMetaOperator{},
+		do: &DefaultDataOperator{},
+		ig: idgen.NewIDGen(nil, 0), // 需要改成配置
+	}
+}
 
-	GetData(sn ...uint64) ([]byte, error)
+// 传入underlying，返回当前的，构成链式调用
+func (ch *RWHanlder) New(Hanlder) Hanlder {
+	// 忽略下层handler
+	return ch
+}
 
-	List(opt ListOptions) ([]*Object, error)
+// 只有文件长度、HdrCRC32是预Ref，如果成功返回新DataID，失败返回0
+// 有文件长度、CRC32、MD5，成功返回引用的DataID，失败返回0，客户端发现DataID有变化，说明不需要上传数据
+// 如果非预Ref DataID传0，说明跳过了预Ref
+func (ch *RWHanlder) Ref(c context.Context, d []*DataInfo) ([]int64, error) {
+	return ch.mo.Ref(c, d)
+}
 
-	Put([]*ObjectInfo, []byte) error
-	Delete() error
+// 打包上传或者小文件，sn传-1，大文件sn从0开始，DataID不传默认创建一个新的
+func (ch *RWHanlder) PutData(c context.Context, dataID int64, sn int, buf []byte) (int64, error) {
+	if dataID == 0 {
+		dataID, _ = ch.ig.New()
+	}
+	return dataID, ch.do.Write(c, dataID, sn, buf)
+}
 
-	Rename(newName string) error
-	MoveTo(parent *ObjectInfo) error
+// 上传完数据以后，再创建元数据
+func (ch *RWHanlder) PutDataInfo(c context.Context, d []*DataInfo) error {
+	return ch.mo.PutDataInfo(c, d)
+}
+
+// 只传一个参数说明是sn，传两个参数说明是sn+offset，传三个参数说明是sn+offset+size
+func (ch *RWHanlder) GetData(c context.Context, o *ObjectInfo, sn int, offset ...int64) ([]byte, error) {
+	switch len(offset) {
+	case 0:
+		return ch.do.Read(c, o.DataID, sn)
+	case 1:
+		return ch.do.ReadBytes(c, o.DataID, sn, offset[0], -1)
+	}
+	return ch.do.ReadBytes(c, o.DataID, sn, offset[0], offset[1])
+}
+
+// 垃圾回收时有数据没有元数据引用的为脏数据（需要留出窗口时间），有元数据没有数据的为损坏数据
+func (ch *RWHanlder) Create(c context.Context, o []*ObjectInfo) ([]int64, error) {
+	return ch.mo.Create(c, o)
+}
+
+func (ch *RWHanlder) List(c context.Context, o *ObjectInfo, opt ListOptions) ([]*ObjectInfo, error) {
+	return nil, nil
+}
+
+// 变更name或者pid，重命名或者移动
+func (ch *RWHanlder) MoveTo(c context.Context, o *ObjectInfo) error {
+	return nil
+}
+
+func (ch *RWHanlder) Recycle(c context.Context, o *ObjectInfo) error {
+	return nil
+}
+
+func (ch *RWHanlder) Delete(c context.Context, o *ObjectInfo) error {
+	return nil
 }
