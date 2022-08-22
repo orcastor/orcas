@@ -3,6 +3,8 @@ package core
 import (
 	"context"
 	"database/sql"
+	"fmt"
+	"math/rand"
 	"path/filepath"
 
 	_ "github.com/mattn/go-sqlite3"
@@ -36,6 +38,7 @@ type DataInfo struct {
 	CRC32    uint64 `borm:"crc32"`     // 整个对象的CRC32校验值（最原始数据）
 	MD5      uint64 `borm:"md5"`       // 整个对象的MD5值（最原始数据）
 
+	Checksum uint64 `borm:"checksum"` // 整个对象的MD5值（最终数据，用于一致性审计）
 	// MIME       string // 数据的多媒体类型
 	Kind   int `borm:"kind"`   // 数据类型（用于预览等），0: etc, 1: image, 2: video, 3: docs
 	Status int `borm:"status"` // 数据状态，正常、压缩、加密、损坏
@@ -92,22 +95,79 @@ func InitBucket(bktName string) error {
 		hdr_crc32 UNSIGNED BIG INT NOT NULL,
 		crc32 UNSIGNED BIG INT NOT NULL,
 		md5 UNSIGNED BIG INT NOT NULL,
+		checksum UNSIGNED BIG INT NOT NULL,
 		kind INT NOT NULL,
 		status INT NOT NULL,
 		pkg_id BIGINT NOT NULL,
 		pkg_off BIGINT NOT NULL
 	)`)
 
-	db.Exec(`CREATE INDEX try_ref ON obj (size, hdr_crc32)`)
-	db.Exec(`CREATE INDEX ref ON obj (size, crc32, md5)`)
+	db.Exec(`CREATE INDEX ref ON obj (size, hdr_crc32, crc32, md5)`)
+	db.Exec(`PRAGMA temp_store = MEMORY`)
 	return nil
 }
 
 type DefaultMetaOperator struct {
 }
 
+func randomString(n int) string {
+	b := make([]byte, n)
+	for i := range b {
+		b[i] = byte(rand.Intn(26) + 'a')
+	}
+	return string(b)
+}
+
+type RefInfo struct {
+	ID       int64  `borm:"max(a.id)"`   // 数据ID（对象ID/版本ID，idgen随机生成的id）
+	Size     int64  `borm:"b.size"`      // 数据的大小
+	HdrCRC32 uint64 `borm:"b.hdr_crc32"` // 头部100KB的CRC32校验值
+	CRC32    uint64 `borm:"b.crc32"`     // 整个对象的CRC32校验值（最原始数据）
+	MD5      uint64 `borm:"b.md5"`       // 整个对象的MD5值（最原始数据）
+}
+
 func (dmo *DefaultMetaOperator) Ref(c context.Context, d []*DataInfo) ([]int64, error) {
-	return nil, nil
+	db, err := GetDB("meta.db")
+	if err != nil {
+		return nil, err
+	}
+	defer db.Close()
+
+	tbl := "tmp_" + randomString(8)
+
+	db.Exec(`CREATE TEMPORARY TABLE ` + tbl + ` (size BIGINT NOT NULL,
+		hdr_crc32 UNSIGNED BIG INT NOT NULL,
+		crc32 UNSIGNED BIG INT NOT NULL,
+		md5 UNSIGNED BIG INT NOT NULL
+	)`)
+
+	t := b.Table(db, tbl, c)
+	_, err = t.Insert(&d, b.Fields("size", "hdr_crc32", "crc32", "md5"))
+
+	var refs []RefInfo
+	t = b.Table(db, "data a, "+tbl+" b on a.size=b.size and a.hdr_crc32=b.hdr_crc32 and (b.crc32=0 or b.md5=0 or (a.crc32=b.crc32 and a.md5=b.md5))", c)
+	_, err = t.Select(&refs, b.GroupBy("b.size", "b.hdr_crc32", "b.crc32", "b.md5"))
+
+	aux := make(map[string]int64, 0)
+	for _, ref := range refs {
+		aux[fmt.Sprintf("%d:%d:%d:%d", ref.Size, ref.HdrCRC32, ref.CRC32, ref.MD5)] = ref.ID
+	}
+
+	res := make([]int64, len(d))
+	for i, x := range d {
+		if x.Size == 0 || x.HdrCRC32 == 0 {
+			continue
+		}
+
+		if id, ok := aux[fmt.Sprintf("%d:%d:%d:%d", x.Size, x.HdrCRC32, x.CRC32, x.MD5)]; ok {
+			if x.CRC32 == 0 || x.MD5 == 0 {
+				res[i] = 1
+			} else {
+				res[i] = id
+			}
+		}
+	}
+	return res, err
 }
 
 func (dmo *DefaultMetaOperator) PutDataInfo(c context.Context, d []*DataInfo) error {
@@ -134,7 +194,7 @@ func (dmo *DefaultMetaOperator) Create(c context.Context, o []*ObjectInfo) (ids 
 	defer db.Close()
 
 	t := b.Table(db, OBJ_TBL, c)
-	n, err := t.InsertIgnore(&o)
+	n, err := t.Insert(&o)
 	if n == len(o) {
 		for _, x := range o {
 			ids = append(ids, x.ID)
