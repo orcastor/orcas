@@ -118,14 +118,6 @@ func randomString(n int) string {
 	return string(b)
 }
 
-type RefInfo struct {
-	ID       int64  `borm:"max(a.id)"`   // 数据ID（对象ID/版本ID，idgen随机生成的id）
-	Size     int64  `borm:"b.size"`      // 数据的大小
-	HdrCRC32 uint64 `borm:"b.hdr_crc32"` // 头部100KB的CRC32校验值
-	CRC32    uint64 `borm:"b.crc32"`     // 整个对象的CRC32校验值（最原始数据）
-	MD5      uint64 `borm:"b.md5"`       // 整个对象的MD5值（最原始数据）
-}
-
 func (dmo *DefaultMetaOperator) Ref(c context.Context, d []*DataInfo) ([]int64, error) {
 	db, err := GetDB("meta.db")
 	if err != nil {
@@ -133,21 +125,29 @@ func (dmo *DefaultMetaOperator) Ref(c context.Context, d []*DataInfo) ([]int64, 
 	}
 	defer db.Close()
 
+	// 把待查询数据放到临时表里联表查询
 	tbl := "tmp_" + randomString(8)
-
 	db.Exec(`CREATE TEMPORARY TABLE ` + tbl + ` (size BIGINT NOT NULL,
 		hdr_crc32 UNSIGNED BIG INT NOT NULL,
 		crc32 UNSIGNED BIG INT NOT NULL,
 		md5 UNSIGNED BIG INT NOT NULL
 	)`)
 
-	t := b.Table(db, tbl, c)
-	_, err = t.Insert(&d, b.Fields("size", "hdr_crc32", "crc32", "md5"))
+	_, err = b.Table(db, tbl, c).Insert(&d, b.Fields("size", "hdr_crc32", "crc32", "md5"))
+	var refs []struct {
+		ID       int64  `borm:"max(a.id)"`
+		Size     int64  `borm:"b.size"`
+		HdrCRC32 uint64 `borm:"b.hdr_crc32"`
+		CRC32    uint64 `borm:"b.crc32"`
+		MD5      uint64 `borm:"b.md5"`
+	}
+	_, err = b.Table(db, `data a, `+tbl+
+		` b on a.size=b.size and a.hdr_crc32=b.hdr_crc32 and (b.crc32=0 or b.md5=0 or 
+		(a.crc32=b.crc32 and a.md5=b.md5))`, c).Select(&refs,
+		b.GroupBy("b.size", "b.hdr_crc32", "b.crc32", "b.md5"))
+	db.Exec(`DROP TABLE ` + tbl)
 
-	var refs []RefInfo
-	t = b.Table(db, "data a, "+tbl+" b on a.size=b.size and a.hdr_crc32=b.hdr_crc32 and (b.crc32=0 or b.md5=0 or (a.crc32=b.crc32 and a.md5=b.md5))", c)
-	_, err = t.Select(&refs, b.GroupBy("b.size", "b.hdr_crc32", "b.crc32", "b.md5"))
-
+	// 构造辅助查询map
 	aux := make(map[string]int64, 0)
 	for _, ref := range refs {
 		aux[fmt.Sprintf("%d:%d:%d:%d", ref.Size, ref.HdrCRC32, ref.CRC32, ref.MD5)] = ref.ID
@@ -155,13 +155,15 @@ func (dmo *DefaultMetaOperator) Ref(c context.Context, d []*DataInfo) ([]int64, 
 
 	res := make([]int64, len(d))
 	for i, x := range d {
+		// 如果最基础的数据不完整，直接跳过
 		if x.Size == 0 || x.HdrCRC32 == 0 {
 			continue
 		}
 
 		if id, ok := aux[fmt.Sprintf("%d:%d:%d:%d", x.Size, x.HdrCRC32, x.CRC32, x.MD5)]; ok {
+			// 全文件的数据没有，说明是预Ref
 			if x.CRC32 == 0 || x.MD5 == 0 {
-				res[i] = 1
+				res[i] = 1 // 非0代表预Ref成功
 			} else {
 				res[i] = id
 			}
@@ -174,8 +176,7 @@ func (dmo *DefaultMetaOperator) PutDataInfo(c context.Context, d []*DataInfo) er
 	db, err := GetDB("meta.db")
 	defer db.Close()
 
-	t := b.Table(db, DATA_TBL, c)
-	_, err = t.ReplaceInto(&d)
+	_, err = b.Table(db, DATA_TBL, c).ReplaceInto(&d)
 	return err
 }
 
@@ -183,9 +184,8 @@ func (dmo *DefaultMetaOperator) GetDataInfo(c context.Context, id int64) (d *Dat
 	db, err := GetDB("meta.db")
 	defer db.Close()
 
-	t := b.Table(db, DATA_TBL, c)
 	d = &DataInfo{}
-	_, err = t.Select(d, b.Where(b.Eq("id", id)))
+	_, err = b.Table(db, DATA_TBL, c).Select(d, b.Where(b.Eq("id", id)))
 	return
 }
 
@@ -193,8 +193,7 @@ func (dmo *DefaultMetaOperator) Create(c context.Context, o []*ObjectInfo) (ids 
 	db, err := GetDB("meta.db")
 	defer db.Close()
 
-	t := b.Table(db, OBJ_TBL, c)
-	n, err := t.Insert(&o)
+	n, err := b.Table(db, OBJ_TBL, c).Insert(&o)
 	if n == len(o) {
 		for _, x := range o {
 			ids = append(ids, x.ID)
@@ -209,7 +208,6 @@ func (dmo *DefaultMetaOperator) Get(c context.Context, ids []int64) (o []*Object
 	db, err := GetDB("meta.db")
 	defer db.Close()
 
-	t := b.Table(db, OBJ_TBL, c)
-	_, err = t.Select(o, b.Where(b.In("id", ids)))
+	_, err = b.Table(db, OBJ_TBL, c).Select(o, b.Where(b.In("id", ids)))
 	return
 }

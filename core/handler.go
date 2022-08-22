@@ -10,9 +10,9 @@ type Hanlder interface {
 	// 传入underlying，返回当前的，构成链式调用
 	New(h Hanlder) Hanlder
 
-	// 只有文件长度、HdrCRC32是预校验，如果成功返回新DataID，失败返回0
+	// 只有文件长度、HdrCRC32是预Ref，如果成功返回新DataID，失败返回0
 	// 有文件长度、CRC32、MD5，成功返回引用的DataID，失败返回0，客户端发现DataID有变化，说明不需要上传数据
-	// 如果非预校验DataID传0，说明跳过了预校验
+	// 如果非预Ref DataID传0，说明跳过了预Ref
 	Ref(c context.Context, d []*DataInfo) ([]int64, error)
 	// 打包上传或者小文件，sn传-1，大文件sn从0开始，DataID不传默认创建一个新的
 	PutData(c context.Context, dataID int64, sn int, buf []byte) (int64, error)
@@ -52,9 +52,9 @@ func (ch *RWHanlder) New(Hanlder) Hanlder {
 	return ch
 }
 
-// 只有文件长度、HdrCRC32是预校验，如果成功返回新DataID，失败返回0
+// 只有文件长度、HdrCRC32是预Ref，如果成功返回新DataID，失败返回0
 // 有文件长度、CRC32、MD5，成功返回引用的DataID，失败返回0，客户端发现DataID有变化，说明不需要上传数据
-// 如果非预校验DataID传0，说明跳过了预校验
+// 如果非预Ref DataID传0，说明跳过了预Ref
 func (ch *RWHanlder) Ref(c context.Context, d []*DataInfo) ([]int64, error) {
 	return ch.mo.Ref(c, d)
 }
