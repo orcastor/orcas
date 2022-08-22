@@ -64,7 +64,7 @@ func (ch *RWHanlder) PutData(c context.Context, dataID int64, sn int, buf []byte
 	if dataID == 0 {
 		dataID, _ = ch.ig.New()
 	}
-	return dataID, ch.do.Write(c, ToFileName(dataID, sn), buf)
+	return dataID, ch.do.Write(c, dataID, sn, buf)
 }
 
 // 上传完数据以后，再创建元数据
@@ -76,11 +76,11 @@ func (ch *RWHanlder) PutDataInfo(c context.Context, d []*DataInfo) error {
 func (ch *RWHanlder) GetData(c context.Context, o *ObjectInfo, sn int, offset ...int64) ([]byte, error) {
 	switch len(offset) {
 	case 0:
-		return ch.do.Read(c, ToFileName(o.DataID, sn))
+		return ch.do.Read(c, o.DataID, sn)
 	case 1:
-		return ch.do.ReadBytes(c, ToFileName(o.DataID, sn), offset[0], -1)
+		return ch.do.ReadBytes(c, o.DataID, sn, offset[0], -1)
 	}
-	return ch.do.ReadBytes(c, ToFileName(o.DataID, sn), offset[0], offset[1])
+	return ch.do.ReadBytes(c, o.DataID, sn, offset[0], offset[1])
 }
 
 // 垃圾回收时有数据没有元数据引用的为脏数据（需要留出窗口时间），有元数据没有数据的为损坏数据

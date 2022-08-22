@@ -4,10 +4,13 @@ import (
 	"bufio"
 	"context"
 	"crypto/md5"
+	"encoding/binary"
 	"fmt"
 	"io"
+	"io/ioutil"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/orca-zhang/ecache"
@@ -19,9 +22,9 @@ type Option struct {
 
 type DataOperator interface {
 	SetOption(opt Option)
-	Write(c context.Context, fileName string, buf []byte) error
-	Read(c context.Context, fileName string) ([]byte, error)
-	ReadBytes(c context.Context, fileName string, offset, size int64) ([]byte, error)
+	Write(c context.Context, dataID int64, sn int, buf []byte) error
+	Read(c context.Context, dataID int64, sn int) ([]byte, error)
+	ReadBytes(c context.Context, dataID int64, sn int, offset, size int64) ([]byte, error)
 }
 
 const interval = time.Second
@@ -78,26 +81,21 @@ func (ddo *DefaultDataOperator) SetOption(opt Option) {
 	ddo.Options = opt
 }
 
-func to32BitsMD5(s string) string {
-	return fmt.Sprintf("%x", md5.Sum([]byte(s)))[8:24]
+func toHash(dataID int64) string {
+	var data [8]byte
+	binary.LittleEndian.PutUint64(data[:], uint64(dataID))
+	return fmt.Sprintf("%x", md5.Sum(data[:]))[8:24]
 }
 
-func ToFileName(dataID int64, sn int) string {
-	if sn == -1 {
-		return fmt.Sprint(dataID)
-	}
-	return fmt.Sprintf("%d-%d", dataID, sn)
-}
-
-func (ddo *DefaultDataOperator) Write(c context.Context, fileName string, buf []byte) error {
-	hash := to32BitsMD5(fileName)
+func (ddo *DefaultDataOperator) Write(c context.Context, dataID int64, sn int, buf []byte) error {
+	hash := toHash(dataID)
 
 	// path/<文件名hash的最后三个字节>/hash
 	dirPath := filepath.Join(Conf().Path, DATA_DIR, hash[len(hash)-3:], hash)
 	// 不用判断是否存在，以及是否创建成功，如果失败，下面写入文件之前会报错
 	os.MkdirAll(dirPath, 0766)
 
-	path := filepath.Join(dirPath, fileName)
+	path := filepath.Join(dirPath, fmt.Sprintf("%d_%s", sn, fmt.Sprintf("%x", md5.Sum(buf))[8:24]))
 	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0666)
 	if err != nil {
 		return err
@@ -115,23 +113,42 @@ func (ddo *DefaultDataOperator) Write(c context.Context, fileName string, buf []
 	if ddo.Options.Sync {
 		err = b.Flush()
 	} else {
-		go b.Flush()
+		// go b.Flush()
 		buffer.Put(path, &AsyncHandle{F: f, B: b})
 	}
 	return err
 }
 
-func (ddo *DefaultDataOperator) Read(c context.Context, fileName string) ([]byte, error) {
-	hash := to32BitsMD5(fileName)
-	// path/<文件名hash的最后三个字节>/hash
-	path := filepath.Join(Conf().Path, DATA_DIR, hash[len(hash)-3:], hash, fileName)
-	return os.ReadFile(path)
+func FindFileNameByPrefix(path string, sn int) string {
+	files, err := ioutil.ReadDir(path)
+	if err != nil {
+		return ""
+	}
+	prefix := fmt.Sprintf("%d_", sn)
+	for _, f := range files {
+		if strings.HasPrefix(f.Name(), prefix) {
+			return filepath.Join(path, f.Name())
+		}
+	}
+	return ""
 }
 
-func (ddo *DefaultDataOperator) ReadBytes(c context.Context, fileName string, offset, size int64) ([]byte, error) {
-	hash := to32BitsMD5(fileName)
+func (ddo *DefaultDataOperator) Read(c context.Context, dataID int64, sn int) ([]byte, error) {
+	hash := toHash(dataID)
 	// path/<文件名hash的最后三个字节>/hash
-	path := filepath.Join(Conf().Path, DATA_DIR, hash[len(hash)-3:], hash, fileName)
+	if f := FindFileNameByPrefix(filepath.Join(Conf().Path, DATA_DIR, hash[len(hash)-3:], hash), sn); f != "" {
+		return os.ReadFile(f)
+	}
+	return nil, nil
+}
+
+func (ddo *DefaultDataOperator) ReadBytes(c context.Context, dataID int64, sn int, offset, size int64) ([]byte, error) {
+	hash := toHash(dataID)
+	// path/<文件名hash的最后三个字节>/hash
+	path := FindFileNameByPrefix(filepath.Join(Conf().Path, DATA_DIR, hash[len(hash)-3:], hash), sn)
+	if path == "" {
+		return nil, nil
+	}
 
 	f, err := os.Open(path)
 	if err != nil {
