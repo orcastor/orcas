@@ -4,8 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"math/rand"
 	"path/filepath"
+	"time"
 
 	_ "github.com/mattn/go-sqlite3"
 	b "github.com/orca-zhang/borm"
@@ -110,14 +110,6 @@ func InitBucket(bktName string) error {
 type DefaultMetaOperator struct {
 }
 
-func randomString(n int) string {
-	b := make([]byte, n)
-	for i := range b {
-		b[i] = byte(rand.Intn(26) + 'a')
-	}
-	return string(b)
-}
-
 func (dmo *DefaultMetaOperator) Ref(c context.Context, d []*DataInfo) ([]int64, error) {
 	db, err := GetDB("meta.db")
 	if err != nil {
@@ -125,14 +117,14 @@ func (dmo *DefaultMetaOperator) Ref(c context.Context, d []*DataInfo) ([]int64, 
 	}
 	defer db.Close()
 
-	// 把待查询数据放到临时表里联表查询
-	tbl := "tmp_" + randomString(8)
+	tbl := fmt.Sprintf("tmp_%x", time.Now().UnixNano())
+	// 创建临时表
 	db.Exec(`CREATE TEMPORARY TABLE ` + tbl + ` (size BIGINT NOT NULL,
 		hdr_crc32 UNSIGNED BIG INT NOT NULL,
 		crc32 UNSIGNED BIG INT NOT NULL,
 		md5 UNSIGNED BIG INT NOT NULL
 	)`)
-
+	// 把待查询数据放到临时表
 	_, err = b.Table(db, tbl, c).Insert(&d, b.Fields("size", "hdr_crc32", "crc32", "md5"))
 	var refs []struct {
 		ID       int64  `borm:"max(a.id)"`
@@ -141,10 +133,12 @@ func (dmo *DefaultMetaOperator) Ref(c context.Context, d []*DataInfo) ([]int64, 
 		CRC32    uint64 `borm:"b.crc32"`
 		MD5      uint64 `borm:"b.md5"`
 	}
+	// 里联表查询
 	_, err = b.Table(db, `data a, `+tbl+
 		` b on a.size=b.size and a.hdr_crc32=b.hdr_crc32 and (b.crc32=0 or b.md5=0 or 
 		(a.crc32=b.crc32 and a.md5=b.md5))`, c).Select(&refs,
 		b.GroupBy("b.size", "b.hdr_crc32", "b.crc32", "b.md5"))
+	// 删除临时表
 	db.Exec(`DROP TABLE ` + tbl)
 
 	// 构造辅助查询map
