@@ -133,9 +133,9 @@ func (dmo *DefaultMetaOperator) Ref(c context.Context, d []*DataInfo) ([]int64, 
 		CRC32    uint64 `borm:"b.crc32"`
 		MD5      uint64 `borm:"b.md5"`
 	}
-	// 里联表查询
-	_, err = b.Table(db, `data a, `+tbl+
-		` b on a.size=b.size and a.hdr_crc32=b.hdr_crc32 and (b.crc32=0 or b.md5=0 or 
+	// 联表查询
+	_, err = b.Table(db, `data a, `+tbl+` b on a.size=b.size 
+	    and a.hdr_crc32=b.hdr_crc32 and (b.crc32=0 or b.md5=0 or 
 		(a.crc32=b.crc32 and a.md5=b.md5))`, c).Select(&refs,
 		b.GroupBy("b.size", "b.hdr_crc32", "b.crc32", "b.md5"))
 	// 删除临时表
