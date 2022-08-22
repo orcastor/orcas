@@ -7,10 +7,8 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
 	"github.com/orca-zhang/ecache"
@@ -117,20 +115,6 @@ func (ddo *DefaultDataOperator) Write(c context.Context, dataID int64, sn int, b
 		buffer.Put(path, &AsyncHandle{F: f, B: b})
 	}
 	return err
-}
-
-func FindFileNameByPrefix(path string, sn int) string {
-	files, err := ioutil.ReadDir(path)
-	if err != nil {
-		return ""
-	}
-	prefix := fmt.Sprintf("%d_", sn)
-	for _, f := range files {
-		if strings.HasPrefix(f.Name(), prefix) {
-			return filepath.Join(path, f.Name())
-		}
-	}
-	return ""
 }
 
 func (ddo *DefaultDataOperator) Read(c context.Context, dataID int64, sn int) ([]byte, error) {
