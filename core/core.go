@@ -64,7 +64,7 @@ func (ch *RWHanlder) New(Hanlder) Hanlder {
 // 有文件长度、CRC32、MD5，成功返回引用的DataID，失败返回0，客户端发现DataID有变化，说明不需要上传数据
 // 如果非预Ref DataID传0，说明跳过了预Ref
 func (ch *RWHanlder) Ref(c context.Context, d []*DataInfo) ([]int64, error) {
-	return ch.mo.DatRef(c, d)
+	return ch.mo.RefData(c, d)
 }
 
 // 打包上传或者小文件，sn传-1，大文件sn从0开始，DataID不传默认创建一个新的
@@ -77,7 +77,7 @@ func (ch *RWHanlder) PutData(c context.Context, dataID int64, sn int, buf []byte
 
 // 上传完数据以后，再创建元数据
 func (ch *RWHanlder) PutDataInfo(c context.Context, d []*DataInfo) error {
-	return ch.mo.DatPut(c, d)
+	return ch.mo.PutData(c, d)
 }
 
 // 只传一个参数说明是sn，传两个参数说明是sn+offset，传三个参数说明是sn+offset+size
@@ -93,7 +93,7 @@ func (ch *RWHanlder) GetData(c context.Context, o *ObjectInfo, sn int, offset ..
 
 // 垃圾回收时有数据没有元数据引用的为脏数据（需要留出窗口时间），有元数据没有数据的为损坏数据
 func (ch *RWHanlder) Put(c context.Context, o []*ObjectInfo) ([]int64, error) {
-	return ch.mo.ObjPut(c, o)
+	return ch.mo.PutObj(c, o)
 }
 
 func (ch *RWHanlder) List(c context.Context, o *ObjectInfo, opt ListOptions) ([]*ObjectInfo, error) {

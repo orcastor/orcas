@@ -57,21 +57,21 @@ type DataInfo struct {
 // 数据存储，<=4194304B的对象，用<ID/PkgID>为名称，否则用<ID/PkgID>-<SN>为名称，<SN>为数据块的序号，从0开始递增
 
 type BucketMetaOperator interface {
-	BktPut(c Ctx, o []*BucketInfo) error
-	BktGet(c Ctx, ids []int64) ([]*BucketInfo, error)
-	BktList(c Ctx, uid int64) ([]int64, error)
+	PutBkt(c Ctx, o []*BucketInfo) error
+	GetBkt(c Ctx, ids []int64) ([]*BucketInfo, error)
+	ListBkt(c Ctx, uid int64) ([]int64, error)
 }
 
 type DataMetaOperator interface {
-	DatRef(c Ctx, d []*DataInfo) ([]int64, error)
-	DatPut(c Ctx, d []*DataInfo) error
-	DatGet(c Ctx, id int64) (*DataInfo, error)
+	RefData(c Ctx, d []*DataInfo) ([]int64, error)
+	PutData(c Ctx, d []*DataInfo) error
+	GetData(c Ctx, id int64) (*DataInfo, error)
 }
 
 type ObjectMetaOperator interface {
-	ObjPut(c Ctx, o []*ObjectInfo) ([]int64, error)
-	ObjGet(c Ctx, ids []int64) ([]*ObjectInfo, error)
-	ObjSet(c Ctx, o *ObjectInfo) error
+	PutObj(c Ctx, o []*ObjectInfo) ([]int64, error)
+	GetObj(c Ctx, ids []int64) ([]*ObjectInfo, error)
+	SetObj(c Ctx, o *ObjectInfo) error
 }
 
 type MetaOperator interface {
@@ -142,7 +142,7 @@ func InitBucketDB(bktName string) error {
 type DefaultMetaOperator struct {
 }
 
-func (dmo *DefaultMetaOperator) BktPut(c Ctx, o []*BucketInfo) error {
+func (dmo *DefaultMetaOperator) PutBkt(c Ctx, o []*BucketInfo) error {
 	db, err := GetDB("")
 	defer db.Close()
 
@@ -150,7 +150,7 @@ func (dmo *DefaultMetaOperator) BktPut(c Ctx, o []*BucketInfo) error {
 	return err
 }
 
-func (dmo *DefaultMetaOperator) BktGet(c Ctx, ids []int64) (o []*BucketInfo, err error) {
+func (dmo *DefaultMetaOperator) GetBkt(c Ctx, ids []int64) (o []*BucketInfo, err error) {
 	db, err := GetDB("")
 	defer db.Close()
 
@@ -158,7 +158,7 @@ func (dmo *DefaultMetaOperator) BktGet(c Ctx, ids []int64) (o []*BucketInfo, err
 	return
 }
 
-func (dmo *DefaultMetaOperator) BktList(c Ctx, uid int64) (ids []int64, err error) {
+func (dmo *DefaultMetaOperator) ListBkt(c Ctx, uid int64) (ids []int64, err error) {
 	db, err := GetDB("")
 	defer db.Close()
 
@@ -166,7 +166,7 @@ func (dmo *DefaultMetaOperator) BktList(c Ctx, uid int64) (ids []int64, err erro
 	return
 }
 
-func (dmo *DefaultMetaOperator) DatRef(c Ctx, d []*DataInfo) ([]int64, error) {
+func (dmo *DefaultMetaOperator) RefData(c Ctx, d []*DataInfo) ([]int64, error) {
 	db, err := GetDB(DATA_DIR)
 	if err != nil {
 		return nil, err
@@ -222,7 +222,7 @@ func (dmo *DefaultMetaOperator) DatRef(c Ctx, d []*DataInfo) ([]int64, error) {
 	return res, err
 }
 
-func (dmo *DefaultMetaOperator) DatPut(c Ctx, d []*DataInfo) error {
+func (dmo *DefaultMetaOperator) PutData(c Ctx, d []*DataInfo) error {
 	db, err := GetDB(DATA_DIR)
 	defer db.Close()
 
@@ -230,7 +230,7 @@ func (dmo *DefaultMetaOperator) DatPut(c Ctx, d []*DataInfo) error {
 	return err
 }
 
-func (dmo *DefaultMetaOperator) DatGet(c Ctx, id int64) (d *DataInfo, err error) {
+func (dmo *DefaultMetaOperator) GetData(c Ctx, id int64) (d *DataInfo, err error) {
 	db, err := GetDB(DATA_DIR)
 	defer db.Close()
 
@@ -239,7 +239,7 @@ func (dmo *DefaultMetaOperator) DatGet(c Ctx, id int64) (d *DataInfo, err error)
 	return
 }
 
-func (dmo *DefaultMetaOperator) ObjPut(c Ctx, o []*ObjectInfo) (ids []int64, err error) {
+func (dmo *DefaultMetaOperator) PutObj(c Ctx, o []*ObjectInfo) (ids []int64, err error) {
 	db, err := GetDB(DATA_DIR)
 	defer db.Close()
 
@@ -254,7 +254,7 @@ func (dmo *DefaultMetaOperator) ObjPut(c Ctx, o []*ObjectInfo) (ids []int64, err
 	return ids, err
 }
 
-func (dmo *DefaultMetaOperator) ObjGet(c Ctx, ids []int64) (o []*ObjectInfo, err error) {
+func (dmo *DefaultMetaOperator) GetObj(c Ctx, ids []int64) (o []*ObjectInfo, err error) {
 	db, err := GetDB(DATA_DIR)
 	defer db.Close()
 
@@ -262,10 +262,10 @@ func (dmo *DefaultMetaOperator) ObjGet(c Ctx, ids []int64) (o []*ObjectInfo, err
 	return
 }
 
-func (dmo *DefaultMetaOperator) ObjSet(c Ctx, o *ObjectInfo) error {
+func (dmo *DefaultMetaOperator) SetObj(c Ctx, o *ObjectInfo) error {
 	db, err := GetDB(DATA_DIR)
 	defer db.Close()
 
-	_, err = b.Table(db, OBJ_TBL, c).Update(o, b.Where(b.In("id", o.ID)))
+	_, err = b.Table(db, OBJ_TBL, c).Update(o, b.Where(b.Eq("id", o.ID)))
 	return err
 }
