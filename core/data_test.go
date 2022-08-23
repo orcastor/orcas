@@ -104,7 +104,7 @@ func TestWriteSyncConcurrent(t *testing.T) {
 				Options: Option{
 					Sync: true,
 				}}
-			for i := 0; i < 10000; i++ {
+			for i := 0; i < 100000; i++ {
 				id, _ := ig.New()
 				ddo.Write(c, id, 0, []byte(fmt.Sprint(i)))
 			}
@@ -117,7 +117,7 @@ func TestWriteAsyncConcurrent(t *testing.T) {
 		Convey("async write files", func() {
 			ig := idgen.NewIDGen(nil, 0)
 			ddo := &DefaultDataOperator{}
-			for i := 0; i < 10000; i++ {
+			for i := 0; i < 100000; i++ {
 				id, _ := ig.New()
 				ddo.Write(c, id, 0, []byte(fmt.Sprint(i)))
 			}

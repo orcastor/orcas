@@ -26,7 +26,7 @@ type DataOperator interface {
 
 const interval = time.Second
 
-var Q = ecache.NewLRUCache(16, 256, interval)
+var Q = ecache.NewLRUCache(16, 1024, interval)
 
 func init() {
 	Q.Inspect(func(action int, key string, iface *interface{}, bytes []byte, status int) {
@@ -106,6 +106,7 @@ func (ddo *DefaultDataOperator) Write(c Ctx, dataID int64, sn int, buf []byte) e
 	if ddo.Options.Sync {
 		defer ah.Close()
 	} else {
+		go ah.B.Flush()
 		defer Q.Put(fn, ah)
 	}
 
