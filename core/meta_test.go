@@ -13,12 +13,48 @@ func init() {
 	})
 }
 
+var bktID = int64(888)
+
+func TestListBkt(t *testing.T) {
+	Convey("normal", t, func() {
+		Convey("put bkt", func() {
+			InitDB()
+			dmo := &DefaultMetaOperator{}
+			id1, _ := idgen.NewIDGen(nil, 0).New()
+			id2, _ := idgen.NewIDGen(nil, 0).New()
+			uid, _ := idgen.NewIDGen(nil, 0).New()
+			oid, _ := idgen.NewIDGen(nil, 0).New()
+			b1 := &BucketInfo{
+				ID:   id1,
+				Name: "zhangwei",
+				UID:  uid,
+				Type: 1,
+				OID:  oid,
+			}
+			b2 := &BucketInfo{
+				ID:   id2,
+				Name: "zhangwei2",
+				UID:  uid,
+				Type: 1,
+				OID:  oid,
+			}
+			So(dmo.PutBkt(c, []*BucketInfo{b1, b2}), ShouldBeNil)
+
+			bs, err := dmo.ListBkt(c, uid)
+			So(err, ShouldBeNil)
+			So(len(bs), ShouldEqual, 2)
+			So(bs[0], ShouldResemble, b1)
+			So(bs[1], ShouldResemble, b2)
+		})
+	})
+}
+
 func TestRefData(t *testing.T) {
 	Convey("normal", t, func() {
 		dmo := &DefaultMetaOperator{}
-		InitBucketDB(DATA_DIR)
+		InitBucketDB(bktID)
 		id, _ := idgen.NewIDGen(nil, 0).New()
-		So(dmo.PutData(c, []*DataInfo{&DataInfo{
+		So(dmo.PutData(c, bktID, []*DataInfo{&DataInfo{
 			ID:       id,
 			Size:     1,
 			HdrCRC32: 222,
@@ -28,7 +64,7 @@ func TestRefData(t *testing.T) {
 		}}), ShouldBeNil)
 
 		Convey("single try ref", func() {
-			ids, err := dmo.RefData(c, []*DataInfo{&DataInfo{
+			ids, err := dmo.RefData(c, bktID, []*DataInfo{&DataInfo{
 				Size:     1,
 				HdrCRC32: 222,
 			}})
@@ -36,7 +72,7 @@ func TestRefData(t *testing.T) {
 			So(len(ids), ShouldEqual, 1)
 			So(ids[0], ShouldNotEqual, 0)
 
-			ids, err = dmo.RefData(c, []*DataInfo{&DataInfo{
+			ids, err = dmo.RefData(c, bktID, []*DataInfo{&DataInfo{
 				Size:     0,
 				HdrCRC32: 222,
 			}})
@@ -44,7 +80,7 @@ func TestRefData(t *testing.T) {
 			So(len(ids), ShouldEqual, 1)
 			So(ids[0], ShouldEqual, 0)
 
-			ids, err = dmo.RefData(c, []*DataInfo{&DataInfo{
+			ids, err = dmo.RefData(c, bktID, []*DataInfo{&DataInfo{
 				Size:     1,
 				HdrCRC32: 0,
 			}})
@@ -52,7 +88,7 @@ func TestRefData(t *testing.T) {
 			So(len(ids), ShouldEqual, 1)
 			So(ids[0], ShouldEqual, 0)
 
-			ids, err = dmo.RefData(c, []*DataInfo{&DataInfo{
+			ids, err = dmo.RefData(c, bktID, []*DataInfo{&DataInfo{
 				Size:     1,
 				HdrCRC32: 0,
 				CRC32:    333,
@@ -63,7 +99,7 @@ func TestRefData(t *testing.T) {
 			So(ids[0], ShouldEqual, 0)
 		})
 		Convey("multiple try ref", func() {
-			ids, err := dmo.RefData(c, []*DataInfo{&DataInfo{
+			ids, err := dmo.RefData(c, bktID, []*DataInfo{&DataInfo{
 				Size:     1,
 				HdrCRC32: 222,
 			}, &DataInfo{
@@ -76,7 +112,7 @@ func TestRefData(t *testing.T) {
 			So(ids[1], ShouldNotEqual, 0)
 		})
 		Convey("multiple try ref diff", func() {
-			ids, err := dmo.RefData(c, []*DataInfo{&DataInfo{
+			ids, err := dmo.RefData(c, bktID, []*DataInfo{&DataInfo{
 				Size:     1,
 				HdrCRC32: 222,
 			}, &DataInfo{
@@ -90,7 +126,7 @@ func TestRefData(t *testing.T) {
 		})
 
 		Convey("single ref", func() {
-			ids, err := dmo.RefData(c, []*DataInfo{&DataInfo{
+			ids, err := dmo.RefData(c, bktID, []*DataInfo{&DataInfo{
 				Size:     1,
 				HdrCRC32: 222,
 				CRC32:    333,
@@ -100,7 +136,7 @@ func TestRefData(t *testing.T) {
 			So(len(ids), ShouldEqual, 1)
 			So(ids[0], ShouldEqual, id)
 
-			ids, err = dmo.RefData(c, []*DataInfo{&DataInfo{
+			ids, err = dmo.RefData(c, bktID, []*DataInfo{&DataInfo{
 				Size:     1,
 				HdrCRC32: 222,
 				CRC32:    0,
@@ -111,7 +147,7 @@ func TestRefData(t *testing.T) {
 			So(ids[0], ShouldNotEqual, id)
 			So(ids[0], ShouldNotEqual, 0)
 
-			ids, err = dmo.RefData(c, []*DataInfo{&DataInfo{
+			ids, err = dmo.RefData(c, bktID, []*DataInfo{&DataInfo{
 				Size:     1,
 				HdrCRC32: 222,
 				CRC32:    333,
@@ -124,7 +160,7 @@ func TestRefData(t *testing.T) {
 		})
 
 		Convey("multiple ref", func() {
-			ids, err := dmo.RefData(c, []*DataInfo{&DataInfo{
+			ids, err := dmo.RefData(c, bktID, []*DataInfo{&DataInfo{
 				Size:     1,
 				HdrCRC32: 222,
 				CRC32:    333,
@@ -141,7 +177,7 @@ func TestRefData(t *testing.T) {
 			So(ids[1], ShouldNotEqual, 0)
 		})
 		Convey("multiple ref diff", func() {
-			ids, err := dmo.RefData(c, []*DataInfo{&DataInfo{
+			ids, err := dmo.RefData(c, bktID, []*DataInfo{&DataInfo{
 				Size:     1,
 				HdrCRC32: 222,
 				CRC32:    333,
@@ -164,9 +200,9 @@ func TestPutData(t *testing.T) {
 	Convey("normal", t, func() {
 		Convey("put data info", func() {
 			dmo := &DefaultMetaOperator{}
-			InitBucketDB(DATA_DIR)
+			InitBucketDB(bktID)
 			id, _ := idgen.NewIDGen(nil, 0).New()
-			So(dmo.PutData(c, []*DataInfo{&DataInfo{
+			So(dmo.PutData(c, bktID, []*DataInfo{&DataInfo{
 				ID:     id,
 				Size:   1,
 				Status: 1,
@@ -179,16 +215,16 @@ func TestGetData(t *testing.T) {
 	Convey("normal", t, func() {
 		Convey("get data info", func() {
 			dmo := &DefaultMetaOperator{}
-			InitBucketDB(DATA_DIR)
+			InitBucketDB(bktID)
 			id, _ := idgen.NewIDGen(nil, 0).New()
 			d := &DataInfo{
 				ID:     id,
 				Size:   1,
 				Status: 1,
 			}
-			So(dmo.PutData(c, []*DataInfo{d}), ShouldBeNil)
+			So(dmo.PutData(c, bktID, []*DataInfo{d}), ShouldBeNil)
 
-			d1, err := dmo.GetData(c, id)
+			d1, err := dmo.GetData(c, bktID, id)
 			So(err, ShouldBeNil)
 			So(d1, ShouldResemble, d)
 		})

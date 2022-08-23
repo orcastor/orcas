@@ -3,6 +3,7 @@ package core
 import (
 	"database/sql"
 	"fmt"
+	"os"
 	"path/filepath"
 	"time"
 
@@ -14,6 +15,7 @@ type BucketInfo struct {
 	ID   int64  `borm:"id"`       // 桶ID
 	Name string `borm:"name"`     // 桶名称
 	UID  int64  `borm:"uid"`      // 拥有者
+	Type int    `borm:"type"`     // 桶类型，0: none, 1: 个人 ...
 	OID  int64  `borm:"root_oid"` // 桶的根对象ID
 	// SnapshotID int64 // 最新快照版本ID
 }
@@ -59,19 +61,19 @@ type DataInfo struct {
 type BucketMetaOperator interface {
 	PutBkt(c Ctx, o []*BucketInfo) error
 	GetBkt(c Ctx, ids []int64) ([]*BucketInfo, error)
-	ListBkt(c Ctx, uid int64) ([]int64, error)
+	ListBkt(c Ctx, uid int64) ([]*BucketInfo, error)
 }
 
 type DataMetaOperator interface {
-	RefData(c Ctx, d []*DataInfo) ([]int64, error)
-	PutData(c Ctx, d []*DataInfo) error
-	GetData(c Ctx, id int64) (*DataInfo, error)
+	RefData(c Ctx, bktID int64, d []*DataInfo) ([]int64, error)
+	PutData(c Ctx, bktID int64, d []*DataInfo) error
+	GetData(c Ctx, bktID, id int64) (*DataInfo, error)
 }
 
 type ObjectMetaOperator interface {
-	PutObj(c Ctx, o []*ObjectInfo) ([]int64, error)
-	GetObj(c Ctx, ids []int64) ([]*ObjectInfo, error)
-	SetObj(c Ctx, o *ObjectInfo) error
+	PutObj(c Ctx, bktID int64, o []*ObjectInfo) ([]int64, error)
+	GetObj(c Ctx, bktID int64, ids []int64) ([]*ObjectInfo, error)
+	SetObj(c Ctx, bktID int64, o *ObjectInfo) error
 }
 
 type MetaOperator interface {
@@ -80,13 +82,18 @@ type MetaOperator interface {
 	ObjectMetaOperator
 }
 
-func GetDB(bktName string) (*sql.DB, error) {
-	dirPath := filepath.Join(Conf().Path, bktName, "meta.db")
-	return sql.Open("sqlite3", dirPath+"?_journal=WAL")
+func GetDB(bktID int64) (*sql.DB, error) {
+	return getDB(fmt.Sprint(bktID))
+}
+
+func getDB(dir string) (*sql.DB, error) {
+	dirPath := filepath.Join(Conf().Path, dir)
+	os.MkdirAll(dirPath, 0766)
+	return sql.Open("sqlite3", filepath.Join(dirPath, "meta.db")+"?_journal=WAL")
 }
 
 func InitDB() error {
-	db, err := GetDB("")
+	db, err := getDB("")
 	if err != nil {
 		return err
 	}
@@ -95,6 +102,7 @@ func InitDB() error {
 	db.Exec(`CREATE TABLE bkt (id BIGINT PRIMARY KEY NOT NULL,
 		name TEXT NOT NULL,
 		uid BIGINT NOT NULL,
+		type INT NOT NULL,
 		root_oid BIGINT NOT NULL
 	)`)
 
@@ -102,8 +110,8 @@ func InitDB() error {
 	return nil
 }
 
-func InitBucketDB(bktName string) error {
-	db, err := GetDB(bktName)
+func InitBucketDB(bktID int64) error {
+	db, err := GetDB(bktID)
 	if err != nil {
 		return err
 	}
@@ -134,7 +142,7 @@ func InitBucketDB(bktName string) error {
 		pkg_off BIGINT NOT NULL
 	)`)
 
-	db.Exec(`CREATE INDEX ix_ref ON obj (size, hdr_crc32, crc32, md5)`)
+	db.Exec(`CREATE INDEX ix_ref ON data (size, hdr_crc32, crc32, md5)`)
 	db.Exec(`PRAGMA temp_store = MEMORY`)
 	return nil
 }
@@ -143,31 +151,34 @@ type DefaultMetaOperator struct {
 }
 
 func (dmo *DefaultMetaOperator) PutBkt(c Ctx, o []*BucketInfo) error {
-	db, err := GetDB("")
+	db, err := getDB("")
 	defer db.Close()
 
 	_, err = b.Table(db, BKT_TBL, c).ReplaceInto(&o)
+	for _, x := range o {
+		InitBucketDB(x.ID)
+	}
 	return err
 }
 
 func (dmo *DefaultMetaOperator) GetBkt(c Ctx, ids []int64) (o []*BucketInfo, err error) {
-	db, err := GetDB("")
+	db, err := getDB("")
 	defer db.Close()
 
 	_, err = b.Table(db, BKT_TBL, c).Select(&o, b.Where(b.In("id", ids)))
 	return
 }
 
-func (dmo *DefaultMetaOperator) ListBkt(c Ctx, uid int64) (ids []int64, err error) {
-	db, err := GetDB("")
+func (dmo *DefaultMetaOperator) ListBkt(c Ctx, uid int64) (o []*BucketInfo, err error) {
+	db, err := getDB("")
 	defer db.Close()
 
-	_, err = b.Table(db, BKT_TBL, c).Select(&ids, b.Fields("id"), b.Where(b.Eq("uid", uid)))
+	_, err = b.Table(db, BKT_TBL, c).Select(&o, b.Where(b.Eq("uid", uid)))
 	return
 }
 
-func (dmo *DefaultMetaOperator) RefData(c Ctx, d []*DataInfo) ([]int64, error) {
-	db, err := GetDB(DATA_DIR)
+func (dmo *DefaultMetaOperator) RefData(c Ctx, bktID int64, d []*DataInfo) ([]int64, error) {
+	db, err := GetDB(bktID)
 	if err != nil {
 		return nil, err
 	}
@@ -222,16 +233,16 @@ func (dmo *DefaultMetaOperator) RefData(c Ctx, d []*DataInfo) ([]int64, error) {
 	return res, err
 }
 
-func (dmo *DefaultMetaOperator) PutData(c Ctx, d []*DataInfo) error {
-	db, err := GetDB(DATA_DIR)
+func (dmo *DefaultMetaOperator) PutData(c Ctx, bktID int64, d []*DataInfo) error {
+	db, err := GetDB(bktID)
 	defer db.Close()
 
 	_, err = b.Table(db, DATA_TBL, c).ReplaceInto(&d)
 	return err
 }
 
-func (dmo *DefaultMetaOperator) GetData(c Ctx, id int64) (d *DataInfo, err error) {
-	db, err := GetDB(DATA_DIR)
+func (dmo *DefaultMetaOperator) GetData(c Ctx, bktID, id int64) (d *DataInfo, err error) {
+	db, err := GetDB(bktID)
 	defer db.Close()
 
 	d = &DataInfo{}
@@ -239,8 +250,8 @@ func (dmo *DefaultMetaOperator) GetData(c Ctx, id int64) (d *DataInfo, err error
 	return
 }
 
-func (dmo *DefaultMetaOperator) PutObj(c Ctx, o []*ObjectInfo) (ids []int64, err error) {
-	db, err := GetDB(DATA_DIR)
+func (dmo *DefaultMetaOperator) PutObj(c Ctx, bktID int64, o []*ObjectInfo) (ids []int64, err error) {
+	db, err := GetDB(bktID)
 	defer db.Close()
 
 	n, err := b.Table(db, OBJ_TBL, c).Insert(&o)
@@ -254,16 +265,16 @@ func (dmo *DefaultMetaOperator) PutObj(c Ctx, o []*ObjectInfo) (ids []int64, err
 	return ids, err
 }
 
-func (dmo *DefaultMetaOperator) GetObj(c Ctx, ids []int64) (o []*ObjectInfo, err error) {
-	db, err := GetDB(DATA_DIR)
+func (dmo *DefaultMetaOperator) GetObj(c Ctx, bktID int64, ids []int64) (o []*ObjectInfo, err error) {
+	db, err := GetDB(bktID)
 	defer db.Close()
 
 	_, err = b.Table(db, OBJ_TBL, c).Select(&o, b.Where(b.In("id", ids)))
 	return
 }
 
-func (dmo *DefaultMetaOperator) SetObj(c Ctx, o *ObjectInfo) error {
-	db, err := GetDB(DATA_DIR)
+func (dmo *DefaultMetaOperator) SetObj(c Ctx, bktID int64, o *ObjectInfo) error {
+	db, err := GetDB(bktID)
 	defer db.Close()
 
 	_, err = b.Table(db, OBJ_TBL, c).Update(o, b.Where(b.Eq("id", o.ID)))
