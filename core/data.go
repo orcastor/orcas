@@ -19,18 +19,19 @@ type Option struct {
 
 type DataOperator interface {
 	SetOption(opt Option)
-	Write(c Ctx, dataID int64, sn int, buf []byte) error
-	Read(c Ctx, dataID int64, sn int) ([]byte, error)
-	ReadBytes(c Ctx, dataID int64, sn int, offset, size int64) ([]byte, error)
+	Write(c Ctx, bktID, dataID int64, sn int, buf []byte) error
+	Read(c Ctx, bktID, dataID int64, sn int) ([]byte, error)
+	ReadBytes(c Ctx, bktID, dataID int64, sn int, offset, size int64) ([]byte, error)
 }
 
 const interval = time.Second
 
-var Q = ecache.NewLRUCache(16, 1024, interval)
+var Q = ecache.NewLRUCache(16, 256, interval)
 
 func init() {
 	Q.Inspect(func(action int, key string, iface *interface{}, bytes []byte, status int) {
-		if action == ecache.PUT && status <= 0 { // evicted / updated
+		// evicted / updated / deleted
+		if (action == ecache.PUT && status <= 0) || (action == ecache.DEL && status == 1) {
 			(*iface).(*AsyncHandle).Close()
 		}
 	})
@@ -39,16 +40,15 @@ func init() {
 		// manually evict expired items
 		for {
 			now := time.Now().UnixNano()
-			m := make(map[string]*AsyncHandle, 0)
+			keys := []string{}
 			Q.Walk(func(key string, iface *interface{}, bytes []byte, expireAt int64) bool {
 				if expireAt < now {
-					m[key] = (*iface).(*AsyncHandle)
+					keys = append(keys, key)
 				}
 				return true
 			})
-			for fn, ah := range m {
-				ah.Close()
-				Q.Del(fn)
+			for _, k := range keys {
+				Q.Del(k)
 			}
 			time.Sleep(interval)
 		}
@@ -89,11 +89,11 @@ func toFileName(dataID int64, sn int) string {
 	return fmt.Sprintf("%d_%d", dataID, sn)
 }
 
-func (ddo *DefaultDataOperator) Write(c Ctx, dataID int64, sn int, buf []byte) error {
+func (ddo *DefaultDataOperator) Write(c Ctx, bktID, dataID int64, sn int, buf []byte) error {
 	fn := toFileName(dataID, sn)
 	hash := toHash(fn)
 	// path/<文件名hash的最后三个字节>/hash
-	dirPath := filepath.Join(Conf().Path, DATA_DIR, hash[len(hash)-3:], hash)
+	dirPath := filepath.Join(Conf().Path, fmt.Sprint(bktID), hash[len(hash)-3:], hash)
 	// 不用判断是否存在，以及是否创建成功，如果失败，下面写入文件之前会报错
 	os.MkdirAll(dirPath, 0766)
 
@@ -103,29 +103,27 @@ func (ddo *DefaultDataOperator) Write(c Ctx, dataID int64, sn int, buf []byte) e
 	}
 
 	ah := &AsyncHandle{F: f, B: bufio.NewWriter(f)}
-	if ddo.Options.Sync {
-		defer ah.Close()
-	} else {
-		go ah.B.Flush()
-		defer Q.Put(fn, ah)
-	}
-
 	_, err = ah.B.Write(buf)
+	if ddo.Options.Sync {
+		ah.Close()
+	} else {
+		Q.Put(fn, ah)
+	}
 	return err
 }
 
-func (ddo *DefaultDataOperator) Read(c Ctx, dataID int64, sn int) ([]byte, error) {
+func (ddo *DefaultDataOperator) Read(c Ctx, bktID, dataID int64, sn int) ([]byte, error) {
 	fn := toFileName(dataID, sn)
 	hash := toHash(fn)
 	// path/<文件名hash的最后三个字节>/hash
-	return ioutil.ReadFile(filepath.Join(Conf().Path, DATA_DIR, hash[len(hash)-3:], hash, fn))
+	return ioutil.ReadFile(filepath.Join(Conf().Path, fmt.Sprint(bktID), hash[len(hash)-3:], hash, fn))
 }
 
-func (ddo *DefaultDataOperator) ReadBytes(c Ctx, dataID int64, sn int, offset, size int64) ([]byte, error) {
+func (ddo *DefaultDataOperator) ReadBytes(c Ctx, bktID, dataID int64, sn int, offset, size int64) ([]byte, error) {
 	fn := toFileName(dataID, sn)
 	hash := toHash(fn)
 	// path/<文件名hash的最后三个字节>/hash
-	f, err := os.Open(filepath.Join(Conf().Path, DATA_DIR, hash[len(hash)-3:], hash, fn))
+	f, err := os.Open(filepath.Join(Conf().Path, fmt.Sprint(bktID), hash[len(hash)-3:], hash, fn))
 	if err != nil {
 		return nil, err
 	}

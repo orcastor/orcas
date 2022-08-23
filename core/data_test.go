@@ -25,11 +25,11 @@ func TestWrite(t *testing.T) {
 				Options: Option{
 					Sync: true,
 				}}
-			So(ddo.Write(c, 4701534814223, 0, []byte("xxxxx")), ShouldBeNil)
+			So(ddo.Write(c, bktID, 4701534814223, 0, []byte("xxxxx")), ShouldBeNil)
 		})
 		Convey("async write one file", func() {
 			ddo := &DefaultDataOperator{}
-			So(ddo.Write(c, 4701535862800, 0, []byte("yyyyy")), ShouldBeNil)
+			So(ddo.Write(c, bktID, 4701535862800, 0, []byte("yyyyy")), ShouldBeNil)
 			for HasInflight() {
 				time.Sleep(time.Second)
 			}
@@ -46,8 +46,8 @@ func TestRead(t *testing.T) {
 				}}
 			key := int64(4701529571344)
 			value := []byte("test_read")
-			So(ddo.Write(c, key, 0, []byte(value)), ShouldBeNil)
-			bs, err := ddo.Read(c, key, 0)
+			So(ddo.Write(c, bktID, key, 0, []byte(value)), ShouldBeNil)
+			bs, err := ddo.Read(c, bktID, key, 0)
 			So(err, ShouldBeNil)
 			So(bs, ShouldResemble, value)
 		})
@@ -62,34 +62,34 @@ func TestReadBytes(t *testing.T) {
 			}}
 		key := int64(4701530619920)
 		value := []byte("test_read")
-		So(ddo.Write(c, key, 0, []byte(value)), ShouldBeNil)
+		So(ddo.Write(c, bktID, key, 0, []byte(value)), ShouldBeNil)
 
 		Convey("offset - 0", func() {
-			bs, err := ddo.ReadBytes(c, key, 0, 0, -1)
+			bs, err := ddo.ReadBytes(c, bktID, key, 0, 0, -1)
 			So(err, ShouldBeNil)
 			So(bs, ShouldResemble, value)
 		})
 
 		Convey("offset - valid x with all", func() {
-			bs, err := ddo.ReadBytes(c, key, 0, 2, -1)
+			bs, err := ddo.ReadBytes(c, bktID, key, 0, 2, -1)
 			So(err, ShouldBeNil)
 			So(bs, ShouldResemble, value[2:])
 		})
 
 		Convey("offset - invalid x with all", func() {
-			bs, err := ddo.ReadBytes(c, key, 0, 12, -1)
+			bs, err := ddo.ReadBytes(c, bktID, key, 0, 12, -1)
 			So(err, ShouldBeNil)
 			So(bs, ShouldBeNil)
 		})
 
 		Convey("size - valid x with valid size", func() {
-			bs, err := ddo.ReadBytes(c, key, 0, 2, int64(len(value)-2))
+			bs, err := ddo.ReadBytes(c, bktID, key, 0, 2, int64(len(value)-2))
 			So(err, ShouldBeNil)
 			So(bs, ShouldResemble, value[2:])
 		})
 
 		Convey("size - valid x with bigger size", func() {
-			bs, err := ddo.ReadBytes(c, key, 0, 2, int64(len(value)*2))
+			bs, err := ddo.ReadBytes(c, bktID, key, 0, 2, int64(len(value)*2))
 			So(err, ShouldBeNil)
 			So(bs, ShouldResemble, value[2:])
 		})
@@ -104,9 +104,10 @@ func TestWriteSyncConcurrent(t *testing.T) {
 				Options: Option{
 					Sync: true,
 				}}
-			for i := 0; i < 100000; i++ {
+			bid, _ := ig.New()
+			for i := 0; i < 20000; i++ {
 				id, _ := ig.New()
-				ddo.Write(c, id, 0, []byte(fmt.Sprint(i)))
+				ddo.Write(c, bid, id, 0, []byte(fmt.Sprint(i)))
 			}
 		})
 	})
@@ -117,9 +118,10 @@ func TestWriteAsyncConcurrent(t *testing.T) {
 		Convey("async write files", func() {
 			ig := idgen.NewIDGen(nil, 0)
 			ddo := &DefaultDataOperator{}
-			for i := 0; i < 100000; i++ {
+			bid, _ := ig.New()
+			for i := 0; i < 20000; i++ {
 				id, _ := ig.New()
-				ddo.Write(c, id, 0, []byte(fmt.Sprint(i)))
+				ddo.Write(c, bid, id, 0, []byte(fmt.Sprint(i)))
 			}
 			for HasInflight() {
 				time.Sleep(time.Second)
