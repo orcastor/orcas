@@ -104,9 +104,9 @@ func TestWriteSyncConcurrent(t *testing.T) {
 				Options: Option{
 					Sync: true,
 				}}
-			for i := 0; i < 30001; i++ {
+			for i := 0; i < 10000; i++ {
 				id, _ := ig.New()
-				So(ddo.Write(c, id, 0, []byte(fmt.Sprint(i))), ShouldBeNil)
+				ddo.Write(c, id, 0, []byte(fmt.Sprint(i)))
 			}
 		})
 	})
@@ -117,9 +117,9 @@ func TestWriteAsyncConcurrent(t *testing.T) {
 		Convey("async write files", func() {
 			ig := idgen.NewIDGen(nil, 0)
 			ddo := &DefaultDataOperator{}
-			for i := 0; i < 30001; i++ {
+			for i := 0; i < 10000; i++ {
 				id, _ := ig.New()
-				So(ddo.Write(c, id, 0, []byte(fmt.Sprint(i))), ShouldBeNil)
+				ddo.Write(c, id, 0, []byte(fmt.Sprint(i)))
 			}
 			for HasInflight() {
 				time.Sleep(time.Second)
