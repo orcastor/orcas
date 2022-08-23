@@ -12,11 +12,10 @@ import (
 )
 
 type BucketInfo struct {
-	ID   int64       `borm:"id"`       // 桶ID
-	Name string      `borm:"name"`     // 桶名称
-	UID  int64       `borm:"uid"`      // 拥有者
-	OID  int64       `borm:"root_oid"` // 桶的根对象ID
-	Root *ObjectInfo // 桶的根对象
+	ID   int64  `borm:"id"`       // 桶ID
+	Name string `borm:"name"`     // 桶名称
+	UID  int64  `borm:"uid"`      // 拥有者
+	OID  int64  `borm:"root_oid"` // 桶的根对象ID
 	// SnapshotID int64 // 最新快照版本ID
 }
 
@@ -59,8 +58,9 @@ type DataInfo struct {
 // 数据存储，<=4194304B的对象，用<ID/PkgID>为名称，否则用<ID/PkgID>-<SN>为名称，<SN>为数据块的序号，从0开始递增
 
 type BucketMetaOperator interface {
-	BktPut(c context.Context, uid int64, bcket string) error
-	BktGet(c context.Context, bckID int64) (*BucketInfo, error)
+	BktPut(c context.Context, o []*BucketInfo) error
+	BktGet(c context.Context, ids []int64) ([]*BucketInfo, error)
+	BktList(c context.Context, uid int64) ([]int64, error)
 }
 
 type DataMetaOperator interface {
@@ -80,9 +80,26 @@ type MetaOperator interface {
 	ObjectMetaOperator
 }
 
-func GetDB(dbName string) (*sql.DB, error) {
-	dirPath := filepath.Join(Conf().Path, dbName, DATA_DIR)
+func GetDB(bktName string) (*sql.DB, error) {
+	dirPath := filepath.Join(Conf().Path, bktName, "meta.db")
 	return sql.Open("sqlite3", dirPath+"?_journal=WAL")
+}
+
+func InitDB() error {
+	db, err := GetDB("")
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+
+	db.Exec(`CREATE TABLE bkt (id BIGINT PRIMARY KEY NOT NULL,
+		name TEXT NOT NULL,
+		uid BIGINT NOT NULL,
+		root_oid BIGINT NOT NULL
+	)`)
+
+	db.Exec(`CREATE INDEX ix_uid on bkt (uid)`)
+	return nil
 }
 
 func InitBucketDB(bktName string) error {
@@ -103,7 +120,7 @@ func InitBucketDB(bktName string) error {
 		ext TEXT NOT NULL
 	)`)
 
-	db.Exec(`CREATE UNIQUE INDEX pid_name on obj (pid, name)`)
+	db.Exec(`CREATE UNIQUE INDEX uk_pid_name on obj (pid, name)`)
 
 	db.Exec(`CREATE TABLE data (id BIGINT PRIMARY KEY NOT NULL,
 		size BIGINT NOT NULL,
@@ -117,7 +134,7 @@ func InitBucketDB(bktName string) error {
 		pkg_off BIGINT NOT NULL
 	)`)
 
-	db.Exec(`CREATE INDEX ref ON obj (size, hdr_crc32, crc32, md5)`)
+	db.Exec(`CREATE INDEX ix_ref ON obj (size, hdr_crc32, crc32, md5)`)
 	db.Exec(`PRAGMA temp_store = MEMORY`)
 	return nil
 }
@@ -125,12 +142,28 @@ func InitBucketDB(bktName string) error {
 type DefaultMetaOperator struct {
 }
 
-func (dmo *DefaultMetaOperator) BktPut(c context.Context, uid int64, bcket string) error {
-	return nil
+func (dmo *DefaultMetaOperator) BktPut(c context.Context, o []*BucketInfo) error {
+	db, err := GetDB("")
+	defer db.Close()
+
+	_, err = b.Table(db, BKT_TBL, c).ReplaceInto(&o)
+	return err
 }
 
-func (dmo *DefaultMetaOperator) BktGet(c context.Context, bckID int64) (*BucketInfo, error) {
-	return nil, nil
+func (dmo *DefaultMetaOperator) BktGet(c context.Context, ids []int64) (o []*BucketInfo, err error) {
+	db, err := GetDB("")
+	defer db.Close()
+
+	_, err = b.Table(db, BKT_TBL, c).Select(&o, b.Where(b.In("id", ids)))
+	return
+}
+
+func (dmo *DefaultMetaOperator) BktList(c context.Context, uid int64) (ids []int64, err error) {
+	db, err := GetDB("")
+	defer db.Close()
+
+	_, err = b.Table(db, BKT_TBL, c).Select(&ids, b.Fields("id"), b.Where(b.Eq("uid", uid)))
+	return
 }
 
 func (dmo *DefaultMetaOperator) DatRef(c context.Context, d []*DataInfo) ([]int64, error) {
@@ -225,6 +258,6 @@ func (dmo *DefaultMetaOperator) ObjGet(c context.Context, ids []int64) (o []*Obj
 	db, err := GetDB(DATA_DIR)
 	defer db.Close()
 
-	_, err = b.Table(db, OBJ_TBL, c).Select(o, b.Where(b.In("id", ids)))
+	_, err = b.Table(db, OBJ_TBL, c).Select(&o, b.Where(b.In("id", ids)))
 	return
 }
