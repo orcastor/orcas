@@ -1,7 +1,6 @@
 package core
 
 import (
-	"context"
 	"testing"
 
 	"github.com/orca-zhang/idgen"
@@ -19,7 +18,7 @@ func TestDatRef(t *testing.T) {
 		dmo := &DefaultMetaOperator{}
 		InitBucketDB(DATA_DIR)
 		id, _ := idgen.NewIDGen(nil, 0).New()
-		So(dmo.DatPut(context.TODO(), []*DataInfo{&DataInfo{
+		So(dmo.DatPut(c, []*DataInfo{&DataInfo{
 			ID:       id,
 			Size:     1,
 			HdrCRC32: 222,
@@ -29,7 +28,7 @@ func TestDatRef(t *testing.T) {
 		}}), ShouldBeNil)
 
 		Convey("single try ref", func() {
-			ids, err := dmo.DatRef(context.TODO(), []*DataInfo{&DataInfo{
+			ids, err := dmo.DatRef(c, []*DataInfo{&DataInfo{
 				Size:     1,
 				HdrCRC32: 222,
 			}})
@@ -37,7 +36,7 @@ func TestDatRef(t *testing.T) {
 			So(len(ids), ShouldEqual, 1)
 			So(ids[0], ShouldNotEqual, 0)
 
-			ids, err = dmo.DatRef(context.TODO(), []*DataInfo{&DataInfo{
+			ids, err = dmo.DatRef(c, []*DataInfo{&DataInfo{
 				Size:     0,
 				HdrCRC32: 222,
 			}})
@@ -45,7 +44,7 @@ func TestDatRef(t *testing.T) {
 			So(len(ids), ShouldEqual, 1)
 			So(ids[0], ShouldEqual, 0)
 
-			ids, err = dmo.DatRef(context.TODO(), []*DataInfo{&DataInfo{
+			ids, err = dmo.DatRef(c, []*DataInfo{&DataInfo{
 				Size:     1,
 				HdrCRC32: 0,
 			}})
@@ -53,7 +52,7 @@ func TestDatRef(t *testing.T) {
 			So(len(ids), ShouldEqual, 1)
 			So(ids[0], ShouldEqual, 0)
 
-			ids, err = dmo.DatRef(context.TODO(), []*DataInfo{&DataInfo{
+			ids, err = dmo.DatRef(c, []*DataInfo{&DataInfo{
 				Size:     1,
 				HdrCRC32: 0,
 				CRC32:    333,
@@ -64,7 +63,7 @@ func TestDatRef(t *testing.T) {
 			So(ids[0], ShouldEqual, 0)
 		})
 		Convey("multiple try ref", func() {
-			ids, err := dmo.DatRef(context.TODO(), []*DataInfo{&DataInfo{
+			ids, err := dmo.DatRef(c, []*DataInfo{&DataInfo{
 				Size:     1,
 				HdrCRC32: 222,
 			}, &DataInfo{
@@ -77,7 +76,7 @@ func TestDatRef(t *testing.T) {
 			So(ids[1], ShouldNotEqual, 0)
 		})
 		Convey("multiple try ref diff", func() {
-			ids, err := dmo.DatRef(context.TODO(), []*DataInfo{&DataInfo{
+			ids, err := dmo.DatRef(c, []*DataInfo{&DataInfo{
 				Size:     1,
 				HdrCRC32: 222,
 			}, &DataInfo{
@@ -91,7 +90,7 @@ func TestDatRef(t *testing.T) {
 		})
 
 		Convey("single ref", func() {
-			ids, err := dmo.DatRef(context.TODO(), []*DataInfo{&DataInfo{
+			ids, err := dmo.DatRef(c, []*DataInfo{&DataInfo{
 				Size:     1,
 				HdrCRC32: 222,
 				CRC32:    333,
@@ -101,7 +100,7 @@ func TestDatRef(t *testing.T) {
 			So(len(ids), ShouldEqual, 1)
 			So(ids[0], ShouldEqual, id)
 
-			ids, err = dmo.DatRef(context.TODO(), []*DataInfo{&DataInfo{
+			ids, err = dmo.DatRef(c, []*DataInfo{&DataInfo{
 				Size:     1,
 				HdrCRC32: 222,
 				CRC32:    0,
@@ -112,7 +111,7 @@ func TestDatRef(t *testing.T) {
 			So(ids[0], ShouldNotEqual, id)
 			So(ids[0], ShouldNotEqual, 0)
 
-			ids, err = dmo.DatRef(context.TODO(), []*DataInfo{&DataInfo{
+			ids, err = dmo.DatRef(c, []*DataInfo{&DataInfo{
 				Size:     1,
 				HdrCRC32: 222,
 				CRC32:    333,
@@ -125,7 +124,7 @@ func TestDatRef(t *testing.T) {
 		})
 
 		Convey("multiple ref", func() {
-			ids, err := dmo.DatRef(context.TODO(), []*DataInfo{&DataInfo{
+			ids, err := dmo.DatRef(c, []*DataInfo{&DataInfo{
 				Size:     1,
 				HdrCRC32: 222,
 				CRC32:    333,
@@ -142,7 +141,7 @@ func TestDatRef(t *testing.T) {
 			So(ids[1], ShouldNotEqual, 0)
 		})
 		Convey("multiple ref diff", func() {
-			ids, err := dmo.DatRef(context.TODO(), []*DataInfo{&DataInfo{
+			ids, err := dmo.DatRef(c, []*DataInfo{&DataInfo{
 				Size:     1,
 				HdrCRC32: 222,
 				CRC32:    333,
@@ -167,7 +166,7 @@ func TestDatPut(t *testing.T) {
 			dmo := &DefaultMetaOperator{}
 			InitBucketDB(DATA_DIR)
 			id, _ := idgen.NewIDGen(nil, 0).New()
-			So(dmo.DatPut(context.TODO(), []*DataInfo{&DataInfo{
+			So(dmo.DatPut(c, []*DataInfo{&DataInfo{
 				ID:     id,
 				Size:   1,
 				Status: 1,
@@ -187,9 +186,9 @@ func TestDatGet(t *testing.T) {
 				Size:   1,
 				Status: 1,
 			}
-			So(dmo.DatPut(context.TODO(), []*DataInfo{d}), ShouldBeNil)
+			So(dmo.DatPut(c, []*DataInfo{d}), ShouldBeNil)
 
-			d1, err := dmo.DatGet(context.TODO(), id)
+			d1, err := dmo.DatGet(c, id)
 			So(err, ShouldBeNil)
 			So(d1, ShouldResemble, d)
 		})
