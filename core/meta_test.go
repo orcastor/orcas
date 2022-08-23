@@ -17,7 +17,7 @@ func init() {
 func TestRef(t *testing.T) {
 	Convey("normal", t, func() {
 		dmo := &DefaultMetaOperator{}
-		InitBucket("meta.db")
+		InitBucket(DATA_DIR)
 		id, _ := idgen.NewIDGen(nil, 0).New()
 		So(dmo.PutDataInfo(context.TODO(), []*DataInfo{&DataInfo{
 			ID:       id,
@@ -165,7 +165,7 @@ func TestPutDataInfo(t *testing.T) {
 	Convey("normal", t, func() {
 		Convey("put data info", func() {
 			dmo := &DefaultMetaOperator{}
-			InitBucket("meta.db")
+			InitBucket(DATA_DIR)
 			id, _ := idgen.NewIDGen(nil, 0).New()
 			So(dmo.PutDataInfo(context.TODO(), []*DataInfo{&DataInfo{
 				ID:     id,
@@ -180,7 +180,7 @@ func TestGetDataInfo(t *testing.T) {
 	Convey("normal", t, func() {
 		Convey("get data info", func() {
 			dmo := &DefaultMetaOperator{}
-			InitBucket("meta.db")
+			InitBucket(DATA_DIR)
 			id, _ := idgen.NewIDGen(nil, 0).New()
 			d := &DataInfo{
 				ID:     id,

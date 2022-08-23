@@ -66,7 +66,7 @@ type MetaOperator interface {
 }
 
 func GetDB(dbName string) (*sql.DB, error) {
-	dirPath := filepath.Join(Conf().Path, dbName)
+	dirPath := filepath.Join(Conf().Path, dbName, DATA_DIR)
 	return sql.Open("sqlite3", dirPath+"?_journal=WAL")
 }
 
@@ -111,7 +111,7 @@ type DefaultMetaOperator struct {
 }
 
 func (dmo *DefaultMetaOperator) Ref(c context.Context, d []*DataInfo) ([]int64, error) {
-	db, err := GetDB("meta.db")
+	db, err := GetDB(DATA_DIR)
 	if err != nil {
 		return nil, err
 	}
@@ -167,7 +167,7 @@ func (dmo *DefaultMetaOperator) Ref(c context.Context, d []*DataInfo) ([]int64, 
 }
 
 func (dmo *DefaultMetaOperator) PutDataInfo(c context.Context, d []*DataInfo) error {
-	db, err := GetDB("meta.db")
+	db, err := GetDB(DATA_DIR)
 	defer db.Close()
 
 	_, err = b.Table(db, DATA_TBL, c).ReplaceInto(&d)
@@ -175,7 +175,7 @@ func (dmo *DefaultMetaOperator) PutDataInfo(c context.Context, d []*DataInfo) er
 }
 
 func (dmo *DefaultMetaOperator) GetDataInfo(c context.Context, id int64) (d *DataInfo, err error) {
-	db, err := GetDB("meta.db")
+	db, err := GetDB(DATA_DIR)
 	defer db.Close()
 
 	d = &DataInfo{}
@@ -184,7 +184,7 @@ func (dmo *DefaultMetaOperator) GetDataInfo(c context.Context, id int64) (d *Dat
 }
 
 func (dmo *DefaultMetaOperator) Create(c context.Context, o []*ObjectInfo) (ids []int64, err error) {
-	db, err := GetDB("meta.db")
+	db, err := GetDB(DATA_DIR)
 	defer db.Close()
 
 	n, err := b.Table(db, OBJ_TBL, c).Insert(&o)
@@ -199,7 +199,7 @@ func (dmo *DefaultMetaOperator) Create(c context.Context, o []*ObjectInfo) (ids 
 }
 
 func (dmo *DefaultMetaOperator) Get(c context.Context, ids []int64) (o []*ObjectInfo, err error) {
-	db, err := GetDB("meta.db")
+	db, err := GetDB(DATA_DIR)
 	defer db.Close()
 
 	_, err = b.Table(db, OBJ_TBL, c).Select(o, b.Where(b.In("id", ids)))
