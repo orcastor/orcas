@@ -1,8 +1,6 @@
 package core
 
 import (
-	"context"
-
 	"github.com/orca-zhang/idgen"
 )
 
@@ -21,23 +19,23 @@ type Hanlder interface {
 	// 只有文件长度、HdrCRC32是预Ref，如果成功返回新DataID，失败返回0
 	// 有文件长度、CRC32、MD5，成功返回引用的DataID，失败返回0，客户端发现DataID有变化，说明不需要上传数据
 	// 如果非预Ref DataID传0，说明跳过了预Ref
-	Ref(c context.Context, d []*DataInfo) ([]int64, error)
+	Ref(c Ctx, bktID int64, d []*DataInfo) ([]int64, error)
 	// 打包上传或者小文件，sn传-1，大文件sn从0开始，DataID不传默认创建一个新的
-	PutData(c context.Context, dataID int64, sn int, buf []byte) (int64, error)
+	PutData(c Ctx, bktID, dataID int64, sn int, buf []byte) (int64, error)
 	// 上传完数据以后，再创建元数据
-	PutDataInfo(c context.Context, d []*DataInfo) error
+	PutDataInfo(c Ctx, bktID int64, d []*DataInfo) error
 	// 只传一个参数说明是sn，传两个参数说明是sn+offset，传三个参数说明是sn+offset+size
-	GetData(c context.Context, o *ObjectInfo, sn int, offset ...int64) ([]byte, error)
+	GetData(c Ctx, bktID int64, o *ObjectInfo, sn int, offset ...int64) ([]byte, error)
 
 	// 垃圾回收时有数据没有元数据引用的为脏数据（需要留出窗口时间），有元数据没有数据的为损坏数据
-	Put(c context.Context, o []*ObjectInfo) ([]int64, error)
-	List(c context.Context, o *ObjectInfo, opt ListOptions) ([]*ObjectInfo, error)
+	Put(c Ctx, bktID int64, o []*ObjectInfo) ([]int64, error)
+	List(c Ctx, bktID int64, o *ObjectInfo, opt ListOptions) ([]*ObjectInfo, error)
 
 	// 变更name或者pid，重命名或者移动
-	MoveTo(c context.Context, o *ObjectInfo) error
+	MoveTo(c Ctx, bktID int64, o *ObjectInfo) error
 
-	Recycle(c context.Context, o *ObjectInfo) error
-	Delete(c context.Context, o *ObjectInfo) error
+	Recycle(c Ctx, bktID int64, o *ObjectInfo) error
+	Delete(c Ctx, bktID int64, o *ObjectInfo) error
 }
 
 type RWHanlder struct {
@@ -63,52 +61,52 @@ func (ch *RWHanlder) New(Hanlder) Hanlder {
 // 只有文件长度、HdrCRC32是预Ref，如果成功返回新DataID，失败返回0
 // 有文件长度、CRC32、MD5，成功返回引用的DataID，失败返回0，客户端发现DataID有变化，说明不需要上传数据
 // 如果非预Ref DataID传0，说明跳过了预Ref
-func (ch *RWHanlder) Ref(c context.Context, d []*DataInfo) ([]int64, error) {
-	return ch.mo.RefData(c, d)
+func (ch *RWHanlder) Ref(c Ctx, bktID int64, d []*DataInfo) ([]int64, error) {
+	return ch.mo.RefData(c, bktID, d)
 }
 
 // 打包上传或者小文件，sn传-1，大文件sn从0开始，DataID不传默认创建一个新的
-func (ch *RWHanlder) PutData(c context.Context, dataID int64, sn int, buf []byte) (int64, error) {
+func (ch *RWHanlder) PutData(c Ctx, bktID, dataID int64, sn int, buf []byte) (int64, error) {
 	if dataID == 0 {
 		dataID, _ = ch.ig.New()
 	}
-	return dataID, ch.do.Write(c, dataID, sn, buf)
+	return dataID, ch.do.Write(c, bktID, dataID, sn, buf)
 }
 
 // 上传完数据以后，再创建元数据
-func (ch *RWHanlder) PutDataInfo(c context.Context, d []*DataInfo) error {
-	return ch.mo.PutData(c, d)
+func (ch *RWHanlder) PutDataInfo(c Ctx, bktID int64, d []*DataInfo) error {
+	return ch.mo.PutData(c, bktID, d)
 }
 
 // 只传一个参数说明是sn，传两个参数说明是sn+offset，传三个参数说明是sn+offset+size
-func (ch *RWHanlder) GetData(c context.Context, o *ObjectInfo, sn int, offset ...int64) ([]byte, error) {
+func (ch *RWHanlder) GetData(c Ctx, bktID int64, o *ObjectInfo, sn int, offset ...int64) ([]byte, error) {
 	switch len(offset) {
 	case 0:
-		return ch.do.Read(c, o.DataID, sn)
+		return ch.do.Read(c, bktID, o.DataID, sn)
 	case 1:
-		return ch.do.ReadBytes(c, o.DataID, sn, offset[0], -1)
+		return ch.do.ReadBytes(c, bktID, o.DataID, sn, offset[0], -1)
 	}
-	return ch.do.ReadBytes(c, o.DataID, sn, offset[0], offset[1])
+	return ch.do.ReadBytes(c, bktID, o.DataID, sn, offset[0], offset[1])
 }
 
 // 垃圾回收时有数据没有元数据引用的为脏数据（需要留出窗口时间），有元数据没有数据的为损坏数据
-func (ch *RWHanlder) Put(c context.Context, o []*ObjectInfo) ([]int64, error) {
-	return ch.mo.PutObj(c, o)
+func (ch *RWHanlder) Put(c Ctx, bktID int64, o []*ObjectInfo) ([]int64, error) {
+	return ch.mo.PutObj(c, bktID, o)
 }
 
-func (ch *RWHanlder) List(c context.Context, o *ObjectInfo, opt ListOptions) ([]*ObjectInfo, error) {
+func (ch *RWHanlder) List(c Ctx, bktID int64, o *ObjectInfo, opt ListOptions) ([]*ObjectInfo, error) {
 	return nil, nil
 }
 
 // 变更name或者pid，重命名或者移动
-func (ch *RWHanlder) MoveTo(c context.Context, o *ObjectInfo) error {
+func (ch *RWHanlder) MoveTo(c Ctx, bktID int64, o *ObjectInfo) error {
 	return nil
 }
 
-func (ch *RWHanlder) Recycle(c context.Context, o *ObjectInfo) error {
+func (ch *RWHanlder) Recycle(c Ctx, bktID int64, o *ObjectInfo) error {
 	return nil
 }
 
-func (ch *RWHanlder) Delete(c context.Context, o *ObjectInfo) error {
+func (ch *RWHanlder) Delete(c Ctx, bktID int64, o *ObjectInfo) error {
 	return nil
 }
