@@ -5,6 +5,7 @@ import (
 	"crypto/md5"
 	"fmt"
 	"io"
+	"io/ioutil"
 	"os"
 	"path/filepath"
 	"time"
@@ -116,7 +117,7 @@ func (ddo *DefaultDataOperator) Read(c Ctx, dataID int64, sn int) ([]byte, error
 	fn := toFileName(dataID, sn)
 	hash := toHash(fn)
 	// path/<文件名hash的最后三个字节>/hash
-	return os.ReadFile(filepath.Join(Conf().Path, DATA_DIR, hash[len(hash)-3:], hash, fn))
+	return ioutil.ReadFile(filepath.Join(Conf().Path, DATA_DIR, hash[len(hash)-3:], hash, fn))
 }
 
 func (ddo *DefaultDataOperator) ReadBytes(c Ctx, dataID int64, sn int, offset, size int64) ([]byte, error) {
