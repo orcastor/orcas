@@ -144,7 +144,7 @@ func (ddo *DefaultDataOperator) ReadBytes(c Ctx, dataID int64, sn int, offset, s
 		buf = make([]byte, size)
 	}
 
-	n, err := bufio.NewReader(f).Read(buf)
+	n, err := bufio.NewReaderSize(f, cap(buf)).Read(buf)
 	if err != nil {
 		return nil, err
 	}
