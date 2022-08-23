@@ -21,10 +21,10 @@ type BucketInfo struct {
 }
 
 type ObjectInfo struct {
-	ID        int64 `borm:"id"`         // 对象ID（idgen随机生成的id）
-	ParentID  int64 `borm:"pid"`        // 父对象ID
-	UpdatedAt int64 `borm:"updated_at"` // 更新时间
-	DataID    int64 `borm:"data_id"`    // 数据ID，如果为0，说明没有数据（新创建的文件，DataID就是对象ID，作为对象的首版本数据）
+	ID       int64 `borm:"id"`    // 对象ID（idgen随机生成的id）
+	ParentID int64 `borm:"pid"`   // 父对象ID
+	MTime    int64 `borm:"mtime"` // 更新时间
+	DataID   int64 `borm:"did"`   // 数据ID，如果为0，说明没有数据（新创建的文件，DataID就是对象ID，作为对象的首版本数据）
 	// BktID int64 // 桶ID，如果支持引用别的桶的数据，为0说明是本桶
 	Type   int    `borm:"type"`   // 对象类型，0: none, 1: dir, 2: file, 3: version, 4: thumb, 5. HLS(m3u8)
 	Status int    `borm:"status"` // 对象状态，0: none, 1: deleted, 2: recycle(to be deleted), 3: malformed
@@ -73,7 +73,7 @@ type DataMetaOperator interface {
 type ObjectMetaOperator interface {
 	PutObj(c Ctx, bktID int64, o []*ObjectInfo) ([]int64, error)
 	GetObj(c Ctx, bktID int64, ids []int64) ([]*ObjectInfo, error)
-	SetObj(c Ctx, bktID int64, o *ObjectInfo) error
+	SetObj(c Ctx, bktID int64, fields []string, o *ObjectInfo) error
 }
 
 type MetaOperator interface {
@@ -119,8 +119,8 @@ func InitBucketDB(bktID int64) error {
 
 	db.Exec(`CREATE TABLE obj (id BIGINT PRIMARY KEY NOT NULL,
 		pid BIGINT NOT NULL,
-		updated_at BIGINT NOT NULL,
-		data_id BIGINT NOT NULL,
+		mtime BIGINT NOT NULL,
+		did BIGINT NOT NULL,
 		type INT NOT NULL,
 		status INT NOT NULL,
 		name TEXT NOT NULL,
@@ -273,10 +273,10 @@ func (dmo *DefaultMetaOperator) GetObj(c Ctx, bktID int64, ids []int64) (o []*Ob
 	return
 }
 
-func (dmo *DefaultMetaOperator) SetObj(c Ctx, bktID int64, o *ObjectInfo) error {
+func (dmo *DefaultMetaOperator) SetObj(c Ctx, bktID int64, fields []string, o *ObjectInfo) error {
 	db, err := GetDB(bktID)
 	defer db.Close()
 
-	_, err = b.Table(db, OBJ_TBL, c).Update(o, b.Where(b.Eq("id", o.ID)))
+	_, err = b.Table(db, OBJ_TBL, c).Update(o, b.Fields(fields...), b.Where(b.Eq("id", o.ID)))
 	return err
 }
