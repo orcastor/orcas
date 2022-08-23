@@ -12,9 +12,11 @@ import (
 )
 
 type BucketInfo struct {
-	ID   int64       `borm:"id"`      // 桶ID
-	Name string      `borm:"name"`    // 桶名称
-	Root *ObjectInfo `borm:"root_id"` // 桶的根对象
+	ID   int64       `borm:"id"`       // 桶ID
+	Name string      `borm:"name"`     // 桶名称
+	UID  int64       `borm:"uid"`      // 拥有者
+	OID  int64       `borm:"root_oid"` // 桶的根对象ID
+	Root *ObjectInfo // 桶的根对象
 	// SnapshotID int64 // 最新快照版本ID
 }
 
@@ -56,13 +58,26 @@ type DataInfo struct {
 
 // 数据存储，<=4194304B的对象，用<ID/PkgID>为名称，否则用<ID/PkgID>-<SN>为名称，<SN>为数据块的序号，从0开始递增
 
-type MetaOperator interface {
-	Ref(c context.Context, d []*DataInfo) ([]int64, error)
-	PutDataInfo(c context.Context, d []*DataInfo) error
-	GetDataInfo(c context.Context, id int64) (*DataInfo, error)
+type BucketMetaOperator interface {
+	BktPut(c context.Context, uid int64, bcket string) error
+	BktGet(c context.Context, bckID int64) (*BucketInfo, error)
+}
 
-	Create(c context.Context, o []*ObjectInfo) ([]int64, error)
-	Get(c context.Context, ids []int64) ([]*ObjectInfo, error)
+type DataMetaOperator interface {
+	DatRef(c context.Context, d []*DataInfo) ([]int64, error)
+	DatPut(c context.Context, d []*DataInfo) error
+	DatGet(c context.Context, id int64) (*DataInfo, error)
+}
+
+type ObjectMetaOperator interface {
+	ObjPut(c context.Context, o []*ObjectInfo) ([]int64, error)
+	ObjGet(c context.Context, ids []int64) ([]*ObjectInfo, error)
+}
+
+type MetaOperator interface {
+	BucketMetaOperator
+	DataMetaOperator
+	ObjectMetaOperator
 }
 
 func GetDB(dbName string) (*sql.DB, error) {
@@ -70,7 +85,7 @@ func GetDB(dbName string) (*sql.DB, error) {
 	return sql.Open("sqlite3", dirPath+"?_journal=WAL")
 }
 
-func InitBucket(bktName string) error {
+func InitBucketDB(bktName string) error {
 	db, err := GetDB(bktName)
 	if err != nil {
 		return err
@@ -110,7 +125,15 @@ func InitBucket(bktName string) error {
 type DefaultMetaOperator struct {
 }
 
-func (dmo *DefaultMetaOperator) Ref(c context.Context, d []*DataInfo) ([]int64, error) {
+func (dmo *DefaultMetaOperator) BktPut(c context.Context, uid int64, bcket string) error {
+	return nil
+}
+
+func (dmo *DefaultMetaOperator) BktGet(c context.Context, bckID int64) (*BucketInfo, error) {
+	return nil, nil
+}
+
+func (dmo *DefaultMetaOperator) DatRef(c context.Context, d []*DataInfo) ([]int64, error) {
 	db, err := GetDB(DATA_DIR)
 	if err != nil {
 		return nil, err
@@ -166,7 +189,7 @@ func (dmo *DefaultMetaOperator) Ref(c context.Context, d []*DataInfo) ([]int64, 
 	return res, err
 }
 
-func (dmo *DefaultMetaOperator) PutDataInfo(c context.Context, d []*DataInfo) error {
+func (dmo *DefaultMetaOperator) DatPut(c context.Context, d []*DataInfo) error {
 	db, err := GetDB(DATA_DIR)
 	defer db.Close()
 
@@ -174,7 +197,7 @@ func (dmo *DefaultMetaOperator) PutDataInfo(c context.Context, d []*DataInfo) er
 	return err
 }
 
-func (dmo *DefaultMetaOperator) GetDataInfo(c context.Context, id int64) (d *DataInfo, err error) {
+func (dmo *DefaultMetaOperator) DatGet(c context.Context, id int64) (d *DataInfo, err error) {
 	db, err := GetDB(DATA_DIR)
 	defer db.Close()
 
@@ -183,7 +206,7 @@ func (dmo *DefaultMetaOperator) GetDataInfo(c context.Context, id int64) (d *Dat
 	return
 }
 
-func (dmo *DefaultMetaOperator) Create(c context.Context, o []*ObjectInfo) (ids []int64, err error) {
+func (dmo *DefaultMetaOperator) ObjPut(c context.Context, o []*ObjectInfo) (ids []int64, err error) {
 	db, err := GetDB(DATA_DIR)
 	defer db.Close()
 
@@ -198,7 +221,7 @@ func (dmo *DefaultMetaOperator) Create(c context.Context, o []*ObjectInfo) (ids 
 	return ids, err
 }
 
-func (dmo *DefaultMetaOperator) Get(c context.Context, ids []int64) (o []*ObjectInfo, err error) {
+func (dmo *DefaultMetaOperator) ObjGet(c context.Context, ids []int64) (o []*ObjectInfo, err error) {
 	db, err := GetDB(DATA_DIR)
 	defer db.Close()
 

@@ -14,12 +14,12 @@ func init() {
 	})
 }
 
-func TestRef(t *testing.T) {
+func TestDatRef(t *testing.T) {
 	Convey("normal", t, func() {
 		dmo := &DefaultMetaOperator{}
-		InitBucket(DATA_DIR)
+		InitBucketDB(DATA_DIR)
 		id, _ := idgen.NewIDGen(nil, 0).New()
-		So(dmo.PutDataInfo(context.TODO(), []*DataInfo{&DataInfo{
+		So(dmo.DatPut(context.TODO(), []*DataInfo{&DataInfo{
 			ID:       id,
 			Size:     1,
 			HdrCRC32: 222,
@@ -29,7 +29,7 @@ func TestRef(t *testing.T) {
 		}}), ShouldBeNil)
 
 		Convey("single try ref", func() {
-			ids, err := dmo.Ref(context.TODO(), []*DataInfo{&DataInfo{
+			ids, err := dmo.DatRef(context.TODO(), []*DataInfo{&DataInfo{
 				Size:     1,
 				HdrCRC32: 222,
 			}})
@@ -37,7 +37,7 @@ func TestRef(t *testing.T) {
 			So(len(ids), ShouldEqual, 1)
 			So(ids[0], ShouldNotEqual, 0)
 
-			ids, err = dmo.Ref(context.TODO(), []*DataInfo{&DataInfo{
+			ids, err = dmo.DatRef(context.TODO(), []*DataInfo{&DataInfo{
 				Size:     0,
 				HdrCRC32: 222,
 			}})
@@ -45,7 +45,7 @@ func TestRef(t *testing.T) {
 			So(len(ids), ShouldEqual, 1)
 			So(ids[0], ShouldEqual, 0)
 
-			ids, err = dmo.Ref(context.TODO(), []*DataInfo{&DataInfo{
+			ids, err = dmo.DatRef(context.TODO(), []*DataInfo{&DataInfo{
 				Size:     1,
 				HdrCRC32: 0,
 			}})
@@ -53,7 +53,7 @@ func TestRef(t *testing.T) {
 			So(len(ids), ShouldEqual, 1)
 			So(ids[0], ShouldEqual, 0)
 
-			ids, err = dmo.Ref(context.TODO(), []*DataInfo{&DataInfo{
+			ids, err = dmo.DatRef(context.TODO(), []*DataInfo{&DataInfo{
 				Size:     1,
 				HdrCRC32: 0,
 				CRC32:    333,
@@ -64,7 +64,7 @@ func TestRef(t *testing.T) {
 			So(ids[0], ShouldEqual, 0)
 		})
 		Convey("multiple try ref", func() {
-			ids, err := dmo.Ref(context.TODO(), []*DataInfo{&DataInfo{
+			ids, err := dmo.DatRef(context.TODO(), []*DataInfo{&DataInfo{
 				Size:     1,
 				HdrCRC32: 222,
 			}, &DataInfo{
@@ -77,7 +77,7 @@ func TestRef(t *testing.T) {
 			So(ids[1], ShouldNotEqual, 0)
 		})
 		Convey("multiple try ref diff", func() {
-			ids, err := dmo.Ref(context.TODO(), []*DataInfo{&DataInfo{
+			ids, err := dmo.DatRef(context.TODO(), []*DataInfo{&DataInfo{
 				Size:     1,
 				HdrCRC32: 222,
 			}, &DataInfo{
@@ -91,7 +91,7 @@ func TestRef(t *testing.T) {
 		})
 
 		Convey("single ref", func() {
-			ids, err := dmo.Ref(context.TODO(), []*DataInfo{&DataInfo{
+			ids, err := dmo.DatRef(context.TODO(), []*DataInfo{&DataInfo{
 				Size:     1,
 				HdrCRC32: 222,
 				CRC32:    333,
@@ -101,7 +101,7 @@ func TestRef(t *testing.T) {
 			So(len(ids), ShouldEqual, 1)
 			So(ids[0], ShouldEqual, id)
 
-			ids, err = dmo.Ref(context.TODO(), []*DataInfo{&DataInfo{
+			ids, err = dmo.DatRef(context.TODO(), []*DataInfo{&DataInfo{
 				Size:     1,
 				HdrCRC32: 222,
 				CRC32:    0,
@@ -112,7 +112,7 @@ func TestRef(t *testing.T) {
 			So(ids[0], ShouldNotEqual, id)
 			So(ids[0], ShouldNotEqual, 0)
 
-			ids, err = dmo.Ref(context.TODO(), []*DataInfo{&DataInfo{
+			ids, err = dmo.DatRef(context.TODO(), []*DataInfo{&DataInfo{
 				Size:     1,
 				HdrCRC32: 222,
 				CRC32:    333,
@@ -125,7 +125,7 @@ func TestRef(t *testing.T) {
 		})
 
 		Convey("multiple ref", func() {
-			ids, err := dmo.Ref(context.TODO(), []*DataInfo{&DataInfo{
+			ids, err := dmo.DatRef(context.TODO(), []*DataInfo{&DataInfo{
 				Size:     1,
 				HdrCRC32: 222,
 				CRC32:    333,
@@ -142,7 +142,7 @@ func TestRef(t *testing.T) {
 			So(ids[1], ShouldNotEqual, 0)
 		})
 		Convey("multiple ref diff", func() {
-			ids, err := dmo.Ref(context.TODO(), []*DataInfo{&DataInfo{
+			ids, err := dmo.DatRef(context.TODO(), []*DataInfo{&DataInfo{
 				Size:     1,
 				HdrCRC32: 222,
 				CRC32:    333,
@@ -161,13 +161,13 @@ func TestRef(t *testing.T) {
 	})
 }
 
-func TestPutDataInfo(t *testing.T) {
+func TestDatPut(t *testing.T) {
 	Convey("normal", t, func() {
 		Convey("put data info", func() {
 			dmo := &DefaultMetaOperator{}
-			InitBucket(DATA_DIR)
+			InitBucketDB(DATA_DIR)
 			id, _ := idgen.NewIDGen(nil, 0).New()
-			So(dmo.PutDataInfo(context.TODO(), []*DataInfo{&DataInfo{
+			So(dmo.DatPut(context.TODO(), []*DataInfo{&DataInfo{
 				ID:     id,
 				Size:   1,
 				Status: 1,
@@ -176,20 +176,20 @@ func TestPutDataInfo(t *testing.T) {
 	})
 }
 
-func TestGetDataInfo(t *testing.T) {
+func TestDatGet(t *testing.T) {
 	Convey("normal", t, func() {
 		Convey("get data info", func() {
 			dmo := &DefaultMetaOperator{}
-			InitBucket(DATA_DIR)
+			InitBucketDB(DATA_DIR)
 			id, _ := idgen.NewIDGen(nil, 0).New()
 			d := &DataInfo{
 				ID:     id,
 				Size:   1,
 				Status: 1,
 			}
-			So(dmo.PutDataInfo(context.TODO(), []*DataInfo{d}), ShouldBeNil)
+			So(dmo.DatPut(context.TODO(), []*DataInfo{d}), ShouldBeNil)
 
-			d1, err := dmo.GetDataInfo(context.TODO(), id)
+			d1, err := dmo.DatGet(context.TODO(), id)
 			So(err, ShouldBeNil)
 			So(d1, ShouldResemble, d)
 		})
