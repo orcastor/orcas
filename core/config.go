@@ -5,8 +5,6 @@ import "context"
 type Ctx context.Context
 
 const (
-	DATA_DIR = "data"
-
 	BKT_TBL = "bkt"
 	USR_TBL = "usr"
 	ACL_TBL = "acl"
