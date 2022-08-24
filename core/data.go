@@ -89,12 +89,11 @@ func (ddo *DefaultDataOperator) SetOptions(opt Options) {
 	ddo.opt = opt
 }
 
-func to32BitsMD5(name string) string {
-	return fmt.Sprintf("%x", md5.Sum([]byte(name)))[8:24]
-}
-
-func toFileName(dataID int64, sn int) string {
-	return fmt.Sprintf("%d_%d", dataID, sn)
+// path/<文件名hash的最后三个字节>/hash
+func toFilePath(path string, bcktID, dataID int64, sn int) string {
+	fn := fmt.Sprintf("%d_%d", dataID, sn)
+	hash := fmt.Sprintf("%x", md5.Sum([]byte(fn)))
+	return filepath.Join(path, fmt.Sprint(bcktID), hash[21:24], hash[8:24], fn)
 }
 
 func (ddo *DefaultDataOperator) Write(c Ctx, bktID, dataID int64, sn int, buf []byte) error {
@@ -102,14 +101,11 @@ func (ddo *DefaultDataOperator) Write(c Ctx, bktID, dataID int64, sn int, buf []
 		return err
 	}
 
-	fn := toFileName(dataID, sn)
-	hash := to32BitsMD5(fn)
-	// path/<文件名hash的最后三个字节>/hash
-	dirPath := filepath.Join(Conf().Path, fmt.Sprint(bktID), hash[len(hash)-3:], hash)
+	path := toFilePath(Conf().Path, bktID, dataID, sn)
 	// 不用判断是否存在，以及是否创建成功，如果失败，下面写入文件之前会报错
-	os.MkdirAll(dirPath, 0766)
+	os.MkdirAll(filepath.Dir(path), 0766)
 
-	f, err := os.OpenFile(filepath.Join(dirPath, fn), os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0666)
+	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0666)
 	if err != nil {
 		return err
 	}
@@ -119,7 +115,7 @@ func (ddo *DefaultDataOperator) Write(c Ctx, bktID, dataID int64, sn int, buf []
 	if ddo.opt.Sync {
 		ah.Close()
 	} else {
-		Q.Put(fn, ah)
+		Q.Put(path, ah)
 	}
 	return err
 }
@@ -129,10 +125,7 @@ func (ddo *DefaultDataOperator) Read(c Ctx, bktID, dataID int64, sn int) ([]byte
 		return nil, err
 	}
 
-	fn := toFileName(dataID, sn)
-	hash := to32BitsMD5(fn)
-	// path/<文件名hash的最后三个字节>/hash
-	return ioutil.ReadFile(filepath.Join(Conf().Path, fmt.Sprint(bktID), hash[len(hash)-3:], hash, fn))
+	return ioutil.ReadFile(toFilePath(Conf().Path, bktID, dataID, sn))
 }
 
 func (ddo *DefaultDataOperator) ReadBytes(c Ctx, bktID, dataID int64, sn int, offset, size int64) ([]byte, error) {
@@ -140,10 +133,7 @@ func (ddo *DefaultDataOperator) ReadBytes(c Ctx, bktID, dataID int64, sn int, of
 		return nil, err
 	}
 
-	fn := toFileName(dataID, sn)
-	hash := to32BitsMD5(fn)
-	// path/<文件名hash的最后三个字节>/hash
-	f, err := os.Open(filepath.Join(Conf().Path, fmt.Sprint(bktID), hash[len(hash)-3:], hash, fn))
+	f, err := os.Open(toFilePath(Conf().Path, bktID, dataID, sn))
 	if err != nil {
 		return nil, err
 	}
@@ -179,10 +169,7 @@ func (ddo *DefaultDataOperator) FileSize(c Ctx, bktID, dataID int64, sn int) (in
 		return 0, err
 	}
 
-	fn := toFileName(dataID, sn)
-	hash := to32BitsMD5(fn)
-	// path/<文件名hash的最后三个字节>/hash
-	f, err := os.Open(filepath.Join(Conf().Path, fmt.Sprint(bktID), hash[len(hash)-3:], hash, fn))
+	f, err := os.Open(toFilePath(Conf().Path, bktID, dataID, sn))
 	if err != nil {
 		return 0, err
 	}
