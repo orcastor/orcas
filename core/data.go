@@ -13,12 +13,12 @@ import (
 	"github.com/orca-zhang/ecache"
 )
 
-type Option struct {
+type Options struct {
 	Sync bool
 }
 
 type DataOperator interface {
-	SetOption(opt Option)
+	SetOptions(opt Options)
 	Write(c Ctx, bktID, dataID int64, sn int, buf []byte) error
 	Read(c Ctx, bktID, dataID int64, sn int) ([]byte, error)
 	ReadBytes(c Ctx, bktID, dataID int64, sn int, offset, size int64) ([]byte, error)
@@ -74,11 +74,18 @@ func (ah AsyncHandle) Close() {
 }
 
 type DefaultDataOperator struct {
-	Options Option
+	acm AccessCtrlMgr
+	opt Options
 }
 
-func (ddo *DefaultDataOperator) SetOption(opt Option) {
-	ddo.Options = opt
+func NewDefaultDataOperator(acm AccessCtrlMgr) DataOperator {
+	return &DefaultDataOperator{
+		acm: acm,
+	}
+}
+
+func (ddo *DefaultDataOperator) SetOptions(opt Options) {
+	ddo.opt = opt
 }
 
 func toHash(name string) string {
@@ -90,6 +97,10 @@ func toFileName(dataID int64, sn int) string {
 }
 
 func (ddo *DefaultDataOperator) Write(c Ctx, bktID, dataID int64, sn int, buf []byte) error {
+	if err := ddo.acm.CheckPermission(c, W, bktID); err != nil {
+		return err
+	}
+
 	fn := toFileName(dataID, sn)
 	hash := toHash(fn)
 	// path/<文件名hash的最后三个字节>/hash
@@ -104,7 +115,7 @@ func (ddo *DefaultDataOperator) Write(c Ctx, bktID, dataID int64, sn int, buf []
 
 	ah := &AsyncHandle{F: f, B: bufio.NewWriter(f)}
 	_, err = ah.B.Write(buf)
-	if ddo.Options.Sync {
+	if ddo.opt.Sync {
 		ah.Close()
 	} else {
 		Q.Put(fn, ah)
@@ -113,6 +124,10 @@ func (ddo *DefaultDataOperator) Write(c Ctx, bktID, dataID int64, sn int, buf []
 }
 
 func (ddo *DefaultDataOperator) Read(c Ctx, bktID, dataID int64, sn int) ([]byte, error) {
+	if err := ddo.acm.CheckPermission(c, R, bktID); err != nil {
+		return nil, err
+	}
+
 	fn := toFileName(dataID, sn)
 	hash := toHash(fn)
 	// path/<文件名hash的最后三个字节>/hash
@@ -120,6 +135,10 @@ func (ddo *DefaultDataOperator) Read(c Ctx, bktID, dataID int64, sn int) ([]byte
 }
 
 func (ddo *DefaultDataOperator) ReadBytes(c Ctx, bktID, dataID int64, sn int, offset, size int64) ([]byte, error) {
+	if err := ddo.acm.CheckPermission(c, R, bktID); err != nil {
+		return nil, err
+	}
+
 	fn := toFileName(dataID, sn)
 	hash := toHash(fn)
 	// path/<文件名hash的最后三个字节>/hash

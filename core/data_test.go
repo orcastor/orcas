@@ -21,14 +21,14 @@ var c = context.TODO()
 func TestWrite(t *testing.T) {
 	Convey("normal", t, func() {
 		Convey("sync write one file", func() {
-			ddo := &DefaultDataOperator{
-				Options: Option{
-					Sync: true,
-				}}
+			ddo := NewDefaultDataOperator(&DefaultAccessCtrlMgr{})
+			ddo.SetOptions(Options{
+				Sync: true,
+			})
 			So(ddo.Write(c, bktID, 4701534814223, 0, []byte("xxxxx")), ShouldBeNil)
 		})
 		Convey("async write one file", func() {
-			ddo := &DefaultDataOperator{}
+			ddo := NewDefaultDataOperator(&DefaultAccessCtrlMgr{})
 			So(ddo.Write(c, bktID, 4701535862800, 0, []byte("yyyyy")), ShouldBeNil)
 			for HasInflight() {
 				time.Sleep(time.Second)
@@ -40,10 +40,10 @@ func TestWrite(t *testing.T) {
 func TestRead(t *testing.T) {
 	Convey("normal", t, func() {
 		Convey("read one file", func() {
-			ddo := &DefaultDataOperator{
-				Options: Option{
-					Sync: true,
-				}}
+			ddo := NewDefaultDataOperator(&DefaultAccessCtrlMgr{})
+			ddo.SetOptions(Options{
+				Sync: true,
+			})
 			key := int64(4701529571344)
 			value := []byte("test_read")
 			So(ddo.Write(c, bktID, key, 0, []byte(value)), ShouldBeNil)
@@ -56,10 +56,10 @@ func TestRead(t *testing.T) {
 
 func TestReadBytes(t *testing.T) {
 	Convey("normal", t, func() {
-		ddo := &DefaultDataOperator{
-			Options: Option{
-				Sync: true,
-			}}
+		ddo := NewDefaultDataOperator(&DefaultAccessCtrlMgr{})
+		ddo.SetOptions(Options{
+			Sync: true,
+		})
 		key := int64(4701530619920)
 		value := []byte("test_read")
 		So(ddo.Write(c, bktID, key, 0, []byte(value)), ShouldBeNil)
@@ -100,10 +100,10 @@ func TestWriteSyncConcurrent(t *testing.T) {
 	Convey("normal", t, func() {
 		Convey("sync write files", func() {
 			ig := idgen.NewIDGen(nil, 0)
-			ddo := &DefaultDataOperator{
-				Options: Option{
-					Sync: true,
-				}}
+			ddo := NewDefaultDataOperator(&DefaultAccessCtrlMgr{})
+			ddo.SetOptions(Options{
+				Sync: true,
+			})
 			bid, _ := ig.New()
 			for i := 0; i < 20000; i++ {
 				id, _ := ig.New()
@@ -117,7 +117,7 @@ func TestWriteAsyncConcurrent(t *testing.T) {
 	Convey("normal", t, func() {
 		Convey("async write files", func() {
 			ig := idgen.NewIDGen(nil, 0)
-			ddo := &DefaultDataOperator{}
+			ddo := NewDefaultDataOperator(&DefaultAccessCtrlMgr{})
 			bid, _ := ig.New()
 			for i := 0; i < 20000; i++ {
 				id, _ := ig.New()
