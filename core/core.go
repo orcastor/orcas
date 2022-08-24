@@ -8,8 +8,8 @@ type ListOptions struct {
 	Word  string // 过滤词
 	Delim string // 分隔符
 	Type  int    // 对象类型，0: none, 1: dir, 2: file, 3: version, 4: thumb, 5. HLS(m3u8)
-	Size  uint64 // 查询个数
-	Order string // 排序方式，time/name/size 前缀 +: 升序（默认） -: 降序，多个字段用逗号分割
+	Size  int    // 查询个数
+	Order string // 排序方式，id/mtime/name/size/type 前缀 +: 升序（默认） -: 降序，多个字段用逗号分割
 }
 
 type Hanlder interface {
@@ -29,13 +29,13 @@ type Hanlder interface {
 
 	// 垃圾回收时有数据没有元数据引用的为脏数据（需要留出窗口时间），有元数据没有数据的为损坏数据
 	Put(c Ctx, bktID int64, o []*ObjectInfo) ([]int64, error)
-	List(c Ctx, bktID int64, o *ObjectInfo, opt ListOptions) ([]*ObjectInfo, error)
+	List(c Ctx, bktID, pid int64, opt ListOptions) ([]*ObjectInfo, string, error)
 
-	// 变更name或者pid，重命名或者移动
-	MoveTo(c Ctx, bktID int64, o *ObjectInfo) error
+	Rename(c Ctx, bktID, id int64, name string) error
+	MoveTo(c Ctx, bktID, id, pid int64) error
 
-	Recycle(c Ctx, bktID int64, o *ObjectInfo) error
-	Delete(c Ctx, bktID int64, o *ObjectInfo) error
+	Recycle(c Ctx, bktID, id int64) error
+	Delete(c Ctx, bktID, id int64) error
 }
 
 type RWHanlder struct {
@@ -45,9 +45,10 @@ type RWHanlder struct {
 }
 
 func New() Hanlder {
+	acm := &DefaultAccessCtrlMgr{}
 	return &RWHanlder{
-		mo: &DefaultMetaOperator{},
-		do: &DefaultDataOperator{},
+		mo: NewDefaultMetaOperator(acm),
+		do: NewDefaultDataOperator(acm),
 		ig: idgen.NewIDGen(nil, 0), // 需要改成配置
 	}
 }
@@ -94,19 +95,22 @@ func (ch *RWHanlder) Put(c Ctx, bktID int64, o []*ObjectInfo) ([]int64, error) {
 	return ch.mo.PutObj(c, bktID, o)
 }
 
-func (ch *RWHanlder) List(c Ctx, bktID int64, o *ObjectInfo, opt ListOptions) ([]*ObjectInfo, error) {
-	return nil, nil
+func (ch *RWHanlder) List(c Ctx, bktID, pid int64, opt ListOptions) ([]*ObjectInfo, string, error) {
+	return nil, "", nil
 }
 
-// 变更name或者pid，重命名或者移动
-func (ch *RWHanlder) MoveTo(c Ctx, bktID int64, o *ObjectInfo) error {
-	return nil
+func (ch *RWHanlder) Rename(c Ctx, bktID, id int64, name string) error {
+	return ch.mo.SetObj(c, bktID, []string{"name"}, &ObjectInfo{ID: id, Name: name})
 }
 
-func (ch *RWHanlder) Recycle(c Ctx, bktID int64, o *ObjectInfo) error {
-	return nil
+func (ch *RWHanlder) MoveTo(c Ctx, bktID, id, pid int64) error {
+	return ch.mo.SetObj(c, bktID, []string{"pid"}, &ObjectInfo{ID: id, PID: pid})
 }
 
-func (ch *RWHanlder) Delete(c Ctx, bktID int64, o *ObjectInfo) error {
-	return nil
+func (ch *RWHanlder) Recycle(c Ctx, bktID, id int64) error {
+	return ch.mo.SetObj(c, bktID, []string{"status"}, &ObjectInfo{ID: id, Status: 2})
+}
+
+func (ch *RWHanlder) Delete(c Ctx, bktID, id int64) error {
+	return ch.mo.SetObj(c, bktID, []string{"status"}, &ObjectInfo{ID: id, Status: 1})
 }
