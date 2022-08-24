@@ -15,16 +15,16 @@ type BucketInfo struct {
 	ID   int64  `borm:"id"`       // 桶ID
 	Name string `borm:"name"`     // 桶名称
 	UID  int64  `borm:"uid"`      // 拥有者
-	Type int    `borm:"type"`     // 桶类型，0: none, 1: 个人 ...
+	Type int    `borm:"type"`     // 桶类型，0: none, 1: normal ...
 	OID  int64  `borm:"root_oid"` // 桶的根对象ID
 	// SnapshotID int64 // 最新快照版本ID
 }
 
 type ObjectInfo struct {
-	ID       int64 `borm:"id"`    // 对象ID（idgen随机生成的id）
-	ParentID int64 `borm:"pid"`   // 父对象ID
-	MTime    int64 `borm:"mtime"` // 更新时间
-	DataID   int64 `borm:"did"`   // 数据ID，如果为0，说明没有数据（新创建的文件，DataID就是对象ID，作为对象的首版本数据）
+	ID     int64 `borm:"id"`    // 对象ID（idgen随机生成的id）
+	PID    int64 `borm:"pid"`   // 父对象ID
+	MTime  int64 `borm:"mtime"` // 更新时间
+	DataID int64 `borm:"did"`   // 数据ID，如果为0，说明没有数据（新创建的文件，DataID就是对象ID，作为对象的首版本数据）
 	// BktID int64 // 桶ID，如果支持引用别的桶的数据，为0说明是本桶
 	Type   int    `borm:"type"`   // 对象类型，0: none, 1: dir, 2: file, 3: version, 4: thumb, 5. HLS(m3u8)
 	Status int    `borm:"status"` // 对象状态，0: none, 1: deleted, 2: recycle(to be deleted), 3: malformed
@@ -74,6 +74,7 @@ type ObjectMetaOperator interface {
 	PutObj(c Ctx, bktID int64, o []*ObjectInfo) ([]int64, error)
 	GetObj(c Ctx, bktID int64, ids []int64) ([]*ObjectInfo, error)
 	SetObj(c Ctx, bktID int64, fields []string, o *ObjectInfo) error
+	ListObj(c Ctx, bktID, pid int64, wd, delim, order string, size int) ([]*ObjectInfo, error)
 }
 
 type MetaOperator interface {
@@ -82,18 +83,14 @@ type MetaOperator interface {
 	ObjectMetaOperator
 }
 
-func GetDB(bktID int64) (*sql.DB, error) {
-	return getDB(fmt.Sprint(bktID))
-}
-
-func getDB(dir string) (*sql.DB, error) {
-	dirPath := filepath.Join(Conf().Path, dir)
+func GetDB(bktID ...interface{}) (*sql.DB, error) {
+	dirPath := filepath.Join(Conf().Path, fmt.Sprint(bktID...))
 	os.MkdirAll(dirPath, 0766)
 	return sql.Open("sqlite3", filepath.Join(dirPath, "meta.db")+"?_journal=WAL")
 }
 
 func InitDB() error {
-	db, err := getDB("")
+	db, err := GetDB()
 	if err != nil {
 		return err
 	}
@@ -148,10 +145,21 @@ func InitBucketDB(bktID int64) error {
 }
 
 type DefaultMetaOperator struct {
+	acm AccessCtrlMgr
+}
+
+func NewDefaultMetaOperator(acm AccessCtrlMgr) MetaOperator {
+	return &DefaultMetaOperator{
+		acm: acm,
+	}
 }
 
 func (dmo *DefaultMetaOperator) PutBkt(c Ctx, o []*BucketInfo) error {
-	db, err := getDB("")
+	if err := dmo.acm.CheckRole(c, ADMIN); err != nil {
+		return err
+	}
+
+	db, err := GetDB()
 	defer db.Close()
 
 	_, err = b.Table(db, BKT_TBL, c).ReplaceInto(&o)
@@ -162,7 +170,11 @@ func (dmo *DefaultMetaOperator) PutBkt(c Ctx, o []*BucketInfo) error {
 }
 
 func (dmo *DefaultMetaOperator) GetBkt(c Ctx, ids []int64) (o []*BucketInfo, err error) {
-	db, err := getDB("")
+	if err := dmo.acm.CheckRole(c, ADMIN); err != nil {
+		return nil, err
+	}
+
+	db, err := GetDB()
 	defer db.Close()
 
 	_, err = b.Table(db, BKT_TBL, c).Select(&o, b.Where(b.In("id", ids)))
@@ -170,7 +182,11 @@ func (dmo *DefaultMetaOperator) GetBkt(c Ctx, ids []int64) (o []*BucketInfo, err
 }
 
 func (dmo *DefaultMetaOperator) ListBkt(c Ctx, uid int64) (o []*BucketInfo, err error) {
-	db, err := getDB("")
+	if err := dmo.acm.CheckPermission(c, R, -1); err != nil {
+		return nil, err
+	}
+
+	db, err := GetDB()
 	defer db.Close()
 
 	_, err = b.Table(db, BKT_TBL, c).Select(&o, b.Where(b.Eq("uid", uid)))
@@ -178,6 +194,10 @@ func (dmo *DefaultMetaOperator) ListBkt(c Ctx, uid int64) (o []*BucketInfo, err 
 }
 
 func (dmo *DefaultMetaOperator) RefData(c Ctx, bktID int64, d []*DataInfo) ([]int64, error) {
+	if err := dmo.acm.CheckPermission(c, RW, bktID); err != nil {
+		return nil, err
+	}
+
 	db, err := GetDB(bktID)
 	if err != nil {
 		return nil, err
@@ -242,6 +262,10 @@ func (dmo *DefaultMetaOperator) PutData(c Ctx, bktID int64, d []*DataInfo) error
 }
 
 func (dmo *DefaultMetaOperator) GetData(c Ctx, bktID, id int64) (d *DataInfo, err error) {
+	if err := dmo.acm.CheckPermission(c, R, bktID); err != nil {
+		return nil, err
+	}
+
 	db, err := GetDB(bktID)
 	defer db.Close()
 
@@ -251,6 +275,10 @@ func (dmo *DefaultMetaOperator) GetData(c Ctx, bktID, id int64) (d *DataInfo, er
 }
 
 func (dmo *DefaultMetaOperator) PutObj(c Ctx, bktID int64, o []*ObjectInfo) (ids []int64, err error) {
+	if err := dmo.acm.CheckPermission(c, W, bktID); err != nil {
+		return nil, err
+	}
+
 	db, err := GetDB(bktID)
 	defer db.Close()
 
@@ -266,6 +294,10 @@ func (dmo *DefaultMetaOperator) PutObj(c Ctx, bktID int64, o []*ObjectInfo) (ids
 }
 
 func (dmo *DefaultMetaOperator) GetObj(c Ctx, bktID int64, ids []int64) (o []*ObjectInfo, err error) {
+	if err := dmo.acm.CheckPermission(c, R, bktID); err != nil {
+		return nil, err
+	}
+
 	db, err := GetDB(bktID)
 	defer db.Close()
 
@@ -274,9 +306,21 @@ func (dmo *DefaultMetaOperator) GetObj(c Ctx, bktID int64, ids []int64) (o []*Ob
 }
 
 func (dmo *DefaultMetaOperator) SetObj(c Ctx, bktID int64, fields []string, o *ObjectInfo) error {
+	if err := dmo.acm.CheckPermission(c, W, bktID); err != nil {
+		return err
+	}
+
 	db, err := GetDB(bktID)
 	defer db.Close()
 
 	_, err = b.Table(db, OBJ_TBL, c).Update(o, b.Fields(fields...), b.Where(b.Eq("id", o.ID)))
 	return err
+}
+
+func (dmo *DefaultMetaOperator) ListObj(c Ctx, bktID, pid int64, wd, delim, order string, size int) ([]*ObjectInfo, error) {
+	if err := dmo.acm.CheckPermission(c, R, bktID); err != nil {
+		return nil, err
+	}
+
+	return nil, nil
 }

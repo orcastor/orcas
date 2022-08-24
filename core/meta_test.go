@@ -19,7 +19,7 @@ func TestListBkt(t *testing.T) {
 	Convey("normal", t, func() {
 		Convey("put bkt", func() {
 			InitDB()
-			dmo := &DefaultMetaOperator{}
+			dmo := NewDefaultMetaOperator(&DefaultAccessCtrlMgr{})
 			id1, _ := idgen.NewIDGen(nil, 0).New()
 			id2, _ := idgen.NewIDGen(nil, 0).New()
 			uid, _ := idgen.NewIDGen(nil, 0).New()
@@ -51,7 +51,7 @@ func TestListBkt(t *testing.T) {
 
 func TestRefData(t *testing.T) {
 	Convey("normal", t, func() {
-		dmo := &DefaultMetaOperator{}
+		dmo := NewDefaultMetaOperator(&DefaultAccessCtrlMgr{})
 		InitBucketDB(bktID)
 		id, _ := idgen.NewIDGen(nil, 0).New()
 		So(dmo.PutData(c, bktID, []*DataInfo{&DataInfo{
@@ -199,7 +199,7 @@ func TestRefData(t *testing.T) {
 func TestPutData(t *testing.T) {
 	Convey("normal", t, func() {
 		Convey("put data info", func() {
-			dmo := &DefaultMetaOperator{}
+			dmo := NewDefaultMetaOperator(&DefaultAccessCtrlMgr{})
 			InitBucketDB(bktID)
 			id, _ := idgen.NewIDGen(nil, 0).New()
 			So(dmo.PutData(c, bktID, []*DataInfo{&DataInfo{
@@ -214,7 +214,7 @@ func TestPutData(t *testing.T) {
 func TestGetData(t *testing.T) {
 	Convey("normal", t, func() {
 		Convey("get data info", func() {
-			dmo := &DefaultMetaOperator{}
+			dmo := NewDefaultMetaOperator(&DefaultAccessCtrlMgr{})
 			InitBucketDB(bktID)
 			id, _ := idgen.NewIDGen(nil, 0).New()
 			d := &DataInfo{
