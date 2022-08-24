@@ -22,6 +22,7 @@ type DataOperator interface {
 	Write(c Ctx, bktID, dataID int64, sn int, buf []byte) error
 	Read(c Ctx, bktID, dataID int64, sn int) ([]byte, error)
 	ReadBytes(c Ctx, bktID, dataID int64, sn int, offset, size int64) ([]byte, error)
+	FileSize(c Ctx, bktID, dataID int64, sn int) (int64, error)
 }
 
 const interval = time.Second
@@ -88,7 +89,7 @@ func (ddo *DefaultDataOperator) SetOptions(opt Options) {
 	ddo.opt = opt
 }
 
-func toHash(name string) string {
+func to32BitsMD5(name string) string {
 	return fmt.Sprintf("%x", md5.Sum([]byte(name)))[8:24]
 }
 
@@ -102,7 +103,7 @@ func (ddo *DefaultDataOperator) Write(c Ctx, bktID, dataID int64, sn int, buf []
 	}
 
 	fn := toFileName(dataID, sn)
-	hash := toHash(fn)
+	hash := to32BitsMD5(fn)
 	// path/<文件名hash的最后三个字节>/hash
 	dirPath := filepath.Join(Conf().Path, fmt.Sprint(bktID), hash[len(hash)-3:], hash)
 	// 不用判断是否存在，以及是否创建成功，如果失败，下面写入文件之前会报错
@@ -129,7 +130,7 @@ func (ddo *DefaultDataOperator) Read(c Ctx, bktID, dataID int64, sn int) ([]byte
 	}
 
 	fn := toFileName(dataID, sn)
-	hash := toHash(fn)
+	hash := to32BitsMD5(fn)
 	// path/<文件名hash的最后三个字节>/hash
 	return ioutil.ReadFile(filepath.Join(Conf().Path, fmt.Sprint(bktID), hash[len(hash)-3:], hash, fn))
 }
@@ -140,7 +141,7 @@ func (ddo *DefaultDataOperator) ReadBytes(c Ctx, bktID, dataID int64, sn int, of
 	}
 
 	fn := toFileName(dataID, sn)
-	hash := toHash(fn)
+	hash := to32BitsMD5(fn)
 	// path/<文件名hash的最后三个字节>/hash
 	f, err := os.Open(filepath.Join(Conf().Path, fmt.Sprint(bktID), hash[len(hash)-3:], hash, fn))
 	if err != nil {
@@ -171,4 +172,25 @@ func (ddo *DefaultDataOperator) ReadBytes(c Ctx, bktID, dataID int64, sn int, of
 		return buf[:n], nil
 	}
 	return buf, nil
+}
+
+func (ddo *DefaultDataOperator) FileSize(c Ctx, bktID, dataID int64, sn int) (int64, error) {
+	if err := ddo.acm.CheckPermission(c, R, bktID); err != nil {
+		return 0, err
+	}
+
+	fn := toFileName(dataID, sn)
+	hash := to32BitsMD5(fn)
+	// path/<文件名hash的最后三个字节>/hash
+	f, err := os.Open(filepath.Join(Conf().Path, fmt.Sprint(bktID), hash[len(hash)-3:], hash, fn))
+	if err != nil {
+		return 0, err
+	}
+	defer f.Close()
+
+	fi, err := f.Stat()
+	if err != nil {
+		return 0, err
+	}
+	return fi.Size(), nil
 }
