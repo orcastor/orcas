@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
@@ -20,18 +21,52 @@ type BucketInfo struct {
 	// SnapshotID int64 // 最新快照版本ID
 }
 
+// 对象状态
+const (
+	OBJ_NONE = iota
+	OBJ_NORMAL
+	OBJ_DELETED
+	OBJ_RECYCLED
+	OBJ_MALFORMED
+)
+
+// 对象类型
+const (
+	OBJ_TYPE_NA = iota
+	OBJ_TYPE_DIR
+	OBJ_TYPE_FILE
+	OBJ_TYPE_VERSION
+	OBJ_TYPE_PREVIEW
+)
+
 type ObjectInfo struct {
 	ID     int64 `borm:"id"`    // 对象ID（idgen随机生成的id）
 	PID    int64 `borm:"pid"`   // 父对象ID
-	MTime  int64 `borm:"mtime"` // 更新时间
+	MTime  int64 `borm:"mtime"` // 更新时间，秒级时间戳
 	DataID int64 `borm:"did"`   // 数据ID，如果为0，说明没有数据（新创建的文件，DataID就是对象ID，作为对象的首版本数据）
 	// BktID int64 // 桶ID，如果支持引用别的桶的数据，为0说明是本桶
-	Type   int    `borm:"type"`   // 对象类型，0: none, 1: dir, 2: file, 3: version, 4: thumb, 5. HLS(m3u8)
-	Status int    `borm:"status"` // 对象状态，0: none, 1: deleted, 2: recycle(to be deleted), 3: malformed
+	Type   int    `borm:"type"`   // 对象类型，0: none, 1: dir, 2: file, 3: version, 4: preview(thumb/m3u8/pdf)
+	Status int    `borm:"status"` // 对象状态，0: none, 1: normal, 1: deleted, 2: recycle(to be deleted), 3: malformed
 	Name   string `borm:"name"`   // 对象名称
 	Size   int64  `borm:"size"`   // 对象的大小，目录的大小是子对象数，文件的大小是最新版本的字节数
 	Ext    string `borm:"ext"`
 }
+
+// 数据状态
+const (
+	DATA_NORMAL    = 1 >> iota // 正常
+	DATA_MALFORMED             // 是否损坏
+	DATA_CMPRED                // 是否压缩 // 0: none, 1: snappy, 2: zip 3: zstd
+	DATA_ENCRYPTED             // 是否加密
+)
+
+// 数据类型
+const (
+	DATA_KIND_ETC = iota
+	DATA_KIND_IMG
+	DATA_KIND_VIDEO
+	DATA_KIND_DOCS
+)
 
 type DataInfo struct {
 	ID       int64  `borm:"id"`        // 数据ID（对象ID/版本ID，idgen随机生成的id）
@@ -44,10 +79,6 @@ type DataInfo struct {
 	// MIME       string // 数据的多媒体类型
 	Kind   int `borm:"kind"`   // 数据类型（用于预览等），0: etc, 1: image, 2: video, 3: docs
 	Status int `borm:"status"` // 数据状态，正常、压缩、加密、损坏
-	// Normal      0x01, 正常
-	// Malformed   0x02, 是否损坏
-	// Compressed  0x04, 是否压缩，0: none, 1: snappy, 2: zip 3: zstd
-	// Encrypted   0x08, 是否加密
 
 	// PkgID不为0说明是打包数据
 	PkgID     int64 `borm:"pkg_id"`  // 打包数据的ID（也是idgen生成的id）
@@ -74,7 +105,7 @@ type ObjectMetaOperator interface {
 	PutObj(c Ctx, bktID int64, o []*ObjectInfo) ([]int64, error)
 	GetObj(c Ctx, bktID int64, ids []int64) ([]*ObjectInfo, error)
 	SetObj(c Ctx, bktID int64, fields []string, o *ObjectInfo) error
-	ListObj(c Ctx, bktID, pid int64, wd, delim, order string, size int) ([]*ObjectInfo, error)
+	ListObj(c Ctx, bktID, pid int64, wd, delim, order string, size, status int) ([]*ObjectInfo, int64, string, error)
 }
 
 type MetaOperator interface {
@@ -317,10 +348,89 @@ func (dmo *DefaultMetaOperator) SetObj(c Ctx, bktID int64, fields []string, o *O
 	return err
 }
 
-func (dmo *DefaultMetaOperator) ListObj(c Ctx, bktID, pid int64, wd, delim, order string, size int) ([]*ObjectInfo, error) {
+func toDelim(field string, o *ObjectInfo) string {
+	var d interface{}
+	switch field {
+	case "id":
+		return fmt.Sprint(o.ID)
+	case "name":
+		return fmt.Sprint(o.Name)
+	case "mtime":
+		d = o.MTime
+	case "size":
+		d = o.Size
+	case "type":
+		d = o.Type
+	}
+	return fmt.Sprintf("%v:%d", d, o.ID)
+}
+
+func (dmo *DefaultMetaOperator) ListObj(c Ctx, bktID, pid int64,
+	wd, delim, order string, size, status int) (o []*ObjectInfo,
+	cnt int64, d string, err error) {
 	if err := dmo.acm.CheckPermission(c, R, bktID); err != nil {
-		return nil, err
+		return nil, 0, "", err
 	}
 
-	return nil, nil
+	conds := []interface{}{b.Eq("pid", pid)}
+	if wd != "" {
+		if strings.Index(wd, "%") >= 0 {
+			conds = append(conds, b.Like("name", wd))
+		} else {
+			conds = append(conds, b.Eq("name", wd))
+		}
+	}
+
+	if order == "" {
+		order = "id"
+	}
+
+	field := order
+	fn := b.Gt
+	orderBy := ""
+	switch order[0] {
+	case '-':
+		fn = b.Lt
+		field = order[1:]
+		orderBy = field + " desc"
+	case '+':
+		field = order[1:]
+		orderBy = field + " asc"
+	default:
+		orderBy = field + " asc"
+	}
+	if field != "id" && field != "name" {
+		orderBy = orderBy + ", id asc"
+	}
+
+	if status != 0 {
+		conds = append(conds, b.Eq("status", status))
+	}
+
+	db, err := GetDB(bktID)
+	defer db.Close()
+
+	if _, err = b.Table(db, OBJ_TBL, c).Select(&cnt,
+		b.Fields("count(1)"),
+		b.Where(conds...)); err != nil {
+		return nil, 0, "", err
+	}
+
+	ds := strings.Split(delim, ":")
+	if len(ds) > 0 && ds[0] != "" {
+		if field == "id" || field == "name" {
+			conds = append(conds, fn(field, ds[0]))
+		} else if len(ds) == 2 {
+			conds = append(conds, b.Or(fn(field, ds[0]),
+				b.And(b.Eq(field, ds[0]), b.Gt("id", ds[1]))))
+		}
+	}
+	_, err = b.Table(db, OBJ_TBL, c).Select(&o,
+		b.Where(conds...),
+		b.OrderBy(orderBy),
+		b.Limit(size))
+	if len(o) > 0 {
+		d = toDelim(field, o[len(o)-1])
+	}
+	return
 }
