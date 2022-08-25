@@ -381,28 +381,6 @@ func (dmo *DefaultMetaOperator) ListObj(c Ctx, bktID, pid int64,
 		}
 	}
 
-	if order == "" {
-		order = "id"
-	}
-
-	field := order
-	fn := b.Gt
-	orderBy := ""
-	switch order[0] {
-	case '-':
-		fn = b.Lt
-		field = order[1:]
-		orderBy = field + " desc"
-	case '+':
-		field = order[1:]
-		orderBy = field + " asc"
-	default:
-		orderBy = field + " asc"
-	}
-	if field != "id" && field != "name" {
-		orderBy = orderBy + ", id asc"
-	}
-
 	if status != 0 {
 		conds = append(conds, b.Eq("status", status))
 	}
@@ -416,21 +394,43 @@ func (dmo *DefaultMetaOperator) ListObj(c Ctx, bktID, pid int64,
 		return nil, 0, "", err
 	}
 
+	// 处理order
+	if order == "" {
+		order = "id"
+	}
+	fn := b.Gt
+	orderBy := order
+	switch order[0] {
+	case '-':
+		fn = b.Lt
+		order = order[1:]
+		orderBy = order + " desc"
+	case '+':
+		order = order[1:]
+		orderBy = order
+	}
+	if order != "id" && order != "name" {
+		orderBy = orderBy + ", id"
+	}
+
+	// 处理边界条件
 	ds := strings.Split(delim, ":")
 	if len(ds) > 0 && ds[0] != "" {
-		if field == "id" || field == "name" {
-			conds = append(conds, fn(field, ds[0]))
+		if order == "id" || order == "name" {
+			conds = append(conds, fn(order, ds[0]))
 		} else if len(ds) == 2 {
-			conds = append(conds, b.Or(fn(field, ds[0]),
-				b.And(b.Eq(field, ds[0]), b.Gt("id", ds[1]))))
+			conds = append(conds, b.Or(fn(order, ds[0]),
+				b.And(b.Eq(order, ds[0]), b.Gt("id", ds[1]))))
 		}
 	}
+
 	_, err = b.Table(db, OBJ_TBL, c).Select(&o,
 		b.Where(conds...),
 		b.OrderBy(orderBy),
 		b.Limit(size))
+
 	if len(o) > 0 {
-		d = toDelim(field, o[len(o)-1])
+		d = toDelim(order, o[len(o)-1])
 	}
 	return
 }
