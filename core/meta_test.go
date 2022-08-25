@@ -511,5 +511,25 @@ func TestListObj(t *testing.T) {
 			So(d, ShouldEqual, fmt.Sprintf("%d:%d", OBJ_TYPE_PREVIEW, id5))
 			So(o, ShouldResemble, []*ObjectInfo{d5})
 		})
+
+		Convey("status filter", func() {
+			o, cnt, d, err := dmo.ListObj(c, bktID, pid, "", "", "", 2, OBJ_NORMAL)
+			So(err, ShouldBeNil)
+			So(len(o), ShouldEqual, 2)
+			So(cnt, ShouldEqual, 4)
+			So(d, ShouldEqual, fmt.Sprint(id2))
+
+			o, cnt, d, err = dmo.ListObj(c, bktID, pid, "", d, "", 2, OBJ_DELETED)
+			So(err, ShouldBeNil)
+			So(len(o), ShouldEqual, 1)
+			So(cnt, ShouldEqual, 1)
+			So(d, ShouldEqual, fmt.Sprint(id5))
+
+			o, cnt, d, err = dmo.ListObj(c, bktID, pid, "", d, "", 2, OBJ_RECYCLED)
+			So(err, ShouldBeNil)
+			So(len(o), ShouldEqual, 0)
+			So(cnt, ShouldEqual, 0)
+			So(d, ShouldEqual, "")
+		})
 	})
 }
