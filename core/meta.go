@@ -87,7 +87,14 @@ type DataInfo struct {
 	// SnapshotID int64 // 快照版本ID
 }
 
-// 数据存储，<=4194304B的对象，用<ID/PkgID>为名称，否则用<ID/PkgID>-<SN>为名称，<SN>为数据块的序号，从0开始递增
+const (
+	BKT_TBL = "bkt"
+	USR_TBL = "usr"
+	ACL_TBL = "acl"
+
+	OBJ_TBL  = "obj"
+	DATA_TBL = "data"
+)
 
 type BucketMetaOperator interface {
 	PutBkt(c Ctx, o []*BucketInfo) error
