@@ -14,6 +14,7 @@ func init() {
 	Init(&CoreConfig{
 		Path: "/tmp/test/",
 	})
+	bktID, _ = idgen.NewIDGen(nil, 0).New()
 }
 
 var c = context.TODO()
@@ -44,9 +45,10 @@ func TestRead(t *testing.T) {
 			ddo.SetOptions(Options{
 				Sync: true,
 			})
-			key := int64(4701529571344)
+			key, _ := idgen.NewIDGen(nil, 0).New()
 			value := []byte("test_read")
 			So(ddo.Write(c, bktID, key, 0, []byte(value)), ShouldBeNil)
+
 			bs, err := ddo.Read(c, bktID, key, 0)
 			So(err, ShouldBeNil)
 			So(bs, ShouldResemble, value)
@@ -60,7 +62,7 @@ func TestReadBytes(t *testing.T) {
 		ddo.SetOptions(Options{
 			Sync: true,
 		})
-		key := int64(4701530619920)
+		key, _ := idgen.NewIDGen(nil, 0).New()
 		value := []byte("test_read")
 		So(ddo.Write(c, bktID, key, 0, []byte(value)), ShouldBeNil)
 

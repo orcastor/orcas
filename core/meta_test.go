@@ -9,13 +9,14 @@ import (
 	. "github.com/smartystreets/goconvey/convey"
 )
 
+var bktID = int64(0)
+
 func init() {
 	Init(&CoreConfig{
 		Path: "/tmp/test/",
 	})
+	bktID, _ = idgen.NewIDGen(nil, 0).New()
 }
-
-var bktID = int64(888)
 
 func TestListBkt(t *testing.T) {
 	Convey("normal", t, func() {
