@@ -4,15 +4,6 @@ import "context"
 
 type Ctx context.Context
 
-const (
-	BKT_TBL = "bkt"
-	USR_TBL = "usr"
-	ACL_TBL = "acl"
-
-	OBJ_TBL  = "obj"
-	DATA_TBL = "data"
-)
-
 var config *CoreConfig
 
 type CoreConfig struct {
