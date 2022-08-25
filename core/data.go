@@ -8,6 +8,7 @@ import (
 	"io/ioutil"
 	"os"
 	"path/filepath"
+	"strconv"
 	"time"
 
 	"github.com/orca-zhang/ecache"
@@ -19,9 +20,13 @@ type Options struct {
 
 type DataOperator interface {
 	SetOptions(opt Options)
+
 	Write(c Ctx, bktID, dataID int64, sn int, buf []byte) error
+	Flush(c Ctx, bktID, dataID int64) error
+
 	Read(c Ctx, bktID, dataID int64, sn int) ([]byte, error)
 	ReadBytes(c Ctx, bktID, dataID int64, sn int, offset, size int64) ([]byte, error)
+
 	FileSize(c Ctx, bktID, dataID int64, sn int) (int64, error)
 }
 
@@ -115,9 +120,14 @@ func (ddo *DefaultDataOperator) Write(c Ctx, bktID, dataID int64, sn int, buf []
 	if ddo.opt.Sync {
 		ah.Close()
 	} else {
-		Q.Put(path, ah)
+		Q.Put(strconv.FormatInt(dataID, 10), ah)
 	}
 	return err
+}
+
+func (ddo *DefaultDataOperator) Flush(c Ctx, bktID, dataID int64) error {
+	Q.Del(strconv.FormatInt(dataID, 10))
+	return nil
 }
 
 func (ddo *DefaultDataOperator) Read(c Ctx, bktID, dataID int64, sn int) ([]byte, error) {
