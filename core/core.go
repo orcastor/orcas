@@ -8,9 +8,9 @@ type ListOptions struct {
 	Word  string // 过滤词
 	Delim string // 分隔符
 	Type  int    // 对象类型，0: 不过滤(default), 1: dir, 2: file, 3: version, 4: thumb, 5. HLS(m3u8)
-	Size  int    // 查询个数
+	Count int    // 查询个数
 	Order string // 排序方式，id/mtime/name/size/type 前缀 +: 升序（默认） -: 降序
-	Less  int    // 显示更少内容(只在网络传输层，节省流量时有效)，0: FULL(default), 1: without EXT, 2:only ID
+	Brief int    // 显示更少内容(只在网络传输层，节省流量时有效)，0: FULL(default), 1: without EXT, 2:only ID
 }
 
 type Hanlder interface {
@@ -106,7 +106,7 @@ func (ch *RWHanlder) Put(c Ctx, o []*ObjectInfo) ([]int64, error) {
 }
 
 func (ch *RWHanlder) List(c Ctx, pid int64, opt ListOptions) ([]*ObjectInfo, int64, string, error) {
-	return ch.mo.ListObj(c, ch.bktID, pid, opt.Word, opt.Delim, opt.Order, opt.Size, 0)
+	return ch.mo.ListObj(c, ch.bktID, pid, opt.Word, opt.Delim, opt.Order, opt.Count, 0)
 }
 
 func (ch *RWHanlder) Rename(c Ctx, id int64, name string) error {
