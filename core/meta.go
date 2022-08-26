@@ -113,7 +113,7 @@ type ObjectMetaOperator interface {
 	PutObj(c Ctx, bktID int64, o []*ObjectInfo) ([]int64, error)
 	GetObj(c Ctx, bktID int64, ids []int64) ([]*ObjectInfo, error)
 	SetObj(c Ctx, bktID int64, fields []string, o *ObjectInfo) error
-	ListObj(c Ctx, bktID, pid int64, wd, delim, order string, size, status int) ([]*ObjectInfo, int64, string, error)
+	ListObj(c Ctx, bktID, pid int64, wd, delim, order string, count, status int) ([]*ObjectInfo, int64, string, error)
 }
 
 type MetaOperator interface {
@@ -386,7 +386,7 @@ func toDelim(field string, o *ObjectInfo) string {
 }
 
 func (dmo *DefaultMetaOperator) ListObj(c Ctx, bktID, pid int64,
-	wd, delim, order string, size, status int) (o []*ObjectInfo,
+	wd, delim, order string, count, status int) (o []*ObjectInfo,
 	cnt int64, d string, err error) {
 	if err := dmo.acm.CheckPermission(c, R, bktID); err != nil {
 		return nil, 0, "", err
@@ -447,7 +447,7 @@ func (dmo *DefaultMetaOperator) ListObj(c Ctx, bktID, pid int64,
 	_, err = b.Table(db, OBJ_TBL, c).Select(&o,
 		b.Where(conds...),
 		b.OrderBy(orderBy),
-		b.Limit(size))
+		b.Limit(count))
 
 	if len(o) > 0 {
 		d = toDelim(order, o[len(o)-1])
