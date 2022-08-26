@@ -71,6 +71,7 @@ const (
 type DataInfo struct {
 	ID       int64  `borm:"id"`        // 数据ID（对象ID/版本ID，idgen随机生成的id）
 	Size     int64  `borm:"size"`      // 数据的大小
+	OrigSize int64  `borm:"o_size"`    // 数据的原始大小
 	HdrCRC32 uint64 `borm:"hdr_crc32"` // 头部100KB的CRC32校验值
 	CRC32    uint64 `borm:"crc32"`     // 整个对象的CRC32校验值（最原始数据）
 	MD5      uint64 `borm:"md5"`       // 整个对象的MD5值（最原始数据）
@@ -142,6 +143,7 @@ func InitDB() error {
 	)`)
 
 	db.Exec(`CREATE INDEX ix_uid on bkt (uid)`)
+	db.Exec(`CREATE UNIQUE INDEX uk_name on bkt (name)`)
 	return nil
 }
 
@@ -167,6 +169,7 @@ func InitBucketDB(bktID int64) error {
 
 	db.Exec(`CREATE TABLE data (id BIGINT PRIMARY KEY NOT NULL,
 		size BIGINT NOT NULL,
+		o_size BIGINT NOT NULL,
 		hdr_crc32 UNSIGNED BIG INT NOT NULL,
 		crc32 UNSIGNED BIG INT NOT NULL,
 		md5 UNSIGNED BIG INT NOT NULL,
@@ -177,7 +180,7 @@ func InitBucketDB(bktID int64) error {
 		pkg_off BIGINT NOT NULL
 	)`)
 
-	db.Exec(`CREATE INDEX ix_ref ON data (size, hdr_crc32, crc32, md5)`)
+	db.Exec(`CREATE INDEX ix_ref ON data (o_size, hdr_crc32, crc32, md5)`)
 	db.Exec(`PRAGMA temp_store = MEMORY`)
 	return nil
 }
@@ -201,8 +204,18 @@ func (dmo *DefaultMetaOperator) PutBkt(c Ctx, o []*BucketInfo) error {
 	defer db.Close()
 
 	_, err = b.Table(db, BKT_TBL, c).ReplaceInto(&o)
+	now := time.Now().Unix()
 	for _, x := range o {
 		InitBucketDB(x.ID)
+		dmo.PutObj(c, x.ID, []*ObjectInfo{
+			&ObjectInfo{
+				ID:     x.OID,
+				MTime:  now,
+				Type:   OBJ_TYPE_DIR,
+				Status: OBJ_NORMAL,
+				Name:   x.Name,
+			},
+		})
 	}
 	return err
 }
@@ -244,42 +257,42 @@ func (dmo *DefaultMetaOperator) RefData(c Ctx, bktID int64, d []*DataInfo) ([]in
 
 	tbl := fmt.Sprintf("tmp_%x", time.Now().UnixNano())
 	// 创建临时表
-	db.Exec(`CREATE TEMPORARY TABLE ` + tbl + ` (size BIGINT NOT NULL,
+	db.Exec(`CREATE TEMPORARY TABLE ` + tbl + ` (o_size BIGINT NOT NULL,
 		hdr_crc32 UNSIGNED BIG INT NOT NULL,
 		crc32 UNSIGNED BIG INT NOT NULL,
 		md5 UNSIGNED BIG INT NOT NULL
 	)`)
 	// 把待查询数据放到临时表
-	_, err = b.Table(db, tbl, c).Insert(&d, b.Fields("size", "hdr_crc32", "crc32", "md5"))
+	_, err = b.Table(db, tbl, c).Insert(&d, b.Fields("o_size", "hdr_crc32", "crc32", "md5"))
 	var refs []struct {
 		ID       int64  `borm:"max(a.id)"`
-		Size     int64  `borm:"b.size"`
+		OrigSize int64  `borm:"b.o_size"`
 		HdrCRC32 uint64 `borm:"b.hdr_crc32"`
 		CRC32    uint64 `borm:"b.crc32"`
 		MD5      uint64 `borm:"b.md5"`
 	}
 	// 联表查询
-	_, err = b.Table(db, `data a, `+tbl+` b on a.size=b.size 
+	_, err = b.Table(db, `data a, `+tbl+` b on a.o_size=b.o_size 
 	    and a.hdr_crc32=b.hdr_crc32 and (b.crc32=0 or b.md5=0 or 
 		(a.crc32=b.crc32 and a.md5=b.md5))`, c).Select(&refs,
-		b.GroupBy("b.size", "b.hdr_crc32", "b.crc32", "b.md5"))
+		b.GroupBy("b.o_size", "b.hdr_crc32", "b.crc32", "b.md5"))
 	// 删除临时表
 	db.Exec(`DROP TABLE ` + tbl)
 
 	// 构造辅助查询map
 	aux := make(map[string]int64, 0)
 	for _, ref := range refs {
-		aux[fmt.Sprintf("%d:%d:%d:%d", ref.Size, ref.HdrCRC32, ref.CRC32, ref.MD5)] = ref.ID
+		aux[fmt.Sprintf("%d:%d:%d:%d", ref.OrigSize, ref.HdrCRC32, ref.CRC32, ref.MD5)] = ref.ID
 	}
 
 	res := make([]int64, len(d))
 	for i, x := range d {
 		// 如果最基础的数据不完整，直接跳过
-		if x.Size == 0 || x.HdrCRC32 == 0 {
+		if x.OrigSize == 0 || x.HdrCRC32 == 0 {
 			continue
 		}
 
-		if id, ok := aux[fmt.Sprintf("%d:%d:%d:%d", x.Size, x.HdrCRC32, x.CRC32, x.MD5)]; ok {
+		if id, ok := aux[fmt.Sprintf("%d:%d:%d:%d", x.OrigSize, x.HdrCRC32, x.CRC32, x.MD5)]; ok {
 			// 全文件的数据没有，说明是预Ref
 			if x.CRC32 == 0 || x.MD5 == 0 {
 				res[i] = 1 // 非0代表预Ref成功

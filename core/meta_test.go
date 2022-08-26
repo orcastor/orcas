@@ -59,7 +59,7 @@ func TestRefData(t *testing.T) {
 		id, _ := idgen.NewIDGen(nil, 0).New()
 		So(dmo.PutData(c, bktID, []*DataInfo{&DataInfo{
 			ID:       id,
-			Size:     1,
+			OrigSize: 1,
 			HdrCRC32: 222,
 			CRC32:    333,
 			MD5:      444,
@@ -68,7 +68,7 @@ func TestRefData(t *testing.T) {
 
 		Convey("single try ref", func() {
 			ids, err := dmo.RefData(c, bktID, []*DataInfo{&DataInfo{
-				Size:     1,
+				OrigSize: 1,
 				HdrCRC32: 222,
 			}})
 			So(err, ShouldBeNil)
@@ -76,7 +76,7 @@ func TestRefData(t *testing.T) {
 			So(ids[0], ShouldNotEqual, 0)
 
 			ids, err = dmo.RefData(c, bktID, []*DataInfo{&DataInfo{
-				Size:     0,
+				OrigSize: 0,
 				HdrCRC32: 222,
 			}})
 			So(err, ShouldBeNil)
@@ -84,7 +84,7 @@ func TestRefData(t *testing.T) {
 			So(ids[0], ShouldEqual, 0)
 
 			ids, err = dmo.RefData(c, bktID, []*DataInfo{&DataInfo{
-				Size:     1,
+				OrigSize: 1,
 				HdrCRC32: 0,
 			}})
 			So(err, ShouldBeNil)
@@ -92,7 +92,7 @@ func TestRefData(t *testing.T) {
 			So(ids[0], ShouldEqual, 0)
 
 			ids, err = dmo.RefData(c, bktID, []*DataInfo{&DataInfo{
-				Size:     1,
+				OrigSize: 1,
 				HdrCRC32: 0,
 				CRC32:    333,
 				MD5:      444,
@@ -103,10 +103,10 @@ func TestRefData(t *testing.T) {
 		})
 		Convey("multiple try ref", func() {
 			ids, err := dmo.RefData(c, bktID, []*DataInfo{&DataInfo{
-				Size:     1,
+				OrigSize: 1,
 				HdrCRC32: 222,
 			}, &DataInfo{
-				Size:     1,
+				OrigSize: 1,
 				HdrCRC32: 222,
 			}})
 			So(err, ShouldBeNil)
@@ -116,10 +116,10 @@ func TestRefData(t *testing.T) {
 		})
 		Convey("multiple try ref diff", func() {
 			ids, err := dmo.RefData(c, bktID, []*DataInfo{&DataInfo{
-				Size:     1,
+				OrigSize: 1,
 				HdrCRC32: 222,
 			}, &DataInfo{
-				Size:     1,
+				OrigSize: 1,
 				HdrCRC32: 111,
 			}})
 			So(err, ShouldBeNil)
@@ -130,7 +130,7 @@ func TestRefData(t *testing.T) {
 
 		Convey("single ref", func() {
 			ids, err := dmo.RefData(c, bktID, []*DataInfo{&DataInfo{
-				Size:     1,
+				OrigSize: 1,
 				HdrCRC32: 222,
 				CRC32:    333,
 				MD5:      444,
@@ -140,7 +140,7 @@ func TestRefData(t *testing.T) {
 			So(ids[0], ShouldEqual, id)
 
 			ids, err = dmo.RefData(c, bktID, []*DataInfo{&DataInfo{
-				Size:     1,
+				OrigSize: 1,
 				HdrCRC32: 222,
 				CRC32:    0,
 				MD5:      444,
@@ -151,7 +151,7 @@ func TestRefData(t *testing.T) {
 			So(ids[0], ShouldNotEqual, 0)
 
 			ids, err = dmo.RefData(c, bktID, []*DataInfo{&DataInfo{
-				Size:     1,
+				OrigSize: 1,
 				HdrCRC32: 222,
 				CRC32:    333,
 				MD5:      0,
@@ -164,12 +164,12 @@ func TestRefData(t *testing.T) {
 
 		Convey("multiple ref", func() {
 			ids, err := dmo.RefData(c, bktID, []*DataInfo{&DataInfo{
-				Size:     1,
+				OrigSize: 1,
 				HdrCRC32: 222,
 				CRC32:    333,
 				MD5:      444,
 			}, &DataInfo{
-				Size:     1,
+				OrigSize: 1,
 				HdrCRC32: 222,
 				CRC32:    333,
 				MD5:      444,
@@ -181,12 +181,12 @@ func TestRefData(t *testing.T) {
 		})
 		Convey("multiple ref diff", func() {
 			ids, err := dmo.RefData(c, bktID, []*DataInfo{&DataInfo{
-				Size:     1,
+				OrigSize: 1,
 				HdrCRC32: 222,
 				CRC32:    333,
 				MD5:      444,
 			}, &DataInfo{
-				Size:     1,
+				OrigSize: 1,
 				HdrCRC32: 111,
 				CRC32:    333,
 				MD5:      444,
