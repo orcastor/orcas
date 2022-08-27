@@ -272,10 +272,9 @@ func (dmo *DefaultMetaOperator) RefData(c Ctx, bktID int64, d []*DataInfo) ([]in
 		MD5      uint64 `borm:"b.md5"`
 	}
 	// 联表查询
-	_, err = b.Table(db, `data a, `+tbl+` b on a.o_size=b.o_size 
-	    and a.hdr_crc32=b.hdr_crc32 and (b.crc32=0 or b.md5=0 or 
-		(a.crc32=b.crc32 and a.md5=b.md5))`, c).Select(&refs,
-		b.GroupBy("b.o_size", "b.hdr_crc32", "b.crc32", "b.md5"))
+	_, err = b.Table(db, `data a, `+tbl+` b`, c).Select(&refs, b.Join(`on a.o_size=b.o_size 
+	and a.hdr_crc32=b.hdr_crc32 and (b.crc32=0 or b.md5=0 or 
+	(a.crc32=b.crc32 and a.md5=b.md5))`), b.GroupBy("b.o_size", "b.hdr_crc32", "b.crc32", "b.md5"))
 	// 删除临时表
 	db.Exec(`DROP TABLE ` + tbl)
 
@@ -333,12 +332,18 @@ func (dmo *DefaultMetaOperator) PutObj(c Ctx, bktID int64, o []*ObjectInfo) (ids
 	db, err := GetDB(bktID)
 	defer db.Close()
 
-	n, err := b.Table(db, OBJ_TBL, c).Insert(&o)
-	if n == len(o) {
-		for _, x := range o {
-			ids = append(ids, x.ID)
-		}
-	} else {
+	for _, x := range o {
+		ids = append(ids, x.ID)
+	}
+
+	n, err := b.Table(db, OBJ_TBL, c).InsertIgnore(&o)
+	if err != nil {
+		return nil, err
+	}
+
+	if n != len(o) {
+		var inserted []int64
+		_, err = b.Table(db, OBJ_TBL, c).Select(&inserted, b.Fields("id"), b.Where(b.In("id", ids)))
 		// TODO: 处理有冲突的情况
 	}
 	return ids, err
@@ -394,8 +399,8 @@ func (dmo *DefaultMetaOperator) ListObj(c Ctx, bktID, pid int64,
 
 	conds := []interface{}{b.Eq("pid", pid)}
 	if wd != "" {
-		if strings.Index(wd, "%") >= 0 {
-			conds = append(conds, b.Like("name", wd))
+		if strings.ContainsAny(wd, "*?") {
+			conds = append(conds, b.GLOB("name", wd))
 		} else {
 			conds = append(conds, b.Eq("name", wd))
 		}

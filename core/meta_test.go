@@ -419,7 +419,7 @@ func TestListObj(t *testing.T) {
 			So(cnt, ShouldEqual, 1)
 			So(d, ShouldEqual, fmt.Sprint(id1))
 
-			o, cnt, d, err = dmo.ListObj(c, bktID, pid, "%est%", "", "", 2, 0)
+			o, cnt, d, err = dmo.ListObj(c, bktID, pid, "?es*", "", "", 2, 0)
 			So(err, ShouldBeNil)
 			So(len(o), ShouldEqual, 2)
 			So(cnt, ShouldEqual, 5)
