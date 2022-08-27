@@ -54,10 +54,17 @@ type ObjectInfo struct {
 
 // 数据状态
 const (
-	DATA_NORMAL    = 1 >> iota // 正常
-	DATA_MALFORMED             // 是否损坏
-	DATA_CMPRED                // 是否压缩 // 0: none, 1: snappy, 2: zip 3: zstd
-	DATA_ENCRYPTED             // 是否加密
+	DATA_NORMAL        = 1 >> iota // 正常
+	DATA_MALFORMED                 // 是否损坏
+	DATA_ENC_AES256                // 是否AES加密
+	DATA_ENC_RESERVED              // 是否保留的加密
+	DATA_CMPR_SNAPPY               // 是否snappy压缩
+	DATA_CMPR_ZSTD                 // 是否zstd压缩
+	DATA_CMPR_GZIP                 // 是否gzip压缩
+	DATA_CMPR_RESERVED             // 是否保留的压缩
+
+	DATA_ENC_MASK  = DATA_ENC_AES256 | DATA_ENC_RESERVED
+	DATA_CMPR_MASK = DATA_CMPR_SNAPPY | DATA_CMPR_ZSTD | DATA_CMPR_GZIP | DATA_CMPR_RESERVED
 )
 
 // 数据类型
@@ -336,15 +343,20 @@ func (dmo *DefaultMetaOperator) PutObj(c Ctx, bktID int64, o []*ObjectInfo) (ids
 		ids = append(ids, x.ID)
 	}
 
-	n, err := b.Table(db, OBJ_TBL, c).InsertIgnore(&o)
-	if err != nil {
-		return nil, err
-	}
-
-	if n != len(o) {
+	if n, err := b.Table(db, OBJ_TBL, c).InsertIgnore(&o); err == nil && n != len(o) {
 		var inserted []int64
 		_, err = b.Table(db, OBJ_TBL, c).Select(&inserted, b.Fields("id"), b.Where(b.In("id", ids)))
-		// TODO: 处理有冲突的情况
+		// 处理有冲突的情况
+		m := make(map[int64]struct{}, 0)
+		for _, v := range inserted {
+			m[v] = struct{}{}
+		}
+		// 擦除没有插入成功的id
+		for i, id := range ids {
+			if _, ok := m[id]; !ok {
+				ids[i] = 0
+			}
+		}
 	}
 	return ids, err
 }
