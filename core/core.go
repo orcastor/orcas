@@ -102,6 +102,11 @@ func (ch *RWHanlder) FileSize(c Ctx, dataID int64, sn int) (int64, error) {
 
 // 垃圾回收时有数据没有元数据引用的为脏数据（需要留出窗口时间），有元数据没有数据的为损坏数据
 func (ch *RWHanlder) Put(c Ctx, o []*ObjectInfo) ([]int64, error) {
+	for _, x := range o {
+		if x.ID == 0 {
+			x.ID, _ = ch.ig.New()
+		}
+	}
 	return ch.mo.PutObj(c, ch.bktID, o)
 }
 
@@ -109,14 +114,13 @@ func (ch *RWHanlder) List(c Ctx, pid int64, opt ListOptions) ([]*ObjectInfo, int
 	return ch.mo.ListObj(c, ch.bktID, pid, opt.Word, opt.Delim, opt.Order, opt.Count, 0)
 }
 
+// 如果存在同名文件，会报错：Error: stepping, UNIQUE constraint failed: obj.name (19)
 func (ch *RWHanlder) Rename(c Ctx, id int64, name string) error {
 	return ch.mo.SetObj(c, ch.bktID, []string{"name"}, &ObjectInfo{ID: id, Name: name})
-	// TODO: 处理有冲突的情况
 }
 
 func (ch *RWHanlder) MoveTo(c Ctx, id, pid int64) error {
 	return ch.mo.SetObj(c, ch.bktID, []string{"pid"}, &ObjectInfo{ID: id, PID: pid})
-	// TODO: 处理有冲突的情况
 }
 
 func (ch *RWHanlder) Recycle(c Ctx, id int64) error {
