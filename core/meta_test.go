@@ -219,9 +219,57 @@ func TestGetData(t *testing.T) {
 	})
 }
 
+func TestPuttObj(t *testing.T) {
+	Convey("normal", t, func() {
+		Convey("put same name obj", func() {
+			dmo := NewDefaultMetaOperator(&DefaultAccessCtrlMgr{})
+			InitBucketDB(bktID)
+			ig := idgen.NewIDGen(nil, 0)
+			id, _ := ig.New()
+			pid, _ := ig.New()
+			did, _ := ig.New()
+			d := &ObjectInfo{
+				ID:     id,
+				PID:    pid,
+				MTime:  time.Now().Unix(),
+				DataID: did,
+				Type:   OBJ_TYPE_DIR,
+				Status: OBJ_NORMAL,
+				Name:   "test",
+				Size:   1,
+				Ext:    "{}",
+			}
+			ids, err := dmo.PutObj(c, bktID, []*ObjectInfo{d})
+			So(err, ShouldBeNil)
+			So(len(ids), ShouldEqual, 1)
+			So(ids[0], ShouldEqual, id)
+
+			id1, _ := ig.New()
+			d1 := &ObjectInfo{
+				ID:     id1,
+				PID:    pid,
+				MTime:  time.Now().Unix(),
+				DataID: did,
+				Type:   OBJ_TYPE_DIR,
+				Status: OBJ_NORMAL,
+				Name:   "test",
+				Size:   1,
+				Ext:    "{}",
+			}
+			// push same name diff id obj
+			ids, err = dmo.PutObj(c, bktID, []*ObjectInfo{d1, d})
+			So(err, ShouldBeNil)
+			So(len(ids), ShouldEqual, 2)
+			So(ids[0], ShouldEqual, 0)
+			// same name same id, like idempotent
+			So(ids[1], ShouldEqual, id)
+		})
+	})
+}
+
 func TestGetObj(t *testing.T) {
 	Convey("normal", t, func() {
-		Convey("put obj info", func() {
+		Convey("get obj info", func() {
 			dmo := NewDefaultMetaOperator(&DefaultAccessCtrlMgr{})
 			InitBucketDB(bktID)
 			ig := idgen.NewIDGen(nil, 0)
