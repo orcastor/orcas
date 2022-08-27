@@ -8,8 +8,6 @@ github.com/fsnotify/fsnotify v1.4.9/go.mod h1:znqG4EE+3YCdAaPaxE2ZRY/06pZUdp0tY4
 github.com/go-redis/redis/v7 v7.4.1 h1:PASvf36gyUpr2zdOUS/9Zqc80GbM+9BDyiJSJDDOrTI=
 github.com/go-redis/redis/v7 v7.4.1/go.mod h1:JDNMw23GTyLNC4GZu9njt15ctBQVn7xjRfnwdHj/Dcg=
 github.com/go-redis/redis/v8 v8.11.4/go.mod h1:2Z2wHZXdQpCDXEGzqMockDpNyYvi2l4Pxt6RJr792+w=
-github.com/go-sql-driver/mysql v1.6.0 h1:BCTh4TKNUYmOmMUcQ3IipzF5prigylS7XXjEkfCHuOE=
-github.com/go-sql-driver/mysql v1.6.0/go.mod h1:DCzpHaOWr8IXmIStZouvnhqoel9Qv2LBy8hT2VhHyBg=
 github.com/go-task/slim-sprig v0.0.0-20210107165309-348f09dbbbc0/go.mod h1:fyg7847qk6SyHyPtNmDHnmrv/HOrqktSC+C9fM+CJOE=
 github.com/golang/protobuf v1.2.0/go.mod h1:6lQm79b+lXiMfvg/cZm0SGofjICqVBUtrP5yJMmIC1U=
 github.com/golang/protobuf v1.3.2/go.mod h1:6lQm79b+lXiMfvg/cZm0SGofjICqVBUtrP5yJMmIC1U=
@@ -56,12 +54,10 @@ github.com/onsi/gomega v1.7.1/go.mod h1:XdKZgCCFLUoM/7CFJVPcG8C1xQ1AJ0vpAezJrB7J
 github.com/onsi/gomega v1.10.1/go.mod h1:iN09h71vgCQne3DLsj+A5owkum+a2tYe+TOCB1ybHNo=
 github.com/onsi/gomega v1.16.0 h1:6gjqkI8iiRHMvdccRJM8rVKjCWk6ZIm6FTm3ddIe4/c=
 github.com/onsi/gomega v1.16.0/go.mod h1:HnhC7FXeEQY45zxNK3PPoIUhzk/80Xly9PcubAlGdZY=
-github.com/orca-zhang/borm v0.0.0-20220202025100-915ca12c4437 h1:JtpTdzUj7z2XlTtO/yK00TNw6kqUI2R+k9o7SAB8Ofo=
-github.com/orca-zhang/borm v0.0.0-20220202025100-915ca12c4437/go.mod h1:oPiCpRWKQyQGeQY4wmLUz5RBx2KTsexah1Dp6A31In4=
+github.com/orca-zhang/borm v0.0.0-20220827054606-f9725f2742ef h1:TKie7zMvucX62y7dlYmGqjTZryu0JSAbyBrhabbfqvU=
+github.com/orca-zhang/borm v0.0.0-20220827054606-f9725f2742ef/go.mod h1:oPiCpRWKQyQGeQY4wmLUz5RBx2KTsexah1Dp6A31In4=
 github.com/orca-zhang/ecache v1.1.1 h1:krk4+/ihsLPg9/k2zYeRa7dNespTQsFnRcLWaJGFNds=
 github.com/orca-zhang/ecache v1.1.1/go.mod h1:1/6HCddx1iAbafDyRdddq5v/0rZf5sCU/fkLZ3BhciQ=
-github.com/orca-zhang/idgen v0.0.0-20220819035605-89e3c447fedf h1:tSxDWR9sCskS8jMPQffYyoeXLKyn1Epx84YCXIRqeKk=
-github.com/orca-zhang/idgen v0.0.0-20220819035605-89e3c447fedf/go.mod h1:QgMA6kZTutcdAVcYrWX06UvJ8kI/+7Bx5RaREcN+3Qg=
 github.com/orca-zhang/idgen v0.0.0-20220821144803-5899297096b5 h1:+4npEmIOWEDkj/iyI+3TqzaOr0wwC3pzVn5kEPy35Tg=
 github.com/orca-zhang/idgen v0.0.0-20220821144803-5899297096b5/go.mod h1:QgMA6kZTutcdAVcYrWX06UvJ8kI/+7Bx5RaREcN+3Qg=
 github.com/pmezard/go-difflib v1.0.0/go.mod h1:iKH77koFhYxTK1pcRnkKkqfTogsbg7gZNVY4sRDYZ/4=
