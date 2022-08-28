@@ -63,7 +63,7 @@ func TestRefData(t *testing.T) {
 			HdrCRC32: 222,
 			CRC32:    333,
 			MD5:      444,
-			Status:   1,
+			Kind:     DATA_NORMAL,
 		}}), ShouldBeNil)
 
 		Convey("single try ref", func() {
@@ -206,9 +206,9 @@ func TestGetData(t *testing.T) {
 			InitBucketDB(bktID)
 			id, _ := idgen.NewIDGen(nil, 0).New()
 			d := &DataInfo{
-				ID:     id,
-				Size:   1,
-				Status: 1,
+				ID:   id,
+				Size: 1,
+				Kind: DATA_NORMAL,
 			}
 			So(dmo.PutData(c, bktID, []*DataInfo{d}), ShouldBeNil)
 
