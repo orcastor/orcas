@@ -62,31 +62,27 @@ const (
 	DATA_CMPR_ZSTD                 // 是否zstd压缩
 	DATA_CMPR_GZIP                 // 是否gzip压缩
 	DATA_CMPR_RESERVED             // 是否保留的压缩
+	DATA_KIND_IMG                  // 图片类型
+	DATA_KIND_VIDEO                // 视频类型
+	DATA_KIND_DOCS                 // 文档类型
+	DATA_KIND_RESERVED             // 未知类型
 
 	DATA_ENC_MASK  = DATA_ENC_AES256 | DATA_ENC_RESERVED
 	DATA_CMPR_MASK = DATA_CMPR_SNAPPY | DATA_CMPR_ZSTD | DATA_CMPR_GZIP | DATA_CMPR_RESERVED
-)
-
-// 数据类型
-const (
-	DATA_KIND_ETC = iota
-	DATA_KIND_IMG
-	DATA_KIND_VIDEO
-	DATA_KIND_DOCS
+	DATA_KIND_MASK = DATA_KIND_IMG | DATA_KIND_VIDEO | DATA_KIND_DOCS | DATA_KIND_RESERVED
 )
 
 type DataInfo struct {
 	ID       int64  `borm:"id"`        // 数据ID（对象ID/版本ID，idgen随机生成的id）
 	Size     int64  `borm:"size"`      // 数据的大小
 	OrigSize int64  `borm:"o_size"`    // 数据的原始大小
-	HdrCRC32 uint64 `borm:"hdr_crc32"` // 头部100KB的CRC32校验值
-	CRC32    uint64 `borm:"crc32"`     // 整个对象的CRC32校验值（最原始数据）
+	HdrCRC32 uint32 `borm:"hdr_crc32"` // 头部100KB的CRC32校验值
+	CRC32    uint32 `borm:"crc32"`     // 整个对象的CRC32校验值（最原始数据）
 	MD5      uint64 `borm:"md5"`       // 整个对象的MD5值（最原始数据）
 
-	Checksum uint64 `borm:"checksum"` // 整个对象的MD5值（最终数据，用于一致性审计）
+	Checksum uint32 `borm:"checksum"` // 整个对象的CRC32校验值（最终数据，用于一致性审计）
+	Kind     uint32 `borm:"kind"`     // 数据状态，正常、损坏、加密、压缩、类型（用于预览等）
 	// MIME       string // 数据的多媒体类型
-	Kind   int `borm:"kind"`   // 数据类型（用于预览等），0: etc, 1: image, 2: video, 3: docs
-	Status int `borm:"status"` // 数据状态，正常、压缩、加密、损坏
 
 	// PkgID不为0说明是打包数据
 	PkgID     int64 `borm:"pkg_id"`  // 打包数据的ID（也是idgen生成的id）
@@ -182,7 +178,6 @@ func InitBucketDB(bktID int64) error {
 		md5 UNSIGNED BIG INT NOT NULL,
 		checksum UNSIGNED BIG INT NOT NULL,
 		kind INT NOT NULL,
-		status INT NOT NULL,
 		pkg_id BIGINT NOT NULL,
 		pkg_off BIGINT NOT NULL
 	)`)
