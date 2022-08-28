@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"hash/crc32"
 	"io"
-	"io/fs"
 	"io/ioutil"
 	"os"
 	"path/filepath"
@@ -73,12 +72,6 @@ func (osi *OrcasSDKImpl) GetObjectIDByPath(c core.Ctx, pid int64, path string) (
 		pid = os[0].ID
 	}
 	return pid, nil
-}
-
-type Uploader struct {
-	tryRefFiles []fs.FileInfo
-	refFiles    []fs.FileInfo
-	files       []fs.FileInfo
 }
 
 func GetHdrCRC32(path string) uint32 {
