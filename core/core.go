@@ -24,7 +24,7 @@ type Hanlder interface {
 	// 打包上传或者小文件，sn传-1，大文件sn从0开始，DataID不传默认创建一个新的
 	PutData(c Ctx, dataID int64, sn int, buf []byte) (int64, error)
 	// 上传完数据以后，再创建元数据
-	PutDataInfo(c Ctx, d []*DataInfo) error
+	PutDataInfo(c Ctx, d []*DataInfo) ([]int64, error)
 	// 只传一个参数说明是sn，传两个参数说明是sn+offset，传三个参数说明是sn+offset+size
 	GetData(c Ctx, o *ObjectInfo, sn int, offset ...int64) ([]byte, error)
 	// 用于非文件内容的扫描，只看文件是否存在，大小是否合适
@@ -80,8 +80,14 @@ func (ch *RWHanlder) PutData(c Ctx, dataID int64, sn int, buf []byte) (int64, er
 }
 
 // 上传完数据以后，再创建元数据
-func (ch *RWHanlder) PutDataInfo(c Ctx, d []*DataInfo) error {
-	return ch.mo.PutData(c, ch.bktID, d)
+func (ch *RWHanlder) PutDataInfo(c Ctx, d []*DataInfo) (ids []int64, err error) {
+	for _, x := range d {
+		if x.ID == 0 {
+			x.ID, _ = ch.ig.New()
+		}
+		ids = append(ids, x.ID)
+	}
+	return ids, ch.mo.PutData(c, ch.bktID, d)
 }
 
 // 只传一个参数说明是sn，传两个参数说明是sn+offset，传三个参数说明是sn+offset+size
