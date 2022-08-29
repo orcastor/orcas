@@ -86,7 +86,7 @@ type DataInfo struct {
 
 	// PkgID不为0说明是打包数据
 	PkgID     int64 `borm:"pkg_id"`  // 打包数据的ID（也是idgen生成的id）
-	PkgOffset int64 `borm:"pkg_off"` // 打包数据的偏移位置
+	PkgOffset int   `borm:"pkg_off"` // 打包数据的偏移位置
 
 	// SnapshotID int64 // 快照版本ID
 }
