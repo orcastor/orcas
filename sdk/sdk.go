@@ -240,6 +240,11 @@ func (osi *OrcasSDKImpl) uploadFiles(c core.Ctx, pid int64, path string, files [
 				// TODO: 处理错误情况
 			}
 		}
+		// 刷新一下打包数据
+		if err := osi.dp.Flush(c, osi.h); err != nil {
+			// TODO: 处理错误情况
+			return err
+		}
 		ids, err := osi.h.PutDataInfo(c, di)
 		if err != nil {
 			return err
