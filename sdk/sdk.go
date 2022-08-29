@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/orcastor/orcas/core"
 )
@@ -82,15 +83,12 @@ func (osi *OrcasSDKImpl) GetObjectIDByPath(c core.Ctx, pid int64, path string) (
 
 func (osi *OrcasSDKImpl) UploadDirByPID(c core.Ctx, pid int64, path string) error {
 	type Elem struct {
-		chPID chan int64
-		path  string
+		pid  int64
+		path string
 	}
 
-	e := Elem{chPID: make(chan int64), path: path}
-	e.chPID <- pid
-
 	// 层序遍历
-	q := []Elem{e}
+	q := []Elem{Elem{pid: pid, path: path}}
 	// 遍历本地目录
 	for len(q) > 0 {
 		f, err := ioutil.ReadDir(q[0].path)
@@ -98,8 +96,6 @@ func (osi *OrcasSDKImpl) UploadDirByPID(c core.Ctx, pid int64, path string) erro
 			// TODO
 			return err
 		}
-
-		defer close(q[0].chPID)
 
 		if len(f) <= 0 {
 			// 目录为空，直接弹出
@@ -112,6 +108,7 @@ func (osi *OrcasSDKImpl) UploadDirByPID(c core.Ctx, pid int64, path string) erro
 		for _, file := range f {
 			if file.IsDir() {
 				dirs = append(dirs, &core.ObjectInfo{
+					PID:    pid,
 					MTime:  file.ModTime().Unix(),
 					Type:   core.OBJ_TYPE_DIR,
 					Status: core.OBJ_NORMAL,
@@ -120,6 +117,7 @@ func (osi *OrcasSDKImpl) UploadDirByPID(c core.Ctx, pid int64, path string) erro
 				continue
 			} else {
 				files = append(files, &core.ObjectInfo{
+					PID:    pid,
 					MTime:  file.ModTime().Unix(),
 					Type:   core.OBJ_TYPE_FILE,
 					Status: core.OBJ_NORMAL,
@@ -130,16 +128,19 @@ func (osi *OrcasSDKImpl) UploadDirByPID(c core.Ctx, pid int64, path string) erro
 		}
 
 		// 异步获取上一级目录的id
-		pid := <-q[0].chPID
+		wg := &sync.WaitGroup{}
 		dirElems := make([]Elem, len(dirs))
 		if len(dirs) > 0 {
 			// 1. 如果是目录， 直接上传
 			for i := range dirs {
-				dirs[i].PID = pid
+				dirs[i].PID = q[0].pid
+				dirElems[i].pid = q[0].pid
 				dirElems[i].path = filepath.Join(path, dirs[i].Name)
 			}
 
+			wg.Add(len(dirs))
 			go func() {
+				defer wg.Done()
 				// 上传目录
 				ids, err := osi.h.Put(c, dirs)
 				if err != nil {
@@ -148,7 +149,7 @@ func (osi *OrcasSDKImpl) UploadDirByPID(c core.Ctx, pid int64, path string) erro
 				}
 				for i, id := range ids {
 					if id > 0 {
-						dirElems[i].chPID <- id
+						dirElems[i].pid = id
 					} else {
 						// TODO: 重名冲突
 					}
@@ -157,13 +158,14 @@ func (osi *OrcasSDKImpl) UploadDirByPID(c core.Ctx, pid int64, path string) erro
 		}
 
 		if len(files) > 0 {
-			di := make([]*core.DataInfo, len(files))
+			var di []*core.DataInfo
 			for i := range files {
-				di[i].OrigSize = files[i].Size
+				di = append(di, &core.DataInfo{OrigSize: files[i].Size})
 			}
 			osi.uploadFiles(c, pid, q[0].path, files, di, osi.cfg.RefLevel, 0)
 		}
 
+		wg.Wait()
 		q = append(q[1:], dirElems...)
 	}
 	return nil

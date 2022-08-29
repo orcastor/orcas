@@ -89,18 +89,18 @@ func (osi *OrcasSDKImpl) readFile(c core.Ctx, path string, oi *core.ObjectInfo, 
 	buf := make([]byte, PKG_SIZE)
 	for {
 		_, err := f.Read(buf)
+		once, err1 := l.OnData(c, osi.h, osi.dp, sn, buf)
+		if err1 != nil {
+			return err1
+		}
+		if once {
+			break
+		}
 		if err == io.EOF {
 			break
 		}
 		if err != nil {
 			return err
-		}
-		once, err := l.OnData(c, osi.h, osi.dp, sn, buf)
-		if err != nil {
-			return err
-		}
-		if once {
-			break
 		}
 		sn++
 	}
