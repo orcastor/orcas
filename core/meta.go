@@ -12,12 +12,13 @@ import (
 	b "github.com/orca-zhang/borm"
 )
 
+const ROOT_OID int64 = 0
+
 type BucketInfo struct {
-	ID   int64  `borm:"id"`       // 桶ID
-	Name string `borm:"name"`     // 桶名称
-	UID  int64  `borm:"uid"`      // 拥有者
-	Type int    `borm:"type"`     // 桶类型，0: none, 1: normal ...
-	OID  int64  `borm:"root_oid"` // 桶的根对象ID
+	ID   int64  `borm:"id"`   // 桶ID
+	Name string `borm:"name"` // 桶名称
+	UID  int64  `borm:"uid"`  // 拥有者
+	Type int    `borm:"type"` // 桶类型，0: none, 1: normal ...
 	// SnapshotID int64 // 最新快照版本ID
 }
 
@@ -54,7 +55,7 @@ type ObjectInfo struct {
 
 // 数据状态
 const (
-	DATA_NORMAL        = 1 >> iota // 正常
+	DATA_NORMAL        = 1 << iota // 正常
 	DATA_MALFORMED                 // 是否损坏
 	DATA_ENC_AES256                // 是否AES加密
 	DATA_ENC_RESERVED              // 是否保留的加密
@@ -141,8 +142,7 @@ func InitDB() error {
 	db.Exec(`CREATE TABLE bkt (id BIGINT PRIMARY KEY NOT NULL,
 		name TEXT NOT NULL,
 		uid BIGINT NOT NULL,
-		type INT NOT NULL,
-		root_oid BIGINT NOT NULL
+		type INT NOT NULL
 	)`)
 
 	db.Exec(`CREATE INDEX ix_uid on bkt (uid)`)
@@ -206,18 +206,8 @@ func (dmo *DefaultMetaOperator) PutBkt(c Ctx, o []*BucketInfo) error {
 	defer db.Close()
 
 	_, err = b.Table(db, BKT_TBL, c).ReplaceInto(&o)
-	now := time.Now().Unix()
 	for _, x := range o {
 		InitBucketDB(x.ID)
-		dmo.PutObj(c, x.ID, []*ObjectInfo{
-			&ObjectInfo{
-				ID:     x.OID,
-				MTime:  now,
-				Type:   OBJ_TYPE_DIR,
-				Status: OBJ_NORMAL,
-				Name:   x.Name,
-			},
-		})
 	}
 	return err
 }
