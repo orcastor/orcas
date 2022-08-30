@@ -13,7 +13,7 @@ import (
 )
 
 const (
-	UPLOAD_DATA = iota >> 1
+	UPLOAD_DATA = 1 << iota
 	CRC32_MD5
 	HDR_CRC32
 )
@@ -61,17 +61,17 @@ func (hl *listener) OnData(c core.Ctx, h core.Hanlder, dp *dataPkg, sn int, buf 
 		if sn != 0 || !dp.Push(buf, hl.d) {
 			// 7. 检查是否要打包，不要打包的直接上传，打包默认一次不超过50个，大小不超过4MB
 			if err = dp.Flush(c, h); err != nil {
-				return
+				return hl.once, err
 			}
 			if hl.d.ID, err = h.PutData(c, hl.d.ID, sn, buf); err != nil {
-				return
+				return hl.once, err
 			}
 		}
 	}
 	return hl.once, nil
 }
 
-func (hl *listener) Finish(c core.Ctx, h core.Hanlder) error {
+func (hl *listener) OnFinish(c core.Ctx, h core.Hanlder) error {
 	if hl.action&CRC32_MD5 != 0 {
 		hl.d.MD5 = binary.LittleEndian.Uint64(hl.md5Hash.Sum(nil)[4:12])
 	}
@@ -88,8 +88,11 @@ func (osi *OrcasSDKImpl) readFile(c core.Ctx, path string, oi *core.ObjectInfo, 
 	sn := 0
 	buf := make([]byte, PKG_SIZE)
 	for {
-		_, err := f.Read(buf)
-		once, err1 := l.OnData(c, osi.h, osi.dp, sn, buf)
+		n, err := f.Read(buf)
+		if err != nil && err != io.EOF {
+			return err
+		}
+		once, err1 := l.OnData(c, osi.h, osi.dp, sn, buf[0:n])
 		if err1 != nil {
 			return err1
 		}
@@ -99,12 +102,9 @@ func (osi *OrcasSDKImpl) readFile(c core.Ctx, path string, oi *core.ObjectInfo, 
 		if err == io.EOF {
 			break
 		}
-		if err != nil {
-			return err
-		}
 		sn++
 	}
-	err = l.Finish(c, osi.h)
+	err = l.OnFinish(c, osi.h)
 	return err
 }
 
@@ -127,7 +127,7 @@ func (dp *dataPkg) SetThres(thres int) {
 
 func (dp *dataPkg) Push(b []byte, d *core.DataInfo) bool {
 	offset := len(dp.buf)
-	if offset+len(b) > PKG_SIZE || len(dp.infos) >= dp.thres {
+	if offset+len(b) > PKG_SIZE || len(dp.infos) >= dp.thres || len(b) == PKG_SIZE {
 		return false
 	}
 	// 填充内容
