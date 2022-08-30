@@ -20,6 +20,7 @@ type Options struct {
 
 type DataOperator interface {
 	SetOptions(opt Options)
+	Close()
 
 	Write(c Ctx, bktID, dataID int64, sn int, buf []byte) error
 	Flush(c Ctx, bktID, dataID int64) error
@@ -92,6 +93,12 @@ func NewDefaultDataOperator(acm AccessCtrlMgr) DataOperator {
 
 func (ddo *DefaultDataOperator) SetOptions(opt Options) {
 	ddo.opt = opt
+}
+
+func (ddo *DefaultDataOperator) Close() {
+	for HasInflight() {
+		time.Sleep(100 * time.Millisecond)
+	}
 }
 
 // path/<文件名hash的最后三个字节>/hash
