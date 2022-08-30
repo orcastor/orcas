@@ -36,6 +36,15 @@ func TestWrite(t *testing.T) {
 			}
 		})
 	})
+	Convey("empty file", t, func() {
+		Convey("write one empty file", func() {
+			ddo := NewDefaultDataOperator(&DefaultAccessCtrlMgr{})
+			ddo.SetOptions(Options{
+				Sync: true,
+			})
+			So(ddo.Write(c, bktID, 4701534814288, 0, nil), ShouldBeNil)
+		})
+	})
 }
 
 func TestRead(t *testing.T) {
