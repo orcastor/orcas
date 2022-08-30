@@ -3,6 +3,9 @@ module github.com/orcastor/orcas
 go 1.11
 
 require (
+	github.com/DataDog/zstd v1.5.2 // indirect
+	github.com/golang/snappy v0.0.4 // indirect
+	github.com/h2non/filetype v1.1.3 // indirect
 	github.com/mattn/go-sqlite3 v1.14.6
 	github.com/modern-go/reflect2 v1.0.2 // indirect
 	github.com/orca-zhang/borm v0.0.0-20220827054606-f9725f2742ef
