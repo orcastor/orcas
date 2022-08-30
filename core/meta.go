@@ -135,6 +135,8 @@ type ObjectMetaOperator interface {
 }
 
 type MetaOperator interface {
+	Close()
+
 	BucketMetaOperator
 	DataMetaOperator
 	ObjectMetaOperator
@@ -209,6 +211,9 @@ func NewDefaultMetaOperator(acm AccessCtrlMgr) MetaOperator {
 	return &DefaultMetaOperator{
 		acm: acm,
 	}
+}
+
+func (dmo *DefaultMetaOperator) Close() {
 }
 
 func (dmo *DefaultMetaOperator) PutBkt(c Ctx, o []*BucketInfo) error {
