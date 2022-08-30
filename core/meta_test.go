@@ -26,20 +26,17 @@ func TestListBkt(t *testing.T) {
 			id1, _ := idgen.NewIDGen(nil, 0).New()
 			id2, _ := idgen.NewIDGen(nil, 0).New()
 			uid, _ := idgen.NewIDGen(nil, 0).New()
-			oid, _ := idgen.NewIDGen(nil, 0).New()
 			b1 := &BucketInfo{
 				ID:   id1,
 				Name: "zhangwei",
 				UID:  uid,
 				Type: 1,
-				OID:  oid,
 			}
 			b2 := &BucketInfo{
 				ID:   id2,
 				Name: "zhangwei2",
 				UID:  uid,
 				Type: 1,
-				OID:  oid,
 			}
 			So(dmo.PutBkt(c, []*BucketInfo{b1, b2}), ShouldBeNil)
 
