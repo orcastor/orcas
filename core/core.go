@@ -16,6 +16,10 @@ type ListOptions struct {
 type Hanlder interface {
 	// 传入underlying，返回当前的，构成链式调用
 	New(h Hanlder) Hanlder
+	Close()
+
+	SetOptions(opt Options)
+	PutBkt(c Ctx, o []*BucketInfo) error
 
 	// 只有文件长度、HdrCRC32是预Ref，如果成功返回新DataID，失败返回0
 	// 有文件长度、CRC32、MD5，成功返回引用的DataID，失败返回0，客户端发现DataID有变化，说明不需要上传数据
@@ -64,6 +68,19 @@ func (ch *RWHanlder) New(Hanlder) Hanlder {
 	return ch
 }
 
+func (ch *RWHanlder) Close() {
+	ch.do.Close()
+	ch.mo.Close()
+}
+
+func (ch *RWHanlder) SetOptions(opt Options) {
+	ch.do.SetOptions(opt)
+}
+
+func (ch *RWHanlder) PutBkt(c Ctx, o []*BucketInfo) error {
+	return ch.mo.PutBkt(c, o)
+}
+
 // 只有文件长度、HdrCRC32是预Ref，如果成功返回新DataID，失败返回0
 // 有文件长度、CRC32、MD5，成功返回引用的DataID，失败返回0，客户端发现DataID有变化，说明不需要上传数据
 // 如果非预Ref DataID传0，说明跳过了预Ref
@@ -74,7 +91,11 @@ func (ch *RWHanlder) Ref(c Ctx, d []*DataInfo) ([]int64, error) {
 // 打包上传或者小文件，sn传-1，大文件sn从0开始，DataID不传默认创建一个新的
 func (ch *RWHanlder) PutData(c Ctx, dataID int64, sn int, buf []byte) (int64, error) {
 	if dataID == 0 {
-		dataID, _ = ch.ig.New()
+		if len(buf) <= 0 {
+			dataID = EmptyDataID
+		} else {
+			dataID, _ = ch.ig.New()
+		}
 	}
 	return dataID, ch.do.Write(c, ch.bktID, dataID, sn, buf)
 }
@@ -107,10 +128,16 @@ func (ch *RWHanlder) FileSize(c Ctx, dataID int64, sn int) (int64, error) {
 }
 
 // 垃圾回收时有数据没有元数据引用的为脏数据（需要留出窗口时间），有元数据没有数据的为损坏数据
+// PID支持用补码来直接引用当次还未上传的对象的ID
 func (ch *RWHanlder) Put(c Ctx, o []*ObjectInfo) ([]int64, error) {
 	for _, x := range o {
 		if x.ID == 0 {
 			x.ID, _ = ch.ig.New()
+		}
+	}
+	for _, x := range o {
+		if x.PID < 0 && int(^x.PID) <= len(o) {
+			x.PID = o[^x.PID].ID
 		}
 	}
 	return ch.mo.PutObj(c, ch.bktID, o)
