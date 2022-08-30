@@ -93,6 +93,8 @@ func (osi *OrcasSDKImpl) UploadDirByPID(c core.Ctx, pid int64, path string) erro
 		path string
 	}
 
+	var emptyFiles []*core.ObjectInfo
+
 	// 层序遍历
 	q := []Elem{Elem{pid: pid, path: path}}
 	// 遍历本地目录
@@ -122,14 +124,20 @@ func (osi *OrcasSDKImpl) UploadDirByPID(c core.Ctx, pid int64, path string) erro
 				})
 				continue
 			} else {
-				files = append(files, &core.ObjectInfo{
+				file := &core.ObjectInfo{
 					PID:    q[0].pid,
 					MTime:  file.ModTime().Unix(),
 					Type:   core.OBJ_TYPE_FILE,
 					Status: core.OBJ_NORMAL,
 					Name:   file.Name(),
 					Size:   file.Size(),
-				})
+				}
+				if file.Size > 0 {
+					files = append(files, file)
+				} else {
+					file.DataID = core.EmptyDataID
+					emptyFiles = append(emptyFiles, file)
+				}
 			}
 		}
 
@@ -164,15 +172,21 @@ func (osi *OrcasSDKImpl) UploadDirByPID(c core.Ctx, pid int64, path string) erro
 		if len(files) > 0 {
 			// 先按文件大小排序一下，尽量让它们可以打包
 			sort.Sort(ObjInfoBySize(files))
-			var di []*core.DataInfo
+
+			di := make([]*core.DataInfo, len(files))
 			for i := range files {
-				di = append(di, &core.DataInfo{OrigSize: files[i].Size})
+				di[i] = &core.DataInfo{OrigSize: files[i].Size}
 			}
 			osi.uploadFiles(c, pid, q[0].path, files, di, osi.cfg.RefLevel, 0)
 		}
 
 		wg.Wait()
 		q = append(q[1:], dirElems...)
+	}
+
+	if _, err := osi.h.Put(c, emptyFiles); err != nil {
+		// TODO: 重名冲突
+		return err
 	}
 	return nil
 }
@@ -286,13 +300,24 @@ func (osi *OrcasSDKImpl) UploadFileByPID(c core.Ctx, pid int64, path string) err
 	if err != nil {
 		return err
 	}
-	return osi.uploadFiles(c, pid, filepath.Dir(path), []*core.ObjectInfo{&core.ObjectInfo{
+
+	file := &core.ObjectInfo{
 		MTime:  fi.ModTime().Unix(),
 		Type:   core.OBJ_TYPE_FILE,
 		Status: core.OBJ_NORMAL,
 		Name:   fi.Name(),
 		Size:   fi.Size(),
-	}}, []*core.DataInfo{&core.DataInfo{
-		OrigSize: fi.Size(),
-	}}, osi.cfg.RefLevel, 0)
+	}
+
+	if file.Size > 0 {
+		return osi.uploadFiles(c, pid, filepath.Dir(path), []*core.ObjectInfo{file}, []*core.DataInfo{&core.DataInfo{
+			OrigSize: fi.Size(),
+		}}, osi.cfg.RefLevel, 0)
+	}
+
+	file.DataID = core.EmptyDataID
+	if _, err = osi.h.Put(c, []*core.ObjectInfo{file}); err != nil {
+		// TODO: 重名冲突
+	}
+	return err
 }
