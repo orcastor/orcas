@@ -73,7 +73,7 @@ func (hl *listener) OnData(c core.Ctx, h core.Hanlder, dp *dataPkg, sn int, buf 
 
 func (hl *listener) OnFinish(c core.Ctx, h core.Hanlder) error {
 	if hl.action&CRC32_MD5 != 0 {
-		hl.d.MD5 = binary.LittleEndian.Uint64(hl.md5Hash.Sum(nil)[4:12])
+		hl.d.MD5 = binary.BigEndian.Uint64(hl.md5Hash.Sum(nil)[4:12])
 	}
 	return nil
 }
@@ -137,8 +137,10 @@ func (dp *dataPkg) Push(b []byte, d *core.DataInfo) bool {
 	// 记录下来要设置打包数据的数据信息
 	dp.infos = append(dp.infos, d)
 	// 处理对齐
-	if padding := PKG_ALIGN - len(b)%PKG_ALIGN; padding > 0 {
-		dp.buf = append(dp.buf, make([]byte, padding)...)
+	if len(b)%PKG_ALIGN > 0 {
+		if padding := PKG_ALIGN - len(b)%PKG_ALIGN; padding > 0 {
+			dp.buf = append(dp.buf, make([]byte, padding)...)
+		}
 	}
 	return true
 }
