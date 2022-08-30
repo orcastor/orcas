@@ -6,6 +6,7 @@ import (
 	"io/ioutil"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 
@@ -24,9 +25,8 @@ const (
 type Config struct {
 	DataSync bool   // 断电保护策略(Power-off Protection Policy)，强制每次写入数据后刷到磁盘
 	RefLevel int    // 0: OFF / 1: Ref / 2: TryRef+Ref
-	RefThres int    // 秒传大小限制，不限制默认为0
 	PkgThres int    // 打包个数限制，不设置默认50个
-	Conflict int    // 同名冲突后，0: Merge / 1: Throw / 2: Rename
+	Conflict int    // 同名冲突后，0: Merge / 1: Throw / 2: Rename / 3: Skip
 	NameTail string // 重命名尾巴，"-副本" / "{\d}"
 	WiseCmpr bool   // 智能压缩，根据文件类型决定是否压缩
 	ChkPtDir string // 断点续传记录目录，不设置路径默认不开启
@@ -81,6 +81,12 @@ func (osi *OrcasSDKImpl) GetObjectIDByPath(c core.Ctx, pid int64, path string) (
 	return pid, nil
 }
 
+type ObjInfoBySize []*core.ObjectInfo
+
+func (p ObjInfoBySize) Len() int           { return len(p) }
+func (p ObjInfoBySize) Less(i, j int) bool { return p[i].Size < p[j].Size || p[i].Name < p[j].Name }
+func (p ObjInfoBySize) Swap(i, j int)      { p[i], p[j] = p[j], p[i] }
+
 func (osi *OrcasSDKImpl) UploadDirByPID(c core.Ctx, pid int64, path string) error {
 	type Elem struct {
 		pid  int64
@@ -108,7 +114,7 @@ func (osi *OrcasSDKImpl) UploadDirByPID(c core.Ctx, pid int64, path string) erro
 		for _, file := range f {
 			if file.IsDir() {
 				dirs = append(dirs, &core.ObjectInfo{
-					PID:    pid,
+					PID:    q[0].pid,
 					MTime:  file.ModTime().Unix(),
 					Type:   core.OBJ_TYPE_DIR,
 					Status: core.OBJ_NORMAL,
@@ -117,7 +123,7 @@ func (osi *OrcasSDKImpl) UploadDirByPID(c core.Ctx, pid int64, path string) erro
 				continue
 			} else {
 				files = append(files, &core.ObjectInfo{
-					PID:    pid,
+					PID:    q[0].pid,
 					MTime:  file.ModTime().Unix(),
 					Type:   core.OBJ_TYPE_FILE,
 					Status: core.OBJ_NORMAL,
@@ -133,12 +139,10 @@ func (osi *OrcasSDKImpl) UploadDirByPID(c core.Ctx, pid int64, path string) erro
 		if len(dirs) > 0 {
 			// 1. 如果是目录， 直接上传
 			for i := range dirs {
-				dirs[i].PID = q[0].pid
-				dirElems[i].pid = q[0].pid
-				dirElems[i].path = filepath.Join(path, dirs[i].Name)
+				dirElems[i].path = filepath.Join(q[0].path, dirs[i].Name)
 			}
 
-			wg.Add(len(dirs))
+			wg.Add(1)
 			go func() {
 				defer wg.Done()
 				// 上传目录
@@ -158,6 +162,8 @@ func (osi *OrcasSDKImpl) UploadDirByPID(c core.Ctx, pid int64, path string) erro
 		}
 
 		if len(files) > 0 {
+			// 先按文件大小排序一下，尽量让它们可以打包
+			sort.Sort(ObjInfoBySize(files))
 			var di []*core.DataInfo
 			for i := range files {
 				di = append(di, &core.DataInfo{OrigSize: files[i].Size})
@@ -172,6 +178,10 @@ func (osi *OrcasSDKImpl) UploadDirByPID(c core.Ctx, pid int64, path string) erro
 }
 
 func (osi *OrcasSDKImpl) uploadFiles(c core.Ctx, pid int64, path string, files []*core.ObjectInfo, di []*core.DataInfo, level, action int) error {
+	if len(files) <= 0 {
+		return nil
+	}
+
 	var files1, files2 []*core.ObjectInfo
 	var di1, di2 []*core.DataInfo
 
