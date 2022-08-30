@@ -92,6 +92,16 @@ type DataInfo struct {
 	// SnapshotID int64 // 快照版本ID
 }
 
+const EmptyDataID = 4708888888888
+
+func EmptyDataInfo() *DataInfo {
+	return &DataInfo{
+		ID:   EmptyDataID,
+		MD5:  0x8F00B204E9800998,
+		Kind: DATA_NORMAL,
+	}
+}
+
 const (
 	BKT_TBL = "bkt"
 	USR_TBL = "usr"
