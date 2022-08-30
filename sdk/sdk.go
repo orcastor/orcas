@@ -204,7 +204,7 @@ func (osi *OrcasSDKImpl) uploadFiles(c core.Ctx, pid int64, path string, files [
 	case TRY_REF:
 		// 3. 如果要预先秒传的，先读取hdrCrc32，排队检查
 		for i, fi := range files {
-			if err := osi.readFile(c, path, fi,
+			if err := osi.readFile(c, filepath.Join(path, fi.Name),
 				newListener(di[i], HDR_CRC32&^action).Once()); err != nil {
 				// TODO: 处理错误情况
 			}
@@ -231,7 +231,7 @@ func (osi *OrcasSDKImpl) uploadFiles(c core.Ctx, pid int64, path string, files [
 	case REF:
 		// 4. 如果不需要预先秒传或者预先秒传失败的，整个读取crc32和md5以后尝试秒传
 		for i, fi := range files {
-			if err := osi.readFile(c, path, fi,
+			if err := osi.readFile(c, filepath.Join(path, fi.Name),
 				newListener(di[i], (HDR_CRC32|CRC32_MD5)&^action)); err != nil {
 				// TODO: 处理错误情况
 			}
@@ -261,7 +261,7 @@ func (osi *OrcasSDKImpl) uploadFiles(c core.Ctx, pid int64, path string, files [
 	case NO_REF:
 		// 直接上传的对象
 		for i, fi := range files {
-			if err := osi.readFile(c, path, fi,
+			if err := osi.readFile(c, filepath.Join(path, fi.Name),
 				newListener(di[i], (UPLOAD_DATA|HDR_CRC32|CRC32_MD5)&^action)); err != nil {
 				// TODO: 处理错误情况
 			}

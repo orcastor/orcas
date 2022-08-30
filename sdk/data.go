@@ -7,7 +7,6 @@ import (
 	"hash/crc32"
 	"io"
 	"os"
-	"path/filepath"
 
 	"github.com/orcastor/orcas/core"
 )
@@ -78,8 +77,8 @@ func (hl *listener) OnFinish(c core.Ctx, h core.Hanlder) error {
 	return nil
 }
 
-func (osi *OrcasSDKImpl) readFile(c core.Ctx, path string, oi *core.ObjectInfo, l *listener) error {
-	f, err := os.Open(filepath.Join(path, oi.Name))
+func (osi *OrcasSDKImpl) readFile(c core.Ctx, path string, l *listener) error {
+	f, err := os.Open(path)
 	if err != nil {
 		return err
 	}
