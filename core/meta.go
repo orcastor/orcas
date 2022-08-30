@@ -55,22 +55,26 @@ type ObjectInfo struct {
 
 // 数据状态
 const (
-	DATA_NORMAL        = 1 << iota // 正常
-	DATA_MALFORMED                 // 是否损坏
-	DATA_ENC_AES256                // 是否AES加密
-	DATA_ENC_RESERVED              // 是否保留的加密
-	DATA_CMPR_SNAPPY               // 是否snappy压缩
-	DATA_CMPR_ZSTD                 // 是否zstd压缩
-	DATA_CMPR_GZIP                 // 是否gzip压缩
-	DATA_CMPR_RESERVED             // 是否保留的压缩
-	DATA_KIND_IMG                  // 图片类型
-	DATA_KIND_VIDEO                // 视频类型
-	DATA_KIND_DOCS                 // 文档类型
-	DATA_KIND_RESERVED             // 未知类型
+	DATA_NORMAL        = uint32(1 << iota) // 正常
+	DATA_MALFORMED                         // 是否损坏
+	DATA_ENC_AES256                        // 是否AES加密
+	DATA_ENC_RESERVED                      // 是否保留的加密
+	DATA_CMPR_SNAPPY                       // 是否snappy压缩
+	DATA_CMPR_ZSTD                         // 是否zstd压缩
+	DATA_CMPR_GZIP                         // 是否gzip压缩
+	DATA_CMPR_RESERVED                     // 是否保留的压缩
+	DATA_KIND_IMG                          // 图片类型
+	DATA_KIND_VIDEO                        // 视频类型
+	DATA_KIND_AUDIO                        // 音频类型
+	DATA_KIND_ARCHIVE                      // 归档类型
+	DATA_KIND_DOCS                         // 文档类型
+	DATA_KIND_FONT                         // 文档类型
+	DATA_KIND_APP                          // 应用类型
+	DATA_KIND_RESERVED                     // 未知类型
 
 	DATA_ENC_MASK  = DATA_ENC_AES256 | DATA_ENC_RESERVED
 	DATA_CMPR_MASK = DATA_CMPR_SNAPPY | DATA_CMPR_ZSTD | DATA_CMPR_GZIP | DATA_CMPR_RESERVED
-	DATA_KIND_MASK = DATA_KIND_IMG | DATA_KIND_VIDEO | DATA_KIND_DOCS | DATA_KIND_RESERVED
+	DATA_KIND_MASK = DATA_KIND_IMG | DATA_KIND_VIDEO | DATA_KIND_AUDIO | DATA_KIND_ARCHIVE | DATA_KIND_DOCS | DATA_KIND_FONT | DATA_KIND_APP | DATA_KIND_RESERVED
 )
 
 type DataInfo struct {
@@ -79,7 +83,7 @@ type DataInfo struct {
 	OrigSize int64  `borm:"o_size"`    // 数据的原始大小
 	HdrCRC32 uint32 `borm:"hdr_crc32"` // 头部100KB的CRC32校验值
 	CRC32    uint32 `borm:"crc32"`     // 整个对象的CRC32校验值（最原始数据）
-	MD5      uint64 `borm:"md5"`       // 整个对象的MD5值（最原始数据）
+	MD5      string `borm:"md5"`       // 整个对象的MD5值（最原始数据）
 
 	Checksum uint32 `borm:"checksum"` // 整个对象的CRC32校验值（最终数据，用于一致性审计）
 	Kind     uint32 `borm:"kind"`     // 数据状态，正常、损坏、加密、压缩、类型（用于预览等）
@@ -97,7 +101,7 @@ const EmptyDataID = 4708888888888
 func EmptyDataInfo() *DataInfo {
 	return &DataInfo{
 		ID:   EmptyDataID,
-		MD5:  0x8F00B204E9800998,
+		MD5:  "8F00B204E9800998",
 		Kind: DATA_NORMAL,
 	}
 }
@@ -183,10 +187,10 @@ func InitBucketDB(bktID int64) error {
 	db.Exec(`CREATE TABLE data (id BIGINT PRIMARY KEY NOT NULL,
 		size BIGINT NOT NULL,
 		o_size BIGINT NOT NULL,
-		hdr_crc32 UNSIGNED BIG INT NOT NULL,
-		crc32 UNSIGNED BIG INT NOT NULL,
-		md5 UNSIGNED BIG INT NOT NULL,
-		checksum UNSIGNED BIG INT NOT NULL,
+		hdr_crc32 UNSIGNED INT NOT NULL,
+		crc32 UNSIGNED INT NOT NULL,
+		md5 CHAR(16) NOT NULL,
+		checksum UNSIGNED INT NOT NULL,
 		kind INT NOT NULL,
 		pkg_id BIGINT NOT NULL,
 		pkg_off BIGINT NOT NULL
@@ -269,9 +273,9 @@ func (dmo *DefaultMetaOperator) RefData(c Ctx, bktID int64, d []*DataInfo) ([]in
 	var refs []struct {
 		ID       int64  `borm:"max(a.id)"`
 		OrigSize int64  `borm:"b.o_size"`
-		HdrCRC32 uint64 `borm:"b.hdr_crc32"`
-		CRC32    uint64 `borm:"b.crc32"`
-		MD5      uint64 `borm:"b.md5"`
+		HdrCRC32 uint32 `borm:"b.hdr_crc32"`
+		CRC32    uint32 `borm:"b.crc32"`
+		MD5      string `borm:"b.md5"`
 	}
 	// 联表查询
 	_, err = b.Table(db, `data a, `+tbl+` b`, c).Select(&refs, b.Join(`on a.o_size=b.o_size 
@@ -283,7 +287,7 @@ func (dmo *DefaultMetaOperator) RefData(c Ctx, bktID int64, d []*DataInfo) ([]in
 	// 构造辅助查询map
 	aux := make(map[string]int64, 0)
 	for _, ref := range refs {
-		aux[fmt.Sprintf("%d:%d:%d:%d", ref.OrigSize, ref.HdrCRC32, ref.CRC32, ref.MD5)] = ref.ID
+		aux[fmt.Sprintf("%d:%d:%d:%s", ref.OrigSize, ref.HdrCRC32, ref.CRC32, ref.MD5)] = ref.ID
 	}
 
 	res := make([]int64, len(d))
@@ -293,9 +297,9 @@ func (dmo *DefaultMetaOperator) RefData(c Ctx, bktID int64, d []*DataInfo) ([]in
 			continue
 		}
 
-		if id, ok := aux[fmt.Sprintf("%d:%d:%d:%d", x.OrigSize, x.HdrCRC32, x.CRC32, x.MD5)]; ok {
+		if id, ok := aux[fmt.Sprintf("%d:%d:%d:%s", x.OrigSize, x.HdrCRC32, x.CRC32, x.MD5)]; ok {
 			// 全文件的数据没有，说明是预Ref
-			if x.CRC32 == 0 || x.MD5 == 0 {
+			if x.CRC32 == 0 || x.MD5 == "" {
 				res[i] = 1 // 非0代表预Ref成功
 			} else {
 				res[i] = id

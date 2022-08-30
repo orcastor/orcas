@@ -59,7 +59,7 @@ func TestRefData(t *testing.T) {
 			OrigSize: 1,
 			HdrCRC32: 222,
 			CRC32:    333,
-			MD5:      444,
+			MD5:      "444",
 			Kind:     DATA_NORMAL,
 		}}), ShouldBeNil)
 
@@ -92,7 +92,7 @@ func TestRefData(t *testing.T) {
 				OrigSize: 1,
 				HdrCRC32: 0,
 				CRC32:    333,
-				MD5:      444,
+				MD5:      "444",
 			}})
 			So(err, ShouldBeNil)
 			So(len(ids), ShouldEqual, 1)
@@ -130,7 +130,7 @@ func TestRefData(t *testing.T) {
 				OrigSize: 1,
 				HdrCRC32: 222,
 				CRC32:    333,
-				MD5:      444,
+				MD5:      "444",
 			}})
 			So(err, ShouldBeNil)
 			So(len(ids), ShouldEqual, 1)
@@ -140,23 +140,23 @@ func TestRefData(t *testing.T) {
 				OrigSize: 1,
 				HdrCRC32: 222,
 				CRC32:    0,
-				MD5:      444,
+				MD5:      "444",
 			}})
 			So(err, ShouldBeNil)
 			So(len(ids), ShouldEqual, 1)
 			So(ids[0], ShouldNotEqual, id)
 			So(ids[0], ShouldNotEqual, 0)
+			So(ids[0], ShouldEqual, 1)
 
 			ids, err = dmo.RefData(c, bktID, []*DataInfo{&DataInfo{
 				OrigSize: 1,
 				HdrCRC32: 222,
 				CRC32:    333,
-				MD5:      0,
 			}})
 			So(err, ShouldBeNil)
 			So(len(ids), ShouldEqual, 1)
 			So(ids[0], ShouldNotEqual, id)
-			So(ids[0], ShouldNotEqual, 0)
+			So(ids[0], ShouldEqual, 0)
 		})
 
 		Convey("multiple ref", func() {
@@ -164,12 +164,12 @@ func TestRefData(t *testing.T) {
 				OrigSize: 1,
 				HdrCRC32: 222,
 				CRC32:    333,
-				MD5:      444,
+				MD5:      "444",
 			}, &DataInfo{
 				OrigSize: 1,
 				HdrCRC32: 222,
 				CRC32:    333,
-				MD5:      444,
+				MD5:      "444",
 			}})
 			So(err, ShouldBeNil)
 			So(len(ids), ShouldEqual, 2)
@@ -181,12 +181,12 @@ func TestRefData(t *testing.T) {
 				OrigSize: 1,
 				HdrCRC32: 222,
 				CRC32:    333,
-				MD5:      444,
+				MD5:      "444",
 			}, &DataInfo{
 				OrigSize: 1,
 				HdrCRC32: 111,
 				CRC32:    333,
-				MD5:      444,
+				MD5:      "444",
 			}})
 			So(err, ShouldBeNil)
 			So(len(ids), ShouldEqual, 2)
