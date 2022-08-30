@@ -154,7 +154,7 @@ func (hl *listener) OnData(c core.Ctx, h core.Hanlder, dp *dataPkg, buf []byte) 
 
 func (hl *listener) OnFinish(c core.Ctx, h core.Hanlder) (err error) {
 	if hl.action&CRC32_MD5 != 0 {
-		hl.d.MD5 = fmt.Sprintf("%x", hl.md5Hash.Sum(nil)[4:12])
+		hl.d.MD5 = fmt.Sprintf("%X", hl.md5Hash.Sum(nil)[4:12])
 	}
 	if len(hl.cmprBuf) > 0 {
 		if hl.d.ID, err = h.PutData(c, hl.d.ID, hl.sn, hl.cmprBuf); err != nil {
