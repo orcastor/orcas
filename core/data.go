@@ -104,7 +104,7 @@ func (ddo *DefaultDataOperator) Close() {
 // path/<文件名hash的最后三个字节>/hash
 func toFilePath(path string, bcktID, dataID int64, sn int) string {
 	fn := fmt.Sprintf("%d_%d", dataID, sn)
-	hash := fmt.Sprintf("%x", md5.Sum([]byte(fn)))
+	hash := fmt.Sprintf("%X", md5.Sum([]byte(fn)))
 	return filepath.Join(path, fmt.Sprint(bcktID), hash[21:24], hash[8:24], fn)
 }
 
