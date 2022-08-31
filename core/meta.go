@@ -55,26 +55,27 @@ type ObjectInfo struct {
 
 // 数据状态
 const (
-	DATA_NORMAL        = uint32(1 << iota) // 正常
-	DATA_MALFORMED                         // 是否损坏
-	DATA_ENC_AES256                        // 是否AES加密
-	DATA_ENC_RESERVED                      // 是否保留的加密
-	DATA_CMPR_SNAPPY                       // 是否snappy压缩
-	DATA_CMPR_ZSTD                         // 是否zstd压缩
-	DATA_CMPR_GZIP                         // 是否gzip压缩
-	DATA_CMPR_RESERVED                     // 是否保留的压缩
-	DATA_KIND_IMG                          // 图片类型
-	DATA_KIND_VIDEO                        // 视频类型
-	DATA_KIND_AUDIO                        // 音频类型
-	DATA_KIND_ARCHIVE                      // 归档类型
-	DATA_KIND_DOCS                         // 文档类型
-	DATA_KIND_FONT                         // 文档类型
-	DATA_KIND_APP                          // 应用类型
-	DATA_KIND_RESERVED                     // 未知类型
+	DATA_NORMAL         = uint32(1 << iota) // 正常
+	DATA_ENDEC_AES256                       // 是否AES加密
+	DATA_ENDEC_SM4                          // 是否SM4加密
+	DATA_ENDEC_RESERVED                     // 是否保留的加密
+	DATA_CMPR_SNAPPY                        // 是否snappy压缩
+	DATA_CMPR_ZSTD                          // 是否zstd压缩
+	DATA_CMPR_GZIP                          // 是否gzip压缩
+	DATA_CMPR_RESERVED                      // 是否保留的压缩
+	DATA_KIND_IMG                           // 图片类型
+	DATA_KIND_VIDEO                         // 视频类型
+	DATA_KIND_AUDIO                         // 音频类型
+	DATA_KIND_ARCHIVE                       // 归档类型
+	DATA_KIND_DOCS                          // 文档类型
+	DATA_KIND_FONT                          // 文档类型
+	DATA_KIND_APP                           // 应用类型
+	DATA_KIND_RESERVED                      // 未知类型
 
-	DATA_ENC_MASK  = DATA_ENC_AES256 | DATA_ENC_RESERVED
-	DATA_CMPR_MASK = DATA_CMPR_SNAPPY | DATA_CMPR_ZSTD | DATA_CMPR_GZIP | DATA_CMPR_RESERVED
-	DATA_KIND_MASK = DATA_KIND_IMG | DATA_KIND_VIDEO | DATA_KIND_AUDIO | DATA_KIND_ARCHIVE | DATA_KIND_DOCS | DATA_KIND_FONT | DATA_KIND_APP | DATA_KIND_RESERVED
+	DATA_MALFORMED  = 0 // 是否损坏
+	DATA_ENDEC_MASK = DATA_ENDEC_AES256 | DATA_ENDEC_SM4 | DATA_ENDEC_RESERVED
+	DATA_CMPR_MASK  = DATA_CMPR_SNAPPY | DATA_CMPR_ZSTD | DATA_CMPR_GZIP | DATA_CMPR_RESERVED
+	DATA_KIND_MASK  = DATA_KIND_IMG | DATA_KIND_VIDEO | DATA_KIND_AUDIO | DATA_KIND_ARCHIVE | DATA_KIND_DOCS | DATA_KIND_FONT | DATA_KIND_APP | DATA_KIND_RESERVED
 )
 
 type DataInfo struct {
