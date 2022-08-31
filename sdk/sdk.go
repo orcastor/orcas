@@ -28,7 +28,7 @@ type Config struct {
 	Conflict uint32 // 同名冲突后，0: Merge or Cover（默认） / 1: Throw / 2: Rename / 3: Skip
 	NameTail string // 重命名尾巴，"-副本" / "{\d}"
 	WiseCmpr uint32 // 智能压缩，根据文件类型决定是否压缩，选择压缩算法， 取值见core.DATA_CMPR_MASK
-	EndecWay uint32 // 加密方式，取值见core.DATA_ENC_MASK
+	EndecWay uint32 // 加密方式，取值见core.DATA_ENDEC_MASK
 	EndecKey string // 加密KEY
 	ChkPtDir string // 断点续传记录目录，不设置路径默认不开启
 	// BEDecmpr bool   // 后端解压，PS：必须是非加密数据
@@ -37,10 +37,11 @@ type Config struct {
 type OrcasSDK interface {
 	SetConfig(cfg Config)
 
-	GetObjectIDByPath(c core.Ctx, pid int64, rpath string) (id int64, err error)
+	Path2ID(c core.Ctx, pid int64, rpath string) (id int64, err error)
+	ID2Path(c core.Ctx, id int64) (rpath string, err error)
 
 	Upload(c core.Ctx, pid int64, lpath string) error
-	Download(c core.Ctx, pid int64, rpath string) error
+	Download(c core.Ctx, pid int64, lpath string) error
 }
 
 type OrcasSDKImpl struct {
@@ -63,7 +64,7 @@ func (osi *OrcasSDKImpl) SetConfig(cfg Config) {
 	}
 }
 
-func (osi *OrcasSDKImpl) GetObjectIDByPath(c core.Ctx, pid int64, rpath string) (int64, error) {
+func (osi *OrcasSDKImpl) Path2ID(c core.Ctx, pid int64, rpath string) (int64, error) {
 	for _, child := range strings.Split(rpath, PathSeparator) {
 		if child == "" {
 			continue
@@ -74,14 +75,35 @@ func (osi *OrcasSDKImpl) GetObjectIDByPath(c core.Ctx, pid int64, rpath string) 
 			Brief: 2,
 		})
 		if err != nil {
-			return 0, fmt.Errorf("open remote path error(%s): %+v", rpath, err)
+			return 0, fmt.Errorf("open remote path error(path:%s): %+v", rpath, err)
 		}
 		if len(os) <= 0 {
-			return 0, errors.New("open remote path error: " + rpath)
+			return 0, errors.New("remote path does not exist, path:" + rpath)
 		}
 		pid = os[0].ID
 	}
 	return pid, nil
+}
+
+func (osi *OrcasSDKImpl) ID2Path(c core.Ctx, id int64) (rpath string, err error) {
+	for id != core.ROOT_OID {
+		os, err := osi.h.Get(c, []int64{id})
+		if err != nil {
+			return "", fmt.Errorf("open remote object error(id:%d): %+v", id, err)
+		}
+		if len(os) <= 0 {
+			return "", fmt.Errorf("remote object does not exist, id:%d", id)
+		}
+		rpath = filepath.Join(os[0].Name, rpath)
+		id = os[0].PID
+	}
+	return rpath, nil
+}
+
+// 层序遍历
+type elem struct {
+	id   int64
+	path string
 }
 
 func (osi *OrcasSDKImpl) Upload(c core.Ctx, pid int64, lpath string) error {
@@ -134,12 +156,7 @@ func (osi *OrcasSDKImpl) Upload(c core.Ctx, pid int64, lpath string) error {
 		return err
 	}
 
-	// 层序遍历
-	type Elem struct {
-		pid  int64
-		path string
-	}
-	q := []Elem{Elem{pid: dirIDs[0], path: lpath}}
+	q := []elem{elem{id: dirIDs[0], path: lpath}}
 	var emptyFiles []*core.ObjectInfo
 
 	// 遍历本地目录
@@ -162,7 +179,7 @@ func (osi *OrcasSDKImpl) Upload(c core.Ctx, pid int64, lpath string) error {
 		for _, fi := range rawFiles {
 			if fi.IsDir() {
 				dirs = append(dirs, &core.ObjectInfo{
-					PID:    q[0].pid,
+					PID:    q[0].id,
 					MTime:  fi.ModTime().Unix(),
 					Type:   core.OBJ_TYPE_DIR,
 					Status: core.OBJ_NORMAL,
@@ -171,7 +188,7 @@ func (osi *OrcasSDKImpl) Upload(c core.Ctx, pid int64, lpath string) error {
 				continue
 			} else {
 				file := &core.ObjectInfo{
-					PID:    q[0].pid,
+					PID:    q[0].id,
 					MTime:  fi.ModTime().Unix(),
 					Type:   core.OBJ_TYPE_FILE,
 					Status: core.OBJ_NORMAL,
@@ -189,7 +206,7 @@ func (osi *OrcasSDKImpl) Upload(c core.Ctx, pid int64, lpath string) error {
 
 		// 异步获取上一级目录的id
 		wg := &sync.WaitGroup{}
-		dirElems := make([]Elem, len(dirs))
+		dirElems := make([]elem, len(dirs))
 		if len(dirs) > 0 {
 			// 1. 如果是目录， 直接上传
 			wg.Add(1)
@@ -201,12 +218,11 @@ func (osi *OrcasSDKImpl) Upload(c core.Ctx, pid int64, lpath string) error {
 					// TODO: 怎么处理
 					fmt.Println(runtime.Caller(0))
 					fmt.Println(err)
-
 					return
 				}
 				for i, id := range ids {
 					if id > 0 {
-						dirElems[i].pid = id
+						dirElems[i].id = id
 					} else {
 						// TODO: 重名冲突
 					}
@@ -232,6 +248,53 @@ func (osi *OrcasSDKImpl) Upload(c core.Ctx, pid int64, lpath string) error {
 	return nil
 }
 
-func (osi *OrcasSDKImpl) Download(c core.Ctx, pid int64, rpath string) error {
+func (osi *OrcasSDKImpl) Download(c core.Ctx, id int64, lpath string) error {
+	o, err := osi.h.Get(c, []int64{id})
+	if err != nil {
+		return fmt.Errorf("open remote object error(id:%d): %+v", id, err)
+	}
+	if len(o) <= 0 {
+		return fmt.Errorf("remote object does not exist, id:%d", id)
+	}
+
+	if o[0].Type == core.OBJ_TYPE_FILE {
+		return osi.downloadFile(c, o[0], lpath)
+	} else if o[0].Type != core.OBJ_TYPE_DIR {
+		return fmt.Errorf("remote object type error, id:%d type:%d", id, o[0].Type)
+	}
+
+	// 遍历远端目录
+	q := []elem{elem{id: id, path: filepath.Join(lpath, o[0].Name)}}
+	var delim string
+	for len(q) > 0 {
+		os.MkdirAll(q[0].path, 0766)
+		o, _, d, err := osi.h.List(c, q[0].id, core.ListOptions{
+			Delim: delim,
+			Count: 100,
+			Order: "type",
+		})
+		if err != nil {
+			fmt.Println(runtime.Caller(0))
+			fmt.Println(err)
+			return err
+		}
+
+		for _, o := range o {
+			path := filepath.Join(q[0].path, o.Name)
+			switch o.Type {
+			case core.OBJ_TYPE_DIR:
+				q = append(q, elem{id: o.ID, path: path})
+			case core.OBJ_TYPE_FILE:
+				osi.downloadFile(c, o, path)
+			}
+		}
+
+		if len(o) <= 0 {
+			q = q[1:]
+			delim = ""
+		} else {
+			delim = d
+		}
+	}
 	return nil
 }
