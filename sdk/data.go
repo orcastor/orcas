@@ -44,6 +44,7 @@ const (
 const (
 	PKG_ALIGN = 8192
 	PKG_SIZE  = 4194304
+	HDR_SIZE  = 102400
 )
 
 type listener struct {
@@ -70,11 +71,13 @@ func (l *listener) Once() *listener {
 }
 
 func (l *listener) OnData(c core.Ctx, h core.Hanlder, dp *dataPkg, buf []byte) (once bool, err error) {
-	if l.action&HDR_CRC32 != 0 && l.cnt == 0 {
-		if len(buf) > HdrSize {
-			l.d.HdrCRC32 = crc32.ChecksumIEEE(buf[0:HdrSize])
-		} else {
-			l.d.HdrCRC32 = crc32.ChecksumIEEE(buf)
+	if l.cnt == 0 {
+		if l.action&HDR_CRC32 != 0 {
+			if len(buf) > HDR_SIZE {
+				l.d.HdrCRC32 = crc32.ChecksumIEEE(buf[0:HDR_SIZE])
+			} else {
+				l.d.HdrCRC32 = crc32.ChecksumIEEE(buf)
+			}
 		}
 		// 6. 如果开启智能压缩的，检查文件类型确定是否要压缩
 		if l.cfg.WiseCmpr > 0 {
@@ -83,6 +86,9 @@ func (l *listener) OnData(c core.Ctx, h core.Hanlder, dp *dataPkg, buf []byte) (
 				l.d.Kind |= l.cfg.WiseCmpr
 			}
 			// fmt.Println(kind.MIME.Value)
+		}
+		if l.cfg.EndecWay > 0 {
+			l.d.Kind |= l.cfg.EndecWay
 		}
 	}
 	if l.action&CRC32_MD5 != 0 {
@@ -118,10 +124,10 @@ func (l *listener) OnData(c core.Ctx, h core.Hanlder, dp *dataPkg, buf []byte) (
 			}
 		}
 
-		if l.cfg.EndecWay&core.DATA_ENDEC_AES256 != 0 {
+		if l.d.Kind&core.DATA_ENDEC_AES256 != 0 {
 			// AES256加密
 			cmprBuf = aesCbc.AesEncrypt([]byte(l.cfg.EndecKey), nil, cmprBuf)
-		} else if l.cfg.EndecWay&core.DATA_ENDEC_SM4 != 0 {
+		} else if l.d.Kind&core.DATA_ENDEC_SM4 != 0 {
 			// SM4加密
 			var encBuf []byte
 			encBuf, err = sm4.Sm4Cbc([]byte(l.cfg.EndecKey), cmprBuf, true) //sm4Cbc模式pksc7填充加密
@@ -255,7 +261,7 @@ func (osi *OrcasSDKImpl) uploadFiles(c core.Ctx, path string, f []*core.ObjectIn
 
 	// 2. 如果是文件，先看是否要秒传
 	switch level {
-	case TRY_REF:
+	case FAST:
 		// 3. 如果要预先秒传的，先读取hdrCrc32，排队检查
 		for i, fi := range f {
 			if err := osi.readFile(c, filepath.Join(path, fi.Name),
@@ -281,17 +287,17 @@ func (osi *OrcasSDKImpl) uploadFiles(c core.Ctx, path string, f []*core.ObjectIn
 				d2 = append(d2, d[i])
 			}
 		}
-		if err := osi.uploadFiles(c, path, f1, d1, REF, action|HDR_CRC32); err != nil {
+		if err := osi.uploadFiles(c, path, f1, d1, FULL, action|HDR_CRC32); err != nil {
 			fmt.Println(runtime.Caller(0))
 			fmt.Println(err)
 			return err
 		}
-		if err := osi.uploadFiles(c, path, f2, d2, NO_REF, action|HDR_CRC32); err != nil {
+		if err := osi.uploadFiles(c, path, f2, d2, OFF, action|HDR_CRC32); err != nil {
 			fmt.Println(runtime.Caller(0))
 			fmt.Println(err)
 			return err
 		}
-	case REF:
+	case FULL:
 		// 4. 如果不需要预先秒传或者预先秒传失败的，整个读取crc32和md5以后尝试秒传
 		for i, fi := range f {
 			if err := osi.readFile(c, filepath.Join(path, fi.Name),
@@ -324,12 +330,12 @@ func (osi *OrcasSDKImpl) uploadFiles(c core.Ctx, path string, f []*core.ObjectIn
 			return err
 		}
 		// 5. 秒传失败的（包括超过大小或者预先秒传失败），丢到待上传对列
-		if err := osi.uploadFiles(c, path, f2, d2, NO_REF, action|HDR_CRC32|CRC32_MD5); err != nil {
+		if err := osi.uploadFiles(c, path, f2, d2, OFF, action|HDR_CRC32|CRC32_MD5); err != nil {
 			fmt.Println(runtime.Caller(0))
 			fmt.Println(err)
 			return err
 		}
-	case NO_REF:
+	case OFF:
 		// 直接上传的对象
 		for i, fi := range f {
 			if err := osi.readFile(c, filepath.Join(path, fi.Name),

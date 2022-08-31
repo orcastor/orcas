@@ -14,24 +14,23 @@ import (
 )
 
 const PathSeparator = "/"
-const HdrSize = 102400
 
 const (
-	NO_REF = iota
-	REF
-	TRY_REF
+	OFF  = iota // OFF
+	FULL        // 整个文件读取
+	FAST        // 头部检查成功再整个文件读取
 )
 
 type Config struct {
 	DataSync bool   // 断电保护策略(Power-off Protection Policy)，强制每次写入数据后刷到磁盘
-	RefLevel uint32 // 0: OFF / 1: Ref / 2: TryRef+Ref
+	RefLevel uint32 // 0: OFF（默认） / 1: Ref / 2: TryRef+Ref
 	PkgThres uint32 // 打包个数限制，不设置默认50个
-	Conflict uint32 // 同名冲突后，0: Merge or Cover / 1: Throw / 2: Rename / 3: Skip
+	Conflict uint32 // 同名冲突后，0: Merge or Cover（默认） / 1: Throw / 2: Rename / 3: Skip
 	NameTail string // 重命名尾巴，"-副本" / "{\d}"
 	WiseCmpr uint32 // 智能压缩，根据文件类型决定是否压缩，选择压缩算法， 取值见core.DATA_CMPR_MASK
-	ChkPtDir string // 断点续传记录目录，不设置路径默认不开启
 	EndecWay uint32 // 加密方式，取值见core.DATA_ENC_MASK
 	EndecKey string // 加密KEY
+	ChkPtDir string // 断点续传记录目录，不设置路径默认不开启
 	// BEDecmpr bool   // 后端解压，PS：必须是非加密数据
 }
 
