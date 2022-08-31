@@ -57,47 +57,47 @@ type listener struct {
 }
 
 func newListener(d *core.DataInfo, cfg Config, action uint32) *listener {
-	hl := &listener{d: d, cfg: cfg, action: action}
+	l := &listener{d: d, cfg: cfg, action: action}
 	if action&CRC32_MD5 != 0 {
-		hl.md5Hash = md5.New()
+		l.md5Hash = md5.New()
 	}
-	return hl
+	return l
 }
 
-func (hl *listener) Once() *listener {
-	hl.once = true
-	return hl
+func (l *listener) Once() *listener {
+	l.once = true
+	return l
 }
 
-func (hl *listener) OnData(c core.Ctx, h core.Hanlder, dp *dataPkg, buf []byte) (once bool, err error) {
-	if hl.action&HDR_CRC32 != 0 && hl.cnt == 0 {
+func (l *listener) OnData(c core.Ctx, h core.Hanlder, dp *dataPkg, buf []byte) (once bool, err error) {
+	if l.action&HDR_CRC32 != 0 && l.cnt == 0 {
 		if len(buf) > HdrSize {
-			hl.d.HdrCRC32 = crc32.ChecksumIEEE(buf[0:HdrSize])
+			l.d.HdrCRC32 = crc32.ChecksumIEEE(buf[0:HdrSize])
 		} else {
-			hl.d.HdrCRC32 = crc32.ChecksumIEEE(buf)
+			l.d.HdrCRC32 = crc32.ChecksumIEEE(buf)
 		}
 		// 6. 如果开启智能压缩的，检查文件类型确定是否要压缩
-		if hl.cfg.WiseCmpr > 0 {
+		if l.cfg.WiseCmpr > 0 {
 			kind, _ := filetype.Match(buf)
 			if CmprBlacklist[kind.MIME.Value] == 0 {
-				hl.d.Kind |= hl.cfg.WiseCmpr
+				l.d.Kind |= l.cfg.WiseCmpr
 			}
 			// fmt.Println(kind.MIME.Value)
 		}
 	}
-	if hl.action&CRC32_MD5 != 0 {
-		hl.d.CRC32 = crc32.Update(hl.d.CRC32, crc32.IEEETable, buf)
-		hl.md5Hash.Write(buf)
+	if l.action&CRC32_MD5 != 0 {
+		l.d.CRC32 = crc32.Update(l.d.CRC32, crc32.IEEETable, buf)
+		l.md5Hash.Write(buf)
 	}
 	// 上传数据
-	if hl.action&UPLOAD_DATA != 0 {
+	if l.action&UPLOAD_DATA != 0 {
 		cmprBuf := buf
-		if hl.d.Kind&core.DATA_CMPR_MASK != 0 {
-			if hl.d.Kind&core.DATA_CMPR_SNAPPY != 0 {
+		if l.d.Kind&core.DATA_CMPR_MASK != 0 {
+			if l.d.Kind&core.DATA_CMPR_SNAPPY != 0 {
 				cmprBuf = snappy.Encode(nil, buf)
-			} else if hl.d.Kind&core.DATA_CMPR_ZSTD != 0 {
+			} else if l.d.Kind&core.DATA_CMPR_ZSTD != 0 {
 				cmprBuf, err = zstd.Compress(nil, buf)
-			} else if hl.d.Kind&core.DATA_CMPR_GZIP != 0 {
+			} else if l.d.Kind&core.DATA_CMPR_GZIP != 0 {
 				var b bytes.Buffer
 				w := gzip.NewWriter(&b)
 				w.Write(buf)
@@ -112,19 +112,19 @@ func (hl *listener) OnData(c core.Ctx, h core.Hanlder, dp *dataPkg, buf []byte) 
 				fmt.Println(err)
 			}
 			// 如果压缩后更大了，恢复原始的
-			if hl.cnt == 0 && len(buf) < PKG_SIZE && len(cmprBuf) >= len(buf) {
-				hl.d.Kind &= ^core.DATA_CMPR_MASK
+			if l.cnt == 0 && len(buf) < PKG_SIZE && len(cmprBuf) >= len(buf) {
+				l.d.Kind &= ^core.DATA_CMPR_MASK
 				cmprBuf = buf
 			}
 		}
 
-		if hl.cfg.EndecWay&core.DATA_ENDEC_AES256 != 0 {
+		if l.cfg.EndecWay&core.DATA_ENDEC_AES256 != 0 {
 			// AES256加密
-			cmprBuf = aesCbc.AesEncrypt([]byte(hl.cfg.EndecKey), nil, cmprBuf)
-		} else if hl.cfg.EndecWay&core.DATA_ENDEC_SM4 != 0 {
+			cmprBuf = aesCbc.AesEncrypt([]byte(l.cfg.EndecKey), nil, cmprBuf)
+		} else if l.cfg.EndecWay&core.DATA_ENDEC_SM4 != 0 {
 			// SM4加密
 			var encBuf []byte
-			encBuf, err = sm4.Sm4Cbc([]byte(hl.cfg.EndecKey), cmprBuf, true) //sm4Cbc模式pksc7填充加密
+			encBuf, err = sm4.Sm4Cbc([]byte(l.cfg.EndecKey), cmprBuf, true) //sm4Cbc模式pksc7填充加密
 			if err != nil {
 				fmt.Println(runtime.Caller(0))
 				fmt.Println(err)
@@ -134,22 +134,22 @@ func (hl *listener) OnData(c core.Ctx, h core.Hanlder, dp *dataPkg, buf []byte) 
 		}
 
 		toUpload := cmprBuf
-		if hl.cnt == 0 && len(buf) < PKG_SIZE {
+		if l.cnt == 0 && len(buf) < PKG_SIZE {
 			// 7. 检查是否要打包，不要打包的直接上传，打包默认一次不超过50个，大小不超过4MB
-			if dp.Push(toUpload, hl.d) {
+			if dp.Push(toUpload, l.d) {
 				toUpload = nil
 			} else {
 				if err = dp.Flush(c, h); err != nil {
 					fmt.Println(runtime.Caller(0))
 					fmt.Println(err)
-					return hl.once, err
+					return l.once, err
 				}
 			}
 		} else {
-			if hl.d.Kind&core.DATA_CMPR_MASK != 0 {
-				hl.cmprBuf = append(hl.cmprBuf, cmprBuf...)
-				if len(hl.cmprBuf) >= PKG_SIZE {
-					toUpload, hl.cmprBuf = hl.cmprBuf[0:PKG_SIZE], hl.cmprBuf[PKG_SIZE:]
+			if l.d.Kind&core.DATA_CMPR_MASK != 0 {
+				l.cmprBuf = append(l.cmprBuf, cmprBuf...)
+				if len(l.cmprBuf) >= PKG_SIZE {
+					toUpload, l.cmprBuf = l.cmprBuf[0:PKG_SIZE], l.cmprBuf[PKG_SIZE:]
 				} else {
 					toUpload = nil
 				}
@@ -158,39 +158,39 @@ func (hl *listener) OnData(c core.Ctx, h core.Hanlder, dp *dataPkg, buf []byte) 
 
 		if len(toUpload) > 0 {
 			// 需要上传
-			if hl.d.ID, err = h.PutData(c, hl.d.ID, hl.sn, toUpload); err != nil {
+			if l.d.ID, err = h.PutData(c, l.d.ID, l.sn, toUpload); err != nil {
 				fmt.Println(runtime.Caller(0))
 				fmt.Println(err)
-				return hl.once, err
+				return l.once, err
 			}
-			hl.sn++
+			l.sn++
 		}
 
-		if hl.d.Kind&core.DATA_CMPR_MASK != 0 {
-			hl.d.Checksum = crc32.Update(hl.d.Checksum, crc32.IEEETable, cmprBuf)
-			hl.d.Size += int64(len(cmprBuf))
+		if l.d.Kind&core.DATA_CMPR_MASK != 0 {
+			l.d.Checksum = crc32.Update(l.d.Checksum, crc32.IEEETable, cmprBuf)
+			l.d.Size += int64(len(cmprBuf))
 		}
 	}
-	hl.cnt++
-	return hl.once, nil
+	l.cnt++
+	return l.once, nil
 }
 
-func (hl *listener) OnFinish(c core.Ctx, h core.Hanlder) (err error) {
-	if hl.action&CRC32_MD5 != 0 {
-		hl.d.MD5 = fmt.Sprintf("%X", hl.md5Hash.Sum(nil)[4:12])
+func (l *listener) OnFinish(c core.Ctx, h core.Hanlder) (err error) {
+	if l.action&CRC32_MD5 != 0 {
+		l.d.MD5 = fmt.Sprintf("%X", l.md5Hash.Sum(nil)[4:12])
 	}
-	if len(hl.cmprBuf) > 0 {
-		if hl.d.ID, err = h.PutData(c, hl.d.ID, hl.sn, hl.cmprBuf); err != nil {
+	if len(l.cmprBuf) > 0 {
+		if l.d.ID, err = h.PutData(c, l.d.ID, l.sn, l.cmprBuf); err != nil {
 			fmt.Println(runtime.Caller(0))
 			fmt.Println(err)
 			return err
 		}
-		hl.d.Checksum = crc32.Update(hl.d.Checksum, crc32.IEEETable, hl.cmprBuf)
-		hl.d.Size += int64(len(hl.cmprBuf))
+		l.d.Checksum = crc32.Update(l.d.Checksum, crc32.IEEETable, l.cmprBuf)
+		l.d.Size += int64(len(l.cmprBuf))
 	}
-	if hl.d.Kind&core.DATA_CMPR_MASK == 0 {
-		hl.d.Checksum = hl.d.CRC32
-		hl.d.Size = hl.d.OrigSize
+	if l.d.Kind&core.DATA_CMPR_MASK == 0 {
+		l.d.Checksum = l.d.CRC32
+		l.d.Size = l.d.OrigSize
 	}
 	return nil
 }
