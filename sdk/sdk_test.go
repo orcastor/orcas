@@ -24,7 +24,7 @@ func init() {
 	core.InitBucketDB(bktID)
 }
 
-var path = "/home/semaphore/"
+var path = "/home/semaphore/go/"
 
 func TestUpload(t *testing.T) {
 	Convey("normal", t, func() {
