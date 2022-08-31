@@ -29,13 +29,16 @@ type Hanlder interface {
 	PutData(c Ctx, dataID int64, sn int, buf []byte) (int64, error)
 	// 上传完数据以后，再创建元数据
 	PutDataInfo(c Ctx, d []*DataInfo) ([]int64, error)
+	// 获取数据信息
+	GetDataInfo(c Ctx, id int64) (*DataInfo, error)
 	// 只传一个参数说明是sn，传两个参数说明是sn+offset，传三个参数说明是sn+offset+size
-	GetData(c Ctx, o *ObjectInfo, sn int, offset ...int64) ([]byte, error)
+	GetData(c Ctx, id int64, sn int, offset ...int) ([]byte, error)
 	// 用于非文件内容的扫描，只看文件是否存在，大小是否合适
 	FileSize(c Ctx, dataID int64, sn int) (int64, error)
 
 	// 垃圾回收时有数据没有元数据引用的为脏数据（需要留出窗口时间），有元数据没有数据的为损坏数据
 	Put(c Ctx, o []*ObjectInfo) ([]int64, error)
+	Get(c Ctx, ids []int64) ([]*ObjectInfo, error)
 	List(c Ctx, pid int64, opt ListOptions) (o []*ObjectInfo, cnt int64, delim string, err error)
 
 	Rename(c Ctx, id int64, name string) error
@@ -111,15 +114,19 @@ func (ch *RWHanlder) PutDataInfo(c Ctx, d []*DataInfo) (ids []int64, err error) 
 	return ids, ch.mo.PutData(c, ch.bktID, d)
 }
 
+func (ch *RWHanlder) GetDataInfo(c Ctx, id int64) (*DataInfo, error) {
+	return ch.mo.GetData(c, ch.bktID, id)
+}
+
 // 只传一个参数说明是sn，传两个参数说明是sn+offset，传三个参数说明是sn+offset+size
-func (ch *RWHanlder) GetData(c Ctx, o *ObjectInfo, sn int, offset ...int64) ([]byte, error) {
+func (ch *RWHanlder) GetData(c Ctx, id int64, sn int, offset ...int) ([]byte, error) {
 	switch len(offset) {
 	case 0:
-		return ch.do.Read(c, ch.bktID, o.DataID, sn)
+		return ch.do.Read(c, ch.bktID, id, sn)
 	case 1:
-		return ch.do.ReadBytes(c, ch.bktID, o.DataID, sn, offset[0], -1)
+		return ch.do.ReadBytes(c, ch.bktID, id, sn, offset[0], -1)
 	}
-	return ch.do.ReadBytes(c, ch.bktID, o.DataID, sn, offset[0], offset[1])
+	return ch.do.ReadBytes(c, ch.bktID, id, sn, offset[0], offset[1])
 }
 
 // 用于非文件内容的扫描，只看文件是否存在，大小是否合适
@@ -141,6 +148,10 @@ func (ch *RWHanlder) Put(c Ctx, o []*ObjectInfo) ([]int64, error) {
 		}
 	}
 	return ch.mo.PutObj(c, ch.bktID, o)
+}
+
+func (ch *RWHanlder) Get(c Ctx, ids []int64) ([]*ObjectInfo, error) {
+	return ch.mo.GetObj(c, ch.bktID, ids)
 }
 
 func (ch *RWHanlder) List(c Ctx, pid int64, opt ListOptions) ([]*ObjectInfo, int64, string, error) {
