@@ -45,12 +45,12 @@ type OrcasSDK interface {
 }
 
 type OrcasSDKImpl struct {
-	h   core.Hanlder
+	h   core.Handler
 	cfg Config
 	dp  *dataPkg
 }
 
-func New(h core.Hanlder) OrcasSDK {
+func New(h core.Handler) OrcasSDK {
 	return &OrcasSDKImpl{h: h, dp: newDataPkg(50)}
 }
 
