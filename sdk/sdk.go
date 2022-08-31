@@ -47,11 +47,11 @@ type OrcasSDK interface {
 type OrcasSDKImpl struct {
 	h   core.Handler
 	cfg Config
-	dp  *dataPkg
+	dp  *dataPkger
 }
 
 func New(h core.Handler) OrcasSDK {
-	return &OrcasSDKImpl{h: h, dp: newDataPkg(50)}
+	return &OrcasSDKImpl{h: h, dp: newDataPkger(50)}
 }
 
 func (osi *OrcasSDKImpl) SetConfig(cfg Config) {

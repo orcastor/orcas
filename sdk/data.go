@@ -99,7 +99,7 @@ func (l *listener) encode(src []byte) (dst []byte, err error) {
 	return
 }
 
-func (l *listener) OnData(c core.Ctx, h core.Hanlder, dp *dataPkg, buf []byte) (once bool, err error) {
+func (l *listener) OnData(c core.Ctx, h core.Handler, dp *dataPkger, buf []byte) (once bool, err error) {
 	if l.cnt == 0 {
 		if l.action&HDR_CRC32 != 0 {
 			if len(buf) > HDR_SIZE {
@@ -154,40 +154,42 @@ func (l *listener) OnData(c core.Ctx, h core.Hanlder, dp *dataPkg, buf []byte) (
 			}
 		}
 
-		// 加密
-		encodedBuf, err := l.encode(cmprBuf)
-		if err != nil {
-			return l.once, err
-		}
+		if cmprBuf != nil {
+			// 加密
+			encodedBuf, err := l.encode(cmprBuf)
+			if err != nil {
+				return l.once, err
+			}
 
-		if l.d.Kind&core.DATA_CMPR_MASK != 0 || l.d.Kind&core.DATA_ENDEC_MASK != 0 {
-			l.d.Checksum = crc32.Update(l.d.Checksum, crc32.IEEETable, encodedBuf)
-			l.d.Size += int64(len(encodedBuf))
-		}
+			if l.d.Kind&core.DATA_CMPR_MASK != 0 || l.d.Kind&core.DATA_ENDEC_MASK != 0 {
+				l.d.Checksum = crc32.Update(l.d.Checksum, crc32.IEEETable, encodedBuf)
+				l.d.Size += int64(len(encodedBuf))
+			}
 
-		// 需要上传
-		if l.d.OrigSize < PKG_SIZE {
-			// 7. 检查是否要打包
-			if ok, err := dp.Push(c, h, encodedBuf, l.d); err == nil {
-				if ok {
-					encodedBuf = nil // 打包成功，不再上传
+			// 需要上传
+			if l.d.OrigSize < PKG_SIZE {
+				// 7. 检查是否要打包
+				if ok, err := dp.Push(c, h, encodedBuf, l.d); err == nil {
+					if ok {
+						encodedBuf = nil // 打包成功，不再上传
+					}
+				} else {
+					return l.once, err
 				}
-			} else {
-				return l.once, err
 			}
-		}
 
-		if encodedBuf != nil {
-			if l.d.ID, err = h.PutData(c, l.d.ID, l.sn, encodedBuf); err != nil {
-				return l.once, err
+			if encodedBuf != nil {
+				if l.d.ID, err = h.PutData(c, l.d.ID, l.sn, encodedBuf); err != nil {
+					return l.once, err
+				}
+				l.sn++
 			}
-			l.sn++
 		}
 	}
 	return l.once, nil
 }
 
-func (l *listener) OnFinish(c core.Ctx, h core.Hanlder) error {
+func (l *listener) OnFinish(c core.Ctx, h core.Handler) error {
 	if l.action&CRC32_MD5 != 0 {
 		l.d.MD5 = fmt.Sprintf("%X", l.md5Hash.Sum(nil)[4:12])
 	}
@@ -376,6 +378,62 @@ func (osi *OrcasSDKImpl) uploadFiles(c core.Ctx, path string, f []*core.ObjectIn
 	return nil
 }
 
+type dataReader struct {
+	c                core.Ctx
+	h                core.Handler
+	buf              bytes.Buffer
+	dataID           int64
+	offset, size, sn int
+	getSize, remain  int
+	kind             uint32
+	endecKey         string
+}
+
+func newDataReader(c core.Ctx, h core.Handler, d *core.DataInfo, endecKey string) *dataReader {
+	dr := &dataReader{c: c, h: h, remain: int(d.Size), kind: d.Kind, endecKey: endecKey}
+	if d.PkgID > 0 {
+		dr.dataID = d.PkgID
+		dr.offset = d.PkgOffset
+		dr.getSize = int(d.Size)
+	} else {
+		dr.dataID = d.ID
+		dr.getSize = -1
+	}
+	return dr
+}
+
+func (dr *dataReader) Read(p []byte) (n int, err error) {
+	if len(p) <= dr.buf.Len() {
+		return dr.buf.Read(p)
+	}
+	if dr.remain > 0 {
+		buf, err := dr.h.GetData(dr.c, dr.dataID, dr.sn, dr.offset, dr.getSize)
+		if err != nil {
+			fmt.Println(runtime.Caller(0))
+			fmt.Println(err)
+			return 0, err
+		}
+		dr.remain -= len(buf)
+		dr.sn++
+
+		decodeBuf := buf
+		if dr.kind&core.DATA_ENDEC_AES256 != 0 {
+			// AES256解密
+			decodeBuf, err = aes256.Decrypt(dr.endecKey, buf)
+		} else if dr.kind&core.DATA_ENDEC_SM4 != 0 {
+			// SM4解密
+			decodeBuf, err = sm4.Sm4Cbc([]byte(dr.endecKey), buf, false) //sm4Cbc模式pksc7填充加密
+		}
+		if err != nil {
+			fmt.Println(runtime.Caller(0))
+			fmt.Println(err)
+			decodeBuf = buf
+		}
+		dr.buf.Write(decodeBuf)
+	}
+	return dr.buf.Read(p)
+}
+
 func (osi *OrcasSDKImpl) downloadFile(c core.Ctx, o *core.ObjectInfo, lpath string) (err error) {
 	if o.Type != core.OBJ_TYPE_FILE {
 		return nil
@@ -409,14 +467,6 @@ func (osi *OrcasSDKImpl) downloadFile(c core.Ctx, o *core.ObjectInfo, lpath stri
 		}
 	}
 
-	offset, getSize := 0, -1
-	if d.PkgID > 0 {
-		dataID = d.PkgID
-		offset = d.PkgOffset
-		getSize = int(d.Size)
-	}
-	remain := int(d.Size)
-
 	os.MkdirAll(filepath.Dir(lpath), 0766)
 
 	f, err := os.OpenFile(lpath, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0666)
@@ -440,58 +490,32 @@ func (osi *OrcasSDKImpl) downloadFile(c core.Ctx, o *core.ObjectInfo, lpath stri
 		decmpr = &DummyArchiver{}
 	}
 
-	sn := 0
-	for remain > 0 {
-		buf, err := osi.h.GetData(c, dataID, sn, offset, getSize)
-		if err != nil {
-			fmt.Println(runtime.Caller(0))
-			fmt.Println(err)
-			return err
-		}
-		remain -= len(buf)
-		sn++
-
-		decodeBuf := buf
-		if d.Kind&core.DATA_ENDEC_AES256 != 0 {
-			// AES256解密
-			decodeBuf, err = aes256.Decrypt(osi.cfg.EndecKey, buf)
-		} else if d.Kind&core.DATA_ENDEC_SM4 != 0 {
-			// SM4解密
-			decodeBuf, err = sm4.Sm4Cbc([]byte(osi.cfg.EndecKey), buf, false) //sm4Cbc模式pksc7填充加密
-		}
-		if err != nil {
-			fmt.Println(runtime.Caller(0))
-			fmt.Println(err)
-			decodeBuf = buf
-		}
-
-		if err = decmpr.Decompress(bytes.NewBuffer(decodeBuf), b); err != nil {
-			fmt.Println(runtime.Caller(0))
-			fmt.Println(err)
-			return err
-		}
+	if err = decmpr.Decompress(newDataReader(c, osi.h, d, osi.cfg.EndecKey), b); err != nil {
+		fmt.Println(runtime.Caller(0))
+		fmt.Println(err)
+		return err
 	}
 	return nil
 }
 
-type dataPkg struct {
+type dataPkger struct {
 	buf   *bytes.Buffer
 	infos []*core.DataInfo
 	thres uint32
 }
 
-func newDataPkg(thres uint32) *dataPkg {
-	return &dataPkg{
+func newDataPkger(thres uint32) *dataPkger {
+	return &dataPkger{
 		buf:   bytes.NewBuffer(make([]byte, 0, PKG_SIZE)),
 		thres: thres,
 	}
 }
 
-func (dp *dataPkg) SetThres(thres uint32) {
+func (dp *dataPkger) SetThres(thres uint32) {
 	dp.thres = thres
 }
 
-func (dp *dataPkg) Push(c core.Ctx, h core.Hanlder, b []byte, d *core.DataInfo) (bool, error) {
+func (dp *dataPkger) Push(c core.Ctx, h core.Handler, b []byte, d *core.DataInfo) (bool, error) {
 	offset := dp.buf.Len()
 	if offset+ /*offset%PKG_ALIGN+*/ len(b) > PKG_SIZE || len(dp.infos) >= int(dp.thres) || len(b) >= PKG_SIZE {
 		return false, dp.Flush(c, h)
@@ -512,7 +536,7 @@ func (dp *dataPkg) Push(c core.Ctx, h core.Hanlder, b []byte, d *core.DataInfo) 
 	return true, nil
 }
 
-func (dp *dataPkg) Flush(c core.Ctx, h core.Hanlder) error {
+func (dp *dataPkger) Flush(c core.Ctx, h core.Handler) error {
 	if dp.buf.Len() <= 0 {
 		return nil
 	}
