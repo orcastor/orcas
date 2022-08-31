@@ -7,7 +7,6 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"sort"
 	"strings"
 	"sync"
 
@@ -31,7 +30,8 @@ type Config struct {
 	NameTail string // 重命名尾巴，"-副本" / "{\d}"
 	WiseCmpr uint32 // 智能压缩，根据文件类型决定是否压缩，选择压缩算法， 取值见core.DATA_CMPR_MASK
 	ChkPtDir string // 断点续传记录目录，不设置路径默认不开启
-	EncKey   string // 加密KEY
+	EndecWay uint32 // 加密方式，取值见core.DATA_ENC_MASK
+	EndecKey string // 加密KEY
 	// BEDecmpr bool   // 后端解压，PS：必须是非加密数据
 }
 
@@ -85,12 +85,6 @@ func (osi *OrcasSDKImpl) GetObjectIDByPath(c core.Ctx, pid int64, rpath string) 
 	return pid, nil
 }
 
-type ObjInfoBySize []*core.ObjectInfo
-
-func (p ObjInfoBySize) Len() int           { return len(p) }
-func (p ObjInfoBySize) Less(i, j int) bool { return p[i].Size < p[j].Size || p[i].Name < p[j].Name }
-func (p ObjInfoBySize) Swap(i, j int)      { p[i], p[j] = p[j], p[i] }
-
 func (osi *OrcasSDKImpl) Upload(c core.Ctx, pid int64, lpath string) error {
 	var o *core.ObjectInfo
 	f, err := os.Open(lpath)
@@ -114,9 +108,12 @@ func (osi *OrcasSDKImpl) Upload(c core.Ctx, pid int64, lpath string) error {
 	}
 	if !fi.IsDir() {
 		if o.Size > 0 {
-			return osi.uploadFiles(c, pid, filepath.Dir(lpath), []*core.ObjectInfo{o}, []*core.DataInfo{&core.DataInfo{
-				OrigSize: fi.Size(),
-			}}, osi.cfg.RefLevel, 0)
+			return osi.uploadFiles(c,
+				filepath.Dir(lpath),
+				[]*core.ObjectInfo{o},
+				[]*core.DataInfo{&core.DataInfo{
+					OrigSize: fi.Size(),
+				}}, osi.cfg.RefLevel, 0)
 		}
 
 		o.DataID = core.EmptyDataID
@@ -148,7 +145,7 @@ func (osi *OrcasSDKImpl) Upload(c core.Ctx, pid int64, lpath string) error {
 
 	// 遍历本地目录
 	for len(q) > 0 {
-		dirFiles, err := ioutil.ReadDir(q[0].path)
+		rawFiles, err := ioutil.ReadDir(q[0].path)
 		if err != nil {
 			// TODO
 			fmt.Println(runtime.Caller(0))
@@ -156,15 +153,14 @@ func (osi *OrcasSDKImpl) Upload(c core.Ctx, pid int64, lpath string) error {
 			return err
 		}
 
-		if len(dirFiles) <= 0 {
+		if len(rawFiles) <= 0 {
 			// 目录为空，直接弹出
 			q = q[1:]
 			continue
 		}
 
-		var dirs []*core.ObjectInfo
-		var files []*core.ObjectInfo
-		for _, fi := range dirFiles {
+		var dirs, files []*core.ObjectInfo
+		for _, fi := range rawFiles {
 			if fi.IsDir() {
 				dirs = append(dirs, &core.ObjectInfo{
 					PID:    q[0].pid,
@@ -221,17 +217,7 @@ func (osi *OrcasSDKImpl) Upload(c core.Ctx, pid int64, lpath string) error {
 		}
 
 		if len(files) > 0 {
-			// 先按文件大小排序一下，尽量让它们可以打包
-			sort.Sort(ObjInfoBySize(files))
-
-			di := make([]*core.DataInfo, len(files))
-			for i := range files {
-				di[i] = &core.DataInfo{
-					Kind:     core.DATA_NORMAL,
-					OrigSize: files[i].Size,
-				}
-			}
-			osi.uploadFiles(c, q[0].pid, q[0].path, files, di, osi.cfg.RefLevel, 0)
+			osi.uploadFiles(c, q[0].path, files, nil, osi.cfg.RefLevel, 0)
 		}
 
 		wg.Wait()

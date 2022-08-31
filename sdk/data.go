@@ -11,11 +11,14 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 
 	"github.com/DataDog/zstd"
+	"github.com/chentaihan/aesCbc"
 	"github.com/golang/snappy"
 	"github.com/h2non/filetype"
 	"github.com/orcastor/orcas/core"
+	"github.com/tjfoc/gmsm/sm4"
 )
 
 var CmprBlacklist = map[string]int{
@@ -44,16 +47,17 @@ const (
 )
 
 type listener struct {
-	d            *core.DataInfo
-	action, cmpr uint32
-	md5Hash      hash.Hash
-	once         bool
-	sn, cnt      int
-	cmprBuf      []byte
+	d       *core.DataInfo
+	cfg     Config
+	action  uint32
+	md5Hash hash.Hash
+	once    bool
+	sn, cnt int
+	cmprBuf []byte
 }
 
-func newListener(d *core.DataInfo, action, cmpr uint32) *listener {
-	hl := &listener{d: d, action: action, cmpr: cmpr}
+func newListener(d *core.DataInfo, cfg Config, action uint32) *listener {
+	hl := &listener{d: d, cfg: cfg, action: action}
 	if action&CRC32_MD5 != 0 {
 		hl.md5Hash = md5.New()
 	}
@@ -73,11 +77,13 @@ func (hl *listener) OnData(c core.Ctx, h core.Hanlder, dp *dataPkg, buf []byte) 
 			hl.d.HdrCRC32 = crc32.ChecksumIEEE(buf)
 		}
 		// 6. 如果开启智能压缩的，检查文件类型确定是否要压缩
-		kind, _ := filetype.Match(buf)
-		if CmprBlacklist[kind.MIME.Value] == 0 {
-			hl.d.Kind |= hl.cmpr
+		if hl.cfg.WiseCmpr > 0 {
+			kind, _ := filetype.Match(buf)
+			if CmprBlacklist[kind.MIME.Value] == 0 {
+				hl.d.Kind |= hl.cfg.WiseCmpr
+			}
+			// fmt.Println(kind.MIME.Value)
 		}
-		// fmt.Println(kind.MIME.Value)
 	}
 	if hl.action&CRC32_MD5 != 0 {
 		hl.d.CRC32 = crc32.Update(hl.d.CRC32, crc32.IEEETable, buf)
@@ -102,11 +108,28 @@ func (hl *listener) OnData(c core.Ctx, h core.Hanlder, dp *dataPkg, buf []byte) 
 			}
 			if err != nil {
 				// FIXME：压缩失败就用原始的？
+				fmt.Println(runtime.Caller(0))
+				fmt.Println(err)
 			}
 			// 如果压缩后更大了，恢复原始的
 			if hl.cnt == 0 && len(buf) < PKG_SIZE && len(cmprBuf) >= len(buf) {
 				hl.d.Kind &= ^core.DATA_CMPR_MASK
 				cmprBuf = buf
+			}
+		}
+
+		if hl.cfg.EndecWay&core.DATA_ENDEC_AES256 != 0 {
+			// AES256加密
+			cmprBuf = aesCbc.AesEncrypt([]byte(hl.cfg.EndecKey), nil, cmprBuf)
+		} else if hl.cfg.EndecWay&core.DATA_ENDEC_SM4 != 0 {
+			// SM4加密
+			var encBuf []byte
+			encBuf, err = sm4.Sm4Cbc([]byte(hl.cfg.EndecKey), cmprBuf, true) //sm4Cbc模式pksc7填充加密
+			if err != nil {
+				fmt.Println(runtime.Caller(0))
+				fmt.Println(err)
+			} else {
+				cmprBuf = encBuf
 			}
 		}
 
@@ -204,28 +227,46 @@ func (osi *OrcasSDKImpl) readFile(c core.Ctx, path string, l *listener) error {
 	return err
 }
 
-func (osi *OrcasSDKImpl) uploadFiles(c core.Ctx, pid int64, path string, files []*core.ObjectInfo, di []*core.DataInfo, level, action uint32) error {
-	if len(files) <= 0 {
+type SortBySize []*core.ObjectInfo
+
+func (p SortBySize) Len() int           { return len(p) }
+func (p SortBySize) Less(i, j int) bool { return p[i].Size < p[j].Size || p[i].Name < p[j].Name }
+func (p SortBySize) Swap(i, j int)      { p[i], p[j] = p[j], p[i] }
+
+func (osi *OrcasSDKImpl) uploadFiles(c core.Ctx, path string, f []*core.ObjectInfo, d []*core.DataInfo, level, action uint32) error {
+	if len(f) <= 0 {
 		return nil
 	}
 
-	var files1, files2 []*core.ObjectInfo
-	var di1, di2 []*core.DataInfo
+	if len(d) <= 0 {
+		// 先按文件大小排序一下，尽量让它们可以打包
+		sort.Sort(SortBySize(f))
+		d = make([]*core.DataInfo, len(f))
+		for i := range f {
+			d[i] = &core.DataInfo{
+				Kind:     core.DATA_NORMAL,
+				OrigSize: f[i].Size,
+			}
+		}
+	}
+
+	var f1, f2 []*core.ObjectInfo
+	var d1, d2 []*core.DataInfo
 
 	// 2. 如果是文件，先看是否要秒传
 	switch level {
 	case TRY_REF:
 		// 3. 如果要预先秒传的，先读取hdrCrc32，排队检查
-		for i, fi := range files {
+		for i, fi := range f {
 			if err := osi.readFile(c, filepath.Join(path, fi.Name),
-				newListener(di[i], HDR_CRC32&^action, osi.cfg.WiseCmpr).Once()); err != nil {
+				newListener(d[i], osi.cfg, HDR_CRC32&^action).Once()); err != nil {
 				// TODO: 处理错误情况
 				fmt.Println(runtime.Caller(0))
 				fmt.Println(err)
 
 			}
 		}
-		ids, err := osi.h.Ref(c, di)
+		ids, err := osi.h.Ref(c, d)
 		if err != nil {
 			// TODO: 处理错误情况
 			fmt.Println(runtime.Caller(0))
@@ -233,35 +274,35 @@ func (osi *OrcasSDKImpl) uploadFiles(c core.Ctx, pid int64, path string, files [
 		}
 		for i, id := range ids {
 			if id > 0 {
-				files1 = append(files1, files[i])
-				di1 = append(di1, di[i])
+				f1 = append(f1, f[i])
+				d1 = append(d1, d[i])
 			} else {
-				files2 = append(files2, files[i])
-				di2 = append(di2, di[i])
+				f2 = append(f2, f[i])
+				d2 = append(d2, d[i])
 			}
 		}
-		if err := osi.uploadFiles(c, pid, path, files1, di1, REF, action|HDR_CRC32); err != nil {
+		if err := osi.uploadFiles(c, path, f1, d1, REF, action|HDR_CRC32); err != nil {
 			fmt.Println(runtime.Caller(0))
 			fmt.Println(err)
 			return err
 		}
-		if err := osi.uploadFiles(c, pid, path, files2, di2, NO_REF, action|HDR_CRC32); err != nil {
+		if err := osi.uploadFiles(c, path, f2, d2, NO_REF, action|HDR_CRC32); err != nil {
 			fmt.Println(runtime.Caller(0))
 			fmt.Println(err)
 			return err
 		}
 	case REF:
 		// 4. 如果不需要预先秒传或者预先秒传失败的，整个读取crc32和md5以后尝试秒传
-		for i, fi := range files {
+		for i, fi := range f {
 			if err := osi.readFile(c, filepath.Join(path, fi.Name),
-				newListener(di[i], (HDR_CRC32|CRC32_MD5)&^action, osi.cfg.WiseCmpr)); err != nil {
+				newListener(d[i], osi.cfg, (HDR_CRC32|CRC32_MD5)&^action)); err != nil {
 				// TODO: 处理错误情况
 				fmt.Println(runtime.Caller(0))
 				fmt.Println(err)
 
 			}
 		}
-		ids, err := osi.h.Ref(c, di)
+		ids, err := osi.h.Ref(c, d)
 		if err != nil {
 			fmt.Println(runtime.Caller(0))
 			fmt.Println(err)
@@ -270,30 +311,29 @@ func (osi *OrcasSDKImpl) uploadFiles(c core.Ctx, pid int64, path string, files [
 		// 设置DataID，如果是有的，说明秒传成功，不再需要上传数据了
 		for i, id := range ids {
 			if id > 0 {
-				files[i].DataID = id
-				files1 = append(files1, files[i])
+				f[i].DataID = id
 			} else {
-				files2 = append(files2, files[i])
-				di2 = append(di2, di[i])
+				f2 = append(f2, f[i])
+				d2 = append(d2, d[i])
 			}
 		}
-		if _, err := osi.h.Put(c, files1); err != nil {
+		if _, err := osi.h.Put(c, f); err != nil {
 			// TODO: 重名冲突
 			fmt.Println(runtime.Caller(0))
 			fmt.Println(err)
 			return err
 		}
 		// 5. 秒传失败的（包括超过大小或者预先秒传失败），丢到待上传对列
-		if err := osi.uploadFiles(c, pid, path, files2, di2, NO_REF, action|HDR_CRC32|CRC32_MD5); err != nil {
+		if err := osi.uploadFiles(c, path, f2, d2, NO_REF, action|HDR_CRC32|CRC32_MD5); err != nil {
 			fmt.Println(runtime.Caller(0))
 			fmt.Println(err)
 			return err
 		}
 	case NO_REF:
 		// 直接上传的对象
-		for i, fi := range files {
+		for i, fi := range f {
 			if err := osi.readFile(c, filepath.Join(path, fi.Name),
-				newListener(di[i], (UPLOAD_DATA|HDR_CRC32|CRC32_MD5)&^action, osi.cfg.WiseCmpr)); err != nil {
+				newListener(d[i], osi.cfg, (UPLOAD_DATA|HDR_CRC32|CRC32_MD5)&^action)); err != nil {
 				// TODO: 处理错误情况
 				fmt.Println(runtime.Caller(0))
 				fmt.Println(err)
@@ -306,7 +346,7 @@ func (osi *OrcasSDKImpl) uploadFiles(c core.Ctx, pid int64, path string, files [
 			fmt.Println(err)
 			return err
 		}
-		ids, err := osi.h.PutDataInfo(c, di)
+		ids, err := osi.h.PutDataInfo(c, d)
 		if err != nil {
 			fmt.Println(runtime.Caller(0))
 			fmt.Println(err)
@@ -314,11 +354,12 @@ func (osi *OrcasSDKImpl) uploadFiles(c core.Ctx, pid int64, path string, files [
 		}
 		// 处理打包上传的对象
 		for i, id := range ids {
-			if files[i].DataID != id {
-				files[i].DataID = id
+			if f[i].DataID != id {
+				f[i].DataID = id
 			}
+			f = append(f, f[i])
 		}
-		if _, err := osi.h.Put(c, files); err != nil {
+		if _, err := osi.h.Put(c, f); err != nil {
 			// TODO: 重名冲突
 			fmt.Println(runtime.Caller(0))
 			fmt.Println(err)
@@ -384,6 +425,6 @@ func (dp *dataPkg) Flush(c core.Ctx, h core.Hanlder) error {
 			dp.infos[i].PkgID = pkgID
 		}
 	}
-	dp.buf, dp.infos = make([]byte, 0, PKG_SIZE), []*core.DataInfo{}
+	dp.buf, dp.infos = make([]byte, 0, PKG_SIZE), nil
 	return nil
 }
