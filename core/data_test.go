@@ -94,13 +94,13 @@ func TestReadBytes(t *testing.T) {
 		})
 
 		Convey("size - valid x with valid size", func() {
-			bs, err := ddo.ReadBytes(c, bktID, key, 0, 2, int64(len(value)-2))
+			bs, err := ddo.ReadBytes(c, bktID, key, 0, 2, len(value)-2)
 			So(err, ShouldBeNil)
 			So(bs, ShouldResemble, value[2:])
 		})
 
 		Convey("size - valid x with bigger size", func() {
-			bs, err := ddo.ReadBytes(c, bktID, key, 0, 2, int64(len(value)*2))
+			bs, err := ddo.ReadBytes(c, bktID, key, 0, 2, len(value)*2)
 			So(err, ShouldBeNil)
 			So(bs, ShouldResemble, value[2:])
 		})

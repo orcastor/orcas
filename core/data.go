@@ -26,7 +26,7 @@ type DataOperator interface {
 	Flush(c Ctx, bktID, dataID int64) error
 
 	Read(c Ctx, bktID, dataID int64, sn int) ([]byte, error)
-	ReadBytes(c Ctx, bktID, dataID int64, sn int, offset, size int64) ([]byte, error)
+	ReadBytes(c Ctx, bktID, dataID int64, sn, offset, size int) ([]byte, error)
 
 	FileSize(c Ctx, bktID, dataID int64, sn int) (int64, error)
 }
@@ -149,7 +149,11 @@ func (ddo *DefaultDataOperator) Read(c Ctx, bktID, dataID int64, sn int) ([]byte
 	return ioutil.ReadFile(toFilePath(Conf().Path, bktID, dataID, sn))
 }
 
-func (ddo *DefaultDataOperator) ReadBytes(c Ctx, bktID, dataID int64, sn int, offset, size int64) ([]byte, error) {
+func (ddo *DefaultDataOperator) ReadBytes(c Ctx, bktID, dataID int64, sn, offset, size int) ([]byte, error) {
+	if offset == 0 && size == -1 {
+		return ddo.Read(c, bktID, dataID, sn)
+	}
+
 	if err := ddo.acm.CheckPermission(c, R, bktID); err != nil {
 		return nil, err
 	}
@@ -161,16 +165,16 @@ func (ddo *DefaultDataOperator) ReadBytes(c Ctx, bktID, dataID int64, sn int, of
 	defer f.Close()
 
 	if offset > 0 {
-		f.Seek(offset, io.SeekStart)
+		f.Seek(int64(offset), io.SeekStart)
 	}
 
 	var buf []byte
 	if size == -1 {
 		fi, err := f.Stat()
-		if err != nil || fi.Size() < offset {
+		if err != nil || fi.Size() < int64(offset) {
 			return nil, err
 		}
-		buf = make([]byte, fi.Size()-offset)
+		buf = make([]byte, fi.Size()-int64(offset))
 	} else {
 		buf = make([]byte, size)
 	}
