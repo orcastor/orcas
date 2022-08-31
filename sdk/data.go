@@ -1,8 +1,8 @@
 package sdk
 
 import (
+	"bufio"
 	"bytes"
-	"compress/gzip"
 	"crypto/md5"
 	"fmt"
 	"hash"
@@ -13,10 +13,9 @@ import (
 	"runtime"
 	"sort"
 
-	"github.com/DataDog/zstd"
-	"github.com/chentaihan/aesCbc"
-	"github.com/golang/snappy"
 	"github.com/h2non/filetype"
+	"github.com/mholt/archiver/v3"
+	"github.com/mkmueller/aes256"
 	"github.com/orcastor/orcas/core"
 	"github.com/tjfoc/gmsm/sm4"
 )
@@ -33,6 +32,18 @@ var CmprBlacklist = map[string]int{
 	"application/x-7z-compressed": 1,
 	"application/x-xz":            1,
 	"application/zstd":            1,
+}
+
+type DummyArchiver struct{}
+
+func (DummyArchiver) CheckExt(string) error { return nil }
+func (DummyArchiver) Compress(in io.Reader, out io.Writer) error {
+	_, err := io.Copy(out, in)
+	return err
+}
+func (DummyArchiver) Decompress(in io.Reader, out io.Writer) error {
+	_, err := io.Copy(out, in)
+	return err
 }
 
 const (
@@ -54,11 +65,12 @@ type listener struct {
 	md5Hash hash.Hash
 	once    bool
 	sn, cnt int
-	cmprBuf []byte
+	cmprBuf bytes.Buffer
+	cmpr    archiver.Compressor
 }
 
 func newListener(d *core.DataInfo, cfg Config, action uint32) *listener {
-	l := &listener{d: d, cfg: cfg, action: action}
+	l := &listener{d: d, cfg: cfg, action: action, cmpr: &DummyArchiver{}}
 	if action&CRC32_MD5 != 0 {
 		l.md5Hash = md5.New()
 	}
@@ -68,6 +80,23 @@ func newListener(d *core.DataInfo, cfg Config, action uint32) *listener {
 func (l *listener) Once() *listener {
 	l.once = true
 	return l
+}
+
+func (l *listener) encode(src []byte) (dst []byte, err error) {
+	// 加密
+	if l.d.Kind&core.DATA_ENDEC_AES256 != 0 {
+		// AES256加密
+		dst, err = aes256.Encrypt(l.cfg.EndecKey, src)
+	} else if l.d.Kind&core.DATA_ENDEC_SM4 != 0 {
+		// SM4加密
+		dst, err = sm4.Sm4Cbc([]byte(l.cfg.EndecKey), src, true) //sm4Cbc模式pksc7填充加密
+	} else {
+		dst = src
+	}
+	if err != nil {
+		dst = src
+	}
+	return
 }
 
 func (l *listener) OnData(c core.Ctx, h core.Hanlder, dp *dataPkg, buf []byte) (once bool, err error) {
@@ -84,6 +113,14 @@ func (l *listener) OnData(c core.Ctx, h core.Hanlder, dp *dataPkg, buf []byte) (
 			kind, _ := filetype.Match(buf)
 			if CmprBlacklist[kind.MIME.Value] == 0 {
 				l.d.Kind |= l.cfg.WiseCmpr
+				if l.cfg.WiseCmpr&core.DATA_CMPR_SNAPPY != 0 {
+					l.cmpr = &archiver.Snappy{}
+				} else if l.cfg.WiseCmpr&core.DATA_CMPR_ZSTD != 0 {
+					l.cmpr = &archiver.Zstd{}
+				} else if l.cfg.WiseCmpr&core.DATA_CMPR_GZIP != 0 {
+					l.cmpr = &archiver.Gz{}
+				}
+				// 如果是黑名单类型，记得要恢复不压缩
 			}
 			// fmt.Println(kind.MIME.Value)
 		}
@@ -91,110 +128,83 @@ func (l *listener) OnData(c core.Ctx, h core.Hanlder, dp *dataPkg, buf []byte) (
 			l.d.Kind |= l.cfg.EndecWay
 		}
 	}
+	l.cnt++
+
 	if l.action&CRC32_MD5 != 0 {
 		l.d.CRC32 = crc32.Update(l.d.CRC32, crc32.IEEETable, buf)
 		l.md5Hash.Write(buf)
 	}
+
 	// 上传数据
 	if l.action&UPLOAD_DATA != 0 {
-		cmprBuf := buf
-		if l.d.Kind&core.DATA_CMPR_MASK != 0 {
-			if l.d.Kind&core.DATA_CMPR_SNAPPY != 0 {
-				cmprBuf = snappy.Encode(nil, buf)
-			} else if l.d.Kind&core.DATA_CMPR_ZSTD != 0 {
-				cmprBuf, err = zstd.Compress(nil, buf)
-			} else if l.d.Kind&core.DATA_CMPR_GZIP != 0 {
-				var b bytes.Buffer
-				w := gzip.NewWriter(&b)
-				w.Write(buf)
-				w.Close()
-				if n, err1 := b.Read(buf); err1 == nil {
-					cmprBuf = buf[0:n]
-				}
-			}
-			if err != nil {
-				// FIXME：压缩失败就用原始的？
-				fmt.Println(runtime.Caller(0))
-				fmt.Println(err)
-			}
-			// 如果压缩后更大了，恢复原始的
-			if l.cnt == 0 && len(buf) < PKG_SIZE && len(cmprBuf) >= len(buf) {
+		var cmprBuf []byte
+		l.cmpr.Compress(bytes.NewBuffer(buf), &l.cmprBuf)
+		// 如果压缩后更大了，恢复原始的
+		if l.d.OrigSize < PKG_SIZE {
+			if l.cmprBuf.Len() >= len(buf) {
 				l.d.Kind &= ^core.DATA_CMPR_MASK
 				cmprBuf = buf
-			}
-		}
-
-		if l.d.Kind&core.DATA_ENDEC_AES256 != 0 {
-			// AES256加密
-			cmprBuf = aesCbc.AesEncrypt([]byte(l.cfg.EndecKey), nil, cmprBuf)
-		} else if l.d.Kind&core.DATA_ENDEC_SM4 != 0 {
-			// SM4加密
-			var encBuf []byte
-			encBuf, err = sm4.Sm4Cbc([]byte(l.cfg.EndecKey), cmprBuf, true) //sm4Cbc模式pksc7填充加密
-			if err != nil {
-				fmt.Println(runtime.Caller(0))
-				fmt.Println(err)
 			} else {
-				cmprBuf = encBuf
+				cmprBuf = l.cmprBuf.Bytes()
 			}
-		}
-
-		toUpload := cmprBuf
-		if l.cnt == 0 && len(buf) < PKG_SIZE {
-			// 7. 检查是否要打包，不要打包的直接上传，打包默认一次不超过50个，大小不超过4MB
-			if dp.Push(toUpload, l.d) {
-				toUpload = nil
-			} else {
-				if err = dp.Flush(c, h); err != nil {
-					fmt.Println(runtime.Caller(0))
-					fmt.Println(err)
-					return l.once, err
-				}
-			}
+			l.cmprBuf.Reset()
 		} else {
-			if l.d.Kind&core.DATA_CMPR_MASK != 0 {
-				l.cmprBuf = append(l.cmprBuf, cmprBuf...)
-				if len(l.cmprBuf) >= PKG_SIZE {
-					toUpload, l.cmprBuf = l.cmprBuf[0:PKG_SIZE], l.cmprBuf[PKG_SIZE:]
-				} else {
-					toUpload = nil
-				}
+			if l.cmprBuf.Len() >= PKG_SIZE {
+				cmprBuf = l.cmprBuf.Next(PKG_SIZE)
 			}
 		}
 
-		if len(toUpload) > 0 {
-			// 需要上传
-			if l.d.ID, err = h.PutData(c, l.d.ID, l.sn, toUpload); err != nil {
-				fmt.Println(runtime.Caller(0))
-				fmt.Println(err)
+		// 加密
+		encodedBuf, err := l.encode(cmprBuf)
+		if err != nil {
+			return l.once, err
+		}
+
+		if l.d.Kind&core.DATA_CMPR_MASK != 0 || l.d.Kind&core.DATA_ENDEC_MASK != 0 {
+			l.d.Checksum = crc32.Update(l.d.Checksum, crc32.IEEETable, encodedBuf)
+			l.d.Size += int64(len(encodedBuf))
+		}
+
+		// 需要上传
+		if l.d.OrigSize < PKG_SIZE {
+			// 7. 检查是否要打包
+			if ok, err := dp.Push(c, h, encodedBuf, l.d); err == nil {
+				if ok {
+					encodedBuf = nil // 打包成功，不再上传
+				}
+			} else {
+				return l.once, err
+			}
+		}
+
+		if encodedBuf != nil {
+			if l.d.ID, err = h.PutData(c, l.d.ID, l.sn, encodedBuf); err != nil {
 				return l.once, err
 			}
 			l.sn++
 		}
-
-		if l.d.Kind&core.DATA_CMPR_MASK != 0 {
-			l.d.Checksum = crc32.Update(l.d.Checksum, crc32.IEEETable, cmprBuf)
-			l.d.Size += int64(len(cmprBuf))
-		}
 	}
-	l.cnt++
 	return l.once, nil
 }
 
-func (l *listener) OnFinish(c core.Ctx, h core.Hanlder) (err error) {
+func (l *listener) OnFinish(c core.Ctx, h core.Hanlder) error {
 	if l.action&CRC32_MD5 != 0 {
 		l.d.MD5 = fmt.Sprintf("%X", l.md5Hash.Sum(nil)[4:12])
 	}
-	if len(l.cmprBuf) > 0 {
-		if l.d.ID, err = h.PutData(c, l.d.ID, l.sn, l.cmprBuf); err != nil {
+	if l.cmprBuf.Len() > 0 {
+		encodedBuf, err := l.encode(l.cmprBuf.Bytes())
+		if err != nil {
+			return err
+		}
+		if l.d.ID, err = h.PutData(c, l.d.ID, l.sn, encodedBuf); err != nil {
 			fmt.Println(runtime.Caller(0))
 			fmt.Println(err)
 			return err
 		}
-		l.d.Checksum = crc32.Update(l.d.Checksum, crc32.IEEETable, l.cmprBuf)
-		l.d.Size += int64(len(l.cmprBuf))
+		l.d.Checksum = crc32.Update(l.d.Checksum, crc32.IEEETable, encodedBuf)
+		l.d.Size += int64(l.cmprBuf.Len())
 	}
-	if l.d.Kind&core.DATA_CMPR_MASK == 0 {
+	if l.d.Kind&core.DATA_CMPR_MASK == 0 && l.d.Kind&core.DATA_ENDEC_MASK == 0 {
 		l.d.Checksum = l.d.CRC32
 		l.d.Size = l.d.OrigSize
 	}
@@ -208,26 +218,19 @@ func (osi *OrcasSDKImpl) readFile(c core.Ctx, path string, l *listener) error {
 	}
 	defer f.Close()
 
+	var n int
+	var once bool
 	buf := make([]byte, PKG_SIZE)
 	for {
-		n, err := f.Read(buf)
-		if err != nil && err != io.EOF {
-			fmt.Println(runtime.Caller(0))
-			fmt.Println(err)
-			return err
-		}
-		once, err1 := l.OnData(c, osi.h, osi.dp, buf[0:n])
-		if err1 != nil {
-			fmt.Println(runtime.Caller(0))
-			fmt.Println(err)
-			return err1
-		}
-		if once {
+		if n, err = f.Read(buf); n <= 0 || err != nil {
 			break
 		}
-		if err == io.EOF {
+		if once, err = l.OnData(c, osi.h, osi.dp, buf[0:n]); once || err != nil {
 			break
 		}
+	}
+	if err != io.EOF {
+		return err
 	}
 	err = l.OnFinish(c, osi.h)
 	return err
@@ -348,8 +351,6 @@ func (osi *OrcasSDKImpl) uploadFiles(c core.Ctx, path string, f []*core.ObjectIn
 		// 刷新一下打包数据
 		if err := osi.dp.Flush(c, osi.h); err != nil {
 			// TODO: 处理错误情况
-			fmt.Println(runtime.Caller(0))
-			fmt.Println(err)
 			return err
 		}
 		ids, err := osi.h.PutDataInfo(c, d)
@@ -375,15 +376,113 @@ func (osi *OrcasSDKImpl) uploadFiles(c core.Ctx, path string, f []*core.ObjectIn
 	return nil
 }
 
+func (osi *OrcasSDKImpl) downloadFile(c core.Ctx, o *core.ObjectInfo, lpath string) (err error) {
+	if o.Type != core.OBJ_TYPE_FILE {
+		return nil
+	}
+
+	dataID := o.DataID
+	// 如果不是首版本
+	if dataID == 0 {
+		os, _, _, err := osi.h.List(c, o.ID, core.ListOptions{
+			Type:  core.OBJ_TYPE_VERSION,
+			Count: 1,
+			Order: "-mtime",
+		})
+		if err != nil || len(os) < 1 {
+			fmt.Println(runtime.Caller(0))
+			fmt.Println(err)
+			return err
+		}
+		dataID = os[0].DataID
+	}
+
+	var d *core.DataInfo
+	if dataID == core.EmptyDataID {
+		d = core.EmptyDataInfo()
+	} else {
+		d, err = osi.h.GetDataInfo(c, dataID)
+		if err != nil {
+			fmt.Println(runtime.Caller(0))
+			fmt.Println(err)
+			return err
+		}
+	}
+
+	offset, getSize := 0, -1
+	if d.PkgID > 0 {
+		dataID = d.PkgID
+		offset = d.PkgOffset
+		getSize = int(d.Size)
+	}
+	remain := int(d.Size)
+
+	os.MkdirAll(filepath.Dir(lpath), 0766)
+
+	f, err := os.OpenFile(lpath, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0666)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	b := bufio.NewWriter(f)
+	defer b.Flush()
+
+	var decmpr archiver.Decompressor
+	if d.Kind&core.DATA_CMPR_MASK != 0 {
+		if d.Kind&core.DATA_CMPR_SNAPPY != 0 {
+			decmpr = &archiver.Snappy{}
+		} else if d.Kind&core.DATA_CMPR_ZSTD != 0 {
+			decmpr = &archiver.Zstd{}
+		} else if d.Kind&core.DATA_CMPR_GZIP != 0 {
+			decmpr = &archiver.Gz{}
+		}
+	} else {
+		decmpr = &DummyArchiver{}
+	}
+
+	sn := 0
+	for remain > 0 {
+		buf, err := osi.h.GetData(c, dataID, sn, offset, getSize)
+		if err != nil {
+			fmt.Println(runtime.Caller(0))
+			fmt.Println(err)
+			return err
+		}
+		remain -= len(buf)
+		sn++
+
+		decodeBuf := buf
+		if d.Kind&core.DATA_ENDEC_AES256 != 0 {
+			// AES256解密
+			decodeBuf, err = aes256.Decrypt(osi.cfg.EndecKey, buf)
+		} else if d.Kind&core.DATA_ENDEC_SM4 != 0 {
+			// SM4解密
+			decodeBuf, err = sm4.Sm4Cbc([]byte(osi.cfg.EndecKey), buf, false) //sm4Cbc模式pksc7填充加密
+		}
+		if err != nil {
+			fmt.Println(runtime.Caller(0))
+			fmt.Println(err)
+			decodeBuf = buf
+		}
+
+		if err = decmpr.Decompress(bytes.NewBuffer(decodeBuf), b); err != nil {
+			fmt.Println(runtime.Caller(0))
+			fmt.Println(err)
+			return err
+		}
+	}
+	return nil
+}
+
 type dataPkg struct {
-	buf   []byte
+	buf   *bytes.Buffer
 	infos []*core.DataInfo
 	thres uint32
 }
 
 func newDataPkg(thres uint32) *dataPkg {
 	return &dataPkg{
-		buf:   make([]byte, 0, PKG_SIZE),
+		buf:   bytes.NewBuffer(make([]byte, 0, PKG_SIZE)),
 		thres: thres,
 	}
 }
@@ -392,10 +491,10 @@ func (dp *dataPkg) SetThres(thres uint32) {
 	dp.thres = thres
 }
 
-func (dp *dataPkg) Push(b []byte, d *core.DataInfo) bool {
-	offset := len(dp.buf)
-	if offset+ /*offset%PKG_ALIGN+*/ len(b) > PKG_SIZE || len(dp.infos) >= int(dp.thres) || len(b) == PKG_SIZE {
-		return false
+func (dp *dataPkg) Push(c core.Ctx, h core.Hanlder, b []byte, d *core.DataInfo) (bool, error) {
+	offset := dp.buf.Len()
+	if offset+ /*offset%PKG_ALIGN+*/ len(b) > PKG_SIZE || len(dp.infos) >= int(dp.thres) || len(b) >= PKG_SIZE {
+		return false, dp.Flush(c, h)
 	}
 	// 写入前再处理对齐，最后一块就不用补齐了，PS：需要测试一下读性能差多少
 	/*if offset%PKG_ALIGN > 0 {
@@ -405,20 +504,20 @@ func (dp *dataPkg) Push(b []byte, d *core.DataInfo) bool {
 		}
 	}*/
 	// 填充内容
-	dp.buf = append(dp.buf, b...)
+	dp.buf.Write(b)
 	// 记录偏移
 	d.PkgOffset = offset
 	// 记录下来要设置打包数据的数据信息
 	dp.infos = append(dp.infos, d)
-	return true
+	return true, nil
 }
 
 func (dp *dataPkg) Flush(c core.Ctx, h core.Hanlder) error {
-	if len(dp.buf) <= 0 {
+	if dp.buf.Len() <= 0 {
 		return nil
 	}
 	// 上传打包的数据包
-	pkgID, err := h.PutData(c, 0, 0, dp.buf)
+	pkgID, err := h.PutData(c, 0, 0, dp.buf.Bytes())
 	if err != nil {
 		fmt.Println(runtime.Caller(0))
 		fmt.Println(err)
@@ -431,6 +530,7 @@ func (dp *dataPkg) Flush(c core.Ctx, h core.Hanlder) error {
 			dp.infos[i].PkgID = pkgID
 		}
 	}
-	dp.buf, dp.infos = make([]byte, 0, PKG_SIZE), nil
+	dp.buf.Reset()
+	dp.infos = nil
 	return nil
 }
