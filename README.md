@@ -14,10 +14,18 @@
     <img src='https://orca-zhang.semaphoreci.com/badges/orcas/branches/master.svg?style=shields&key=78c39699-2da0-4322-9372-0839f9dcde76' alt='Build Status'>
   </a>
   <a href="https://orcastor.github.io/doc/">
-    <img src="https://img.shields.io/badge/doc-click--me-brightgreen.svg?style=flat">
+    <img src="https://img.shields.io/badge/wiki-click--me-blue.svg?style=flat">
   </a>
   <!--<a href="https://codecov.io/gh/orcastor/orcas" alt="codecov">
     <img src="https://codecov.io/gh/orcastor/orcas/branch/master/graph/badge.svg?token=F6LQbADKkq"/>
   </a>-->
-<p align="center">一款开箱即用的轻量级对象存储</p>
 </p>
+
+<p align="center">一款开箱即用的轻量级对象存储</p>
+
+<p align="center">
+  <a href="#">
+    <img src="https://orcastor.github.io/doc/logo.png">
+  </a>
+</p>
+
