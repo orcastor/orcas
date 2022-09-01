@@ -138,19 +138,23 @@ func (l *listener) OnData(c core.Ctx, h core.Handler, dp *dataPkger, buf []byte)
 	// 上传数据
 	if l.action&UPLOAD_DATA != 0 {
 		var cmprBuf []byte
-		l.cmpr.Compress(bytes.NewBuffer(buf), &l.cmprBuf)
-		// 如果压缩后更大了，恢复原始的
-		if l.d.OrigSize < PKG_SIZE {
-			if l.cmprBuf.Len() >= len(buf) {
-				l.d.Kind &= ^core.DATA_CMPR_MASK
-				cmprBuf = buf
-			} else {
-				cmprBuf = l.cmprBuf.Bytes()
-			}
-			l.cmprBuf.Reset()
+		if l.d.Kind&core.DATA_CMPR_MASK == 0 {
+			cmprBuf = buf
 		} else {
-			if l.cmprBuf.Len() >= PKG_SIZE {
-				cmprBuf = l.cmprBuf.Next(PKG_SIZE)
+			l.cmpr.Compress(bytes.NewBuffer(buf), &l.cmprBuf)
+			// 如果压缩后更大了，恢复原始的
+			if l.d.OrigSize < PKG_SIZE {
+				if l.cmprBuf.Len() >= len(buf) {
+					l.d.Kind &= ^core.DATA_CMPR_MASK
+					cmprBuf = buf
+				} else {
+					cmprBuf = l.cmprBuf.Bytes()
+				}
+				l.cmprBuf.Reset()
+			} else {
+				if l.cmprBuf.Len() >= PKG_SIZE {
+					cmprBuf = l.cmprBuf.Next(PKG_SIZE)
+				}
 			}
 		}
 
