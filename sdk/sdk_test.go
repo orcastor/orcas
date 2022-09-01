@@ -14,17 +14,25 @@ import (
 )
 
 var bktID int64
+var mntPath = "/tmp/test/"
+var path = "/home/semaphore/go/"
+var cfg = Config{
+	DataSync: true,
+	RefLevel: OFF,
+	WiseCmpr: core.DATA_CMPR_ZSTD,
+	EndecWay: core.DATA_ENDEC_AES256,
+	EndecKey: "1234567890abcdef12345678",
+	DontSync: ".*;*.[pP][dD][fF]",
+}
 
 func init() {
 	core.Init(&core.CoreConfig{
-		Path: "/tmp/test/",
+		Path: mntPath,
 	})
 	bktID, _ = idgen.NewIDGen(nil, 0).New()
 	core.InitDB()
 	core.InitBucketDB(bktID)
 }
-
-var path = "/home/semaphore/go/"
 
 func TestUpload(t *testing.T) {
 	Convey("normal", t, func() {
@@ -39,15 +47,21 @@ func TestUpload(t *testing.T) {
 			So(h.PutBkt(c, []*core.BucketInfo{&core.BucketInfo{ID: bktID, Name: "zhangwei", UID: 9999, Type: 1}}), ShouldBeNil)
 
 			sdk := New(h)
-			sdk.SetConfig(Config{
-				DataSync: true,
-				RefLevel: OFF,
-				WiseCmpr: core.DATA_CMPR_ZSTD,
-				EndecWay: core.DATA_ENDEC_AES256,
-				EndecKey: "1234567890abcdef12345678",
-			})
+			sdk.SetConfig(cfg)
 			fmt.Println(sdk.Upload(c, core.ROOT_OID, path))
+		})
+	})
+}
 
+func TestDownload(t *testing.T) {
+	Convey("normal", t, func() {
+		Convey("upload dir", func() {
+			c := context.TODO()
+			h := core.NewRWHandler(bktID)
+			defer h.Close()
+
+			sdk := New(h)
+			sdk.SetConfig(cfg)
 			id, _ := sdk.Path2ID(c, core.ROOT_OID, filepath.Base(path))
 			fmt.Println(id)
 			fmt.Println(sdk.ID2Path(c, id))
@@ -56,10 +70,10 @@ func TestUpload(t *testing.T) {
 			fmt.Println(id2)
 			fmt.Println(sdk.ID2Path(c, id2))
 
-			sdk.Download(c, id, "/tmp/test")
+			sdk.Download(c, id, mntPath)
 
 			var out bytes.Buffer
-			cmd := exec.Command("diff", "-urNa", path, "/tmp/test/"+filepath.Base(path))
+			cmd := exec.Command("diff", "-urNa", "-x.*", path, filepath.Join(mntPath, filepath.Base(path)))
 			cmd.Stdout = &out
 			So(cmd.Run(), ShouldBeNil)
 			So(out.String(), ShouldBeEmpty)
