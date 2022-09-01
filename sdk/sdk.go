@@ -25,12 +25,13 @@ type Config struct {
 	DataSync bool   // 断电保护策略(Power-off Protection Policy)，强制每次写入数据后刷到磁盘
 	RefLevel uint32 // 0: OFF（默认） / 1: Ref / 2: TryRef+Ref
 	PkgThres uint32 // 打包个数限制，不设置默认50个
-	Conflict uint32 // 同名冲突后，0: Merge or Cover（默认） / 1: Throw / 2: Rename / 3: Skip
-	NameTail string // 重命名尾巴，"-副本" / "{\d}"
 	WiseCmpr uint32 // 智能压缩，根据文件类型决定是否压缩，选择压缩算法， 取值见core.DATA_CMPR_MASK
 	EndecWay uint32 // 加密方式，取值见core.DATA_ENDEC_MASK
 	EndecKey string // 加密KEY
-	ChkPtDir string // 断点续传记录目录，不设置路径默认不开启
+	DontSync string // 不同步的文件名通配符（https://pkg.go.dev/path/filepath#Match），用分号分隔
+	// Conflict uint32 // 同名冲突后，0: Merge or Cover（默认） / 1: Throw / 2: Rename / 3: Skip
+	// NameTail string // 重命名尾巴，"-副本" / "{\d}"
+	// ChkPtDir string // 断点续传记录目录，不设置路径默认不开启
 	// BEDecmpr bool   // 后端解压，PS：必须是非加密数据
 }
 
@@ -48,6 +49,7 @@ type OrcasSDKImpl struct {
 	h   core.Handler
 	cfg Config
 	dp  *dataPkger
+	bl  []string
 }
 
 func New(h core.Handler) OrcasSDK {
@@ -62,6 +64,18 @@ func (osi *OrcasSDKImpl) SetConfig(cfg Config) {
 	if cfg.DataSync {
 		osi.h.SetOptions(core.Options{Sync: true})
 	}
+	if cfg.DontSync != "" {
+		osi.bl = strings.Split(cfg.DontSync, ";")
+	}
+}
+
+func (osi *OrcasSDKImpl) skip(name string) bool {
+	for _, v := range osi.bl {
+		if ok, _ := filepath.Match(v, name); ok {
+			return true
+		}
+	}
+	return false
 }
 
 func (osi *OrcasSDKImpl) Path2ID(c core.Ctx, pid int64, rpath string) (int64, error) {
@@ -128,6 +142,9 @@ func (osi *OrcasSDKImpl) Upload(c core.Ctx, pid int64, lpath string) error {
 		Size:   fi.Size(),
 	}
 	if !fi.IsDir() {
+		if osi.skip(o.Name) {
+			return nil
+		}
 		if o.Size > 0 {
 			return osi.uploadFiles(c,
 				filepath.Dir(lpath),
@@ -177,6 +194,9 @@ func (osi *OrcasSDKImpl) Upload(c core.Ctx, pid int64, lpath string) error {
 
 		var dirs, files []*core.ObjectInfo
 		for _, fi := range rawFiles {
+			if osi.skip(fi.Name()) {
+				continue
+			}
 			if fi.IsDir() {
 				dirs = append(dirs, &core.ObjectInfo{
 					PID:    q[0].id,
@@ -280,6 +300,9 @@ func (osi *OrcasSDKImpl) Download(c core.Ctx, id int64, lpath string) error {
 		}
 
 		for _, o := range o {
+			if osi.skip(o.Name) {
+				continue
+			}
 			path := filepath.Join(q[0].path, o.Name)
 			switch o.Type {
 			case core.OBJ_TYPE_DIR:
