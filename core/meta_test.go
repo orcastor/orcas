@@ -216,7 +216,7 @@ func TestGetData(t *testing.T) {
 	})
 }
 
-func TestPuttObj(t *testing.T) {
+func TestPutObj(t *testing.T) {
 	Convey("normal", t, func() {
 		Convey("put same name obj", func() {
 			dmo := NewDefaultMetaOperator(&DefaultAccessCtrlMgr{})
