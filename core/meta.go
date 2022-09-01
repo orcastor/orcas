@@ -223,6 +223,9 @@ func (dmo *DefaultMetaOperator) PutBkt(c Ctx, o []*BucketInfo) error {
 	}
 
 	db, err := GetDB()
+	if err != nil {
+		return err
+	}
 	defer db.Close()
 
 	_, err = b.Table(db, BKT_TBL, c).ReplaceInto(&o)
@@ -238,6 +241,9 @@ func (dmo *DefaultMetaOperator) GetBkt(c Ctx, ids []int64) (o []*BucketInfo, err
 	}
 
 	db, err := GetDB()
+	if err != nil {
+		return nil, err
+	}
 	defer db.Close()
 
 	_, err = b.Table(db, BKT_TBL, c).Select(&o, b.Where(b.In("id", ids)))
@@ -250,6 +256,9 @@ func (dmo *DefaultMetaOperator) ListBkt(c Ctx, uid int64) (o []*BucketInfo, err 
 	}
 
 	db, err := GetDB()
+	if err != nil {
+		return nil, err
+	}
 	defer db.Close()
 
 	_, err = b.Table(db, BKT_TBL, c).Select(&o, b.Where(b.Eq("uid", uid)))
@@ -317,6 +326,9 @@ func (dmo *DefaultMetaOperator) RefData(c Ctx, bktID int64, d []*DataInfo) ([]in
 
 func (dmo *DefaultMetaOperator) PutData(c Ctx, bktID int64, d []*DataInfo) error {
 	db, err := GetDB(bktID)
+	if err != nil {
+		return err
+	}
 	defer db.Close()
 
 	_, err = b.Table(db, DATA_TBL, c).ReplaceInto(&d)
@@ -329,6 +341,9 @@ func (dmo *DefaultMetaOperator) GetData(c Ctx, bktID, id int64) (d *DataInfo, er
 	}
 
 	db, err := GetDB(bktID)
+	if err != nil {
+		return nil, err
+	}
 	defer db.Close()
 
 	d = &DataInfo{}
@@ -342,6 +357,9 @@ func (dmo *DefaultMetaOperator) PutObj(c Ctx, bktID int64, o []*ObjectInfo) (ids
 	}
 
 	db, err := GetDB(bktID)
+	if err != nil {
+		return nil, err
+	}
 	defer db.Close()
 
 	for _, x := range o {
@@ -372,6 +390,9 @@ func (dmo *DefaultMetaOperator) GetObj(c Ctx, bktID int64, ids []int64) (o []*Ob
 	}
 
 	db, err := GetDB(bktID)
+	if err != nil {
+		return nil, err
+	}
 	defer db.Close()
 
 	_, err = b.Table(db, OBJ_TBL, c).Select(&o, b.Where(b.In("id", ids)))
@@ -384,6 +405,9 @@ func (dmo *DefaultMetaOperator) SetObj(c Ctx, bktID int64, fields []string, o *O
 	}
 
 	db, err := GetDB(bktID)
+	if err != nil {
+		return err
+	}
 	defer db.Close()
 
 	_, err = b.Table(db, OBJ_TBL, c).Update(o, b.Fields(fields...), b.Where(b.Eq("id", o.ID)))
@@ -407,35 +431,7 @@ func toDelim(field string, o *ObjectInfo) string {
 	return fmt.Sprintf("%v:%d", d, o.ID)
 }
 
-func (dmo *DefaultMetaOperator) ListObj(c Ctx, bktID, pid int64,
-	wd, delim, order string, count, status int) (o []*ObjectInfo,
-	cnt int64, d string, err error) {
-	if err := dmo.acm.CheckPermission(c, R, bktID); err != nil {
-		return nil, 0, "", err
-	}
-
-	conds := []interface{}{b.Eq("pid", pid)}
-	if wd != "" {
-		if strings.ContainsAny(wd, "*?") {
-			conds = append(conds, b.GLOB("name", wd))
-		} else {
-			conds = append(conds, b.Eq("name", wd))
-		}
-	}
-
-	if status != 0 {
-		conds = append(conds, b.Eq("status", status))
-	}
-
-	db, err := GetDB(bktID)
-	defer db.Close()
-
-	if _, err = b.Table(db, OBJ_TBL, c).Select(&cnt,
-		b.Fields("count(1)"),
-		b.Where(conds...)); err != nil {
-		return nil, 0, "", err
-	}
-
+func doOrder(delim, order string, conds *[]interface{}) (string, string) {
 	// 处理order
 	if order == "" {
 		order = "id"
@@ -459,13 +455,49 @@ func (dmo *DefaultMetaOperator) ListObj(c Ctx, bktID, pid int64,
 	ds := strings.Split(delim, ":")
 	if len(ds) > 0 && ds[0] != "" {
 		if order == "id" || order == "name" {
-			conds = append(conds, fn(order, ds[0]))
+			*conds = append(*conds, fn(order, ds[0]))
 		} else if len(ds) == 2 {
-			conds = append(conds, b.Or(fn(order, ds[0]),
+			*conds = append(*conds, b.Or(fn(order, ds[0]),
 				b.And(b.Eq(order, ds[0]), b.Gt("id", ds[1]))))
 		}
 	}
+	return orderBy, order
+}
 
+func (dmo *DefaultMetaOperator) ListObj(c Ctx, bktID, pid int64,
+	wd, delim, order string, count, status int) (o []*ObjectInfo,
+	cnt int64, d string, err error) {
+	if err := dmo.acm.CheckPermission(c, R, bktID); err != nil {
+		return nil, 0, "", err
+	}
+
+	conds := []interface{}{b.Eq("pid", pid)}
+	if wd != "" {
+		if strings.ContainsAny(wd, "*?") {
+			conds = append(conds, b.GLOB("name", wd))
+		} else {
+			conds = append(conds, b.Eq("name", wd))
+		}
+	}
+
+	if status != 0 {
+		conds = append(conds, b.Eq("status", status))
+	}
+
+	db, err := GetDB(bktID)
+	if err != nil {
+		return nil, 0, "", err
+	}
+	defer db.Close()
+
+	if _, err = b.Table(db, OBJ_TBL, c).Select(&cnt,
+		b.Fields("count(1)"),
+		b.Where(conds...)); err != nil {
+		return nil, 0, "", err
+	}
+
+	var orderBy string
+	orderBy, order = doOrder(delim, order, &conds)
 	_, err = b.Table(db, OBJ_TBL, c).Select(&o,
 		b.Where(conds...),
 		b.OrderBy(orderBy),
