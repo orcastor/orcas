@@ -13,8 +13,7 @@ import (
 	"github.com/orcastor/orcas/core"
 )
 
-const PathSeparator = "/"
-
+// 秒传级别设置 对应 Config.RefLevel
 const (
 	OFF  = iota // OFF
 	FULL        // 整个文件读取
@@ -25,9 +24,9 @@ type Config struct {
 	DataSync bool   // 断电保护策略(Power-off Protection Policy)，强制每次写入数据后刷到磁盘
 	RefLevel uint32 // 0: OFF（默认） / 1: Ref / 2: TryRef+Ref
 	PkgThres uint32 // 打包个数限制，不设置默认50个
-	WiseCmpr uint32 // 智能压缩，根据文件类型决定是否压缩，选择压缩算法， 取值见core.DATA_CMPR_MASK
+	WiseCmpr uint32 // 智能压缩，根据文件类型决定是否压缩，取值见core.DATA_CMPR_MASK
 	EndecWay uint32 // 加密方式，取值见core.DATA_ENDEC_MASK
-	EndecKey string // 加密KEY
+	EndecKey string // 加密KEY，SM4需要固定为16个字符，AES256需要大于16个字符
 	DontSync string // 不同步的文件名通配符（https://pkg.go.dev/path/filepath#Match），用分号分隔
 	// Conflict uint32 // 同名冲突后，0: Merge or Cover（默认） / 1: Throw / 2: Rename / 3: Skip
 	// NameTail string // 重命名尾巴，"-副本" / "{\d}"
@@ -77,6 +76,8 @@ func (osi *OrcasSDKImpl) skip(name string) bool {
 	}
 	return false
 }
+
+const PathSeparator = "/"
 
 func (osi *OrcasSDKImpl) Path2ID(c core.Ctx, pid int64, rpath string) (int64, error) {
 	for _, child := range strings.Split(rpath, PathSeparator) {
