@@ -121,7 +121,6 @@ type elem struct {
 }
 
 func (osi *OrcasSDKImpl) Upload(c core.Ctx, pid int64, lpath string) error {
-	var o *core.ObjectInfo
 	f, err := os.Open(lpath)
 	if err != nil {
 		return err
@@ -133,7 +132,7 @@ func (osi *OrcasSDKImpl) Upload(c core.Ctx, pid int64, lpath string) error {
 	}
 	f.Close()
 
-	o = &core.ObjectInfo{
+	o := &core.ObjectInfo{
 		PID:    pid,
 		MTime:  fi.ModTime().Unix(),
 		Type:   core.OBJ_TYPE_FILE,
@@ -286,6 +285,7 @@ func (osi *OrcasSDKImpl) Download(c core.Ctx, id int64, lpath string) error {
 	// 遍历远端目录
 	q := []elem{elem{id: id, path: filepath.Join(lpath, o[0].Name)}}
 	var delim string
+	wg := &sync.WaitGroup{}
 	for len(q) > 0 {
 		os.MkdirAll(q[0].path, 0766)
 		o, _, d, err := osi.h.List(c, q[0].id, core.ListOptions{
@@ -308,7 +308,12 @@ func (osi *OrcasSDKImpl) Download(c core.Ctx, id int64, lpath string) error {
 			case core.OBJ_TYPE_DIR:
 				q = append(q, elem{id: o.ID, path: path})
 			case core.OBJ_TYPE_FILE:
-				osi.downloadFile(c, o, path)
+				n := o
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					osi.downloadFile(c, n, path)
+				}()
 			}
 		}
 
@@ -319,5 +324,6 @@ func (osi *OrcasSDKImpl) Download(c core.Ctx, id int64, lpath string) error {
 			delim = d
 		}
 	}
+	wg.Wait()
 	return nil
 }
