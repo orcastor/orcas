@@ -284,7 +284,9 @@ func (dmo *DefaultMetaOperator) RefData(c Ctx, bktID int64, d []*DataInfo) ([]in
 		md5 UNSIGNED BIG INT NOT NULL
 	)`)
 	// 把待查询数据放到临时表
-	_, err = b.Table(db, tbl, c).Insert(&d, b.Fields("o_size", "hdr_crc32", "crc32", "md5"))
+	if _, err = b.Table(db, tbl, c).Insert(&d, b.Fields("o_size", "hdr_crc32", "crc32", "md5")); err != nil {
+		return nil, err
+	}
 	var refs []struct {
 		ID       int64  `borm:"max(a.id)"`
 		OrigSize int64  `borm:"b.o_size"`
@@ -293,9 +295,11 @@ func (dmo *DefaultMetaOperator) RefData(c Ctx, bktID int64, d []*DataInfo) ([]in
 		MD5      string `borm:"b.md5"`
 	}
 	// 联表查询
-	_, err = b.Table(db, `data a, `+tbl+` b`, c).Select(&refs, b.Join(`on a.o_size=b.o_size 
+	if _, err = b.Table(db, `data a, `+tbl+` b`, c).Select(&refs, b.Join(`on a.o_size=b.o_size 
 	and a.hdr_crc32=b.hdr_crc32 and (b.crc32=0 or b.md5=0 or 
-	(a.crc32=b.crc32 and a.md5=b.md5))`), b.GroupBy("b.o_size", "b.hdr_crc32", "b.crc32", "b.md5"))
+	(a.crc32=b.crc32 and a.md5=b.md5))`), b.GroupBy("b.o_size", "b.hdr_crc32", "b.crc32", "b.md5")); err != nil {
+		return nil, err
+	}
 	// 删除临时表
 	db.Exec(`DROP TABLE ` + tbl)
 
@@ -368,7 +372,9 @@ func (dmo *DefaultMetaOperator) PutObj(c Ctx, bktID int64, o []*ObjectInfo) (ids
 
 	if n, err := b.Table(db, OBJ_TBL, c).InsertIgnore(&o); err == nil && n != len(o) {
 		var inserted []int64
-		_, err = b.Table(db, OBJ_TBL, c).Select(&inserted, b.Fields("id"), b.Where(b.In("id", ids)))
+		if _, err = b.Table(db, OBJ_TBL, c).Select(&inserted, b.Fields("id"), b.Where(b.In("id", ids))); err != nil {
+			return nil, err
+		}
 		// 处理有冲突的情况
 		m := make(map[int64]struct{}, 0)
 		for _, v := range inserted {
