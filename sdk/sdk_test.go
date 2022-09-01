@@ -44,7 +44,7 @@ func TestUpload(t *testing.T) {
 			h := core.NewRWHandler(bktID)
 			defer h.Close()
 
-			So(h.PutBkt(c, []*core.BucketInfo{&core.BucketInfo{ID: bktID, Name: "zhangwei", UID: 9999, Type: 1}}), ShouldBeNil)
+			So(h.PutBkt(c, []*core.BucketInfo{{ID: bktID, Name: "zhangwei", UID: 9999, Type: 1}}), ShouldBeNil)
 
 			sdk := New(h)
 			sdk.SetConfig(cfg)

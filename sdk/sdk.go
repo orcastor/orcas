@@ -148,7 +148,7 @@ func (osi *OrcasSDKImpl) Upload(c core.Ctx, pid int64, lpath string) error {
 			return osi.uploadFiles(c,
 				filepath.Dir(lpath),
 				[]*core.ObjectInfo{o},
-				[]*core.DataInfo{&core.DataInfo{
+				[]*core.DataInfo{{
 					OrigSize: fi.Size(),
 				}}, osi.cfg.RefLevel, 0)
 		}
@@ -172,7 +172,7 @@ func (osi *OrcasSDKImpl) Upload(c core.Ctx, pid int64, lpath string) error {
 		return err
 	}
 
-	q := []elem{elem{id: dirIDs[0], path: lpath}}
+	q := []elem{{id: dirIDs[0], path: lpath}}
 	var emptyFiles []*core.ObjectInfo
 
 	// 遍历本地目录
@@ -283,7 +283,7 @@ func (osi *OrcasSDKImpl) Download(c core.Ctx, id int64, lpath string) error {
 	}
 
 	// 遍历远端目录
-	q := []elem{elem{id: id, path: filepath.Join(lpath, o[0].Name)}}
+	q := []elem{{id: id, path: filepath.Join(lpath, o[0].Name)}}
 	var delim string
 	wg := &sync.WaitGroup{}
 	for len(q) > 0 {
