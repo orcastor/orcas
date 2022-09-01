@@ -3,7 +3,7 @@ name: Go
 agent:
   machine:
     type: e1-standard-2
-    os_image: ubuntu2004
+    os_image: ubuntu1804
 blocks:
   - name: Test
     task:
@@ -17,5 +17,6 @@ blocks:
             - checkout
             - go get ./...
             - go test -coverprofile=coverage.txt -covermode=atomic -v ./...
-            - '''bash <(curl -s https://codecov.io/bash) -t 8c2bdd22-0aab-4cc1-a473-cd6db39aed9b || echo "Codecov did not collect coverage reports"'''
+            - 'bash <(curl -s https://codecov.io/bash) -t 8c2bdd22-0aab-4cc1-a473-cd6db39aed9b || echo "Codecov did not collect coverage reports"'
             - du -hcs /tmp/test/*
+            #- go build -v .
