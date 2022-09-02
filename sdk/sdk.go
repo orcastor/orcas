@@ -23,7 +23,7 @@ const (
 type Config struct {
 	DataSync bool   // 断电保护策略(Power-off Protection Policy)，强制每次写入数据后刷到磁盘
 	RefLevel uint32 // 0: OFF（默认） / 1: Ref / 2: TryRef+Ref
-	PkgThres uint32 // 打包个数限制，不设置默认50个
+	PkgThres uint32 // 打包个数限制，不设置默认100个
 	WiseCmpr uint32 // 智能压缩，根据文件类型决定是否压缩，取值见core.DATA_CMPR_MASK
 	EndecWay uint32 // 加密方式，取值见core.DATA_ENDEC_MASK
 	EndecKey string // 加密KEY，SM4需要固定为16个字符，AES256需要大于16个字符
@@ -37,11 +37,11 @@ type Config struct {
 type OrcasSDK interface {
 	SetConfig(cfg Config)
 
-	Path2ID(c core.Ctx, pid int64, rpath string) (id int64, err error)
-	ID2Path(c core.Ctx, id int64) (rpath string, err error)
+	Path2ID(c core.Ctx, bktID, pid int64, rpath string) (id int64, err error)
+	ID2Path(c core.Ctx, bktID, id int64) (rpath string, err error)
 
-	Upload(c core.Ctx, pid int64, lpath string) error
-	Download(c core.Ctx, pid int64, lpath string) error
+	Upload(c core.Ctx, bktID, pid int64, lpath string) error
+	Download(c core.Ctx, bktID, pid int64, lpath string) error
 }
 
 type OrcasSDKImpl struct {
@@ -52,7 +52,7 @@ type OrcasSDKImpl struct {
 }
 
 func New(h core.Handler) OrcasSDK {
-	return &OrcasSDKImpl{h: h, dp: newDataPkger(50)}
+	return &OrcasSDKImpl{h: h, dp: newDataPkger(100)}
 }
 
 func (osi *OrcasSDKImpl) SetConfig(cfg Config) {
@@ -79,12 +79,12 @@ func (osi *OrcasSDKImpl) skip(name string) bool {
 
 const PathSeparator = "/"
 
-func (osi *OrcasSDKImpl) Path2ID(c core.Ctx, pid int64, rpath string) (int64, error) {
+func (osi *OrcasSDKImpl) Path2ID(c core.Ctx, bktID, pid int64, rpath string) (int64, error) {
 	for _, child := range strings.Split(rpath, PathSeparator) {
 		if child == "" {
 			continue
 		}
-		os, _, _, err := osi.h.List(c, pid, core.ListOptions{
+		os, _, _, err := osi.h.List(c, bktID, pid, core.ListOptions{
 			Word:  child,
 			Count: 1,
 			Brief: 2,
@@ -100,9 +100,9 @@ func (osi *OrcasSDKImpl) Path2ID(c core.Ctx, pid int64, rpath string) (int64, er
 	return pid, nil
 }
 
-func (osi *OrcasSDKImpl) ID2Path(c core.Ctx, id int64) (rpath string, err error) {
+func (osi *OrcasSDKImpl) ID2Path(c core.Ctx, bktID, id int64) (rpath string, err error) {
 	for id != core.ROOT_OID {
-		os, err := osi.h.Get(c, []int64{id})
+		os, err := osi.h.Get(c, bktID, []int64{id})
 		if err != nil {
 			return "", fmt.Errorf("open remote object error(id:%d): %+v", id, err)
 		}
@@ -121,7 +121,7 @@ type elem struct {
 	path string
 }
 
-func (osi *OrcasSDKImpl) Upload(c core.Ctx, pid int64, lpath string) error {
+func (osi *OrcasSDKImpl) Upload(c core.Ctx, bktID, pid int64, lpath string) error {
 	f, err := os.Open(lpath)
 	if err != nil {
 		return err
@@ -147,6 +147,7 @@ func (osi *OrcasSDKImpl) Upload(c core.Ctx, pid int64, lpath string) error {
 		}
 		if o.Size > 0 {
 			return osi.uploadFiles(c,
+				bktID,
 				filepath.Dir(lpath),
 				[]*core.ObjectInfo{o},
 				[]*core.DataInfo{{
@@ -155,7 +156,7 @@ func (osi *OrcasSDKImpl) Upload(c core.Ctx, pid int64, lpath string) error {
 		}
 
 		o.DataID = core.EmptyDataID
-		if _, err = osi.h.Put(c, []*core.ObjectInfo{o}); err != nil {
+		if _, err = osi.h.Put(c, bktID, []*core.ObjectInfo{o}); err != nil {
 			// TODO: 重名冲突
 			fmt.Println(runtime.Caller(0))
 			fmt.Println(err)
@@ -165,7 +166,7 @@ func (osi *OrcasSDKImpl) Upload(c core.Ctx, pid int64, lpath string) error {
 
 	// 上传目录
 	o.Type = core.OBJ_TYPE_DIR
-	dirIDs, err := osi.h.Put(c, []*core.ObjectInfo{o})
+	dirIDs, err := osi.h.Put(c, bktID, []*core.ObjectInfo{o})
 	if err != nil || len(dirIDs) <= 0 || dirIDs[0] <= 0 {
 		// TODO: 怎么处理
 		fmt.Println(runtime.Caller(0))
@@ -233,7 +234,7 @@ func (osi *OrcasSDKImpl) Upload(c core.Ctx, pid int64, lpath string) error {
 			go func() {
 				defer wg.Done()
 				// 上传目录
-				ids, err := osi.h.Put(c, dirs)
+				ids, err := osi.h.Put(c, bktID, dirs)
 				if err != nil {
 					// TODO: 怎么处理
 					fmt.Println(runtime.Caller(0))
@@ -252,14 +253,14 @@ func (osi *OrcasSDKImpl) Upload(c core.Ctx, pid int64, lpath string) error {
 		}
 
 		if len(files) > 0 {
-			osi.uploadFiles(c, q[0].path, files, nil, osi.cfg.RefLevel, 0)
+			osi.uploadFiles(c, bktID, q[0].path, files, nil, osi.cfg.RefLevel, 0)
 		}
 
 		wg.Wait()
 		q = append(q[1:], dirElems...)
 	}
 
-	if _, err := osi.h.Put(c, emptyFiles); err != nil {
+	if _, err := osi.h.Put(c, bktID, emptyFiles); err != nil {
 		// TODO: 重名冲突
 		fmt.Println(runtime.Caller(0))
 		fmt.Println(err)
@@ -268,8 +269,8 @@ func (osi *OrcasSDKImpl) Upload(c core.Ctx, pid int64, lpath string) error {
 	return nil
 }
 
-func (osi *OrcasSDKImpl) Download(c core.Ctx, id int64, lpath string) error {
-	o, err := osi.h.Get(c, []int64{id})
+func (osi *OrcasSDKImpl) Download(c core.Ctx, bktID, id int64, lpath string) error {
+	o, err := osi.h.Get(c, bktID, []int64{id})
 	if err != nil {
 		return fmt.Errorf("open remote object error(id:%d): %+v", id, err)
 	}
@@ -278,7 +279,7 @@ func (osi *OrcasSDKImpl) Download(c core.Ctx, id int64, lpath string) error {
 	}
 
 	if o[0].Type == core.OBJ_TYPE_FILE {
-		return osi.downloadFile(c, o[0], lpath)
+		return osi.downloadFile(c, bktID, o[0], lpath)
 	} else if o[0].Type != core.OBJ_TYPE_DIR {
 		return fmt.Errorf("remote object type error, id:%d type:%d", id, o[0].Type)
 	}
@@ -289,7 +290,7 @@ func (osi *OrcasSDKImpl) Download(c core.Ctx, id int64, lpath string) error {
 	wg := &sync.WaitGroup{}
 	for len(q) > 0 {
 		os.MkdirAll(q[0].path, 0766)
-		o, _, d, err := osi.h.List(c, q[0].id, core.ListOptions{
+		o, _, d, err := osi.h.List(c, bktID, q[0].id, core.ListOptions{
 			Delim: delim,
 			Count: 100,
 			Order: "type",
@@ -309,11 +310,11 @@ func (osi *OrcasSDKImpl) Download(c core.Ctx, id int64, lpath string) error {
 			case core.OBJ_TYPE_DIR:
 				q = append(q, elem{id: o.ID, path: path})
 			case core.OBJ_TYPE_FILE:
-				n := o
+				f := o
 				wg.Add(1)
 				go func() {
 					defer wg.Done()
-					osi.downloadFile(c, n, path)
+					osi.downloadFile(c, bktID, f, path)
 				}()
 			}
 		}
