@@ -1,4 +1,10 @@
-# 🐋 Orcas
+<p align="center">
+  <a href="#">
+    <img src="https://orcastor.github.io/doc/logo.svg">
+  </a>
+</p>
+
+<p align="center"><strong>OrcaS：一款开箱即用的轻量级对象存储</strong></p>
 
 <p align="center">
   <a href="/go.mod#L3" alt="go version">
@@ -19,13 +25,5 @@
   <!--<a href="https://codecov.io/gh/orcastor/orcas" alt="codecov">
     <img src="https://codecov.io/gh/orcastor/orcas/branch/master/graph/badge.svg?token=F6LQbADKkq"/>
   </a>-->
-</p>
-
-<p align="center">一款开箱即用的轻量级对象存储</p>
-
-<p align="center">
-  <a href="#">
-    <img src="https://orcastor.github.io/doc/logo.png">
-  </a>
 </p>
 
