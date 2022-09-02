@@ -18,7 +18,7 @@ type Options struct {
 	Sync bool
 }
 
-type DataOperator interface {
+type DataAdapter interface {
 	SetOptions(opt Options)
 	Close()
 
@@ -80,22 +80,22 @@ func (ah AsyncHandle) Close() {
 	ah.F.Close()
 }
 
-type DefaultDataOperator struct {
+type DefaultDataAdapter struct {
 	acm AccessCtrlMgr
 	opt Options
 }
 
-func NewDefaultDataOperator(acm AccessCtrlMgr) DataOperator {
-	return &DefaultDataOperator{
+func NewDefaultDataAdapter(acm AccessCtrlMgr) DataAdapter {
+	return &DefaultDataAdapter{
 		acm: acm,
 	}
 }
 
-func (ddo *DefaultDataOperator) SetOptions(opt Options) {
+func (ddo *DefaultDataAdapter) SetOptions(opt Options) {
 	ddo.opt = opt
 }
 
-func (ddo *DefaultDataOperator) Close() {
+func (ddo *DefaultDataAdapter) Close() {
 	for HasInflight() {
 		time.Sleep(100 * time.Millisecond)
 	}
@@ -108,7 +108,7 @@ func toFilePath(path string, bcktID, dataID int64, sn int) string {
 	return filepath.Join(path, fmt.Sprint(bcktID), hash[21:24], hash[8:24], fn)
 }
 
-func (ddo *DefaultDataOperator) Write(c Ctx, bktID, dataID int64, sn int, buf []byte) error {
+func (ddo *DefaultDataAdapter) Write(c Ctx, bktID, dataID int64, sn int, buf []byte) error {
 	if err := ddo.acm.CheckPermission(c, W, bktID); err != nil {
 		return err
 	}
@@ -136,12 +136,12 @@ func (ddo *DefaultDataOperator) Write(c Ctx, bktID, dataID int64, sn int, buf []
 	return err
 }
 
-func (ddo *DefaultDataOperator) Flush(c Ctx, bktID, dataID int64) error {
+func (ddo *DefaultDataAdapter) Flush(c Ctx, bktID, dataID int64) error {
 	Q.Del(strconv.FormatInt(dataID, 10))
 	return nil
 }
 
-func (ddo *DefaultDataOperator) Read(c Ctx, bktID, dataID int64, sn int) ([]byte, error) {
+func (ddo *DefaultDataAdapter) Read(c Ctx, bktID, dataID int64, sn int) ([]byte, error) {
 	if err := ddo.acm.CheckPermission(c, R, bktID); err != nil {
 		return nil, err
 	}
@@ -149,7 +149,7 @@ func (ddo *DefaultDataOperator) Read(c Ctx, bktID, dataID int64, sn int) ([]byte
 	return ioutil.ReadFile(toFilePath(Conf().Path, bktID, dataID, sn))
 }
 
-func (ddo *DefaultDataOperator) ReadBytes(c Ctx, bktID, dataID int64, sn, offset, size int) ([]byte, error) {
+func (ddo *DefaultDataAdapter) ReadBytes(c Ctx, bktID, dataID int64, sn, offset, size int) ([]byte, error) {
 	if offset == 0 && size == -1 {
 		return ddo.Read(c, bktID, dataID, sn)
 	}
@@ -189,7 +189,7 @@ func (ddo *DefaultDataOperator) ReadBytes(c Ctx, bktID, dataID int64, sn, offset
 	return buf, nil
 }
 
-func (ddo *DefaultDataOperator) FileSize(c Ctx, bktID, dataID int64, sn int) (int64, error) {
+func (ddo *DefaultDataAdapter) FileSize(c Ctx, bktID, dataID int64, sn int) (int64, error) {
 	if err := ddo.acm.CheckPermission(c, R, bktID); err != nil {
 		return 0, err
 	}

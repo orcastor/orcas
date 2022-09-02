@@ -116,31 +116,31 @@ const (
 	DATA_TBL = "data"
 )
 
-type BucketMetaOperator interface {
+type BucketMetaAdapter interface {
 	PutBkt(c Ctx, o []*BucketInfo) error
 	GetBkt(c Ctx, ids []int64) ([]*BucketInfo, error)
 	ListBkt(c Ctx, uid int64) ([]*BucketInfo, error)
 }
 
-type DataMetaOperator interface {
+type DataMetaAdapter interface {
 	RefData(c Ctx, bktID int64, d []*DataInfo) ([]int64, error)
 	PutData(c Ctx, bktID int64, d []*DataInfo) error
 	GetData(c Ctx, bktID, id int64) (*DataInfo, error)
 }
 
-type ObjectMetaOperator interface {
+type ObjectMetaAdapter interface {
 	PutObj(c Ctx, bktID int64, o []*ObjectInfo) ([]int64, error)
 	GetObj(c Ctx, bktID int64, ids []int64) ([]*ObjectInfo, error)
 	SetObj(c Ctx, bktID int64, fields []string, o *ObjectInfo) error
 	ListObj(c Ctx, bktID, pid int64, wd, delim, order string, count, status int) ([]*ObjectInfo, int64, string, error)
 }
 
-type MetaOperator interface {
+type MetaAdapter interface {
 	Close()
 
-	BucketMetaOperator
-	DataMetaOperator
-	ObjectMetaOperator
+	BucketMetaAdapter
+	DataMetaAdapter
+	ObjectMetaAdapter
 }
 
 func GetDB(bktID ...interface{}) (*sql.DB, error) {
@@ -204,20 +204,20 @@ func InitBucketDB(bktID int64) error {
 	return nil
 }
 
-type DefaultMetaOperator struct {
+type DefaultMetaAdapter struct {
 	acm AccessCtrlMgr
 }
 
-func NewDefaultMetaOperator(acm AccessCtrlMgr) MetaOperator {
-	return &DefaultMetaOperator{
+func NewDefaultMetaAdapter(acm AccessCtrlMgr) MetaAdapter {
+	return &DefaultMetaAdapter{
 		acm: acm,
 	}
 }
 
-func (dmo *DefaultMetaOperator) Close() {
+func (dmo *DefaultMetaAdapter) Close() {
 }
 
-func (dmo *DefaultMetaOperator) PutBkt(c Ctx, o []*BucketInfo) error {
+func (dmo *DefaultMetaAdapter) PutBkt(c Ctx, o []*BucketInfo) error {
 	if err := dmo.acm.CheckRole(c, ADMIN); err != nil {
 		return err
 	}
@@ -235,7 +235,7 @@ func (dmo *DefaultMetaOperator) PutBkt(c Ctx, o []*BucketInfo) error {
 	return err
 }
 
-func (dmo *DefaultMetaOperator) GetBkt(c Ctx, ids []int64) (o []*BucketInfo, err error) {
+func (dmo *DefaultMetaAdapter) GetBkt(c Ctx, ids []int64) (o []*BucketInfo, err error) {
 	if err := dmo.acm.CheckRole(c, ADMIN); err != nil {
 		return nil, err
 	}
@@ -250,7 +250,7 @@ func (dmo *DefaultMetaOperator) GetBkt(c Ctx, ids []int64) (o []*BucketInfo, err
 	return
 }
 
-func (dmo *DefaultMetaOperator) ListBkt(c Ctx, uid int64) (o []*BucketInfo, err error) {
+func (dmo *DefaultMetaAdapter) ListBkt(c Ctx, uid int64) (o []*BucketInfo, err error) {
 	if err := dmo.acm.CheckPermission(c, R, -1); err != nil {
 		return nil, err
 	}
@@ -265,7 +265,7 @@ func (dmo *DefaultMetaOperator) ListBkt(c Ctx, uid int64) (o []*BucketInfo, err 
 	return
 }
 
-func (dmo *DefaultMetaOperator) RefData(c Ctx, bktID int64, d []*DataInfo) ([]int64, error) {
+func (dmo *DefaultMetaAdapter) RefData(c Ctx, bktID int64, d []*DataInfo) ([]int64, error) {
 	if err := dmo.acm.CheckPermission(c, RW, bktID); err != nil {
 		return nil, err
 	}
@@ -328,7 +328,7 @@ func (dmo *DefaultMetaOperator) RefData(c Ctx, bktID int64, d []*DataInfo) ([]in
 	return res, err
 }
 
-func (dmo *DefaultMetaOperator) PutData(c Ctx, bktID int64, d []*DataInfo) error {
+func (dmo *DefaultMetaAdapter) PutData(c Ctx, bktID int64, d []*DataInfo) error {
 	db, err := GetDB(bktID)
 	if err != nil {
 		return err
@@ -339,7 +339,7 @@ func (dmo *DefaultMetaOperator) PutData(c Ctx, bktID int64, d []*DataInfo) error
 	return err
 }
 
-func (dmo *DefaultMetaOperator) GetData(c Ctx, bktID, id int64) (d *DataInfo, err error) {
+func (dmo *DefaultMetaAdapter) GetData(c Ctx, bktID, id int64) (d *DataInfo, err error) {
 	if err := dmo.acm.CheckPermission(c, R, bktID); err != nil {
 		return nil, err
 	}
@@ -355,7 +355,7 @@ func (dmo *DefaultMetaOperator) GetData(c Ctx, bktID, id int64) (d *DataInfo, er
 	return
 }
 
-func (dmo *DefaultMetaOperator) PutObj(c Ctx, bktID int64, o []*ObjectInfo) (ids []int64, err error) {
+func (dmo *DefaultMetaAdapter) PutObj(c Ctx, bktID int64, o []*ObjectInfo) (ids []int64, err error) {
 	if err := dmo.acm.CheckPermission(c, W, bktID); err != nil {
 		return nil, err
 	}
@@ -390,7 +390,7 @@ func (dmo *DefaultMetaOperator) PutObj(c Ctx, bktID int64, o []*ObjectInfo) (ids
 	return ids, err
 }
 
-func (dmo *DefaultMetaOperator) GetObj(c Ctx, bktID int64, ids []int64) (o []*ObjectInfo, err error) {
+func (dmo *DefaultMetaAdapter) GetObj(c Ctx, bktID int64, ids []int64) (o []*ObjectInfo, err error) {
 	if err := dmo.acm.CheckPermission(c, R, bktID); err != nil {
 		return nil, err
 	}
@@ -405,7 +405,7 @@ func (dmo *DefaultMetaOperator) GetObj(c Ctx, bktID int64, ids []int64) (o []*Ob
 	return
 }
 
-func (dmo *DefaultMetaOperator) SetObj(c Ctx, bktID int64, fields []string, o *ObjectInfo) error {
+func (dmo *DefaultMetaAdapter) SetObj(c Ctx, bktID int64, fields []string, o *ObjectInfo) error {
 	if err := dmo.acm.CheckPermission(c, W, bktID); err != nil {
 		return err
 	}
@@ -470,7 +470,7 @@ func doOrder(delim, order string, conds *[]interface{}) (string, string) {
 	return orderBy, order
 }
 
-func (dmo *DefaultMetaOperator) ListObj(c Ctx, bktID, pid int64,
+func (dmo *DefaultMetaAdapter) ListObj(c Ctx, bktID, pid int64,
 	wd, delim, order string, count, status int) (o []*ObjectInfo,
 	cnt int64, d string, err error) {
 	if err := dmo.acm.CheckPermission(c, R, bktID); err != nil {
