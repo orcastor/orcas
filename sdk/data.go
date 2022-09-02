@@ -59,6 +59,7 @@ const (
 )
 
 type listener struct {
+	bktID   int64
 	d       *core.DataInfo
 	cfg     Config
 	action  uint32
@@ -69,8 +70,8 @@ type listener struct {
 	cmpr    archiver.Compressor
 }
 
-func newListener(d *core.DataInfo, cfg Config, action uint32) *listener {
-	l := &listener{d: d, cfg: cfg, action: action, cmpr: &DummyArchiver{}}
+func newListener(bktID int64, d *core.DataInfo, cfg Config, action uint32) *listener {
+	l := &listener{bktID: bktID, d: d, cfg: cfg, action: action, cmpr: &DummyArchiver{}}
 	if action&CRC32_MD5 != 0 {
 		l.md5Hash = md5.New()
 	}
@@ -173,7 +174,7 @@ func (l *listener) OnData(c core.Ctx, h core.Handler, dp *dataPkger, buf []byte)
 			// 需要上传
 			if l.d.OrigSize < PKG_SIZE {
 				// 7. 检查是否要打包
-				if ok, err := dp.Push(c, h, encodedBuf, l.d); err == nil {
+				if ok, err := dp.Push(c, h, l.bktID, encodedBuf, l.d); err == nil {
 					if ok {
 						encodedBuf = nil // 打包成功，不再上传
 					}
@@ -183,7 +184,7 @@ func (l *listener) OnData(c core.Ctx, h core.Handler, dp *dataPkger, buf []byte)
 			}
 
 			if encodedBuf != nil {
-				if l.d.ID, err = h.PutData(c, l.d.ID, l.sn, encodedBuf); err != nil {
+				if l.d.ID, err = h.PutData(c, l.bktID, l.d.ID, l.sn, encodedBuf); err != nil {
 					return l.once, err
 				}
 				l.sn++
@@ -202,7 +203,7 @@ func (l *listener) OnFinish(c core.Ctx, h core.Handler) error {
 		if err != nil {
 			return err
 		}
-		if l.d.ID, err = h.PutData(c, l.d.ID, l.sn, encodedBuf); err != nil {
+		if l.d.ID, err = h.PutData(c, l.bktID, l.d.ID, l.sn, encodedBuf); err != nil {
 			fmt.Println(runtime.Caller(0))
 			fmt.Println(err)
 			return err
@@ -248,7 +249,7 @@ func (p SortBySize) Len() int           { return len(p) }
 func (p SortBySize) Less(i, j int) bool { return p[i].Size < p[j].Size || p[i].Name < p[j].Name }
 func (p SortBySize) Swap(i, j int)      { p[i], p[j] = p[j], p[i] }
 
-func (osi *OrcasSDKImpl) uploadFiles(c core.Ctx, path string, f []*core.ObjectInfo, d []*core.DataInfo, level, action uint32) error {
+func (osi *OrcasSDKImpl) uploadFiles(c core.Ctx, bktID int64, path string, f []*core.ObjectInfo, d []*core.DataInfo, level, action uint32) error {
 	if len(f) <= 0 {
 		return nil
 	}
@@ -274,14 +275,14 @@ func (osi *OrcasSDKImpl) uploadFiles(c core.Ctx, path string, f []*core.ObjectIn
 		// 3. 如果要预先秒传的，先读取hdrCrc32，排队检查
 		for i, fi := range f {
 			if err := osi.readFile(c, filepath.Join(path, fi.Name),
-				newListener(d[i], osi.cfg, HDR_CRC32&^action).Once()); err != nil {
+				newListener(bktID, d[i], osi.cfg, HDR_CRC32&^action).Once()); err != nil {
 				// TODO: 处理错误情况
 				fmt.Println(runtime.Caller(0))
 				fmt.Println(err)
 
 			}
 		}
-		ids, err := osi.h.Ref(c, d)
+		ids, err := osi.h.Ref(c, bktID, d)
 		if err != nil {
 			// TODO: 处理错误情况
 			fmt.Println(runtime.Caller(0))
@@ -296,12 +297,12 @@ func (osi *OrcasSDKImpl) uploadFiles(c core.Ctx, path string, f []*core.ObjectIn
 				d2 = append(d2, d[i])
 			}
 		}
-		if err := osi.uploadFiles(c, path, f1, d1, FULL, action|HDR_CRC32); err != nil {
+		if err := osi.uploadFiles(c, bktID, path, f1, d1, FULL, action|HDR_CRC32); err != nil {
 			fmt.Println(runtime.Caller(0))
 			fmt.Println(err)
 			return err
 		}
-		if err := osi.uploadFiles(c, path, f2, d2, OFF, action|HDR_CRC32); err != nil {
+		if err := osi.uploadFiles(c, bktID, path, f2, d2, OFF, action|HDR_CRC32); err != nil {
 			fmt.Println(runtime.Caller(0))
 			fmt.Println(err)
 			return err
@@ -310,14 +311,14 @@ func (osi *OrcasSDKImpl) uploadFiles(c core.Ctx, path string, f []*core.ObjectIn
 		// 4. 如果不需要预先秒传或者预先秒传失败的，整个读取crc32和md5以后尝试秒传
 		for i, fi := range f {
 			if err := osi.readFile(c, filepath.Join(path, fi.Name),
-				newListener(d[i], osi.cfg, (HDR_CRC32|CRC32_MD5)&^action)); err != nil {
+				newListener(bktID, d[i], osi.cfg, (HDR_CRC32|CRC32_MD5)&^action)); err != nil {
 				// TODO: 处理错误情况
 				fmt.Println(runtime.Caller(0))
 				fmt.Println(err)
 
 			}
 		}
-		ids, err := osi.h.Ref(c, d)
+		ids, err := osi.h.Ref(c, bktID, d)
 		if err != nil {
 			fmt.Println(runtime.Caller(0))
 			fmt.Println(err)
@@ -332,14 +333,14 @@ func (osi *OrcasSDKImpl) uploadFiles(c core.Ctx, path string, f []*core.ObjectIn
 				d2 = append(d2, d[i])
 			}
 		}
-		if _, err := osi.h.Put(c, f); err != nil {
+		if _, err := osi.h.Put(c, bktID, f); err != nil {
 			// TODO: 重名冲突
 			fmt.Println(runtime.Caller(0))
 			fmt.Println(err)
 			return err
 		}
 		// 5. 秒传失败的（包括超过大小或者预先秒传失败），丢到待上传对列
-		if err := osi.uploadFiles(c, path, f2, d2, OFF, action|HDR_CRC32|CRC32_MD5); err != nil {
+		if err := osi.uploadFiles(c, bktID, path, f2, d2, OFF, action|HDR_CRC32|CRC32_MD5); err != nil {
 			fmt.Println(runtime.Caller(0))
 			fmt.Println(err)
 			return err
@@ -348,18 +349,18 @@ func (osi *OrcasSDKImpl) uploadFiles(c core.Ctx, path string, f []*core.ObjectIn
 		// 直接上传的对象
 		for i, fi := range f {
 			if err := osi.readFile(c, filepath.Join(path, fi.Name),
-				newListener(d[i], osi.cfg, (UPLOAD_DATA|HDR_CRC32|CRC32_MD5)&^action)); err != nil {
+				newListener(bktID, d[i], osi.cfg, (UPLOAD_DATA|HDR_CRC32|CRC32_MD5)&^action)); err != nil {
 				// TODO: 处理错误情况
 				fmt.Println(runtime.Caller(0))
 				fmt.Println(err)
 			}
 		}
 		// 刷新一下打包数据
-		if err := osi.dp.Flush(c, osi.h); err != nil {
+		if err := osi.dp.Flush(c, osi.h, bktID); err != nil {
 			// TODO: 处理错误情况
 			return err
 		}
-		ids, err := osi.h.PutDataInfo(c, d)
+		ids, err := osi.h.PutDataInfo(c, bktID, d)
 		if err != nil {
 			fmt.Println(runtime.Caller(0))
 			fmt.Println(err)
@@ -372,7 +373,7 @@ func (osi *OrcasSDKImpl) uploadFiles(c core.Ctx, path string, f []*core.ObjectIn
 			}
 			f = append(f, f[i])
 		}
-		if _, err := osi.h.Put(c, f); err != nil {
+		if _, err := osi.h.Put(c, bktID, f); err != nil {
 			// TODO: 重名冲突
 			fmt.Println(runtime.Caller(0))
 			fmt.Println(err)
@@ -386,6 +387,7 @@ type dataReader struct {
 	c                core.Ctx
 	h                core.Handler
 	buf              bytes.Buffer
+	bktID            int64
 	dataID           int64
 	offset, size, sn int
 	getSize, remain  int
@@ -393,8 +395,8 @@ type dataReader struct {
 	endecKey         string
 }
 
-func newDataReader(c core.Ctx, h core.Handler, d *core.DataInfo, endecKey string) *dataReader {
-	dr := &dataReader{c: c, h: h, remain: int(d.Size), kind: d.Kind, endecKey: endecKey}
+func newDataReader(c core.Ctx, h core.Handler, bktID int64, d *core.DataInfo, endecKey string) *dataReader {
+	dr := &dataReader{c: c, h: h, bktID: bktID, remain: int(d.Size), kind: d.Kind, endecKey: endecKey}
 	if d.PkgID > 0 {
 		dr.dataID = d.PkgID
 		dr.offset = d.PkgOffset
@@ -411,7 +413,7 @@ func (dr *dataReader) Read(p []byte) (n int, err error) {
 		return dr.buf.Read(p)
 	}
 	if dr.remain > 0 {
-		buf, err := dr.h.GetData(dr.c, dr.dataID, dr.sn, dr.offset, dr.getSize)
+		buf, err := dr.h.GetData(dr.c, dr.bktID, dr.dataID, dr.sn, dr.offset, dr.getSize)
 		if err != nil {
 			fmt.Println(runtime.Caller(0))
 			fmt.Println(err)
@@ -438,7 +440,7 @@ func (dr *dataReader) Read(p []byte) (n int, err error) {
 	return dr.buf.Read(p)
 }
 
-func (osi *OrcasSDKImpl) downloadFile(c core.Ctx, o *core.ObjectInfo, lpath string) (err error) {
+func (osi *OrcasSDKImpl) downloadFile(c core.Ctx, bktID int64, o *core.ObjectInfo, lpath string) (err error) {
 	if o.Type != core.OBJ_TYPE_FILE {
 		return nil
 	}
@@ -446,7 +448,7 @@ func (osi *OrcasSDKImpl) downloadFile(c core.Ctx, o *core.ObjectInfo, lpath stri
 	dataID := o.DataID
 	// 如果不是首版本
 	if dataID == 0 {
-		os, _, _, err := osi.h.List(c, o.ID, core.ListOptions{
+		os, _, _, err := osi.h.List(c, bktID, o.ID, core.ListOptions{
 			Type:  core.OBJ_TYPE_VERSION,
 			Count: 1,
 			Order: "-mtime",
@@ -463,7 +465,7 @@ func (osi *OrcasSDKImpl) downloadFile(c core.Ctx, o *core.ObjectInfo, lpath stri
 	if dataID == core.EmptyDataID {
 		d = core.EmptyDataInfo()
 	} else {
-		d, err = osi.h.GetDataInfo(c, dataID)
+		d, err = osi.h.GetDataInfo(c, bktID, dataID)
 		if err != nil {
 			fmt.Println(runtime.Caller(0))
 			fmt.Println(err)
@@ -494,7 +496,7 @@ func (osi *OrcasSDKImpl) downloadFile(c core.Ctx, o *core.ObjectInfo, lpath stri
 		decmpr = &DummyArchiver{}
 	}
 
-	if err = decmpr.Decompress(newDataReader(c, osi.h, d, osi.cfg.EndecKey), b); err != nil {
+	if err = decmpr.Decompress(newDataReader(c, osi.h, bktID, d, osi.cfg.EndecKey), b); err != nil {
 		fmt.Println(runtime.Caller(0))
 		fmt.Println(err)
 		return err
@@ -519,10 +521,10 @@ func (dp *dataPkger) SetThres(thres uint32) {
 	dp.thres = thres
 }
 
-func (dp *dataPkger) Push(c core.Ctx, h core.Handler, b []byte, d *core.DataInfo) (bool, error) {
+func (dp *dataPkger) Push(c core.Ctx, h core.Handler, bktID int64, b []byte, d *core.DataInfo) (bool, error) {
 	offset := dp.buf.Len()
 	if offset+ /*offset%PKG_ALIGN+*/ len(b) > PKG_SIZE || len(dp.infos) >= int(dp.thres) || len(b) >= PKG_SIZE {
-		return false, dp.Flush(c, h)
+		return false, dp.Flush(c, h, bktID)
 	}
 	// 写入前再处理对齐，最后一块就不用补齐了，PS：需要测试一下读性能差多少
 	/*if offset%PKG_ALIGN > 0 {
@@ -540,12 +542,12 @@ func (dp *dataPkger) Push(c core.Ctx, h core.Handler, b []byte, d *core.DataInfo
 	return true, nil
 }
 
-func (dp *dataPkger) Flush(c core.Ctx, h core.Handler) error {
+func (dp *dataPkger) Flush(c core.Ctx, h core.Handler, bktID int64) error {
 	if dp.buf.Len() <= 0 {
 		return nil
 	}
 	// 上传打包的数据包
-	pkgID, err := h.PutData(c, 0, 0, dp.buf.Bytes())
+	pkgID, err := h.PutData(c, bktID, 0, 0, dp.buf.Bytes())
 	if err != nil {
 		fmt.Println(runtime.Caller(0))
 		fmt.Println(err)
