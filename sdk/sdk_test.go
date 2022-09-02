@@ -41,14 +41,14 @@ func TestUpload(t *testing.T) {
 			// bktID = 18885407408128
 
 			c := context.TODO()
-			h := core.NewRWHandler(bktID)
+			h := core.NewRWHandler()
 			defer h.Close()
 
 			So(h.PutBkt(c, []*core.BucketInfo{{ID: bktID, Name: "zhangwei", UID: 9999, Type: 1}}), ShouldBeNil)
 
 			sdk := New(h)
 			sdk.SetConfig(cfg)
-			fmt.Println(sdk.Upload(c, core.ROOT_OID, path))
+			fmt.Println(sdk.Upload(c, bktID, core.ROOT_OID, path))
 		})
 	})
 }
@@ -57,20 +57,20 @@ func TestDownload(t *testing.T) {
 	Convey("normal", t, func() {
 		Convey("upload dir", func() {
 			c := context.TODO()
-			h := core.NewRWHandler(bktID)
+			h := core.NewRWHandler()
 			defer h.Close()
 
 			sdk := New(h)
 			sdk.SetConfig(cfg)
-			id, _ := sdk.Path2ID(c, core.ROOT_OID, filepath.Base(path))
+			id, _ := sdk.Path2ID(c, bktID, core.ROOT_OID, filepath.Base(path))
 			fmt.Println(id)
-			fmt.Println(sdk.ID2Path(c, id))
+			fmt.Println(sdk.ID2Path(c, bktID, id))
 
-			id2, _ := sdk.Path2ID(c, id, "go")
+			id2, _ := sdk.Path2ID(c, bktID, id, "go")
 			fmt.Println(id2)
-			fmt.Println(sdk.ID2Path(c, id2))
+			fmt.Println(sdk.ID2Path(c, bktID, id2))
 
-			sdk.Download(c, id, mntPath)
+			sdk.Download(c, bktID, id, mntPath)
 
 			var out bytes.Buffer
 			cmd := exec.Command("diff", "-urNa", "-x.*", path, filepath.Join(mntPath, filepath.Base(path)))
