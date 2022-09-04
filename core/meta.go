@@ -50,7 +50,7 @@ type ObjectInfo struct {
 	Status int    `borm:"status"` // 对象状态，0: none, 1: normal, 1: deleted, 2: recycle(to be deleted), 3: malformed
 	Name   string `borm:"name"`   // 对象名称
 	Size   int64  `borm:"size"`   // 对象的大小，目录的大小是子对象数，文件的大小是最新版本的字节数
-	Ext    string `borm:"ext"`
+	Ext    string `borm:"ext"`    // 对象的扩展信息
 }
 
 // 数据状态
