@@ -49,7 +49,7 @@ type Handler interface {
 }
 
 type RWHandler struct {
-	mo MetaAdapter
+	mo MetadataAdapter
 	do DataAdapter
 	ig *idgen.IDGen
 }
@@ -57,7 +57,7 @@ type RWHandler struct {
 func NewRWHandler() Handler {
 	acm := &DefaultAccessCtrlMgr{}
 	return &RWHandler{
-		mo: NewDefaultMetaAdapter(acm),
+		mo: NewDefaultMetadataAdapter(acm),
 		do: NewDefaultDataAdapter(acm),
 		ig: idgen.NewIDGen(nil, 0), // 需要改成配置
 	}

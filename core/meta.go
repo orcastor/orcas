@@ -79,14 +79,14 @@ const (
 )
 
 type DataInfo struct {
-	ID       int64  `borm:"id"`        // 数据ID（对象ID/版本ID，idgen随机生成的id）
+	ID       int64  `borm:"id"`        // 数据ID（idgen随机生成的id）
 	Size     int64  `borm:"size"`      // 数据的大小
 	OrigSize int64  `borm:"o_size"`    // 数据的原始大小
 	HdrCRC32 uint32 `borm:"hdr_crc32"` // 头部100KB的CRC32校验值
-	CRC32    uint32 `borm:"crc32"`     // 整个对象的CRC32校验值（最原始数据）
-	MD5      string `borm:"md5"`       // 整个对象的MD5值（最原始数据）
+	CRC32    uint32 `borm:"crc32"`     // 整个数据的CRC32校验值（最原始数据）
+	MD5      string `borm:"md5"`       // 整个数据的MD5值（最原始数据）
 
-	Checksum uint32 `borm:"checksum"` // 整个对象的CRC32校验值（最终数据，用于一致性审计）
+	Checksum uint32 `borm:"checksum"` // 整个数据的CRC32校验值（最终数据，用于一致性审计）
 	Kind     uint32 `borm:"kind"`     // 数据状态，正常、损坏、加密、压缩、类型（用于预览等）
 	// MIME       string // 数据的多媒体类型
 
@@ -116,31 +116,31 @@ const (
 	DATA_TBL = "data"
 )
 
-type BucketMetaAdapter interface {
+type BucketMetadataAdapter interface {
 	PutBkt(c Ctx, o []*BucketInfo) error
 	GetBkt(c Ctx, ids []int64) ([]*BucketInfo, error)
 	ListBkt(c Ctx, uid int64) ([]*BucketInfo, error)
 }
 
-type DataMetaAdapter interface {
+type DataMetadataAdapter interface {
 	RefData(c Ctx, bktID int64, d []*DataInfo) ([]int64, error)
 	PutData(c Ctx, bktID int64, d []*DataInfo) error
 	GetData(c Ctx, bktID, id int64) (*DataInfo, error)
 }
 
-type ObjectMetaAdapter interface {
+type ObjectMetadataAdapter interface {
 	PutObj(c Ctx, bktID int64, o []*ObjectInfo) ([]int64, error)
 	GetObj(c Ctx, bktID int64, ids []int64) ([]*ObjectInfo, error)
 	SetObj(c Ctx, bktID int64, fields []string, o *ObjectInfo) error
 	ListObj(c Ctx, bktID, pid int64, wd, delim, order string, count, status int) ([]*ObjectInfo, int64, string, error)
 }
 
-type MetaAdapter interface {
+type MetadataAdapter interface {
 	Close()
 
-	BucketMetaAdapter
-	DataMetaAdapter
-	ObjectMetaAdapter
+	BucketMetadataAdapter
+	DataMetadataAdapter
+	ObjectMetadataAdapter
 }
 
 func GetDB(bktID ...interface{}) (*sql.DB, error) {
@@ -204,20 +204,20 @@ func InitBucketDB(bktID int64) error {
 	return nil
 }
 
-type DefaultMetaAdapter struct {
+type DefaultMetadataAdapter struct {
 	acm AccessCtrlMgr
 }
 
-func NewDefaultMetaAdapter(acm AccessCtrlMgr) MetaAdapter {
-	return &DefaultMetaAdapter{
+func NewDefaultMetadataAdapter(acm AccessCtrlMgr) MetadataAdapter {
+	return &DefaultMetadataAdapter{
 		acm: acm,
 	}
 }
 
-func (dmo *DefaultMetaAdapter) Close() {
+func (dmo *DefaultMetadataAdapter) Close() {
 }
 
-func (dmo *DefaultMetaAdapter) PutBkt(c Ctx, o []*BucketInfo) error {
+func (dmo *DefaultMetadataAdapter) PutBkt(c Ctx, o []*BucketInfo) error {
 	if err := dmo.acm.CheckRole(c, ADMIN); err != nil {
 		return err
 	}
@@ -235,7 +235,7 @@ func (dmo *DefaultMetaAdapter) PutBkt(c Ctx, o []*BucketInfo) error {
 	return err
 }
 
-func (dmo *DefaultMetaAdapter) GetBkt(c Ctx, ids []int64) (o []*BucketInfo, err error) {
+func (dmo *DefaultMetadataAdapter) GetBkt(c Ctx, ids []int64) (o []*BucketInfo, err error) {
 	if err := dmo.acm.CheckRole(c, ADMIN); err != nil {
 		return nil, err
 	}
@@ -250,7 +250,7 @@ func (dmo *DefaultMetaAdapter) GetBkt(c Ctx, ids []int64) (o []*BucketInfo, err 
 	return
 }
 
-func (dmo *DefaultMetaAdapter) ListBkt(c Ctx, uid int64) (o []*BucketInfo, err error) {
+func (dmo *DefaultMetadataAdapter) ListBkt(c Ctx, uid int64) (o []*BucketInfo, err error) {
 	if err := dmo.acm.CheckPermission(c, R, -1); err != nil {
 		return nil, err
 	}
@@ -265,7 +265,7 @@ func (dmo *DefaultMetaAdapter) ListBkt(c Ctx, uid int64) (o []*BucketInfo, err e
 	return
 }
 
-func (dmo *DefaultMetaAdapter) RefData(c Ctx, bktID int64, d []*DataInfo) ([]int64, error) {
+func (dmo *DefaultMetadataAdapter) RefData(c Ctx, bktID int64, d []*DataInfo) ([]int64, error) {
 	if err := dmo.acm.CheckPermission(c, RW, bktID); err != nil {
 		return nil, err
 	}
@@ -328,7 +328,7 @@ func (dmo *DefaultMetaAdapter) RefData(c Ctx, bktID int64, d []*DataInfo) ([]int
 	return res, err
 }
 
-func (dmo *DefaultMetaAdapter) PutData(c Ctx, bktID int64, d []*DataInfo) error {
+func (dmo *DefaultMetadataAdapter) PutData(c Ctx, bktID int64, d []*DataInfo) error {
 	db, err := GetDB(bktID)
 	if err != nil {
 		return err
@@ -339,7 +339,7 @@ func (dmo *DefaultMetaAdapter) PutData(c Ctx, bktID int64, d []*DataInfo) error 
 	return err
 }
 
-func (dmo *DefaultMetaAdapter) GetData(c Ctx, bktID, id int64) (d *DataInfo, err error) {
+func (dmo *DefaultMetadataAdapter) GetData(c Ctx, bktID, id int64) (d *DataInfo, err error) {
 	if err := dmo.acm.CheckPermission(c, R, bktID); err != nil {
 		return nil, err
 	}
@@ -355,7 +355,7 @@ func (dmo *DefaultMetaAdapter) GetData(c Ctx, bktID, id int64) (d *DataInfo, err
 	return
 }
 
-func (dmo *DefaultMetaAdapter) PutObj(c Ctx, bktID int64, o []*ObjectInfo) (ids []int64, err error) {
+func (dmo *DefaultMetadataAdapter) PutObj(c Ctx, bktID int64, o []*ObjectInfo) (ids []int64, err error) {
 	if err := dmo.acm.CheckPermission(c, W, bktID); err != nil {
 		return nil, err
 	}
@@ -390,7 +390,7 @@ func (dmo *DefaultMetaAdapter) PutObj(c Ctx, bktID int64, o []*ObjectInfo) (ids 
 	return ids, err
 }
 
-func (dmo *DefaultMetaAdapter) GetObj(c Ctx, bktID int64, ids []int64) (o []*ObjectInfo, err error) {
+func (dmo *DefaultMetadataAdapter) GetObj(c Ctx, bktID int64, ids []int64) (o []*ObjectInfo, err error) {
 	if err := dmo.acm.CheckPermission(c, R, bktID); err != nil {
 		return nil, err
 	}
@@ -405,7 +405,7 @@ func (dmo *DefaultMetaAdapter) GetObj(c Ctx, bktID int64, ids []int64) (o []*Obj
 	return
 }
 
-func (dmo *DefaultMetaAdapter) SetObj(c Ctx, bktID int64, fields []string, o *ObjectInfo) error {
+func (dmo *DefaultMetadataAdapter) SetObj(c Ctx, bktID int64, fields []string, o *ObjectInfo) error {
 	if err := dmo.acm.CheckPermission(c, W, bktID); err != nil {
 		return err
 	}
@@ -470,7 +470,7 @@ func doOrder(delim, order string, conds *[]interface{}) (string, string) {
 	return orderBy, order
 }
 
-func (dmo *DefaultMetaAdapter) ListObj(c Ctx, bktID, pid int64,
+func (dmo *DefaultMetadataAdapter) ListObj(c Ctx, bktID, pid int64,
 	wd, delim, order string, count, status int) (o []*ObjectInfo,
 	cnt int64, d string, err error) {
 	if err := dmo.acm.CheckPermission(c, R, bktID); err != nil {
