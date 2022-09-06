@@ -330,6 +330,9 @@ func (osi *OrcasSDKImpl) uploadFiles(c core.Ctx, bktID int64, path string, f []*
 				f[i].DataID = id
 			} else {
 				f2 = append(f2, f[i])
+				if id < 0 { // 小于0说明是引用的数据
+					d[i].ID = id
+				}
 				d2 = append(d2, d[i])
 			}
 		}
@@ -348,11 +351,14 @@ func (osi *OrcasSDKImpl) uploadFiles(c core.Ctx, bktID int64, path string, f []*
 	case OFF:
 		// 直接上传的对象
 		for i, fi := range f {
-			if err := osi.readFile(c, filepath.Join(path, fi.Name),
-				newListener(bktID, d[i], osi.cfg, (UPLOAD_DATA|HDR_CRC32|CRC32_MD5)&^action)); err != nil {
-				// TODO: 处理错误情况
-				fmt.Println(runtime.Caller(0))
-				fmt.Println(err)
+			// 如果是引用别人的，也就是<0的，不用再传了就
+			if d[i].ID >= 0 {
+				if err := osi.readFile(c, filepath.Join(path, fi.Name),
+					newListener(bktID, d[i], osi.cfg, (UPLOAD_DATA|HDR_CRC32|CRC32_MD5)&^action)); err != nil {
+					// TODO: 处理错误情况
+					fmt.Println(runtime.Caller(0))
+					fmt.Println(err)
+				}
 			}
 		}
 		// 刷新一下打包数据
@@ -368,10 +374,9 @@ func (osi *OrcasSDKImpl) uploadFiles(c core.Ctx, bktID int64, path string, f []*
 		}
 		// 处理打包上传的对象
 		for i, id := range ids {
-			if f[i].DataID != id {
+			if f[i].DataID != id { // 包括小于0的
 				f[i].DataID = id
 			}
-			f = append(f, f[i])
 		}
 		if _, err := osi.h.Put(c, bktID, f); err != nil {
 			// TODO: 重名冲突
