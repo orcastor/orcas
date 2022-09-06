@@ -5,8 +5,8 @@ import (
 )
 
 type ListOptions struct {
-	Word  string // 过滤词
-	Delim string // 分隔符
+	Word  string // 过滤词，支持通配符*和?
+	Delim string // 分隔符，每次请求后返回，原样回传即可
 	Type  int    // 对象类型，0: 不过滤(default), 1: dir, 2: file, 3: version, 4: preview(thumb/m3u8/pdf)
 	Count int    // 查询个数
 	Order string // 排序方式，id/mtime/name/size/type 前缀 +: 升序（默认） -: 降序
