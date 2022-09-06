@@ -4,7 +4,7 @@
   </a>
 </p>
 
-<p align="center"><strong>OrcaS：一款开箱即用的轻量级对象存储</strong></p>
+<p align="center"><strong>OrcaS：一款开箱即用的轻量级对象文件系统</strong></p>
 
 <p align="center">
   <a href="/go.mod#L3" alt="go version">
