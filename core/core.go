@@ -25,14 +25,14 @@ type Handler interface {
 	// 有文件长度、CRC32、MD5，成功返回引用的DataID，失败返回0，客户端发现DataID有变化，说明不需要上传数据
 	// 如果非预Ref DataID传0，说明跳过了预Ref
 	Ref(c Ctx, bktID int64, d []*DataInfo) ([]int64, error)
-	// 打包上传或者小文件，sn传-1，大文件sn从0开始，DataID不传默认创建一个新的
+	// sn从0开始，DataID不传默认创建一个新的
 	PutData(c Ctx, bktID, dataID int64, sn int, buf []byte) (int64, error)
-	// 上传完数据以后，再创建元数据
+	// 只传一个参数说明是sn，传两个参数说明是sn+offset，传三个参数说明是sn+offset+size
+	GetData(c Ctx, bktID, id int64, sn int, offset ...int) ([]byte, error)
+	// 上传元数据
 	PutDataInfo(c Ctx, bktID int64, d []*DataInfo) ([]int64, error)
 	// 获取数据信息
 	GetDataInfo(c Ctx, bktID, id int64) (*DataInfo, error)
-	// 只传一个参数说明是sn，传两个参数说明是sn+offset，传三个参数说明是sn+offset+size
-	GetData(c Ctx, bktID, id int64, sn int, offset ...int) ([]byte, error)
 	// 用于非文件内容的扫描，只看文件是否存在，大小是否合适
 	FileSize(c Ctx, bktID, dataID int64, sn int) (int64, error)
 
