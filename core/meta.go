@@ -316,13 +316,19 @@ func (dmo *DefaultMetadataAdapter) RefData(c Ctx, bktID int64, d []*DataInfo) ([
 			continue
 		}
 
-		if id, ok := aux[fmt.Sprintf("%d:%d:%d:%s", x.OrigSize, x.HdrCRC32, x.CRC32, x.MD5)]; ok {
+		key := fmt.Sprintf("%d:%d:%d:%s", x.OrigSize, x.HdrCRC32, x.CRC32, x.MD5)
+		if id, ok := aux[key]; ok {
 			// 全文件的数据没有，说明是预Ref
 			if x.CRC32 == 0 || x.MD5 == "" {
-				res[i] = 1 // 非0代表预Ref成功
+				if id > 0 {
+					res[i] = 1 // 非0代表预Ref成功，预Ref只看数据库
+				}
 			} else {
 				res[i] = id
 			}
+		} else {
+			// 没有秒传成功，但是当前批次可能有一样的数据
+			aux[key] = int64(^i)
 		}
 	}
 	return res, err

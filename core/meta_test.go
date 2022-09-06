@@ -193,6 +193,24 @@ func TestRefData(t *testing.T) {
 			So(ids[0], ShouldEqual, id)
 			So(ids[1], ShouldEqual, 0)
 		})
+
+		Convey("multiple ref same but do not exist", func() {
+			ids, err := dmo.RefData(c, bktID, []*DataInfo{{
+				OrigSize: 1,
+				HdrCRC32: 222,
+				CRC32:    333,
+				MD5:      "445",
+			}, {
+				OrigSize: 1,
+				HdrCRC32: 222,
+				CRC32:    333,
+				MD5:      "445",
+			}})
+			So(err, ShouldBeNil)
+			So(len(ids), ShouldEqual, 2)
+			So(ids[0], ShouldEqual, 0)
+			So(ids[1], ShouldEqual, ^0)
+		})
 	})
 }
 
