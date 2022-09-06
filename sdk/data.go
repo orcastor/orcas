@@ -53,7 +53,7 @@ const (
 )
 
 const (
-	PKG_ALIGN = 8192
+	PKG_ALIGN = 4096
 	PKG_SIZE  = 4194304
 	HDR_SIZE  = 102400
 )
@@ -249,7 +249,8 @@ func (p SortBySize) Len() int           { return len(p) }
 func (p SortBySize) Less(i, j int) bool { return p[i].Size < p[j].Size || p[i].Name < p[j].Name }
 func (p SortBySize) Swap(i, j int)      { p[i], p[j] = p[j], p[i] }
 
-func (osi *OrcasSDKImpl) uploadFiles(c core.Ctx, bktID int64, path string, f []*core.ObjectInfo, d []*core.DataInfo, level, action uint32) error {
+func (osi *OrcasSDKImpl) uploadFiles(c core.Ctx, bktID int64, path string,
+	f []*core.ObjectInfo, d []*core.DataInfo, level, doneAction uint32) error {
 	if len(f) <= 0 {
 		return nil
 	}
@@ -275,7 +276,7 @@ func (osi *OrcasSDKImpl) uploadFiles(c core.Ctx, bktID int64, path string, f []*
 		// 如果要预先秒传的，先读取hdrCrc32，排队检查
 		for i, fi := range f {
 			if err := osi.readFile(c, filepath.Join(path, fi.Name),
-				newListener(bktID, d[i], osi.cfg, HDR_CRC32&^action).Once()); err != nil {
+				newListener(bktID, d[i], osi.cfg, HDR_CRC32&^doneAction).Once()); err != nil {
 				// TODO: 处理错误情况
 				fmt.Println(runtime.Caller(0))
 				fmt.Println(err)
@@ -297,12 +298,12 @@ func (osi *OrcasSDKImpl) uploadFiles(c core.Ctx, bktID int64, path string, f []*
 				d2 = append(d2, d[i])
 			}
 		}
-		if err := osi.uploadFiles(c, bktID, path, f1, d1, FULL, action|HDR_CRC32); err != nil {
+		if err := osi.uploadFiles(c, bktID, path, f1, d1, FULL, doneAction|HDR_CRC32); err != nil {
 			fmt.Println(runtime.Caller(0))
 			fmt.Println(err)
 			return err
 		}
-		if err := osi.uploadFiles(c, bktID, path, f2, d2, OFF, action|HDR_CRC32); err != nil {
+		if err := osi.uploadFiles(c, bktID, path, f2, d2, OFF, doneAction|HDR_CRC32); err != nil {
 			fmt.Println(runtime.Caller(0))
 			fmt.Println(err)
 			return err
@@ -311,7 +312,7 @@ func (osi *OrcasSDKImpl) uploadFiles(c core.Ctx, bktID int64, path string, f []*
 		// 如果不需要预先秒传或者预先秒传失败的，整个读取crc32和md5以后尝试秒传
 		for i, fi := range f {
 			if err := osi.readFile(c, filepath.Join(path, fi.Name),
-				newListener(bktID, d[i], osi.cfg, (HDR_CRC32|CRC32_MD5)&^action)); err != nil {
+				newListener(bktID, d[i], osi.cfg, (HDR_CRC32|CRC32_MD5)&^doneAction)); err != nil {
 				// TODO: 处理错误情况
 				fmt.Println(runtime.Caller(0))
 				fmt.Println(err)
@@ -343,7 +344,7 @@ func (osi *OrcasSDKImpl) uploadFiles(c core.Ctx, bktID int64, path string, f []*
 			return err
 		}
 		// 秒传失败的（包括超过大小或者预先秒传失败），普通上传
-		if err := osi.uploadFiles(c, bktID, path, f2, d2, OFF, action|HDR_CRC32|CRC32_MD5); err != nil {
+		if err := osi.uploadFiles(c, bktID, path, f2, d2, OFF, doneAction|HDR_CRC32|CRC32_MD5); err != nil {
 			fmt.Println(runtime.Caller(0))
 			fmt.Println(err)
 			return err
@@ -354,7 +355,7 @@ func (osi *OrcasSDKImpl) uploadFiles(c core.Ctx, bktID int64, path string, f []*
 			// 如果是引用别人的，也就是<0的，不用再传了就
 			if d[i].ID >= 0 {
 				if err := osi.readFile(c, filepath.Join(path, fi.Name),
-					newListener(bktID, d[i], osi.cfg, (UPLOAD_DATA|HDR_CRC32|CRC32_MD5)&^action)); err != nil {
+					newListener(bktID, d[i], osi.cfg, (UPLOAD_DATA|HDR_CRC32|CRC32_MD5)&^doneAction)); err != nil {
 					// TODO: 处理错误情况
 					fmt.Println(runtime.Caller(0))
 					fmt.Println(err)
