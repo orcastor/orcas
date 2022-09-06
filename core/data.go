@@ -103,9 +103,9 @@ func (ddo *DefaultDataAdapter) Close() {
 
 // path/<文件名hash的最后三个字节>/hash
 func toFilePath(path string, bcktID, dataID int64, sn int) string {
-	fn := fmt.Sprintf("%d_%d", dataID, sn)
-	hash := fmt.Sprintf("%X", md5.Sum([]byte(fn)))
-	return filepath.Join(path, fmt.Sprint(bcktID), hash[21:24], hash[8:24], fn)
+	fileName := fmt.Sprintf("%d_%d", dataID, sn)
+	hash := fmt.Sprintf("%X", md5.Sum([]byte(fileName)))
+	return filepath.Join(path, fmt.Sprint(bcktID), hash[21:24], hash[8:24], fileName)
 }
 
 func (ddo *DefaultDataAdapter) Write(c Ctx, bktID, dataID int64, sn int, buf []byte) error {
