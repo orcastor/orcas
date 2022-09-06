@@ -22,7 +22,7 @@ const (
 
 type Config struct {
 	DataSync bool   // 断电保护策略(Power-off Protection Policy)，强制每次写入数据后刷到磁盘
-	RefLevel uint32 // 0: OFF（默认） / 1: Ref / 2: TryRef+Ref
+	RefLevel uint32 // 秒传级别设置：0: OFF（默认） / 1: Ref / 2: TryRef+Ref
 	PkgThres uint32 // 打包个数限制，不设置默认100个
 	WiseCmpr uint32 // 智能压缩，根据文件类型决定是否压缩，取值见core.DATA_CMPR_MASK
 	EndecWay uint32 // 加密方式，取值见core.DATA_ENDEC_MASK
