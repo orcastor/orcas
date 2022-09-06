@@ -109,7 +109,7 @@ func (l *listener) OnData(c core.Ctx, h core.Handler, dp *dataPkger, buf []byte)
 				l.d.HdrCRC32 = crc32.ChecksumIEEE(buf)
 			}
 		}
-		// 6. 如果开启智能压缩的，检查文件类型确定是否要压缩
+		// 如果开启智能压缩的，检查文件类型确定是否要压缩
 		if l.cfg.WiseCmpr > 0 {
 			kind, _ := filetype.Match(buf)
 			if CmprBlacklist[kind.MIME.Value] == 0 {
@@ -121,8 +121,8 @@ func (l *listener) OnData(c core.Ctx, h core.Handler, dp *dataPkger, buf []byte)
 				} else if l.cfg.WiseCmpr&core.DATA_CMPR_GZIP != 0 {
 					l.cmpr = &archiver.Gz{}
 				}
-				// 如果是黑名单类型，记得要恢复不压缩
 			}
+			// 如果是黑名单类型，不压缩
 			// fmt.Println(kind.MIME.Value)
 		}
 		if l.cfg.EndecWay > 0 {
@@ -269,10 +269,10 @@ func (osi *OrcasSDKImpl) uploadFiles(c core.Ctx, bktID int64, path string, f []*
 	var f1, f2 []*core.ObjectInfo
 	var d1, d2 []*core.DataInfo
 
-	// 2. 如果是文件，先看是否要秒传
+	// 如果是文件，先看是否要秒传
 	switch level {
 	case FAST:
-		// 3. 如果要预先秒传的，先读取hdrCrc32，排队检查
+		// 如果要预先秒传的，先读取hdrCrc32，排队检查
 		for i, fi := range f {
 			if err := osi.readFile(c, filepath.Join(path, fi.Name),
 				newListener(bktID, d[i], osi.cfg, HDR_CRC32&^action).Once()); err != nil {
@@ -308,7 +308,7 @@ func (osi *OrcasSDKImpl) uploadFiles(c core.Ctx, bktID int64, path string, f []*
 			return err
 		}
 	case FULL:
-		// 4. 如果不需要预先秒传或者预先秒传失败的，整个读取crc32和md5以后尝试秒传
+		// 如果不需要预先秒传或者预先秒传失败的，整个读取crc32和md5以后尝试秒传
 		for i, fi := range f {
 			if err := osi.readFile(c, filepath.Join(path, fi.Name),
 				newListener(bktID, d[i], osi.cfg, (HDR_CRC32|CRC32_MD5)&^action)); err != nil {
@@ -339,7 +339,7 @@ func (osi *OrcasSDKImpl) uploadFiles(c core.Ctx, bktID int64, path string, f []*
 			fmt.Println(err)
 			return err
 		}
-		// 5. 秒传失败的（包括超过大小或者预先秒传失败），丢到待上传对列
+		// 秒传失败的（包括超过大小或者预先秒传失败），普通上传
 		if err := osi.uploadFiles(c, bktID, path, f2, d2, OFF, action|HDR_CRC32|CRC32_MD5); err != nil {
 			fmt.Println(runtime.Caller(0))
 			fmt.Println(err)
