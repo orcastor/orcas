@@ -103,13 +103,22 @@ func (ch *RWHandler) PutData(c Ctx, bktID, dataID int64, sn int, buf []byte) (in
 
 // 上传完数据以后，再创建元数据
 func (ch *RWHandler) PutDataInfo(c Ctx, bktID int64, d []*DataInfo) (ids []int64, err error) {
+	var n []*DataInfo
 	for _, x := range d {
-		if x.ID == 0 {
+		if x.ID < 0 && int(^x.ID) <= len(d) {
+			continue
+		} else if x.ID <= 0 {
 			x.ID, _ = ch.ig.New()
 		}
 		ids = append(ids, x.ID)
+		n = append(n, x)
 	}
-	return ids, ch.mo.PutData(c, bktID, d)
+	for i := range ids {
+		if ids[i] < 0 && ^ids[i] < int64(len(ids)) {
+			ids[i] = ids[^ids[i]]
+		}
+	}
+	return ids, ch.mo.PutData(c, bktID, n)
 }
 
 func (ch *RWHandler) GetDataInfo(c Ctx, bktID, id int64) (*DataInfo, error) {
