@@ -101,7 +101,7 @@ func (ddo *DefaultDataAdapter) Close() {
 	}
 }
 
-// path/<文件名hash的最后三个字节>/hash
+// path/<文件名hash的最后三个字节>/hash/<dataID>_<sn>
 func toFilePath(path string, bcktID, dataID int64, sn int) string {
 	fileName := fmt.Sprintf("%d_%d", dataID, sn)
 	hash := fmt.Sprintf("%X", md5.Sum([]byte(fileName)))
