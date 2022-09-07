@@ -515,10 +515,10 @@ func (dmo *DefaultMetadataAdapter) ListObj(c Ctx, bktID, pid int64,
 			b.Where(conds...),
 			b.OrderBy(orderBy),
 			b.Limit(count))
-	}
 
-	if len(o) > 0 {
-		d = toDelim(order, o[len(o)-1])
+		if len(o) > 0 {
+			d = toDelim(order, o[len(o)-1])
+		}
 	}
 	return
 }
