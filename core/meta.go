@@ -15,10 +15,12 @@ import (
 const ROOT_OID int64 = 0
 
 type BucketInfo struct {
-	ID   int64  `borm:"id"`   // 桶ID
-	Name string `borm:"name"` // 桶名称
-	UID  int64  `borm:"uid"`  // 拥有者
-	Type int    `borm:"type"` // 桶类型，0: none, 1: normal ...
+	ID    int64  `borm:"id"`    // 桶ID
+	Name  string `borm:"name"`  // 桶名称
+	UID   int64  `borm:"uid"`   // 拥有者
+	Type  int    `borm:"type"`  // 桶类型，0: none, 1: normal ...
+	Quota int64  `borm:"quota"` // 配额
+	Usage int64  `borm:"usage"` // 使用量，统计所有版本的原始大小
 	// SnapshotID int64 // 最新快照版本ID
 }
 
