@@ -161,7 +161,9 @@ func InitDB() error {
 	db.Exec(`CREATE TABLE bkt (id BIGINT PRIMARY KEY NOT NULL,
 		name TEXT NOT NULL,
 		uid BIGINT NOT NULL,
-		type INT NOT NULL
+		type INT NOT NULL,
+		quota BIGINT NOT NULL,
+		usage BIGINT NOT NULL
 	)`)
 
 	db.Exec(`CREATE INDEX ix_uid on bkt (uid)`)
