@@ -34,18 +34,6 @@ var CmprBlacklist = map[string]int{
 	"application/zstd":            1,
 }
 
-type DummyArchiver struct{}
-
-func (DummyArchiver) CheckExt(string) error { return nil }
-func (DummyArchiver) Compress(in io.Reader, out io.Writer) error {
-	_, err := io.Copy(out, in)
-	return err
-}
-func (DummyArchiver) Decompress(in io.Reader, out io.Writer) error {
-	_, err := io.Copy(out, in)
-	return err
-}
-
 const (
 	UPLOAD_DATA = 1 << iota
 	CRC32_MD5
@@ -71,7 +59,7 @@ type listener struct {
 }
 
 func newListener(bktID int64, d *core.DataInfo, cfg Config, action uint32) *listener {
-	l := &listener{bktID: bktID, d: d, cfg: cfg, action: action, cmpr: &DummyArchiver{}}
+	l := &listener{bktID: bktID, d: d, cfg: cfg, action: action}
 	if action&CRC32_MD5 != 0 {
 		l.md5Hash = md5.New()
 	}
@@ -267,84 +255,93 @@ func (osi *OrcasSDKImpl) uploadFiles(c core.Ctx, bktID int64, path string,
 		}
 	}
 
-	var f1, f2 []*core.ObjectInfo
-	var d1, d2 []*core.DataInfo
+	var f1, f2, f3, f4 []*core.ObjectInfo
+	var d1, d2, d3, d4 []*core.DataInfo
 
 	// 如果是文件，先看是否要秒传
 	switch level {
 	case FAST:
-		// 如果要预先秒传的，先读取hdrCrc32，排队检查
+		// 如果要预先秒传的，先读取hdrCRC32，排队检查
 		for i, fi := range f {
-			if err := osi.readFile(c, filepath.Join(path, fi.Name),
-				newListener(bktID, d[i], osi.cfg, HDR_CRC32&^doneAction).Once()); err != nil {
-				// TODO: 处理错误情况
-				fmt.Println(runtime.Caller(0))
-				fmt.Println(err)
-
-			}
-		}
-		ids, err := osi.h.Ref(c, bktID, d)
-		if err != nil {
-			// TODO: 处理错误情况
-			fmt.Println(runtime.Caller(0))
-			fmt.Println(err)
-		}
-		for i, id := range ids {
-			if id > 0 {
-				f1 = append(f1, f[i])
+			if fi.Size > PKG_SIZE {
+				f1 = append(f1, fi)
 				d1 = append(d1, d[i])
 			} else {
-				f2 = append(f2, f[i])
+				f2 = append(f2, fi)
 				d2 = append(d2, d[i])
 			}
 		}
-		if err := osi.uploadFiles(c, bktID, path, f1, d1, FULL, doneAction|HDR_CRC32); err != nil {
+		if err := osi.uploadFiles(c, bktID, path, f2, d2, FULL, doneAction); err != nil {
 			fmt.Println(runtime.Caller(0))
 			fmt.Println(err)
 			return err
 		}
-		if err := osi.uploadFiles(c, bktID, path, f2, d2, OFF, doneAction|HDR_CRC32); err != nil {
-			fmt.Println(runtime.Caller(0))
-			fmt.Println(err)
-			return err
+		if len(f1) > 0 {
+			for i, fi := range f1 {
+				if err := osi.readFile(c, filepath.Join(path, fi.Name),
+					newListener(bktID, d1[i], osi.cfg, HDR_CRC32&^doneAction).Once()); err != nil {
+					fmt.Println(runtime.Caller(0))
+					fmt.Println(err)
+				}
+			}
+			ids, err := osi.h.Ref(c, bktID, d1)
+			if err != nil {
+				fmt.Println(runtime.Caller(0))
+				fmt.Println(err)
+			}
+			for i, id := range ids {
+				if id > 0 {
+					f3 = append(f3, f1[i])
+					d3 = append(d3, d1[i])
+				} else {
+					f4 = append(f4, f1[i])
+					d4 = append(d4, d1[i])
+				}
+			}
+			if err := osi.uploadFiles(c, bktID, path, f3, d3, FULL, doneAction|HDR_CRC32); err != nil {
+				fmt.Println(runtime.Caller(0))
+				fmt.Println(err)
+				return err
+			}
+			if err := osi.uploadFiles(c, bktID, path, f4, d4, OFF, doneAction|HDR_CRC32); err != nil {
+				fmt.Println(runtime.Caller(0))
+				fmt.Println(err)
+				return err
+			}
 		}
 	case FULL:
 		// 如果不需要预先秒传或者预先秒传失败的，整个读取crc32和md5以后尝试秒传
 		for i, fi := range f {
 			if err := osi.readFile(c, filepath.Join(path, fi.Name),
 				newListener(bktID, d[i], osi.cfg, (HDR_CRC32|CRC32_MD5)&^doneAction)); err != nil {
-				// TODO: 处理错误情况
 				fmt.Println(runtime.Caller(0))
 				fmt.Println(err)
-
 			}
 		}
 		ids, err := osi.h.Ref(c, bktID, d)
 		if err != nil {
 			fmt.Println(runtime.Caller(0))
 			fmt.Println(err)
-			// TODO: 处理错误情况
 		}
 		// 设置DataID，如果是有的，说明秒传成功，不再需要上传数据了
 		for i, id := range ids {
 			if id > 0 {
 				f[i].DataID = id
 			} else {
-				f2 = append(f2, f[i])
+				f1 = append(f1, f[i])
 				if id < 0 { // 小于0说明是引用的数据
 					d[i].ID = id
 				}
-				d2 = append(d2, d[i])
+				d1 = append(d1, d[i])
 			}
 		}
-		if _, err := osi.h.Put(c, bktID, f); err != nil {
-			// TODO: 重名冲突
+		if _, err := osi.putObjects(c, bktID, f); err != nil {
 			fmt.Println(runtime.Caller(0))
 			fmt.Println(err)
 			return err
 		}
 		// 秒传失败的（包括超过大小或者预先秒传失败），普通上传
-		if err := osi.uploadFiles(c, bktID, path, f2, d2, OFF, doneAction|HDR_CRC32|CRC32_MD5); err != nil {
+		if err := osi.uploadFiles(c, bktID, path, f1, d1, OFF, doneAction|HDR_CRC32|CRC32_MD5); err != nil {
 			fmt.Println(runtime.Caller(0))
 			fmt.Println(err)
 			return err
@@ -356,7 +353,6 @@ func (osi *OrcasSDKImpl) uploadFiles(c core.Ctx, bktID int64, path string,
 			if d[i].ID >= 0 {
 				if err := osi.readFile(c, filepath.Join(path, fi.Name),
 					newListener(bktID, d[i], osi.cfg, (UPLOAD_DATA|HDR_CRC32|CRC32_MD5)&^doneAction)); err != nil {
-					// TODO: 处理错误情况
 					fmt.Println(runtime.Caller(0))
 					fmt.Println(err)
 				}
@@ -364,7 +360,6 @@ func (osi *OrcasSDKImpl) uploadFiles(c core.Ctx, bktID int64, path string,
 		}
 		// 刷新一下打包数据
 		if err := osi.dp.Flush(c, osi.h, bktID); err != nil {
-			// TODO: 处理错误情况
 			return err
 		}
 		ids, err := osi.h.PutDataInfo(c, bktID, d)
@@ -379,14 +374,25 @@ func (osi *OrcasSDKImpl) uploadFiles(c core.Ctx, bktID int64, path string,
 				f[i].DataID = id
 			}
 		}
-		if _, err := osi.h.Put(c, bktID, f); err != nil {
-			// TODO: 重名冲突
+		if _, err := osi.putObjects(c, bktID, f); err != nil {
 			fmt.Println(runtime.Caller(0))
 			fmt.Println(err)
 			return err
 		}
 	}
 	return nil
+}
+
+type DummyArchiver struct{}
+
+func (DummyArchiver) CheckExt(string) error { return nil }
+func (DummyArchiver) Compress(in io.Reader, out io.Writer) error {
+	_, err := io.Copy(out, in)
+	return err
+}
+func (DummyArchiver) Decompress(in io.Reader, out io.Writer) error {
+	_, err := io.Copy(out, in)
+	return err
 }
 
 type dataReader struct {
@@ -457,7 +463,7 @@ func (osi *OrcasSDKImpl) downloadFile(c core.Ctx, bktID int64, o *core.ObjectInf
 		os, _, _, err := osi.h.List(c, bktID, o.ID, core.ListOptions{
 			Type:  core.OBJ_TYPE_VERSION,
 			Count: 1,
-			Order: "-mtime",
+			Order: "-id",
 		})
 		if err != nil || len(os) < 1 {
 			fmt.Println(runtime.Caller(0))

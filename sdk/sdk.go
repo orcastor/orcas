@@ -20,6 +20,14 @@ const (
 	FAST        // 头部检查成功再整个文件读取
 )
 
+// 同名冲突解决方式
+const (
+	MERGE = iota
+	THROW
+	RENAME
+	SKIP
+)
+
 type Config struct {
 	DataSync bool   // 断电保护策略(Power-off Protection Policy)，强制每次写入数据后刷到磁盘
 	RefLevel uint32 // 秒传级别设置：OFF（默认） / FULL: Ref / FAST: TryRef+Ref
@@ -28,8 +36,8 @@ type Config struct {
 	EndecWay uint32 // 加密方式，取值见core.DATA_ENDEC_MASK
 	EndecKey string // 加密KEY，SM4需要固定为16个字符，AES256需要大于16个字符
 	DontSync string // 不同步的文件名通配符（https://pkg.go.dev/path/filepath#Match），用分号分隔
-	// Conflict uint32 // 同名冲突后，0: Merge or Cover（默认） / 1: Throw / 2: Rename / 3: Skip
-	// NameTail string // 重命名尾巴，"-副本" / "{\d}"
+	Conflict uint32 // 同名冲突解决方式，0: Merge or Cover（默认） / 1: Throw / 2: Rename / 3: Skip
+	NameTmpl string // 重命名尾巴，"%s的副本"
 	// ChkPtDir string // 断点续传记录目录，不设置路径默认不开启
 	// BEDecmpr bool   // 后端解压，PS：必须是非加密数据
 }
@@ -115,6 +123,96 @@ func (osi *OrcasSDKImpl) ID2Path(c core.Ctx, bktID, id int64) (rpath string, err
 	return rpath, nil
 }
 
+func (osi *OrcasSDKImpl) putObjects(c core.Ctx, bktID int64, o []*core.ObjectInfo) ([]int64, error) {
+	ids, err := osi.h.Put(c, bktID, o)
+	if err != nil {
+		fmt.Println(runtime.Caller(0))
+		fmt.Println(err)
+		return nil, err
+	}
+
+	switch osi.cfg.Conflict {
+	case MERGE: // Merge or Cover（默认）
+		var vers []*core.ObjectInfo
+		for i := range ids {
+			if ids[i] <= 0 {
+				ids[i], err = osi.Path2ID(c, bktID, o[i].PID, o[i].Name)
+				// 如果是文件，需要新建一个版本，版本更新的逻辑需要jobs来完成
+				if o[i].Type == core.OBJ_TYPE_FILE {
+					vers = append(vers, &core.ObjectInfo{
+						PID:    ids[i],
+						MTime:  o[i].MTime,
+						Type:   core.OBJ_TYPE_VERSION,
+						Status: core.OBJ_NORMAL,
+						Size:   o[i].Size,
+					})
+				}
+			}
+		}
+		if len(vers) > 0 {
+			_, err = osi.h.Put(c, bktID, vers)
+			if err != nil {
+				fmt.Println(runtime.Caller(0))
+				fmt.Println(err)
+				return nil, err
+			}
+		}
+	case THROW: // Throw
+		for i := range ids {
+			if ids[i] <= 0 {
+				return ids, fmt.Errorf("remote object exists, pid:%d, name:%s", o[i].PID, o[i].Name)
+			}
+		}
+	case RENAME: // Rename
+		m := make(map[int]int)
+		var rename []*core.ObjectInfo
+		for i := range ids {
+			// 需要重命名重新创建
+			if ids[i] <= 0 {
+				// 先直接用NameTmpl创建，覆盖大部分场景
+				m[len(rename)] = i
+				x := *o[i]
+				x.Name = fmt.Sprintf(osi.cfg.NameTmpl, x.Name)
+				rename = append(rename, &x)
+			}
+		}
+		// 需要重命名重新创建
+		if len(rename) > 0 {
+			ids2, err2 := osi.h.Put(c, bktID, rename)
+			if err2 != nil {
+				return ids, err2
+			}
+			for i := range ids2 {
+				if ids2[i] > 0 {
+					ids[m[i]] = ids2[i]
+				} else {
+					// 还是失败，用NameTmpl找有多少个目录，然后往后一个一个尝试
+					_, cnt, _, err3 := osi.h.List(c, bktID, rename[i].PID, core.ListOptions{
+						Word: rename[i].Name + "*",
+					})
+					if err3 != nil {
+						return ids, err3
+					}
+					for j := 0; j < 500; j++ {
+						x := *o[m[i]]
+						x.Name = fmt.Sprintf(osi.cfg.NameTmpl+"%d", x.Name, int(cnt)+j+1)
+						ids3, err4 := osi.h.Put(c, bktID, []*core.ObjectInfo{&x})
+						if err4 != nil {
+							return ids, err4
+						}
+						if len(ids3) > 0 && ids3[0] > 0 {
+							ids[m[i]] = ids3[0]
+							break
+						}
+					}
+				}
+			}
+		}
+	case SKIP: // Skip
+	}
+	return ids, nil
+}
+
 // 层序遍历
 type elem struct {
 	id   int64
@@ -156,8 +254,7 @@ func (osi *OrcasSDKImpl) Upload(c core.Ctx, bktID, pid int64, lpath string) erro
 		}
 
 		o.DataID = core.EmptyDataID
-		if _, err = osi.h.Put(c, bktID, []*core.ObjectInfo{o}); err != nil {
-			// TODO: 重名冲突
+		if _, err = osi.putObjects(c, bktID, []*core.ObjectInfo{o}); err != nil {
 			fmt.Println(runtime.Caller(0))
 			fmt.Println(err)
 		}
@@ -166,9 +263,8 @@ func (osi *OrcasSDKImpl) Upload(c core.Ctx, bktID, pid int64, lpath string) erro
 
 	// 上传目录
 	o.Type = core.OBJ_TYPE_DIR
-	dirIDs, err := osi.h.Put(c, bktID, []*core.ObjectInfo{o})
+	dirIDs, err := osi.putObjects(c, bktID, []*core.ObjectInfo{o})
 	if err != nil || len(dirIDs) <= 0 || dirIDs[0] <= 0 {
-		// TODO: 怎么处理
 		fmt.Println(runtime.Caller(0))
 		fmt.Println(err)
 		return err
@@ -179,9 +275,14 @@ func (osi *OrcasSDKImpl) Upload(c core.Ctx, bktID, pid int64, lpath string) erro
 
 	// 遍历本地目录
 	for len(q) > 0 {
+		if q[0].path == "" {
+			// 路径为空，直接弹出
+			q = q[1:]
+			continue
+		}
+
 		rawFiles, err := ioutil.ReadDir(q[0].path)
 		if err != nil {
-			// TODO
 			fmt.Println(runtime.Caller(0))
 			fmt.Println(err)
 			return err
@@ -228,13 +329,13 @@ func (osi *OrcasSDKImpl) Upload(c core.Ctx, bktID, pid int64, lpath string) erro
 		// 异步获取上一级目录的id
 		wg := &sync.WaitGroup{}
 		dirElems := make([]elem, len(dirs))
-		if len(dirs) > 0 {
+		if len(dirs) > 0 { // FIXME：处理目录过多问题
 			// 1. 如果是目录， 直接上传
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
 				// 上传目录
-				ids, err := osi.h.Put(c, bktID, dirs)
+				ids, err := osi.putObjects(c, bktID, dirs)
 				if err != nil {
 					// TODO: 怎么处理
 					fmt.Println(runtime.Caller(0))
@@ -244,15 +345,13 @@ func (osi *OrcasSDKImpl) Upload(c core.Ctx, bktID, pid int64, lpath string) erro
 				for i, id := range ids {
 					if id > 0 {
 						dirElems[i].id = id
-					} else {
-						// TODO: 重名冲突
+						dirElems[i].path = filepath.Join(q[0].path, dirs[i].Name)
 					}
-					dirElems[i].path = filepath.Join(q[0].path, dirs[i].Name)
 				}
 			}()
 		}
 
-		if len(files) > 0 {
+		if len(files) > 0 { // FIXME：处理文件过多问题
 			osi.uploadFiles(c, bktID, q[0].path, files, nil, osi.cfg.RefLevel, 0)
 		}
 
@@ -260,8 +359,7 @@ func (osi *OrcasSDKImpl) Upload(c core.Ctx, bktID, pid int64, lpath string) erro
 		q = append(q[1:], dirElems...)
 	}
 
-	if _, err := osi.h.Put(c, bktID, emptyFiles); err != nil {
-		// TODO: 重名冲突
+	if _, err := osi.putObjects(c, bktID, emptyFiles); err != nil {
 		fmt.Println(runtime.Caller(0))
 		fmt.Println(err)
 		return err
