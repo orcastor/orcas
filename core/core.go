@@ -1,6 +1,8 @@
 package core
 
 import (
+	"strconv"
+
 	"github.com/orca-zhang/idgen"
 )
 
@@ -36,7 +38,7 @@ type Handler interface {
 	// 用于非文件内容的扫描，只看文件是否存在，大小是否合适
 	FileSize(c Ctx, bktID, dataID int64, sn int) (int64, error)
 
-	// 垃圾回收时有数据没有元数据引用的为脏数据（需要留出窗口时间），有元数据没有数据的为损坏数据
+	// Name不传默认用ID字符串化后的值作为Name
 	Put(c Ctx, bktID int64, o []*ObjectInfo) ([]int64, error)
 	Get(c Ctx, bktID int64, ids []int64) ([]*ObjectInfo, error)
 	List(c Ctx, bktID, pid int64, opt ListOptions) (o []*ObjectInfo, cnt int64, delim string, err error)
@@ -44,6 +46,7 @@ type Handler interface {
 	Rename(c Ctx, bktID, id int64, name string) error
 	MoveTo(c Ctx, bktID, id, pid int64) error
 
+	// 垃圾回收时有数据没有元数据引用的为脏数据（需要留出窗口时间），有元数据没有数据的为损坏数据
 	Recycle(c Ctx, bktID, id int64) error
 	Delete(c Ctx, bktID, id int64) error
 }
@@ -149,6 +152,9 @@ func (ch *RWHandler) Put(c Ctx, bktID int64, o []*ObjectInfo) ([]int64, error) {
 	for _, x := range o {
 		if x.ID == 0 {
 			x.ID, _ = ch.ig.New()
+		}
+		if x.Name == "" {
+			x.Name = strconv.FormatInt(x.ID, 10)
 		}
 	}
 	for _, x := range o {
