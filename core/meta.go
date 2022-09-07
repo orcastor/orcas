@@ -508,12 +508,14 @@ func (dmo *DefaultMetadataAdapter) ListObj(c Ctx, bktID, pid int64,
 		return nil, 0, "", err
 	}
 
-	var orderBy string
-	orderBy, order = doOrder(delim, order, &conds)
-	_, err = b.Table(db, OBJ_TBL, c).Select(&o,
-		b.Where(conds...),
-		b.OrderBy(orderBy),
-		b.Limit(count))
+	if count > 0 {
+		var orderBy string
+		orderBy, order = doOrder(delim, order, &conds)
+		_, err = b.Table(db, OBJ_TBL, c).Select(&o,
+			b.Where(conds...),
+			b.OrderBy(orderBy),
+			b.Limit(count))
+	}
 
 	if len(o) > 0 {
 		d = toDelim(order, o[len(o)-1])

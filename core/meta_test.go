@@ -595,5 +595,13 @@ func TestListObj(t *testing.T) {
 			So(cnt, ShouldEqual, 0)
 			So(d, ShouldEqual, "")
 		})
+
+		Convey("list obj with 0 count", func() {
+			o, cnt, d, err := dmo.ListObj(c, bktID, pid, "", "", "", 0, 0)
+			So(err, ShouldBeNil)
+			So(len(o), ShouldEqual, 0)
+			So(cnt, ShouldEqual, 5)
+			So(d, ShouldBeEmpty)
+		})
 	})
 }
