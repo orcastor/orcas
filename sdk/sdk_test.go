@@ -19,6 +19,7 @@ var path = "/home/semaphore/go/"
 var cfg = Config{
 	DataSync: true,
 	RefLevel: OFF,
+	RefLevel: FULL,
 	WiseCmpr: core.DATA_CMPR_ZSTD,
 	EndecWay: core.DATA_ENDEC_AES256,
 	EndecKey: "1234567890abcdef12345678",
