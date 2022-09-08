@@ -231,13 +231,105 @@ func (osi *OrcasSDKImpl) readFile(c core.Ctx, path string, l *listener) error {
 	return err
 }
 
-type SortBySize []uploadInfo
+func (osi *OrcasSDKImpl) putObjects(c core.Ctx, bktID int64, o []*core.ObjectInfo) ([]int64, error) {
+	if len(o) <= 0 {
+		return nil, nil
+	}
 
-func (u SortBySize) Len() int { return len(u) }
-func (u SortBySize) Less(i, j int) bool {
-	return u[i].o.Size < u[j].o.Size || u[i].o.Name < u[j].o.Name
+	ids, err := osi.h.Put(c, bktID, o)
+	if err != nil {
+		fmt.Println(runtime.Caller(0))
+		fmt.Println(err)
+		return nil, err
+	}
+
+	switch osi.cfg.Conflict {
+	case MERGE: // Merge or Cover（默认）
+		var vers []*core.ObjectInfo
+		for i := range ids {
+			if ids[i] <= 0 {
+				ids[i], err = osi.Path2ID(c, bktID, o[i].PID, o[i].Name)
+				// 如果是文件，需要新建一个版本，版本更新的逻辑需要jobs来完成
+				if o[i].Type == core.OBJ_TYPE_FILE {
+					vers = append(vers, &core.ObjectInfo{
+						PID:    ids[i],
+						MTime:  o[i].MTime,
+						Type:   core.OBJ_TYPE_VERSION,
+						Status: core.OBJ_NORMAL,
+						Size:   o[i].Size,
+					})
+				}
+			}
+		}
+		if len(vers) > 0 {
+			_, err = osi.h.Put(c, bktID, vers)
+			if err != nil {
+				fmt.Println(runtime.Caller(0))
+				fmt.Println(err)
+				return nil, err
+			}
+		}
+	case THROW: // Throw
+		for i := range ids {
+			if ids[i] <= 0 {
+				return ids, fmt.Errorf("remote object exists, pid:%d, name:%s", o[i].PID, o[i].Name)
+			}
+		}
+	case RENAME: // Rename
+		m := make(map[int]int)
+		var rename []*core.ObjectInfo
+		for i := range ids {
+			// 需要重命名重新创建
+			if ids[i] <= 0 {
+				// 先直接用NameTmpl创建，覆盖大部分场景
+				m[len(rename)] = i
+				x := *o[i]
+				x.Name = fmt.Sprintf(osi.cfg.NameTmpl, x.Name)
+				rename = append(rename, &x)
+			}
+		}
+		// 需要重命名重新创建
+		if len(rename) > 0 {
+			ids2, err2 := osi.h.Put(c, bktID, rename)
+			if err2 != nil {
+				return ids, err2
+			}
+			for i := range ids2 {
+				if ids2[i] > 0 {
+					ids[m[i]] = ids2[i]
+				} else {
+					// 还是失败，用NameTmpl找有多少个目录，然后往后一个一个尝试
+					_, cnt, _, err3 := osi.h.List(c, bktID, rename[i].PID, core.ListOptions{
+						Word: rename[i].Name + "*",
+					})
+					if err3 != nil {
+						return ids, err3
+					}
+					for j := 0; j < 500; j++ {
+						x := *o[m[i]]
+						x.Name = fmt.Sprintf(osi.cfg.NameTmpl+"%d", x.Name, int(cnt)+j+1)
+						ids3, err4 := osi.h.Put(c, bktID, []*core.ObjectInfo{&x})
+						if err4 != nil {
+							return ids, err4
+						}
+						if len(ids3) > 0 && ids3[0] > 0 {
+							ids[m[i]] = ids3[0]
+							break
+						}
+					}
+				}
+			}
+		}
+	case SKIP: // Skip
+	}
+	return ids, nil
 }
-func (u SortBySize) Swap(i, j int) { u[i], u[j] = u[j], u[i] }
+
+type sizeSort []uploadInfo
+
+func (u sizeSort) Len() int           { return len(u) }
+func (u sizeSort) Less(i, j int) bool { return u[i].o.Size < u[j].o.Size || u[i].o.Name < u[j].o.Name }
+func (u sizeSort) Swap(i, j int)      { u[i], u[j] = u[j], u[i] }
 
 func (osi *OrcasSDKImpl) uploadFiles(c core.Ctx, bktID int64, u []uploadInfo,
 	d []*core.DataInfo, level, doneAction uint32) error {
@@ -247,7 +339,7 @@ func (osi *OrcasSDKImpl) uploadFiles(c core.Ctx, bktID int64, u []uploadInfo,
 
 	if len(d) <= 0 {
 		// 先按文件大小排序一下，尽量让它们可以打包
-		sort.Sort(SortBySize(u))
+		sort.Sort(sizeSort(u))
 		d = make([]*core.DataInfo, len(u))
 		for i := range u {
 			d[i] = &core.DataInfo{
@@ -257,8 +349,8 @@ func (osi *OrcasSDKImpl) uploadFiles(c core.Ctx, bktID int64, u []uploadInfo,
 		}
 	}
 
-	var u1, u2, u3, u4 []uploadInfo
-	var d1, d2, d3, d4 []*core.DataInfo
+	var u1, u2 []uploadInfo
+	var d1, d2 []*core.DataInfo
 
 	// 如果是文件，先看是否要秒传
 	switch level {
@@ -273,43 +365,39 @@ func (osi *OrcasSDKImpl) uploadFiles(c core.Ctx, bktID int64, u []uploadInfo,
 				d2 = append(d2, d[i])
 			}
 		}
-		if err := osi.uploadFiles(c, bktID, u2, d2, FULL, doneAction); err != nil {
-			fmt.Println(runtime.Caller(0))
-			fmt.Println(err)
-			return err
-		}
-		if len(u1) > 0 {
-			for i, fi := range u1 {
+		u, u1, d, d1 = u1, nil, d1, nil
+		if len(u) > 0 {
+			for i, fi := range u {
 				if err := osi.readFile(c, filepath.Join(fi.path, fi.o.Name),
-					newListener(bktID, d1[i], osi.cfg, HDR_CRC32&^doneAction).Once()); err != nil {
+					newListener(bktID, d[i], osi.cfg, HDR_CRC32&^doneAction).Once()); err != nil {
 					fmt.Println(runtime.Caller(0))
 					fmt.Println(err)
 				}
 			}
-			ids, err := osi.h.Ref(c, bktID, d1)
+			ids, err := osi.h.Ref(c, bktID, d)
 			if err != nil {
 				fmt.Println(runtime.Caller(0))
 				fmt.Println(err)
 			}
 			for i, id := range ids {
 				if id > 0 {
-					u3 = append(u3, u1[i])
-					d3 = append(d3, d1[i])
+					u1 = append(u1, u[i])
+					d1 = append(d1, d[i])
 				} else {
-					u4 = append(u4, u1[i])
-					d4 = append(d4, d1[i])
+					u2 = append(u2, u[i])
+					d2 = append(d2, d[i])
 				}
 			}
-			if err := osi.uploadFiles(c, bktID, u3, d3, FULL, doneAction|HDR_CRC32); err != nil {
+			if err := osi.uploadFiles(c, bktID, u1, d1, FULL, doneAction|HDR_CRC32); err != nil {
 				fmt.Println(runtime.Caller(0))
 				fmt.Println(err)
 				return err
 			}
-			if err := osi.uploadFiles(c, bktID, u4, d4, OFF, doneAction|HDR_CRC32); err != nil {
-				fmt.Println(runtime.Caller(0))
-				fmt.Println(err)
-				return err
-			}
+		}
+		if err := osi.uploadFiles(c, bktID, u2, d2, OFF, doneAction); err != nil {
+			fmt.Println(runtime.Caller(0))
+			fmt.Println(err)
+			return err
 		}
 	case FULL:
 		// 如果不需要预先秒传或者预先秒传失败的，整个读取crc32和md5以后尝试秒传
@@ -325,17 +413,19 @@ func (osi *OrcasSDKImpl) uploadFiles(c core.Ctx, bktID int64, u []uploadInfo,
 			fmt.Println(runtime.Caller(0))
 			fmt.Println(err)
 		}
-		// 设置DataID，如果是有的，说明秒传成功，不再需要上传数据了
 		var f []*core.ObjectInfo
+		var gap int64
 		for i, id := range ids {
+			// 设置DataID，如果是有的，说明秒传成功，不再需要上传数据了
 			if id > 0 {
 				u[i].o.DataID = id
 				f = append(f, u[i].o)
+				gap++
 			} else {
-				u1 = append(u1, u[i])
 				if id < 0 { // 小于0说明是引用的数据
-					d[i].ID = id
+					d[i].ID = id + gap // 有人走了，那需要补充空隙
 				}
+				u1 = append(u1, u[i])
 				d1 = append(d1, d[i])
 			}
 		}
