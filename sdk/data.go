@@ -231,6 +231,27 @@ func (osi *OrcasSDKImpl) readFile(c core.Ctx, path string, l *listener) error {
 	return err
 }
 
+func (osi *OrcasSDKImpl) putOne(c core.Ctx, bktID int64, o *core.ObjectInfo) (int64, error) {
+	ids, err := osi.h.Put(c, bktID, []*core.ObjectInfo{o})
+	if err != nil {
+		return 0, err
+	}
+	if len(ids) > 0 && ids[0] > 0 {
+		return ids[0], nil
+	}
+	return 0, fmt.Errorf("remote object exists, pid:%d, name:%s", o.PID, o.Name)
+}
+
+func (osi *OrcasSDKImpl) getRename(o *core.ObjectInfo, i int) *core.ObjectInfo {
+	x := *o
+	if i <= 0 {
+		x.Name = fmt.Sprintf(osi.cfg.NameTmpl, x.Name)
+	} else {
+		x.Name = fmt.Sprintf(osi.cfg.NameTmpl+"%d", x.Name, i+1)
+	}
+	return &x
+}
+
 func (osi *OrcasSDKImpl) putObjects(c core.Ctx, bktID int64, o []*core.ObjectInfo) ([]int64, error) {
 	if len(o) <= 0 {
 		return nil, nil
@@ -269,12 +290,6 @@ func (osi *OrcasSDKImpl) putObjects(c core.Ctx, bktID int64, o []*core.ObjectInf
 				return nil, err
 			}
 		}
-	case THROW: // Throw
-		for i := range ids {
-			if ids[i] <= 0 {
-				return ids, fmt.Errorf("remote object exists, pid:%d, name:%s", o[i].PID, o[i].Name)
-			}
-		}
 	case RENAME: // Rename
 		m := make(map[int]int)
 		var rename []*core.ObjectInfo
@@ -283,9 +298,7 @@ func (osi *OrcasSDKImpl) putObjects(c core.Ctx, bktID int64, o []*core.ObjectInf
 			if ids[i] <= 0 {
 				// 先直接用NameTmpl创建，覆盖大部分场景
 				m[len(rename)] = i
-				x := *o[i]
-				x.Name = fmt.Sprintf(osi.cfg.NameTmpl, x.Name)
-				rename = append(rename, &x)
+				rename = append(rename, osi.getRename(o[i], 0))
 			}
 		}
 		// 需要重命名重新创建
@@ -305,19 +318,28 @@ func (osi *OrcasSDKImpl) putObjects(c core.Ctx, bktID int64, o []*core.ObjectInf
 					if err3 != nil {
 						return ids, err3
 					}
-					for j := 0; j < 500; j++ {
-						x := *o[m[i]]
-						x.Name = fmt.Sprintf(osi.cfg.NameTmpl+"%d", x.Name, int(cnt)+j+1)
-						ids3, err4 := osi.h.Put(c, bktID, []*core.ObjectInfo{&x})
-						if err4 != nil {
-							return ids, err4
+					// 假设有 test、test的副本、test的副本2，cnt为2
+					for j := 0; j <= int(cnt/2)+1; j++ {
+						// 先试试个数后面一个，正常顺序查找，最大概率命中的分支
+						if ids[m[i]], err3 = osi.putOne(c, bktID, osi.getRename(o[i], int(cnt)+j)); err3 == nil {
+							break
 						}
-						if len(ids3) > 0 && ids3[0] > 0 {
-							ids[m[i]] = ids3[0]
+						// 从最前面往后找
+						if ids[m[i]], err3 = osi.putOne(c, bktID, osi.getRename(o[i], j)); err3 == nil {
+							break
+						}
+						// 从cnt个开始往前找
+						if ids[m[i]], err3 = osi.putOne(c, bktID, osi.getRename(o[i], int(cnt)-1-j)); err3 == nil {
 							break
 						}
 					}
 				}
+			}
+		}
+	case THROW: // Throw
+		for i := range ids {
+			if ids[i] <= 0 {
+				return ids, fmt.Errorf("remote object exists, pid:%d, name:%s", o[i].PID, o[i].Name)
 			}
 		}
 	case SKIP: // Skip

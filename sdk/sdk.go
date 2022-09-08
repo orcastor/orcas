@@ -23,8 +23,8 @@ const (
 // 同名冲突解决方式
 const (
 	MERGE = iota
-	THROW
 	RENAME
+	THROW
 	SKIP
 )
 
