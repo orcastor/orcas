@@ -23,6 +23,7 @@ var cfg = Config{
 	EndecWay: core.DATA_ENDEC_AES256,
 	EndecKey: "1234567890abcdef12345678",
 	DontSync: ".*",
+	WorkersN: 16,
 }
 
 func init() {
@@ -32,52 +33,42 @@ func init() {
 	bktID, _ = idgen.NewIDGen(nil, 0).New()
 	core.InitDB()
 	core.InitBucketDB(bktID)
+	core.NewRWHandler().PutBkt(context.TODO(), []*core.BucketInfo{{ID: bktID, Name: "zhangwei", UID: 9999, Type: 1}})
+	// bktID = 30403939270656
 }
 
 func TestUpload(t *testing.T) {
-	Convey("normal", t, func() {
-		Convey("upload dir", func() {
+	Convey("upload dir", t, func() {
+		c := context.TODO()
+		sdk := New(core.NewRWHandler())
+		defer sdk.Close()
 
-			// bktID = 18885407408128
-
-			c := context.TODO()
-			h := core.NewRWHandler()
-
-			So(h.PutBkt(c, []*core.BucketInfo{{ID: bktID, Name: "zhangwei", UID: 9999, Type: 1}}), ShouldBeNil)
-
-			sdk := New(h)
-			defer sdk.Close()
-
-			sdk.SetConfig(cfg)
-			fmt.Println(sdk.Upload(c, bktID, core.ROOT_OID, path))
-		})
+		sdk.SetConfig(cfg)
+		So(sdk.Upload(c, bktID, core.ROOT_OID, path), ShouldBeNil)
 	})
 }
 
 func TestDownload(t *testing.T) {
+	Convey("download dir", t, func() {
+		c := context.TODO()
+		sdk := New(core.NewRWHandler())
+		defer sdk.Close()
+
+		sdk.SetConfig(cfg)
+		id, _ := sdk.Path2ID(c, bktID, core.ROOT_OID, filepath.Base(path))
+		fmt.Println(id)
+		fmt.Println(sdk.ID2Path(c, bktID, id))
+
+		So(sdk.Download(c, bktID, id, mntPath), ShouldBeNil)
+	})
+}
+
+func TestCheck(t *testing.T) {
 	Convey("normal", t, func() {
-		Convey("upload dir", func() {
-			c := context.TODO()
-
-			sdk := New(core.NewRWHandler())
-			defer sdk.Close()
-
-			sdk.SetConfig(cfg)
-			id, _ := sdk.Path2ID(c, bktID, core.ROOT_OID, filepath.Base(path))
-			fmt.Println(id)
-			fmt.Println(sdk.ID2Path(c, bktID, id))
-
-			id2, _ := sdk.Path2ID(c, bktID, id, "go")
-			fmt.Println(id2)
-			fmt.Println(sdk.ID2Path(c, bktID, id2))
-
-			sdk.Download(c, bktID, id, mntPath)
-
-			var out bytes.Buffer
-			cmd := exec.Command("diff", "-urNa", "-x.*", path, filepath.Join(mntPath, filepath.Base(path)))
-			cmd.Stdout = &out
-			So(cmd.Run(), ShouldBeNil)
-			So(out.String(), ShouldBeEmpty)
-		})
+		var out bytes.Buffer
+		cmd := exec.Command("diff", "-urNa", "-x.*", path, filepath.Join(mntPath, filepath.Base(path)))
+		cmd.Stdout = &out
+		So(cmd.Run(), ShouldBeNil)
+		So(out.String(), ShouldBeEmpty)
 	})
 }
