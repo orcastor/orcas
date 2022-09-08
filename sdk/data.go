@@ -78,7 +78,7 @@ func (l *listener) encode(src []byte) (dst []byte, err error) {
 		dst, err = aes256.Encrypt(l.cfg.EndecKey, src)
 	} else if l.d.Kind&core.DATA_ENDEC_SM4 != 0 {
 		// SM4加密
-		dst, err = sm4.Sm4Cbc([]byte(l.cfg.EndecKey), src, true) //sm4Cbc模式pksc7填充加密
+		dst, err = sm4.Sm4Cbc([]byte(l.cfg.EndecKey), src, true) //sm4Cbc模式PKSC7填充加密
 	} else {
 		dst = src
 	}
