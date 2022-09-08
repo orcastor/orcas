@@ -108,14 +108,13 @@ func (ch *RWHandler) PutData(c Ctx, bktID, dataID int64, sn int, buf []byte) (in
 func (ch *RWHandler) PutDataInfo(c Ctx, bktID int64, d []*DataInfo) (ids []int64, err error) {
 	var n []*DataInfo
 	for _, x := range d {
-		if x.ID < 0 && int(^x.ID) <= len(d) {
-			// 如果是引用别的元素的，直接跳过
-			continue
-		} else if x.ID <= 0 {
+		if x.ID == 0 {
 			x.ID, _ = ch.ig.New()
 		}
 		ids = append(ids, x.ID)
-		n = append(n, x)
+		if x.ID > 0 {
+			n = append(n, x)
+		}
 	}
 	// 设置为反码引用别的元素的数据
 	for i := range ids {
