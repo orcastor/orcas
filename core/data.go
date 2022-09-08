@@ -113,10 +113,6 @@ func (ddo *DefaultDataAdapter) Write(c Ctx, bktID, dataID int64, sn int, buf []b
 		return err
 	}
 
-	if len(buf) <= 0 {
-		return nil
-	}
-
 	path := toFilePath(Conf().Path, bktID, dataID, sn)
 	// 不用判断是否存在，以及是否创建成功，如果失败，下面写入文件之前会报错
 	os.MkdirAll(filepath.Dir(path), 0766)
