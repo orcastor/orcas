@@ -148,7 +148,7 @@ type MetadataAdapter interface {
 func GetDB(bktID ...interface{}) (*sql.DB, error) {
 	dirPath := filepath.Join(Conf().Path, fmt.Sprint(bktID...))
 	os.MkdirAll(dirPath, 0766)
-	return sql.Open("sqlite3", filepath.Join(dirPath, "meta.db")+"?_journal=WAL")
+	return sql.Open("sqlite3", filepath.Join(dirPath, "meta.db")+"?_journal=WAL&cache=shared&mode=rwc&nolock=1")
 }
 
 func InitDB() error {
