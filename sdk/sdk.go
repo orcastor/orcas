@@ -56,13 +56,12 @@ type OrcasSDK interface {
 type OrcasSDKImpl struct {
 	h   core.Handler
 	cfg Config
-	dp  *dataPkger
 	bl  []string
 	f   *Fanout
 }
 
 func New(h core.Handler) OrcasSDK {
-	return &OrcasSDKImpl{h: h, dp: newDataPkger(1000), f: NewFanout()}
+	return &OrcasSDKImpl{h: h, f: NewFanout()}
 }
 
 func (osi *OrcasSDKImpl) Close() {
@@ -70,9 +69,7 @@ func (osi *OrcasSDKImpl) Close() {
 }
 
 func (osi *OrcasSDKImpl) SetConfig(cfg Config) {
-	if cfg.PkgThres > 0 {
-		osi.dp.SetThres(cfg.PkgThres)
-	} else {
+	if cfg.PkgThres <= 0 {
 		cfg.PkgThres = 1000
 	}
 	if cfg.DataSync {
@@ -178,9 +175,7 @@ func (osi *OrcasSDKImpl) Upload(c core.Ctx, bktID, pid int64, lpath string) erro
 			return osi.uploadFiles(c,
 				bktID,
 				[]uploadInfo{{path: filepath.Dir(lpath), o: o}},
-				[]*core.DataInfo{{
-					OrigSize: fi.Size(),
-				}}, osi.cfg.RefLevel, 0)
+				nil, nil, osi.cfg.RefLevel, 0)
 		}
 
 		o.DataID = core.EmptyDataID
@@ -257,7 +252,7 @@ func (osi *OrcasSDKImpl) Upload(c core.Ctx, bktID, pid int64, lpath string) erro
 						var tmpu []uploadInfo
 						tmpu, u = u, nil
 						osi.f.MustDo(c, func(c core.Ctx) {
-							osi.uploadFiles(c, bktID, tmpu, nil, osi.cfg.RefLevel, 0)
+							osi.uploadFiles(c, bktID, tmpu, nil, nil, osi.cfg.RefLevel, 0)
 						})
 					}
 				} else {
@@ -299,7 +294,7 @@ func (osi *OrcasSDKImpl) Upload(c core.Ctx, bktID, pid int64, lpath string) erro
 		var tmpu []uploadInfo
 		tmpu, u = u, nil
 		osi.f.MustDo(c, func(c core.Ctx) {
-			osi.uploadFiles(c, bktID, tmpu, nil, osi.cfg.RefLevel, 0)
+			osi.uploadFiles(c, bktID, tmpu, nil, nil, osi.cfg.RefLevel, 0)
 		})
 	}
 
