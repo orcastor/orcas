@@ -70,7 +70,6 @@ func (osi *OrcasSDKImpl) Close() {
 }
 
 func (osi *OrcasSDKImpl) SetConfig(cfg Config) {
-	osi.cfg = cfg
 	if cfg.PkgThres > 0 {
 		osi.dp.SetThres(cfg.PkgThres)
 	} else {
@@ -85,6 +84,12 @@ func (osi *OrcasSDKImpl) SetConfig(cfg Config) {
 	if cfg.WorkersN > 0 {
 		osi.f.TuneWorker(int(cfg.WorkersN))
 	}
+	if cfg.Conflict == RENAME {
+		if !strings.Contains(cfg.NameTmpl, "%s") {
+			panic(`cfg.NameTmp should contains "%s"`)
+		}
+	}
+	osi.cfg = cfg
 }
 
 func (osi *OrcasSDKImpl) skip(name string) bool {
@@ -132,96 +137,6 @@ func (osi *OrcasSDKImpl) ID2Path(c core.Ctx, bktID, id int64) (rpath string, err
 		id = os[0].PID
 	}
 	return rpath, nil
-}
-
-func (osi *OrcasSDKImpl) putObjects(c core.Ctx, bktID int64, o []*core.ObjectInfo) ([]int64, error) {
-	ids, err := osi.h.Put(c, bktID, o)
-	if err != nil {
-		fmt.Println(runtime.Caller(0))
-		fmt.Println(err)
-		return nil, err
-	}
-
-	switch osi.cfg.Conflict {
-	case MERGE: // Merge or Cover（默认）
-		var vers []*core.ObjectInfo
-		for i := range ids {
-			if ids[i] <= 0 {
-				ids[i], err = osi.Path2ID(c, bktID, o[i].PID, o[i].Name)
-				// 如果是文件，需要新建一个版本，版本更新的逻辑需要jobs来完成
-				if o[i].Type == core.OBJ_TYPE_FILE {
-					vers = append(vers, &core.ObjectInfo{
-						PID:    ids[i],
-						MTime:  o[i].MTime,
-						Type:   core.OBJ_TYPE_VERSION,
-						Status: core.OBJ_NORMAL,
-						Size:   o[i].Size,
-					})
-				}
-			}
-		}
-		if len(vers) > 0 {
-			_, err = osi.h.Put(c, bktID, vers)
-			if err != nil {
-				fmt.Println(runtime.Caller(0))
-				fmt.Println(err)
-				return nil, err
-			}
-		}
-	case THROW: // Throw
-		for i := range ids {
-			if ids[i] <= 0 {
-				return ids, fmt.Errorf("remote object exists, pid:%d, name:%s", o[i].PID, o[i].Name)
-			}
-		}
-	case RENAME: // Rename
-		m := make(map[int]int)
-		var rename []*core.ObjectInfo
-		for i := range ids {
-			// 需要重命名重新创建
-			if ids[i] <= 0 {
-				// 先直接用NameTmpl创建，覆盖大部分场景
-				m[len(rename)] = i
-				x := *o[i]
-				x.Name = fmt.Sprintf(osi.cfg.NameTmpl, x.Name)
-				rename = append(rename, &x)
-			}
-		}
-		// 需要重命名重新创建
-		if len(rename) > 0 {
-			ids2, err2 := osi.h.Put(c, bktID, rename)
-			if err2 != nil {
-				return ids, err2
-			}
-			for i := range ids2 {
-				if ids2[i] > 0 {
-					ids[m[i]] = ids2[i]
-				} else {
-					// 还是失败，用NameTmpl找有多少个目录，然后往后一个一个尝试
-					_, cnt, _, err3 := osi.h.List(c, bktID, rename[i].PID, core.ListOptions{
-						Word: rename[i].Name + "*",
-					})
-					if err3 != nil {
-						return ids, err3
-					}
-					for j := 0; j < 500; j++ {
-						x := *o[m[i]]
-						x.Name = fmt.Sprintf(osi.cfg.NameTmpl+"%d", x.Name, int(cnt)+j+1)
-						ids3, err4 := osi.h.Put(c, bktID, []*core.ObjectInfo{&x})
-						if err4 != nil {
-							return ids, err4
-						}
-						if len(ids3) > 0 && ids3[0] > 0 {
-							ids[m[i]] = ids3[0]
-							break
-						}
-					}
-				}
-			}
-		}
-	case SKIP: // Skip
-	}
-	return ids, nil
 }
 
 // 层序遍历
@@ -339,8 +254,8 @@ func (osi *OrcasSDKImpl) Upload(c core.Ctx, bktID, pid int64, lpath string) erro
 						o:    file,
 					})
 					if len(u) >= int(osi.cfg.PkgThres) {
-						tmpu := u
-						u = nil
+						var tmpu []uploadInfo
+						tmpu, u = u, nil
 						osi.f.MustDo(c, func(c core.Ctx) {
 							osi.uploadFiles(c, bktID, tmpu, nil, osi.cfg.RefLevel, 0)
 						})
@@ -381,8 +296,8 @@ func (osi *OrcasSDKImpl) Upload(c core.Ctx, bktID, pid int64, lpath string) erro
 	}
 
 	if len(u) > 0 {
-		tmpu := u
-		u = nil
+		var tmpu []uploadInfo
+		tmpu, u = u, nil
 		osi.f.MustDo(c, func(c core.Ctx) {
 			osi.uploadFiles(c, bktID, tmpu, nil, osi.cfg.RefLevel, 0)
 		})
