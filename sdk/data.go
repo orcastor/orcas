@@ -391,8 +391,8 @@ func (osi *OrcasSDKImpl) uploadFiles(c core.Ctx, bktID int64, u []uploadInfo,
 				d2 = append(d2, d[i])
 			}
 		}
-		u, u1, d, d1 = u1, nil, d1, nil
-		if len(u) > 0 {
+		if len(u1) > 0 {
+			u, d, u1, d1 = u1, d1, nil, nil
 			for i, fi := range u {
 				if err := osi.readFile(c, filepath.Join(fi.path, fi.o.Name), dp,
 					newListener(bktID, d[i], osi.cfg, HDR_CRC32&^doneAction).Once()); err != nil {
@@ -407,20 +407,20 @@ func (osi *OrcasSDKImpl) uploadFiles(c core.Ctx, bktID int64, u []uploadInfo,
 			}
 			for i, id := range ids {
 				if id > 0 {
-					u1 = append(u1, u[i])
-					d1 = append(d1, d[i])
-				} else {
 					u2 = append(u2, u[i])
 					d2 = append(d2, d[i])
+				} else {
+					u1 = append(u1, u[i])
+					d1 = append(d1, d[i])
 				}
 			}
-			if err := osi.uploadFiles(c, bktID, u1, d1, dp, FULL, doneAction|HDR_CRC32); err != nil {
+			if err := osi.uploadFiles(c, bktID, u1, d1, dp, OFF, doneAction|HDR_CRC32); err != nil {
 				fmt.Println(runtime.Caller(0))
 				fmt.Println(err)
 				return err
 			}
 		}
-		if err := osi.uploadFiles(c, bktID, u2, d2, dp, OFF, doneAction); err != nil {
+		if err := osi.uploadFiles(c, bktID, u2, d2, dp, FULL, doneAction); err != nil {
 			fmt.Println(runtime.Caller(0))
 			fmt.Println(err)
 			return err
