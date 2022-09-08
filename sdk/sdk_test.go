@@ -18,7 +18,6 @@ var mntPath = "/tmp/test/"
 var path = "/home/semaphore/go/"
 var cfg = Config{
 	DataSync: true,
-	RefLevel: OFF,
 	RefLevel: FULL,
 	WiseCmpr: core.DATA_CMPR_ZSTD,
 	EndecWay: core.DATA_ENDEC_AES256,
@@ -43,11 +42,12 @@ func TestUpload(t *testing.T) {
 
 			c := context.TODO()
 			h := core.NewRWHandler()
-			defer h.Close()
 
 			So(h.PutBkt(c, []*core.BucketInfo{{ID: bktID, Name: "zhangwei", UID: 9999, Type: 1}}), ShouldBeNil)
 
 			sdk := New(h)
+			defer sdk.Close()
+
 			sdk.SetConfig(cfg)
 			fmt.Println(sdk.Upload(c, bktID, core.ROOT_OID, path))
 		})
@@ -58,10 +58,10 @@ func TestDownload(t *testing.T) {
 	Convey("normal", t, func() {
 		Convey("upload dir", func() {
 			c := context.TODO()
-			h := core.NewRWHandler()
-			defer h.Close()
 
-			sdk := New(h)
+			sdk := New(core.NewRWHandler())
+			defer sdk.Close()
+
 			sdk.SetConfig(cfg)
 			id, _ := sdk.Path2ID(c, bktID, core.ROOT_OID, filepath.Base(path))
 			fmt.Println(id)
