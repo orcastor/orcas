@@ -31,15 +31,15 @@ const (
 type Config struct {
 	DataSync bool   // 断电保护策略(Power-off Protection Policy)，强制每次写入数据后刷到磁盘
 	RefLevel uint32 // 秒传级别设置：OFF（默认） / FULL: Ref / FAST: TryRef+Ref
-	PkgThres uint32 // 打包个数限制，不设置默认100个
+	PkgThres uint32 // 打包个数限制，不设置默认1000个
 	WiseCmpr uint32 // 智能压缩，根据文件类型决定是否压缩，取值见core.DATA_CMPR_MASK
 	EndecWay uint32 // 加密方式，取值见core.DATA_ENDEC_MASK
 	EndecKey string // 加密KEY，SM4需要固定为16个字符，AES256需要大于16个字符
 	DontSync string // 不同步的文件名通配符（https://pkg.go.dev/path/filepath#Match），用分号分隔
 	Conflict uint32 // 同名冲突解决方式，0: Merge or Cover（默认） / 1: Throw / 2: Rename / 3: Skip
 	NameTmpl string // 重命名尾巴，"%s的副本"
+	WorkersN uint32 // 并发池大小
 	// ChkPtDir string // 断点续传记录目录，不设置路径默认不开启
-	// BEDecmpr bool   // 后端解压，PS：必须是非加密数据
 }
 
 type OrcasSDK interface {
@@ -58,10 +58,11 @@ type OrcasSDKImpl struct {
 	cfg Config
 	dp  *dataPkger
 	bl  []string
+	f   *Fanout
 }
 
 func New(h core.Handler) OrcasSDK {
-	return &OrcasSDKImpl{h: h, dp: newDataPkger(100)}
+	return &OrcasSDKImpl{h: h, dp: newDataPkger(1000), f: NewFanout()}
 }
 
 func (osi *OrcasSDKImpl) Close() {
@@ -72,12 +73,17 @@ func (osi *OrcasSDKImpl) SetConfig(cfg Config) {
 	osi.cfg = cfg
 	if cfg.PkgThres > 0 {
 		osi.dp.SetThres(cfg.PkgThres)
+	} else {
+		cfg.PkgThres = 1000
 	}
 	if cfg.DataSync {
 		osi.h.SetOptions(core.Options{Sync: true})
 	}
 	if cfg.DontSync != "" {
 		osi.bl = strings.Split(cfg.DontSync, ";")
+	}
+	if cfg.WorkersN > 0 {
+		osi.f.TuneWorker(int(cfg.WorkersN))
 	}
 }
 
@@ -224,6 +230,11 @@ type elem struct {
 	path string
 }
 
+type uploadInfo struct {
+	path string
+	o    *core.ObjectInfo
+}
+
 func (osi *OrcasSDKImpl) Upload(c core.Ctx, bktID, pid int64, lpath string) error {
 	f, err := os.Open(lpath)
 	if err != nil {
@@ -251,8 +262,7 @@ func (osi *OrcasSDKImpl) Upload(c core.Ctx, bktID, pid int64, lpath string) erro
 		if o.Size > 0 {
 			return osi.uploadFiles(c,
 				bktID,
-				filepath.Dir(lpath),
-				[]*core.ObjectInfo{o},
+				[]uploadInfo{{path: filepath.Dir(lpath), o: o}},
 				[]*core.DataInfo{{
 					OrigSize: fi.Size(),
 				}}, osi.cfg.RefLevel, 0)
@@ -277,6 +287,7 @@ func (osi *OrcasSDKImpl) Upload(c core.Ctx, bktID, pid int64, lpath string) erro
 
 	q := []elem{{id: dirIDs[0], path: lpath}}
 	var emptyFiles []*core.ObjectInfo
+	var u []uploadInfo
 
 	// 遍历本地目录
 	for len(q) > 0 {
@@ -299,7 +310,7 @@ func (osi *OrcasSDKImpl) Upload(c core.Ctx, bktID, pid int64, lpath string) erro
 			continue
 		}
 
-		var dirs, files []*core.ObjectInfo
+		var dirs []*core.ObjectInfo
 		for _, fi := range rawFiles {
 			if osi.skip(fi.Name()) {
 				continue
@@ -323,7 +334,17 @@ func (osi *OrcasSDKImpl) Upload(c core.Ctx, bktID, pid int64, lpath string) erro
 					Size:   fi.Size(),
 				}
 				if file.Size > 0 {
-					files = append(files, file)
+					u = append(u, uploadInfo{
+						path: q[0].path,
+						o:    file,
+					})
+					if len(u) >= int(osi.cfg.PkgThres) {
+						tmpu := u
+						u = nil
+						osi.f.MustDo(c, func(c core.Ctx) {
+							osi.uploadFiles(c, bktID, tmpu, nil, osi.cfg.RefLevel, 0)
+						})
+					}
 				} else {
 					file.DataID = core.EmptyDataID
 					emptyFiles = append(emptyFiles, file)
@@ -342,7 +363,6 @@ func (osi *OrcasSDKImpl) Upload(c core.Ctx, bktID, pid int64, lpath string) erro
 				// 上传目录
 				ids, err := osi.putObjects(c, bktID, dirs)
 				if err != nil {
-					// TODO: 怎么处理
 					fmt.Println(runtime.Caller(0))
 					fmt.Println(err)
 					return
@@ -356,19 +376,27 @@ func (osi *OrcasSDKImpl) Upload(c core.Ctx, bktID, pid int64, lpath string) erro
 			}()
 		}
 
-		if len(files) > 0 { // FIXME：处理文件过多问题
-			osi.uploadFiles(c, bktID, q[0].path, files, nil, osi.cfg.RefLevel, 0)
-		}
-
 		wg.Wait()
 		q = append(q[1:], dirElems...)
 	}
 
-	if _, err := osi.putObjects(c, bktID, emptyFiles); err != nil {
-		fmt.Println(runtime.Caller(0))
-		fmt.Println(err)
-		return err
+	if len(u) > 0 {
+		tmpu := u
+		u = nil
+		osi.f.MustDo(c, func(c core.Ctx) {
+			osi.uploadFiles(c, bktID, tmpu, nil, osi.cfg.RefLevel, 0)
+		})
 	}
+
+	if len(emptyFiles) > 0 {
+		osi.f.MustDo(c, func(c core.Ctx) {
+			if _, err := osi.putObjects(c, bktID, emptyFiles); err != nil {
+				fmt.Println(runtime.Caller(0))
+				fmt.Println(err)
+			}
+		})
+	}
+	osi.f.Wait()
 	return nil
 }
 
@@ -390,12 +418,11 @@ func (osi *OrcasSDKImpl) Download(c core.Ctx, bktID, id int64, lpath string) err
 	// 遍历远端目录
 	q := []elem{{id: id, path: filepath.Join(lpath, o[0].Name)}}
 	var delim string
-	wg := &sync.WaitGroup{}
 	for len(q) > 0 {
 		os.MkdirAll(q[0].path, 0766)
 		o, _, d, err := osi.h.List(c, bktID, q[0].id, core.ListOptions{
 			Delim: delim,
-			Count: 100,
+			Count: 1000,
 			Order: "type",
 		})
 		if err != nil {
@@ -414,11 +441,9 @@ func (osi *OrcasSDKImpl) Download(c core.Ctx, bktID, id int64, lpath string) err
 				q = append(q, elem{id: o.ID, path: path})
 			case core.OBJ_TYPE_FILE:
 				f := o
-				wg.Add(1)
-				go func() {
-					defer wg.Done()
+				osi.f.MustDo(c, func(c core.Ctx) {
 					osi.downloadFile(c, bktID, f, path)
-				}()
+				})
 			}
 		}
 
@@ -429,6 +454,6 @@ func (osi *OrcasSDKImpl) Download(c core.Ctx, bktID, id int64, lpath string) err
 			delim = d
 		}
 	}
-	wg.Wait()
+	osi.f.Wait()
 	return nil
 }
