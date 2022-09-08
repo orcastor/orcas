@@ -322,15 +322,18 @@ func (osi *OrcasSDKImpl) putObjects(c core.Ctx, bktID int64, o []*core.ObjectInf
 				// 假设有 test、test的副本、test的副本2，cnt为2
 				for j := 0; j <= int(cnt/2)+1; j++ {
 					// 先试试个数后面一个，正常顺序查找，最大概率命中的分支
-					if ids[m[i]], err3 = osi.putOne(c, bktID, osi.getRename(o[i], int(cnt)+j)); err3 == nil {
+					if ids[m[i]], err3 = osi.putOne(c, bktID,
+						osi.getRename(o[i], int(cnt)+j)); err3 == nil {
 						break
 					}
 					// 从最前面往后找
-					if ids[m[i]], err3 = osi.putOne(c, bktID, osi.getRename(o[i], j)); err3 == nil {
+					if ids[m[i]], err3 = osi.putOne(c, bktID,
+						osi.getRename(o[i], j)); err3 == nil {
 						break
 					}
 					// 从cnt个开始往前找
-					if ids[m[i]], err3 = osi.putOne(c, bktID, osi.getRename(o[i], int(cnt)-1-j)); err3 == nil {
+					if ids[m[i]], err3 = osi.putOne(c, bktID,
+						osi.getRename(o[i], int(cnt)-1-j)); err3 == nil {
 						break
 					}
 				}
