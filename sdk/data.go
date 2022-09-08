@@ -343,6 +343,7 @@ func (osi *OrcasSDKImpl) putObjects(c core.Ctx, bktID int64, o []*core.ObjectInf
 			}
 		}
 	case SKIP: // Skip
+		break
 	}
 	return ids, nil
 }
