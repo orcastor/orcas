@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"crypto/md5"
+	"encoding/binary"
 	"fmt"
 	"hash"
 	"hash/crc32"
@@ -184,7 +185,7 @@ func (l *listener) OnData(c core.Ctx, h core.Handler, dp *dataPkger, buf []byte)
 
 func (l *listener) OnFinish(c core.Ctx, h core.Handler) error {
 	if l.action&CRC32_MD5 != 0 {
-		l.d.MD5 = fmt.Sprintf("%X", l.md5Hash.Sum(nil)[4:12])
+		l.d.MD5 = int64(binary.BigEndian.Uint64(l.md5Hash.Sum(nil)[4:12]))
 	}
 	if l.cmprBuf.Len() > 0 {
 		encodedBuf, err := l.encode(l.cmprBuf.Bytes())
