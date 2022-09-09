@@ -288,7 +288,8 @@ func (dmo *DefaultMetadataAdapter) RefData(c Ctx, bktID int64, d []*DataInfo) ([
 		md5 BIGINT NOT NULL
 	)`)
 	// 把待查询数据放到临时表
-	if _, err = b.Table(db, tbl, c).Insert(&d, b.Fields("o_size", "hdr_crc32", "crc32", "md5")); err != nil {
+	if _, err = b.Table(db, tbl, c).Insert(&d,
+		b.Fields("o_size", "hdr_crc32", "crc32", "md5")); err != nil {
 		return nil, err
 	}
 	var refs []struct {
@@ -299,9 +300,10 @@ func (dmo *DefaultMetadataAdapter) RefData(c Ctx, bktID int64, d []*DataInfo) ([
 		MD5      int64  `borm:"b.md5"`
 	}
 	// 联表查询
-	if _, err = b.Table(db, `data a, `+tbl+` b`, c).Select(&refs, b.Join(`on a.o_size=b.o_size 
-	and a.hdr_crc32=b.hdr_crc32 and (b.crc32=0 or b.md5=0 or 
-	(a.crc32=b.crc32 and a.md5=b.md5))`), b.GroupBy("b.o_size", "b.hdr_crc32", "b.crc32", "b.md5")); err != nil {
+	if _, err = b.Table(db, `data a, `+tbl+` b`, c).Select(&refs,
+		b.Join(`on a.o_size=b.o_size and a.hdr_crc32=b.hdr_crc32 and 
+			(b.crc32=0 or b.md5=0 or (a.crc32=b.crc32 and a.md5=b.md5))`),
+		b.GroupBy("b.o_size", "b.hdr_crc32", "b.crc32", "b.md5")); err != nil {
 		return nil, err
 	}
 	// 删除临时表
