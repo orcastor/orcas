@@ -522,22 +522,22 @@ func (DummyArchiver) Decompress(in io.Reader, out io.Writer) error {
 }
 
 type dataReader struct {
-	c               core.Ctx
-	h               core.Handler
-	buf             bytes.Buffer
-	bktID           int64
-	dataID          int64
-	off, size, sn   int
-	getSize, remain int
-	kind            uint32
-	endecKey        string
+	c                core.Ctx
+	h                core.Handler
+	buf              bytes.Buffer
+	bktID            int64
+	dataID           int64
+	offset, size, sn int
+	getSize, remain  int
+	kind             uint32
+	endecKey         string
 }
 
 func newDataReader(c core.Ctx, h core.Handler, bktID int64, d *core.DataInfo, endecKey string) *dataReader {
 	dr := &dataReader{c: c, h: h, bktID: bktID, remain: int(d.Size), kind: d.Kind, endecKey: endecKey}
 	if d.PkgID > 0 {
 		dr.dataID = d.PkgID
-		dr.off = d.PkgOff
+		dr.offset = d.PkgOffset
 		dr.getSize = int(d.Size)
 	} else {
 		dr.dataID = d.ID
@@ -551,7 +551,7 @@ func (dr *dataReader) Read(p []byte) (n int, err error) {
 		return dr.buf.Read(p)
 	}
 	if dr.remain > 0 {
-		buf, err := dr.h.GetData(dr.c, dr.bktID, dr.dataID, dr.sn, dr.off, dr.getSize)
+		buf, err := dr.h.GetData(dr.c, dr.bktID, dr.dataID, dr.sn, dr.offset, dr.getSize)
 		if err != nil {
 			fmt.Println(runtime.Caller(0))
 			fmt.Println(err)
@@ -660,21 +660,21 @@ func (dp *dataPkger) SetThres(thres uint32) {
 }
 
 func (dp *dataPkger) Push(c core.Ctx, h core.Handler, bktID int64, b []byte, d *core.DataInfo) (bool, error) {
-	off := dp.buf.Len()
-	if off+ /*off%PKG_ALIGN+*/ len(b) > PKG_SIZE || len(dp.infos) >= int(dp.thres) || len(b) >= PKG_SIZE {
+	offset := dp.buf.Len()
+	if offset+ /*offset%PKG_ALIGN+*/ len(b) > PKG_SIZE || len(dp.infos) >= int(dp.thres) || len(b) >= PKG_SIZE {
 		return false, dp.Flush(c, h, bktID)
 	}
 	// 写入前再处理对齐，最后一块就不用补齐了，PS：需要测试一下读性能差多少
-	/*if off%PKG_ALIGN > 0 {
-		if padding := PKG_ALIGN - off%PKG_ALIGN; padding > 0 {
+	/*if offset%PKG_ALIGN > 0 {
+		if padding := PKG_ALIGN - offset%PKG_ALIGN; padding > 0 {
 			dp.buf = append(dp.buf, make([]byte, padding)...)
-			off = len(dp.buf)
+			offset = len(dp.buf)
 		}
 	}*/
 	// 填充内容
 	dp.buf.Write(b)
 	// 记录偏移
-	d.PkgOff = off
+	d.PkgOffset = offset
 	// 记录下来要设置打包数据的数据信息
 	dp.infos = append(dp.infos, d)
 	return true, nil
