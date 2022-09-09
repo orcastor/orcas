@@ -91,8 +91,8 @@ github.com/orca-zhang/borm v0.0.0-20220827054606-f9725f2742ef h1:TKie7zMvucX62y7
 github.com/orca-zhang/borm v0.0.0-20220827054606-f9725f2742ef/go.mod h1:oPiCpRWKQyQGeQY4wmLUz5RBx2KTsexah1Dp6A31In4=
 github.com/orca-zhang/ecache v1.1.1 h1:krk4+/ihsLPg9/k2zYeRa7dNespTQsFnRcLWaJGFNds=
 github.com/orca-zhang/ecache v1.1.1/go.mod h1:1/6HCddx1iAbafDyRdddq5v/0rZf5sCU/fkLZ3BhciQ=
-github.com/orca-zhang/idgen v0.0.0-20220821144803-5899297096b5 h1:+4npEmIOWEDkj/iyI+3TqzaOr0wwC3pzVn5kEPy35Tg=
-github.com/orca-zhang/idgen v0.0.0-20220821144803-5899297096b5/go.mod h1:QgMA6kZTutcdAVcYrWX06UvJ8kI/+7Bx5RaREcN+3Qg=
+github.com/orca-zhang/idgen v0.0.0-20220909041521-2662ff4c3c3e h1:Ae9G+JXfh/uot6qX0yJ9av+NqQaspOsuJ/tYYeNu6eU=
+github.com/orca-zhang/idgen v0.0.0-20220909041521-2662ff4c3c3e/go.mod h1:QgMA6kZTutcdAVcYrWX06UvJ8kI/+7Bx5RaREcN+3Qg=
 github.com/pierrec/lz4/v4 v4.1.2 h1:qvY3YFXRQE/XB8MlLzJH7mSzBs74eA2gg52YTk6jUPM=
 github.com/pierrec/lz4/v4 v4.1.2/go.mod h1:gZWDp/Ze/IJXGXf23ltt2EXimqmTUXEy0GFuRQyBid4=
 github.com/pmezard/go-difflib v1.0.0/go.mod h1:iKH77koFhYxTK1pcRnkKkqfTogsbg7gZNVY4sRDYZ/4=
