@@ -81,16 +81,16 @@ const (
 )
 
 type DataInfo struct {
-	ID       int64  `borm:"id"`      // 数据ID（idgen随机生成的id）
-	Size     int64  `borm:"size"`    // 数据的大小
-	OrigSize int64  `borm:"o_size"`  // 数据的原始大小
-	HdrCRC32 uint32 `borm:"h_crc32"` // 头部100KB的CRC32校验值
-	CRC32    uint32 `borm:"crc32"`   // 整个数据的CRC32校验值（最原始数据）
-	MD5      int64  `borm:"md5"`     // 整个数据的MD5值（最原始数据）
-	Cksum    uint32 `borm:"cksum"`   // 整个数据的CRC32校验值（最终数据，用于一致性审计）
-	Kind     uint32 `borm:"kind"`    // 数据状态，正常、损坏、加密、压缩、类型（用于预览等）
-	PkgID    int64  `borm:"pkg_id"`  // 打包数据的ID（也是idgen生成的id）
-	PkgOff   int    `borm:"pkg_off"` // 打包数据的偏移位置
+	ID        int64  `borm:"id"`      // 数据ID（idgen随机生成的id）
+	Size      int64  `borm:"size"`    // 数据的大小
+	OrigSize  int64  `borm:"o_size"`  // 数据的原始大小
+	HdrCRC32  uint32 `borm:"h_crc32"` // 头部100KB的CRC32校验值
+	CRC32     uint32 `borm:"crc32"`   // 整个数据的CRC32校验值（最原始数据）
+	MD5       int64  `borm:"md5"`     // 整个数据的MD5值（最原始数据）
+	Cksum     uint32 `borm:"cksum"`   // 整个数据的CRC32校验值（最终数据，用于一致性审计）
+	Kind      uint32 `borm:"kind"`    // 数据状态，正常、损坏、加密、压缩、类型（用于预览等）
+	PkgID     int64  `borm:"pkg_id"`  // 打包数据的ID（也是idgen生成的id）
+	PkgOffset int    `borm:"pkg_off"` // 打包数据的偏移位置
 	// PkgID不为0说明是打包数据
 	// SnapshotID int64 // 快照版本ID
 }
