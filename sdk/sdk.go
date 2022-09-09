@@ -22,10 +22,10 @@ const (
 
 // 同名冲突解决方式
 const (
-	MERGE = iota
-	RENAME
-	THROW
-	SKIP
+	COVER  = iota // 合并或覆盖
+	RENAME        // 重命名
+	THROW         // 报错
+	SKIP          // 跳过
 )
 
 type Config struct {
@@ -36,7 +36,7 @@ type Config struct {
 	EndecWay uint32 // 加密方式，取值见core.DATA_ENDEC_MASK
 	EndecKey string // 加密KEY，SM4需要固定为16个字符，AES256需要大于16个字符
 	DontSync string // 不同步的文件名通配符（https://pkg.go.dev/path/filepath#Match），用分号分隔
-	Conflict uint32 // 同名冲突解决方式，0: Merge or Cover（默认） / 1: Throw / 2: Rename / 3: Skip
+	Conflict uint32 // 同名冲突解决方式，COVER：合并或覆盖 / RENAME：重命名 / THROW：报错 / SKIP：跳过
 	NameTmpl string // 重命名尾巴，"%s的副本"
 	WorkersN uint32 // 并发池大小，不小于16
 	// ChkPtDir string // 断点续传记录目录，不设置路径默认不开启
@@ -72,12 +72,8 @@ func (osi *OrcasSDKImpl) SetConfig(cfg Config) {
 	if cfg.PkgThres <= 0 {
 		cfg.PkgThres = 1000
 	}
-	if cfg.DataSync {
-		osi.h.SetOptions(core.Options{Sync: true})
-	}
-	if cfg.DontSync != "" {
-		osi.bl = strings.Split(cfg.DontSync, ";")
-	}
+	osi.h.SetOptions(core.Options{Sync: cfg.DataSync})
+	osi.bl = strings.Split(cfg.DontSync, ";")
 	if cfg.WorkersN < 16 {
 		cfg.WorkersN = 16
 	}
@@ -86,7 +82,17 @@ func (osi *OrcasSDKImpl) SetConfig(cfg Config) {
 	}
 	if cfg.Conflict == RENAME {
 		if !strings.Contains(cfg.NameTmpl, "%s") {
-			panic(`cfg.NameTmp should contains "%s"`)
+			panic(`cfg.NameTmp should contains "%s".`)
+		}
+	}
+	switch cfg.EndecWay {
+	case core.DATA_ENDEC_SM4:
+		if len(cfg.EndecKey) != 16 {
+			panic(`The length of EndecKey for DATA_ENDEC_SM4 should be 16.`)
+		}
+	case core.DATA_ENDEC_AES256:
+		if len(cfg.EndecKey) <= 16 {
+			panic(`The length of EndecKey for DATA_ENDEC_AES256 should be greater than 16.`)
 		}
 	}
 	osi.cfg = cfg
