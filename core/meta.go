@@ -43,16 +43,16 @@ const (
 )
 
 type ObjectInfo struct {
-	ID     int64 `borm:"id"`    // 对象ID（idgen随机生成的id）
-	PID    int64 `borm:"pid"`   // 父对象ID
-	MTime  int64 `borm:"mtime"` // 更新时间，秒级时间戳
-	DataID int64 `borm:"did"`   // 数据ID，如果为0，说明没有数据（新创建的文件，DataID就是对象ID，作为对象的首版本数据）
-	// BktID int64 // 桶ID，如果支持引用别的桶的数据，为0说明是本桶
+	ID     int64  `borm:"id"`     // 对象ID（idgen随机生成的id）
+	PID    int64  `borm:"pid"`    // 父对象ID
+	MTime  int64  `borm:"mtime"`  // 更新时间，秒级时间戳
+	DataID int64  `borm:"did"`    // 数据ID，如果为0，说明没有数据（新创建的文件，DataID就是对象ID，作为对象的首版本数据）
 	Type   int    `borm:"type"`   // 对象类型，0: none, 1: dir, 2: file, 3: version, 4: preview(thumb/m3u8/pdf)
 	Status int    `borm:"status"` // 对象状态，0: none, 1: normal, 1: deleted, 2: recycle(to be deleted), 3: malformed
 	Name   string `borm:"name"`   // 对象名称
 	Size   int64  `borm:"size"`   // 对象的大小，目录的大小是子对象数，文件的大小是最新版本的字节数
 	Ext    string `borm:"ext"`    // 对象的扩展信息
+	// BktID int64 // 桶ID，如果支持引用别的桶的数据，为0说明是本桶
 }
 
 // 数据状态
@@ -81,21 +81,17 @@ const (
 )
 
 type DataInfo struct {
-	ID       int64  `borm:"id"`        // 数据ID（idgen随机生成的id）
-	Size     int64  `borm:"size"`      // 数据的大小
-	OrigSize int64  `borm:"o_size"`    // 数据的原始大小
-	HdrCRC32 uint32 `borm:"hdr_crc32"` // 头部100KB的CRC32校验值
-	CRC32    uint32 `borm:"crc32"`     // 整个数据的CRC32校验值（最原始数据）
-	MD5      int64  `borm:"md5"`       // 整个数据的MD5值（最原始数据）
-
-	Checksum uint32 `borm:"checksum"` // 整个数据的CRC32校验值（最终数据，用于一致性审计）
-	Kind     uint32 `borm:"kind"`     // 数据状态，正常、损坏、加密、压缩、类型（用于预览等）
-	// MIME       string // 数据的多媒体类型
-
+	ID       int64  `borm:"id"`      // 数据ID（idgen随机生成的id）
+	Size     int64  `borm:"size"`    // 数据的大小
+	OrigSize int64  `borm:"o_size"`  // 数据的原始大小
+	HdrCRC32 uint32 `borm:"h_crc32"` // 头部100KB的CRC32校验值
+	CRC32    uint32 `borm:"crc32"`   // 整个数据的CRC32校验值（最原始数据）
+	MD5      int64  `borm:"md5"`     // 整个数据的MD5值（最原始数据）
+	Cksum    uint32 `borm:"cksum"`   // 整个数据的CRC32校验值（最终数据，用于一致性审计）
+	Kind     uint32 `borm:"kind"`    // 数据状态，正常、损坏、加密、压缩、类型（用于预览等）
+	PkgID    int64  `borm:"pkg_id"`  // 打包数据的ID（也是idgen生成的id）
+	PkgOff   int    `borm:"pkg_off"` // 打包数据的偏移位置
 	// PkgID不为0说明是打包数据
-	PkgID     int64 `borm:"pkg_id"`  // 打包数据的ID（也是idgen生成的id）
-	PkgOffset int   `borm:"pkg_off"` // 打包数据的偏移位置
-
 	// SnapshotID int64 // 快照版本ID
 }
 
@@ -194,16 +190,16 @@ func InitBucketDB(bktID int64) error {
 	db.Exec(`CREATE TABLE data (id BIGINT PRIMARY KEY NOT NULL,
 		size BIGINT NOT NULL,
 		o_size BIGINT NOT NULL,
-		hdr_crc32 UNSIGNED INT NOT NULL,
+		h_crc32 UNSIGNED INT NOT NULL,
 		crc32 UNSIGNED INT NOT NULL,
 		md5 BIGINT NOT NULL,
-		checksum UNSIGNED INT NOT NULL,
+		cksum UNSIGNED INT NOT NULL,
 		kind INT NOT NULL,
 		pkg_id BIGINT NOT NULL,
 		pkg_off INT NOT NULL
 	)`)
 
-	db.Exec(`CREATE INDEX ix_ref ON data (o_size, hdr_crc32, crc32, md5)`)
+	db.Exec(`CREATE INDEX ix_ref ON data (o_size, h_crc32, crc32, md5)`)
 	db.Exec(`PRAGMA temp_store = MEMORY`)
 	return nil
 }
@@ -283,27 +279,27 @@ func (dmo *DefaultMetadataAdapter) RefData(c Ctx, bktID int64, d []*DataInfo) ([
 	tbl := fmt.Sprintf("tmp_%x", time.Now().UnixNano())
 	// 创建临时表
 	db.Exec(`CREATE TEMPORARY TABLE ` + tbl + ` (o_size BIGINT NOT NULL,
-		hdr_crc32 UNSIGNED BIG INT NOT NULL,
+		h_crc32 UNSIGNED BIG INT NOT NULL,
 		crc32 UNSIGNED BIG INT NOT NULL,
 		md5 BIGINT NOT NULL
 	)`)
 	// 把待查询数据放到临时表
 	if _, err = b.Table(db, tbl, c).Insert(&d,
-		b.Fields("o_size", "hdr_crc32", "crc32", "md5")); err != nil {
+		b.Fields("o_size", "h_crc32", "crc32", "md5")); err != nil {
 		return nil, err
 	}
 	var refs []struct {
 		ID       int64  `borm:"max(a.id)"`
 		OrigSize int64  `borm:"b.o_size"`
-		HdrCRC32 uint32 `borm:"b.hdr_crc32"`
+		HdrCRC32 uint32 `borm:"b.h_crc32"`
 		CRC32    uint32 `borm:"b.crc32"`
 		MD5      int64  `borm:"b.md5"`
 	}
 	// 联表查询
 	if _, err = b.Table(db, `data a, `+tbl+` b`, c).Select(&refs,
-		b.Join(`on a.o_size=b.o_size and a.hdr_crc32=b.hdr_crc32 and 
+		b.Join(`on a.o_size=b.o_size and a.h_crc32=b.h_crc32 and 
 			(b.crc32=0 or b.md5=0 or (a.crc32=b.crc32 and a.md5=b.md5))`),
-		b.GroupBy("b.o_size", "b.hdr_crc32", "b.crc32", "b.md5")); err != nil {
+		b.GroupBy("b.o_size", "b.h_crc32", "b.crc32", "b.md5")); err != nil {
 		return nil, err
 	}
 	// 删除临时表
