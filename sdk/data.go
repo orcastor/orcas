@@ -265,7 +265,7 @@ func (osi *OrcasSDKImpl) putObjects(c core.Ctx, bktID int64, o []*core.ObjectInf
 	}
 
 	switch osi.cfg.Conflict {
-	case MERGE: // Merge or Cover（默认）
+	case COVER: // 合并或覆盖
 		var vers []*core.ObjectInfo
 		for i := range ids {
 			if ids[i] <= 0 {
@@ -290,7 +290,7 @@ func (osi *OrcasSDKImpl) putObjects(c core.Ctx, bktID int64, o []*core.ObjectInf
 				return nil, err
 			}
 		}
-	case RENAME: // Rename
+	case RENAME: // 重命名
 		m := make(map[int]int)
 		var rename []*core.ObjectInfo
 		for i := range ids {
@@ -301,7 +301,6 @@ func (osi *OrcasSDKImpl) putObjects(c core.Ctx, bktID int64, o []*core.ObjectInf
 				rename = append(rename, osi.getRename(o[i], 0))
 			}
 		}
-		// 需要重命名重新创建
 		if len(rename) > 0 {
 			ids2, err2 := osi.h.Put(c, bktID, rename)
 			if err2 != nil {
@@ -339,13 +338,13 @@ func (osi *OrcasSDKImpl) putObjects(c core.Ctx, bktID int64, o []*core.ObjectInf
 				}
 			}
 		}
-	case THROW: // Throw
+	case THROW: // 报错
 		for i := range ids {
 			if ids[i] <= 0 {
 				return ids, fmt.Errorf("remote object exists, pid:%d, name:%s", o[i].PID, o[i].Name)
 			}
 		}
-	case SKIP: // Skip
+	case SKIP: // 跳过
 		break
 	}
 	return ids, nil
