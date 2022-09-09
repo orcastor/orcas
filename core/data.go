@@ -8,32 +8,24 @@ import (
 	"io/ioutil"
 	"os"
 	"path/filepath"
-	"strconv"
 	"time"
 
 	"github.com/orca-zhang/ecache"
 )
-
-type Options struct {
-	Sync bool
-}
 
 type DataAdapter interface {
 	SetOptions(opt Options)
 	Close()
 
 	Write(c Ctx, bktID, dataID int64, sn int, buf []byte) error
-	Flush(c Ctx, bktID, dataID int64) error
 
 	Read(c Ctx, bktID, dataID int64, sn int) ([]byte, error)
 	ReadBytes(c Ctx, bktID, dataID int64, sn, offset, size int) ([]byte, error)
-
-	FileSize(c Ctx, bktID, dataID int64, sn int) (int64, error)
 }
 
 const interval = time.Second
 
-var Q = ecache.NewLRUCache(16, 256, interval)
+var Q = ecache.NewLRUCache(16, 1024, interval)
 
 func init() {
 	Q.Inspect(func(action int, key string, iface *interface{}, bytes []byte, status int) {
@@ -81,21 +73,14 @@ func (ah AsyncHandle) Close() {
 }
 
 type DefaultDataAdapter struct {
-	acm AccessCtrlMgr
 	opt Options
 }
 
-func NewDefaultDataAdapter(acm AccessCtrlMgr) DataAdapter {
-	return &DefaultDataAdapter{
-		acm: acm,
-	}
+func (dda *DefaultDataAdapter) SetOptions(opt Options) {
+	dda.opt = opt
 }
 
-func (ddo *DefaultDataAdapter) SetOptions(opt Options) {
-	ddo.opt = opt
-}
-
-func (ddo *DefaultDataAdapter) Close() {
+func (dda *DefaultDataAdapter) Close() {
 	for HasInflight() {
 		time.Sleep(100 * time.Millisecond)
 	}
@@ -108,11 +93,7 @@ func toFilePath(path string, bcktID, dataID int64, sn int) string {
 	return filepath.Join(path, fmt.Sprint(bcktID), hash[21:24], hash[8:24], fileName)
 }
 
-func (ddo *DefaultDataAdapter) Write(c Ctx, bktID, dataID int64, sn int, buf []byte) error {
-	if err := ddo.acm.CheckPermission(c, W, bktID); err != nil {
-		return err
-	}
-
+func (dda *DefaultDataAdapter) Write(c Ctx, bktID, dataID int64, sn int, buf []byte) error {
 	path := toFilePath(Conf().Path, bktID, dataID, sn)
 	// 不用判断是否存在，以及是否创建成功，如果失败，下面写入文件之前会报错
 	os.MkdirAll(filepath.Dir(path), 0766)
@@ -124,34 +105,22 @@ func (ddo *DefaultDataAdapter) Write(c Ctx, bktID, dataID int64, sn int, buf []b
 
 	ah := &AsyncHandle{F: f, B: bufio.NewWriter(f)}
 	_, err = ah.B.Write(buf)
-	if ddo.opt.Sync {
+	if dda.opt.Sync {
 		ah.Close()
 	} else {
-		Q.Put(strconv.FormatInt(dataID, 10), ah)
+		go ah.B.Flush()
+		Q.Put(path, ah)
 	}
 	return err
 }
 
-func (ddo *DefaultDataAdapter) Flush(c Ctx, bktID, dataID int64) error {
-	Q.Del(strconv.FormatInt(dataID, 10))
-	return nil
-}
-
-func (ddo *DefaultDataAdapter) Read(c Ctx, bktID, dataID int64, sn int) ([]byte, error) {
-	if err := ddo.acm.CheckPermission(c, R, bktID); err != nil {
-		return nil, err
-	}
-
+func (dda *DefaultDataAdapter) Read(c Ctx, bktID, dataID int64, sn int) ([]byte, error) {
 	return ioutil.ReadFile(toFilePath(Conf().Path, bktID, dataID, sn))
 }
 
-func (ddo *DefaultDataAdapter) ReadBytes(c Ctx, bktID, dataID int64, sn, offset, size int) ([]byte, error) {
+func (dda *DefaultDataAdapter) ReadBytes(c Ctx, bktID, dataID int64, sn, offset, size int) ([]byte, error) {
 	if offset == 0 && size == -1 {
-		return ddo.Read(c, bktID, dataID, sn)
-	}
-
-	if err := ddo.acm.CheckPermission(c, R, bktID); err != nil {
-		return nil, err
+		return dda.Read(c, bktID, dataID, sn)
 	}
 
 	f, err := os.Open(toFilePath(Conf().Path, bktID, dataID, sn))
@@ -183,22 +152,4 @@ func (ddo *DefaultDataAdapter) ReadBytes(c Ctx, bktID, dataID int64, sn, offset,
 		return buf[:n], nil
 	}
 	return buf, nil
-}
-
-func (ddo *DefaultDataAdapter) FileSize(c Ctx, bktID, dataID int64, sn int) (int64, error) {
-	if err := ddo.acm.CheckPermission(c, R, bktID); err != nil {
-		return 0, err
-	}
-
-	f, err := os.Open(toFilePath(Conf().Path, bktID, dataID, sn))
-	if err != nil {
-		return 0, err
-	}
-	defer f.Close()
-
-	fi, err := f.Stat()
-	if err != nil {
-		return 0, err
-	}
-	return fi.Size(), nil
 }
