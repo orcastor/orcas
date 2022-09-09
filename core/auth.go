@@ -1,10 +1,19 @@
 package core
 
+import "errors"
+
 const (
-	NA = iota
-	R
-	W
-	RW
+	NA = 1 << iota
+	DR
+	DW
+	DD
+	MDR
+	MDW
+	MDD
+
+	DRW  = DR | DW
+	MDRW = MDR | MDW
+	ALL  = DRW | DD | MDRW | MDD
 )
 
 const (
@@ -17,15 +26,14 @@ type AccessCtrlMgr interface {
 	CheckRole(c Ctx, role int) error
 }
 
-type Users interface {
-	Auth(c Ctx, usr, pwd string) (int64, error)
+type Admin interface {
 	ChPwd(c Ctx, uid int64, pwd, newPwd string) error
+	ChRole(c Ctx, uid int64, role int) error
 
 	AddUsr(c Ctx, usr, pwd string) error
 	DelUsr(c Ctx, usr, pwd string) error
 
-	NewTOTP(c Ctx) (string, string)
-	CheckTOTP(c Ctx, key, token string) (bool, error)
+	NewOTP(c Ctx) (string, string)
 }
 
 type DefaultAccessCtrlMgr struct {
@@ -37,4 +45,8 @@ func (dac *DefaultAccessCtrlMgr) CheckPermission(c Ctx, action int, bktID int64)
 
 func (dac *DefaultAccessCtrlMgr) CheckRole(c Ctx, role int) error {
 	return nil
+}
+
+func Auth(c Ctx, usr, pwd, otp string) (Ctx, error) {
+	return nil, errors.New("auth failed")
 }
