@@ -344,16 +344,16 @@ func (osi *OrcasSDKImpl) Download(c core.Ctx, bktID, id int64, lpath string) err
 			return err
 		}
 
-		for _, o := range o {
-			if osi.skip(o.Name) {
+		for _, x := range o {
+			if osi.skip(x.Name) {
 				continue
 			}
-			path := filepath.Join(q[0].path, o.Name)
-			switch o.Type {
+			path := filepath.Join(q[0].path, x.Name)
+			switch x.Type {
 			case core.OBJ_TYPE_DIR:
-				q = append(q, elem{id: o.ID, path: path})
+				q = append(q, elem{id: x.ID, path: path})
 			case core.OBJ_TYPE_FILE:
-				f := o
+				f := x
 				osi.f.MustDo(c, func(c core.Ctx) {
 					osi.downloadFile(c, bktID, f, path)
 				})
