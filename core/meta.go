@@ -86,7 +86,7 @@ type DataInfo struct {
 	OrigSize int64  `borm:"o_size"`    // 数据的原始大小
 	HdrCRC32 uint32 `borm:"hdr_crc32"` // 头部100KB的CRC32校验值
 	CRC32    uint32 `borm:"crc32"`     // 整个数据的CRC32校验值（最原始数据）
-	MD5      string `borm:"md5"`       // 整个数据的MD5值（最原始数据）
+	MD5      int64  `borm:"md5"`       // 整个数据的MD5值（最原始数据）
 
 	Checksum uint32 `borm:"checksum"` // 整个数据的CRC32校验值（最终数据，用于一致性审计）
 	Kind     uint32 `borm:"kind"`     // 数据状态，正常、损坏、加密、压缩、类型（用于预览等）
@@ -104,7 +104,7 @@ const EmptyDataID = 4708888888888
 func EmptyDataInfo() *DataInfo {
 	return &DataInfo{
 		ID:   EmptyDataID,
-		MD5:  "8F00B204E9800998",
+		MD5:  -1081059644736014743,
 		Kind: DATA_NORMAL,
 	}
 }
@@ -196,11 +196,11 @@ func InitBucketDB(bktID int64) error {
 		o_size BIGINT NOT NULL,
 		hdr_crc32 UNSIGNED INT NOT NULL,
 		crc32 UNSIGNED INT NOT NULL,
-		md5 CHAR(16) NOT NULL,
+		md5 BIGINT NOT NULL,
 		checksum UNSIGNED INT NOT NULL,
 		kind INT NOT NULL,
 		pkg_id BIGINT NOT NULL,
-		pkg_off BIGINT NOT NULL
+		pkg_off INT NOT NULL
 	)`)
 
 	db.Exec(`CREATE INDEX ix_ref ON data (o_size, hdr_crc32, crc32, md5)`)
@@ -285,7 +285,7 @@ func (dmo *DefaultMetadataAdapter) RefData(c Ctx, bktID int64, d []*DataInfo) ([
 	db.Exec(`CREATE TEMPORARY TABLE ` + tbl + ` (o_size BIGINT NOT NULL,
 		hdr_crc32 UNSIGNED BIG INT NOT NULL,
 		crc32 UNSIGNED BIG INT NOT NULL,
-		md5 UNSIGNED BIG INT NOT NULL
+		md5 BIGINT NOT NULL
 	)`)
 	// 把待查询数据放到临时表
 	if _, err = b.Table(db, tbl, c).Insert(&d, b.Fields("o_size", "hdr_crc32", "crc32", "md5")); err != nil {
@@ -296,7 +296,7 @@ func (dmo *DefaultMetadataAdapter) RefData(c Ctx, bktID int64, d []*DataInfo) ([
 		OrigSize int64  `borm:"b.o_size"`
 		HdrCRC32 uint32 `borm:"b.hdr_crc32"`
 		CRC32    uint32 `borm:"b.crc32"`
-		MD5      string `borm:"b.md5"`
+		MD5      int64  `borm:"b.md5"`
 	}
 	// 联表查询
 	if _, err = b.Table(db, `data a, `+tbl+` b`, c).Select(&refs, b.Join(`on a.o_size=b.o_size 
@@ -310,7 +310,7 @@ func (dmo *DefaultMetadataAdapter) RefData(c Ctx, bktID int64, d []*DataInfo) ([
 	// 构造辅助查询map
 	aux := make(map[string]int64, 0)
 	for _, ref := range refs {
-		aux[fmt.Sprintf("%d:%d:%d:%s", ref.OrigSize, ref.HdrCRC32, ref.CRC32, ref.MD5)] = ref.ID
+		aux[fmt.Sprintf("%d:%d:%d:%d", ref.OrigSize, ref.HdrCRC32, ref.CRC32, ref.MD5)] = ref.ID
 	}
 
 	res := make([]int64, len(d))
@@ -320,10 +320,10 @@ func (dmo *DefaultMetadataAdapter) RefData(c Ctx, bktID int64, d []*DataInfo) ([
 			continue
 		}
 
-		key := fmt.Sprintf("%d:%d:%d:%s", x.OrigSize, x.HdrCRC32, x.CRC32, x.MD5)
+		key := fmt.Sprintf("%d:%d:%d:%d", x.OrigSize, x.HdrCRC32, x.CRC32, x.MD5)
 		if id, ok := aux[key]; ok {
 			// 全文件的数据没有，说明是预Ref
-			if x.CRC32 == 0 || x.MD5 == "" {
+			if x.CRC32 == 0 || x.MD5 == 0 {
 				if id > 0 {
 					res[i] = 1 // 非0代表预Ref成功，预Ref只看数据库
 				}

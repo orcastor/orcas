@@ -59,7 +59,7 @@ func TestRefData(t *testing.T) {
 			OrigSize: 1,
 			HdrCRC32: 222,
 			CRC32:    333,
-			MD5:      "444",
+			MD5:      -1081059644736014743,
 			Kind:     DATA_NORMAL,
 		}}), ShouldBeNil)
 
@@ -92,7 +92,7 @@ func TestRefData(t *testing.T) {
 				OrigSize: 1,
 				HdrCRC32: 0,
 				CRC32:    333,
-				MD5:      "444",
+				MD5:      -1081059644736014743,
 			}})
 			So(err, ShouldBeNil)
 			So(len(ids), ShouldEqual, 1)
@@ -130,7 +130,7 @@ func TestRefData(t *testing.T) {
 				OrigSize: 1,
 				HdrCRC32: 222,
 				CRC32:    333,
-				MD5:      "444",
+				MD5:      -1081059644736014743,
 			}})
 			So(err, ShouldBeNil)
 			So(len(ids), ShouldEqual, 1)
@@ -140,7 +140,7 @@ func TestRefData(t *testing.T) {
 				OrigSize: 1,
 				HdrCRC32: 222,
 				CRC32:    0,
-				MD5:      "444",
+				MD5:      -1081059644736014743,
 			}})
 			So(err, ShouldBeNil)
 			So(len(ids), ShouldEqual, 1)
@@ -156,7 +156,7 @@ func TestRefData(t *testing.T) {
 			So(err, ShouldBeNil)
 			So(len(ids), ShouldEqual, 1)
 			So(ids[0], ShouldNotEqual, id)
-			So(ids[0], ShouldEqual, 0)
+			So(ids[0], ShouldEqual, 1)
 		})
 
 		Convey("multiple ref", func() {
@@ -164,12 +164,12 @@ func TestRefData(t *testing.T) {
 				OrigSize: 1,
 				HdrCRC32: 222,
 				CRC32:    333,
-				MD5:      "444",
+				MD5:      -1081059644736014743,
 			}, {
 				OrigSize: 1,
 				HdrCRC32: 222,
 				CRC32:    333,
-				MD5:      "444",
+				MD5:      -1081059644736014743,
 			}})
 			So(err, ShouldBeNil)
 			So(len(ids), ShouldEqual, 2)
@@ -181,12 +181,12 @@ func TestRefData(t *testing.T) {
 				OrigSize: 1,
 				HdrCRC32: 222,
 				CRC32:    333,
-				MD5:      "444",
+				MD5:      -1081059644736014743,
 			}, {
 				OrigSize: 1,
 				HdrCRC32: 111,
 				CRC32:    333,
-				MD5:      "444",
+				MD5:      -1081059644736014743,
 			}})
 			So(err, ShouldBeNil)
 			So(len(ids), ShouldEqual, 2)
@@ -199,12 +199,12 @@ func TestRefData(t *testing.T) {
 				OrigSize: 1,
 				HdrCRC32: 222,
 				CRC32:    333,
-				MD5:      "445",
+				MD5:      -1081059644736014744,
 			}, {
 				OrigSize: 1,
 				HdrCRC32: 222,
 				CRC32:    333,
-				MD5:      "445",
+				MD5:      -1081059644736014744,
 			}})
 			So(err, ShouldBeNil)
 			So(len(ids), ShouldEqual, 2)
