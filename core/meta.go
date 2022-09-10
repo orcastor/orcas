@@ -26,7 +26,8 @@ type BucketInfo struct {
 
 // 对象类型
 const (
-	OBJ_TYPE_MALFORMED = iota
+	OBJ_TYPE_MALFORMED = iota - 1
+	OBJ_TYPE_NONE
 	OBJ_TYPE_DIR
 	OBJ_TYPE_FILE
 	OBJ_TYPE_VERSION
@@ -38,7 +39,7 @@ type ObjectInfo struct {
 	PID    int64  `borm:"pid"`   // 父对象ID
 	MTime  int64  `borm:"mtime"` // 更新时间，秒级时间戳
 	DataID int64  `borm:"did"`   // 数据ID，如果为0，说明没有数据（新创建的文件，DataID就是对象ID，作为对象的首版本数据）
-	Type   int    `borm:"type"`  // 对象类型，0: malformed, 1: dir, 2: file, 3: version, 4: preview(thumb/m3u8/pdf)
+	Type   int    `borm:"type"`  // 对象类型，-1: malformed, 0: none, 1: dir, 2: file, 3: version, 4: preview(thumb/m3u8/pdf)
 	Name   string `borm:"name"`  // 对象名称
 	Size   int64  `borm:"size"`  // 对象的大小，目录的大小是子对象数，文件的大小是最新版本的字节数
 	Ext    string `borm:"ext"`   // 对象的扩展信息
