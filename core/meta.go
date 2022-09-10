@@ -157,7 +157,7 @@ func InitDB() error {
 	db.Exec(`CREATE TABLE bkt (id BIGINT PRIMARY KEY NOT NULL,
 		name TEXT NOT NULL,
 		uid BIGINT NOT NULL,
-		type INT NOT NULL,
+		type TINYINT NOT NULL,
 		quota BIGINT NOT NULL,
 		usage BIGINT NOT NULL
 	)`)
@@ -178,8 +178,8 @@ func InitBucketDB(bktID int64) error {
 		pid BIGINT NOT NULL,
 		mtime BIGINT NOT NULL,
 		did BIGINT NOT NULL,
-		type INT NOT NULL,
-		status INT NOT NULL,
+		type TINYINT NOT NULL,
+		status TINYINT NOT NULL,
 		name TEXT NOT NULL,
 		size BIGINT NOT NULL,
 		ext TEXT NOT NULL
@@ -194,7 +194,7 @@ func InitBucketDB(bktID int64) error {
 		crc32 UNSIGNED INT NOT NULL,
 		md5 BIGINT NOT NULL,
 		cksum UNSIGNED INT NOT NULL,
-		kind INT NOT NULL,
+		kind SMALLINT NOT NULL,
 		pkg_id BIGINT NOT NULL,
 		pkg_off INT NOT NULL
 	)`)
@@ -256,8 +256,8 @@ func (dma *DefaultMetadataAdapter) RefData(c Ctx, bktID int64, d []*DataInfo) ([
 	tbl := fmt.Sprintf("tmp_%x", time.Now().UnixNano())
 	// 创建临时表
 	db.Exec(`CREATE TEMPORARY TABLE ` + tbl + ` (o_size BIGINT NOT NULL,
-		h_crc32 UNSIGNED BIG INT NOT NULL,
-		crc32 UNSIGNED BIG INT NOT NULL,
+		h_crc32 UNSIGNED INT NOT NULL,
+		crc32 UNSIGNED INT NOT NULL,
 		md5 BIGINT NOT NULL
 	)`)
 	// 把待查询数据放到临时表
