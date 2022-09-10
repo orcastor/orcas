@@ -249,7 +249,6 @@ func TestPutObj(t *testing.T) {
 				MTime:  time.Now().Unix(),
 				DataID: did,
 				Type:   OBJ_TYPE_DIR,
-				Status: OBJ_NORMAL,
 				Name:   "test",
 				Size:   1,
 				Ext:    "{}",
@@ -266,7 +265,6 @@ func TestPutObj(t *testing.T) {
 				MTime:  time.Now().Unix(),
 				DataID: did,
 				Type:   OBJ_TYPE_DIR,
-				Status: OBJ_NORMAL,
 				Name:   "test",
 				Size:   1,
 				Ext:    "{}",
@@ -297,7 +295,6 @@ func TestGetObj(t *testing.T) {
 				MTime:  time.Now().Unix(),
 				DataID: did,
 				Type:   OBJ_TYPE_DIR,
-				Status: OBJ_NORMAL,
 				Name:   "test",
 				Size:   1,
 				Ext:    "{}",
@@ -330,7 +327,6 @@ func TestSetObj(t *testing.T) {
 			MTime:  time.Now().Unix(),
 			DataID: did,
 			Type:   OBJ_TYPE_DIR,
-			Status: OBJ_NORMAL,
 			Name:   "test",
 			Size:   1,
 			Ext:    "{}",
@@ -347,14 +343,6 @@ func TestSetObj(t *testing.T) {
 		Convey("set obj name", func() {
 			d.Name = "test1"
 			dma.SetObj(c, bktID, []string{"name"}, &ObjectInfo{ID: id, Name: d.Name})
-			d1, err = dma.GetObj(c, bktID, ids)
-			So(err, ShouldBeNil)
-			So(len(d1), ShouldEqual, 1)
-			So(d1[0], ShouldResemble, d)
-		})
-		Convey("set obj status", func() {
-			d.Status = OBJ_MALFORMED
-			dma.SetObj(c, bktID, []string{"status"}, &ObjectInfo{ID: id, Status: d.Status})
 			d1, err = dma.GetObj(c, bktID, ids)
 			So(err, ShouldBeNil)
 			So(len(d1), ShouldEqual, 1)
@@ -390,7 +378,6 @@ func TestListObj(t *testing.T) {
 			MTime:  now + 1,
 			DataID: did1,
 			Type:   OBJ_TYPE_DIR,
-			Status: OBJ_NORMAL,
 			Name:   "test1",
 			Size:   0,
 			Ext:    "{}",
@@ -401,7 +388,6 @@ func TestListObj(t *testing.T) {
 			MTime:  now + 2,
 			DataID: did2,
 			Type:   OBJ_TYPE_FILE,
-			Status: OBJ_NORMAL,
 			Name:   "test2",
 			Size:   2,
 			Ext:    "{}",
@@ -412,7 +398,6 @@ func TestListObj(t *testing.T) {
 			MTime:  now + 3,
 			DataID: did3,
 			Type:   OBJ_TYPE_VERSION,
-			Status: OBJ_NORMAL,
 			Name:   "test3",
 			Size:   3,
 			Ext:    "{}",
@@ -423,7 +408,6 @@ func TestListObj(t *testing.T) {
 			MTime:  now + 3,
 			DataID: did4,
 			Type:   OBJ_TYPE_PREVIEW,
-			Status: OBJ_NORMAL,
 			Name:   "test4",
 			Size:   3,
 			Ext:    "{}",
@@ -434,7 +418,6 @@ func TestListObj(t *testing.T) {
 			MTime:  now + 4,
 			DataID: did5,
 			Type:   OBJ_TYPE_PREVIEW,
-			Status: OBJ_DELETED,
 			Name:   "test5",
 			Size:   4,
 			Ext:    "{}",
@@ -444,25 +427,25 @@ func TestListObj(t *testing.T) {
 		So(len(ids), ShouldEqual, 5)
 
 		Convey("list obj pagination", func() {
-			o, cnt, d, err := dma.ListObj(c, bktID, pid, "", "", "", 2, 0)
+			o, cnt, d, err := dma.ListObj(c, bktID, pid, "", "", "", 2)
 			So(err, ShouldBeNil)
 			So(len(o), ShouldEqual, 2)
 			So(cnt, ShouldEqual, 5)
 			So(d, ShouldEqual, fmt.Sprint(id2))
 
-			o, cnt, d, err = dma.ListObj(c, bktID, pid, "", d, "", 2, 0)
+			o, cnt, d, err = dma.ListObj(c, bktID, pid, "", d, "", 2)
 			So(err, ShouldBeNil)
 			So(len(o), ShouldEqual, 2)
 			So(cnt, ShouldEqual, 5)
 			So(d, ShouldEqual, fmt.Sprint(id4))
 
-			o, cnt, d, err = dma.ListObj(c, bktID, pid, "", d, "", 2, 0)
+			o, cnt, d, err = dma.ListObj(c, bktID, pid, "", d, "", 2)
 			So(err, ShouldBeNil)
 			So(len(o), ShouldEqual, 1)
 			So(cnt, ShouldEqual, 5)
 			So(d, ShouldEqual, fmt.Sprint(id5))
 
-			o, cnt, d, err = dma.ListObj(c, bktID, pid, "", d, "", 2, 0)
+			o, cnt, d, err = dma.ListObj(c, bktID, pid, "", d, "", 2)
 			So(err, ShouldBeNil)
 			So(len(o), ShouldEqual, 0)
 			So(cnt, ShouldEqual, 5)
@@ -470,19 +453,19 @@ func TestListObj(t *testing.T) {
 		})
 
 		Convey("word", func() {
-			o, cnt, d, err := dma.ListObj(c, bktID, pid, "xxx", "", "", 2, 0)
+			o, cnt, d, err := dma.ListObj(c, bktID, pid, "xxx", "", "", 2)
 			So(err, ShouldBeNil)
 			So(len(o), ShouldEqual, 0)
 			So(cnt, ShouldEqual, 0)
 			So(d, ShouldEqual, "")
 
-			o, cnt, d, err = dma.ListObj(c, bktID, pid, "test1", "", "", 2, 0)
+			o, cnt, d, err = dma.ListObj(c, bktID, pid, "test1", "", "", 2)
 			So(err, ShouldBeNil)
 			So(len(o), ShouldEqual, 1)
 			So(cnt, ShouldEqual, 1)
 			So(d, ShouldEqual, fmt.Sprint(id1))
 
-			o, cnt, d, err = dma.ListObj(c, bktID, pid, "?es*", "", "", 2, 0)
+			o, cnt, d, err = dma.ListObj(c, bktID, pid, "?es*", "", "", 2)
 			So(err, ShouldBeNil)
 			So(len(o), ShouldEqual, 2)
 			So(cnt, ShouldEqual, 5)
@@ -490,21 +473,21 @@ func TestListObj(t *testing.T) {
 		})
 
 		Convey("order", func() {
-			o, cnt, d, err := dma.ListObj(c, bktID, pid, "", "", "+id", 5, 0)
+			o, cnt, d, err := dma.ListObj(c, bktID, pid, "", "", "+id", 5)
 			So(err, ShouldBeNil)
 			So(len(o), ShouldEqual, 5)
 			So(cnt, ShouldEqual, 5)
 			So(d, ShouldEqual, fmt.Sprint(id5))
 			So(o, ShouldResemble, []*ObjectInfo{d1, d2, d3, d4, d5})
 
-			o, cnt, d, err = dma.ListObj(c, bktID, pid, "", "", "-id", 5, 0)
+			o, cnt, d, err = dma.ListObj(c, bktID, pid, "", "", "-id", 5)
 			So(err, ShouldBeNil)
 			So(len(o), ShouldEqual, 5)
 			So(cnt, ShouldEqual, 5)
 			So(d, ShouldEqual, fmt.Sprint(id1))
 			So(o, ShouldResemble, []*ObjectInfo{d5, d4, d3, d2, d1})
 
-			o, cnt, d, err = dma.ListObj(c, bktID, pid, "", "", "-name", 5, 0)
+			o, cnt, d, err = dma.ListObj(c, bktID, pid, "", "", "-name", 5)
 			So(err, ShouldBeNil)
 			So(len(o), ShouldEqual, 5)
 			So(cnt, ShouldEqual, 5)
@@ -512,63 +495,63 @@ func TestListObj(t *testing.T) {
 			So(o, ShouldResemble, []*ObjectInfo{d5, d4, d3, d2, d1})
 
 			// 比较非id或者name的时候，相同值的排序是否稳定
-			o, cnt, d, err = dma.ListObj(c, bktID, pid, "", "", "+mtime", 3, 0)
+			o, cnt, d, err = dma.ListObj(c, bktID, pid, "", "", "+mtime", 3)
 			So(err, ShouldBeNil)
 			So(len(o), ShouldEqual, 3)
 			So(cnt, ShouldEqual, 5)
 			So(d, ShouldEqual, fmt.Sprintf("%d:%d", now+3, id3))
 			So(o, ShouldResemble, []*ObjectInfo{d1, d2, d3})
 
-			o, cnt, d, err = dma.ListObj(c, bktID, pid, "", "", "-mtime", 2, 0)
+			o, cnt, d, err = dma.ListObj(c, bktID, pid, "", "", "-mtime", 2)
 			So(err, ShouldBeNil)
 			So(len(o), ShouldEqual, 2)
 			So(cnt, ShouldEqual, 5)
 			So(d, ShouldEqual, fmt.Sprintf("%d:%d", now+3, id3))
 			So(o, ShouldResemble, []*ObjectInfo{d5, d3})
 
-			o, cnt, d, err = dma.ListObj(c, bktID, pid, "", d, "-mtime", 2, 0)
+			o, cnt, d, err = dma.ListObj(c, bktID, pid, "", d, "-mtime", 2)
 			So(err, ShouldBeNil)
 			So(len(o), ShouldEqual, 2)
 			So(cnt, ShouldEqual, 5)
 			So(d, ShouldEqual, fmt.Sprintf("%d:%d", now+2, id2))
 			So(o, ShouldResemble, []*ObjectInfo{d4, d2})
 
-			o, cnt, d, err = dma.ListObj(c, bktID, pid, "", "", "+size", 3, 0)
+			o, cnt, d, err = dma.ListObj(c, bktID, pid, "", "", "+size", 3)
 			So(err, ShouldBeNil)
 			So(len(o), ShouldEqual, 3)
 			So(cnt, ShouldEqual, 5)
 			So(d, ShouldEqual, fmt.Sprintf("%d:%d", 3, id3))
 			So(o, ShouldResemble, []*ObjectInfo{d1, d2, d3})
 
-			o, cnt, d, err = dma.ListObj(c, bktID, pid, "", "", "-size", 2, 0)
+			o, cnt, d, err = dma.ListObj(c, bktID, pid, "", "", "-size", 2)
 			So(err, ShouldBeNil)
 			So(len(o), ShouldEqual, 2)
 			So(cnt, ShouldEqual, 5)
 			So(d, ShouldEqual, fmt.Sprintf("%d:%d", 3, id3))
 			So(o, ShouldResemble, []*ObjectInfo{d5, d3})
 
-			o, cnt, d, err = dma.ListObj(c, bktID, pid, "", d, "-size", 2, 0)
+			o, cnt, d, err = dma.ListObj(c, bktID, pid, "", d, "-size", 2)
 			So(err, ShouldBeNil)
 			So(len(o), ShouldEqual, 2)
 			So(cnt, ShouldEqual, 5)
 			So(d, ShouldEqual, fmt.Sprintf("%d:%d", 2, id2))
 			So(o, ShouldResemble, []*ObjectInfo{d4, d2})
 
-			o, cnt, d, err = dma.ListObj(c, bktID, pid, "", "", "+type", 3, 0)
+			o, cnt, d, err = dma.ListObj(c, bktID, pid, "", "", "+type", 3)
 			So(err, ShouldBeNil)
 			So(len(o), ShouldEqual, 3)
 			So(cnt, ShouldEqual, 5)
 			So(d, ShouldEqual, fmt.Sprintf("%d:%d", 3, id3))
 			So(o, ShouldResemble, []*ObjectInfo{d1, d2, d3})
 
-			o, cnt, d, err = dma.ListObj(c, bktID, pid, "", "", "-type", 1, 0)
+			o, cnt, d, err = dma.ListObj(c, bktID, pid, "", "", "-type", 1)
 			So(err, ShouldBeNil)
 			So(len(o), ShouldEqual, 1)
 			So(cnt, ShouldEqual, 5)
 			So(d, ShouldEqual, fmt.Sprintf("%d:%d", OBJ_TYPE_PREVIEW, id4))
 			So(o, ShouldResemble, []*ObjectInfo{d4})
 
-			o, cnt, d, err = dma.ListObj(c, bktID, pid, "", d, "-type", 1, 0)
+			o, cnt, d, err = dma.ListObj(c, bktID, pid, "", d, "-type", 1)
 			So(err, ShouldBeNil)
 			So(len(o), ShouldEqual, 1)
 			So(cnt, ShouldEqual, 5)
@@ -576,28 +559,8 @@ func TestListObj(t *testing.T) {
 			So(o, ShouldResemble, []*ObjectInfo{d5})
 		})
 
-		Convey("status filter", func() {
-			o, cnt, d, err := dma.ListObj(c, bktID, pid, "", "", "", 2, OBJ_NORMAL)
-			So(err, ShouldBeNil)
-			So(len(o), ShouldEqual, 2)
-			So(cnt, ShouldEqual, 4)
-			So(d, ShouldEqual, fmt.Sprint(id2))
-
-			o, cnt, d, err = dma.ListObj(c, bktID, pid, "", d, "", 2, OBJ_DELETED)
-			So(err, ShouldBeNil)
-			So(len(o), ShouldEqual, 1)
-			So(cnt, ShouldEqual, 1)
-			So(d, ShouldEqual, fmt.Sprint(id5))
-
-			o, cnt, d, err = dma.ListObj(c, bktID, pid, "", d, "", 2, OBJ_RECYCLED)
-			So(err, ShouldBeNil)
-			So(len(o), ShouldEqual, 0)
-			So(cnt, ShouldEqual, 0)
-			So(d, ShouldEqual, "")
-		})
-
 		Convey("list obj with 0 count", func() {
-			o, cnt, d, err := dma.ListObj(c, bktID, pid, "", "", "", 0, 0)
+			o, cnt, d, err := dma.ListObj(c, bktID, pid, "", "", "", 0)
 			So(err, ShouldBeNil)
 			So(len(o), ShouldEqual, 0)
 			So(cnt, ShouldEqual, 5)

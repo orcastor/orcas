@@ -24,18 +24,9 @@ type BucketInfo struct {
 	// SnapshotID int64 // 最新快照版本ID
 }
 
-// 对象状态
-const (
-	OBJ_NONE = iota
-	OBJ_NORMAL
-	OBJ_DELETED
-	OBJ_RECYCLED
-	OBJ_MALFORMED
-)
-
 // 对象类型
 const (
-	OBJ_TYPE_NA = iota
+	OBJ_TYPE_MALFORMED = iota
 	OBJ_TYPE_DIR
 	OBJ_TYPE_FILE
 	OBJ_TYPE_VERSION
@@ -43,15 +34,14 @@ const (
 )
 
 type ObjectInfo struct {
-	ID     int64  `borm:"id"`     // 对象ID（idgen随机生成的id）
-	PID    int64  `borm:"pid"`    // 父对象ID
-	MTime  int64  `borm:"mtime"`  // 更新时间，秒级时间戳
-	DataID int64  `borm:"did"`    // 数据ID，如果为0，说明没有数据（新创建的文件，DataID就是对象ID，作为对象的首版本数据）
-	Type   int    `borm:"type"`   // 对象类型，0: none, 1: dir, 2: file, 3: version, 4: preview(thumb/m3u8/pdf)
-	Status int    `borm:"status"` // 对象状态，0: none, 1: normal, 1: deleted, 2: recycle(to be deleted), 3: malformed
-	Name   string `borm:"name"`   // 对象名称
-	Size   int64  `borm:"size"`   // 对象的大小，目录的大小是子对象数，文件的大小是最新版本的字节数
-	Ext    string `borm:"ext"`    // 对象的扩展信息
+	ID     int64  `borm:"id"`    // 对象ID（idgen随机生成的id）
+	PID    int64  `borm:"pid"`   // 父对象ID
+	MTime  int64  `borm:"mtime"` // 更新时间，秒级时间戳
+	DataID int64  `borm:"did"`   // 数据ID，如果为0，说明没有数据（新创建的文件，DataID就是对象ID，作为对象的首版本数据）
+	Type   int    `borm:"type"`  // 对象类型，0: malformed, 1: dir, 2: file, 3: version, 4: preview(thumb/m3u8/pdf)
+	Name   string `borm:"name"`  // 对象名称
+	Size   int64  `borm:"size"`  // 对象的大小，目录的大小是子对象数，文件的大小是最新版本的字节数
+	Ext    string `borm:"ext"`   // 对象的扩展信息
 	// BktID int64 // 桶ID，如果支持引用别的桶的数据，为0说明是本桶
 }
 
@@ -70,7 +60,7 @@ const (
 	DATA_KIND_AUDIO                         // 音频类型
 	DATA_KIND_ARCHIVE                       // 归档类型
 	DATA_KIND_DOCS                          // 文档类型
-	DATA_KIND_FONT                          // 文档类型
+	DATA_KIND_FONT                          // 字体类型
 	DATA_KIND_APP                           // 应用类型
 	DATA_KIND_RESERVED                      // 未知类型
 
@@ -90,7 +80,7 @@ type DataInfo struct {
 	Cksum     uint32 `borm:"cksum"`   // 整个数据的CRC32校验值（最终数据，用于一致性审计）
 	Kind      uint32 `borm:"kind"`    // 数据状态，正常、损坏、加密、压缩、类型（用于预览等）
 	PkgID     int64  `borm:"pkg_id"`  // 打包数据的ID（也是idgen生成的id）
-	PkgOffset int    `borm:"pkg_off"` // 打包数据的偏移位置
+	PkgOffset uint32 `borm:"pkg_off"` // 打包数据的偏移位置
 	// PkgID不为0说明是打包数据
 	// SnapshotID int64 // 快照版本ID
 }
@@ -130,7 +120,7 @@ type ObjectMetadataAdapter interface {
 	PutObj(c Ctx, bktID int64, o []*ObjectInfo) ([]int64, error)
 	GetObj(c Ctx, bktID int64, ids []int64) ([]*ObjectInfo, error)
 	SetObj(c Ctx, bktID int64, fields []string, o *ObjectInfo) error
-	ListObj(c Ctx, bktID, pid int64, wd, delim, order string, count, status int) ([]*ObjectInfo, int64, string, error)
+	ListObj(c Ctx, bktID, pid int64, wd, delim, order string, count int) ([]*ObjectInfo, int64, string, error)
 }
 
 type MetadataAdapter interface {
@@ -155,11 +145,11 @@ func InitDB() error {
 	defer db.Close()
 
 	db.Exec(`CREATE TABLE bkt (id BIGINT PRIMARY KEY NOT NULL,
-		name TEXT NOT NULL,
 		uid BIGINT NOT NULL,
-		type TINYINT NOT NULL,
 		quota BIGINT NOT NULL,
-		usage BIGINT NOT NULL
+		usage BIGINT NOT NULL,
+		type TINYINT NOT NULL,
+		name TEXT NOT NULL
 	)`)
 
 	db.Exec(`CREATE INDEX ix_uid on bkt (uid)`)
@@ -176,29 +166,27 @@ func InitBucketDB(bktID int64) error {
 
 	db.Exec(`CREATE TABLE obj (id BIGINT PRIMARY KEY NOT NULL,
 		pid BIGINT NOT NULL,
-		mtime BIGINT NOT NULL,
 		did BIGINT NOT NULL,
-		type TINYINT NOT NULL,
-		status TINYINT NOT NULL,
-		name TEXT NOT NULL,
 		size BIGINT NOT NULL,
+		mtime BIGINT NOT NULL,
+		type TINYINT NOT NULL,
+		name TEXT NOT NULL,
 		ext TEXT NOT NULL
 	)`)
-
-	db.Exec(`CREATE UNIQUE INDEX uk_pid_name on obj (pid, name)`)
 
 	db.Exec(`CREATE TABLE data (id BIGINT PRIMARY KEY NOT NULL,
 		size BIGINT NOT NULL,
 		o_size BIGINT NOT NULL,
+		md5 BIGINT NOT NULL,
+		pkg_id BIGINT NOT NULL,
+		pkg_off UNSIGNED INT NOT NULL,
 		h_crc32 UNSIGNED INT NOT NULL,
 		crc32 UNSIGNED INT NOT NULL,
-		md5 BIGINT NOT NULL,
 		cksum UNSIGNED INT NOT NULL,
-		kind SMALLINT NOT NULL,
-		pkg_id BIGINT NOT NULL,
-		pkg_off INT NOT NULL
+		kind SMALLINT NOT NULL
 	)`)
 
+	db.Exec(`CREATE UNIQUE INDEX uk_pid_name on obj (pid, name)`)
 	db.Exec(`CREATE INDEX ix_ref ON data (o_size, h_crc32, crc32, md5)`)
 	db.Exec(`PRAGMA temp_store = MEMORY`)
 	return nil
@@ -440,7 +428,7 @@ func doOrder(delim, order string, conds *[]interface{}) (string, string) {
 }
 
 func (dma *DefaultMetadataAdapter) ListObj(c Ctx, bktID, pid int64,
-	wd, delim, order string, count, status int) (o []*ObjectInfo,
+	wd, delim, order string, count int) (o []*ObjectInfo,
 	cnt int64, d string, err error) {
 	conds := []interface{}{b.Eq("pid", pid)}
 	if wd != "" {
@@ -449,10 +437,6 @@ func (dma *DefaultMetadataAdapter) ListObj(c Ctx, bktID, pid int64,
 		} else {
 			conds = append(conds, b.Eq("name", wd))
 		}
-	}
-
-	if status != 0 {
-		conds = append(conds, b.Eq("status", status))
 	}
 
 	db, err := GetDB(bktID)
