@@ -206,7 +206,7 @@ func (ch *RWHandler) List(c Ctx, bktID, pid int64, opt ListOptions) ([]*ObjectIn
 	if err := ch.acm.CheckPermission(c, MDR, bktID); err != nil {
 		return nil, 0, "", err
 	}
-	return ch.ma.ListObj(c, bktID, pid, opt.Word, opt.Delim, opt.Order, opt.Count, 0)
+	return ch.ma.ListObj(c, bktID, pid, opt.Word, opt.Delim, opt.Order, opt.Count)
 }
 
 // 如果存在同名文件，会报错：Error: stepping, UNIQUE constraint failed: obj.name (19)
@@ -228,12 +228,14 @@ func (ch *RWHandler) Recycle(c Ctx, bktID, id int64) error {
 	if err := ch.acm.CheckPermission(c, MDRW, bktID); err != nil {
 		return err
 	}
-	return ch.ma.SetObj(c, bktID, []string{"status"}, &ObjectInfo{ID: id, Status: OBJ_RECYCLED})
+	// TODO
+	return nil
 }
 
 func (ch *RWHandler) Delete(c Ctx, bktID, id int64) error {
 	if err := ch.acm.CheckPermission(c, MDD, bktID); err != nil {
 		return err
 	}
-	return ch.ma.SetObj(c, bktID, []string{"status"}, &ObjectInfo{ID: id, Status: OBJ_DELETED})
+	// TODO
+	return nil
 }
