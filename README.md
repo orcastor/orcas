@@ -13,7 +13,7 @@
   <a href="https://goreportcard.com/badge/github.com/orcastor/orcas" alt="goreport">
     <img src="https://goreportcard.com/badge/github.com/orcastor/orcas?v=20220901">
   </a>
-  <a href='https://orca-zhang.semaphoreci.com/badges/orcas/branches/master.svg?style=shields&key=78c39699-2da0-4322-9372-0839f9dcde76' alt='Build Status'>
+  <a href='https://orca-zhang.semaphoreci.com/branches/733643c4-54d7-4cc4-9b1e-c3c77c8ff7db' alt='Build Status'>
     <img src='https://orca-zhang.semaphoreci.com/badges/orcas/branches/master.svg?style=shields&key=78c39699-2da0-4322-9372-0839f9dcde76'>
   </a>
   <a href="https://github.com/orcastor/orcas/blob/master/LICENSE" alt='MIT license'>
