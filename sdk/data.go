@@ -498,9 +498,6 @@ func (osi *OrcasSDKImpl) uploadFiles(c core.Ctx, bktID int64, u []uploadInfo,
 			if u[i].o.DataID != id { // 包括小于0的
 				u[i].o.DataID = id
 			}
-			if d[i].PkgID == 0 { // 如果不是打包数据，对象ID可以复用数据ID
-				u[i].o.ID = u[i].o.DataID
-			}
 			f = append(f, u[i].o)
 		}
 		if _, err := osi.putObjects(c, bktID, f); err != nil {
@@ -586,11 +583,27 @@ func (osi *OrcasSDKImpl) downloadFile(c core.Ctx, bktID int64, o *core.ObjectInf
 		return nil
 	}
 
+	dataID := o.DataID
+	// 如果不是首版本
+	if dataID == 0 {
+		os, _, _, err := osi.h.List(c, bktID, o.ID, core.ListOptions{
+			Type:  core.OBJ_TYPE_VERSION,
+			Count: 1,
+			Order: "-id",
+		})
+		if err != nil || len(os) < 1 {
+			fmt.Println(runtime.Caller(0))
+			fmt.Println(err)
+			return err
+		}
+		dataID = os[0].DataID
+	}
+
 	var d *core.DataInfo
-	if o.DataID == core.EmptyDataID {
+	if dataID == core.EmptyDataID {
 		d = core.EmptyDataInfo()
 	} else {
-		d, err = osi.h.GetDataInfo(c, bktID, o.DataID)
+		d, err = osi.h.GetDataInfo(c, bktID, dataID)
 		if err != nil {
 			fmt.Println(runtime.Caller(0))
 			fmt.Println(err)
