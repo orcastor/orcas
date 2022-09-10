@@ -23,7 +23,6 @@ var cfg = Config{
 	EndecWay: core.DATA_ENDEC_AES256,
 	EndecKey: "1234567890abcdef12345678",
 	DontSync: ".*",
-	WorkersN: 16,
 }
 
 func init() {
@@ -68,7 +67,8 @@ func TestCheck(t *testing.T) {
 		var out bytes.Buffer
 		cmd := exec.Command("diff", "-urNa", "-x.*", path, filepath.Join(mntPath, filepath.Base(path)))
 		cmd.Stdout = &out
-		So(cmd.Run(), ShouldBeNil)
+		err := cmd.Run()
 		So(out.String(), ShouldBeEmpty)
+		So(err, ShouldBeNil)
 	})
 }
