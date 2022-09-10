@@ -169,12 +169,11 @@ func (osi *OrcasSDKImpl) Upload(c core.Ctx, bktID, pid int64, lpath string) erro
 	f.Close()
 
 	o := &core.ObjectInfo{
-		PID:    pid,
-		MTime:  fi.ModTime().Unix(),
-		Type:   core.OBJ_TYPE_FILE,
-		Status: core.OBJ_NORMAL,
-		Name:   fi.Name(),
-		Size:   fi.Size(),
+		PID:   pid,
+		MTime: fi.ModTime().Unix(),
+		Type:  core.OBJ_TYPE_FILE,
+		Name:  fi.Name(),
+		Size:  fi.Size(),
 	}
 	if !fi.IsDir() {
 		if osi.skip(o.Name) {
@@ -236,21 +235,19 @@ func (osi *OrcasSDKImpl) Upload(c core.Ctx, bktID, pid int64, lpath string) erro
 			}
 			if fi.IsDir() {
 				dirs = append(dirs, &core.ObjectInfo{
-					PID:    q[0].id,
-					MTime:  fi.ModTime().Unix(),
-					Type:   core.OBJ_TYPE_DIR,
-					Status: core.OBJ_NORMAL,
-					Name:   fi.Name(),
+					PID:   q[0].id,
+					MTime: fi.ModTime().Unix(),
+					Type:  core.OBJ_TYPE_DIR,
+					Name:  fi.Name(),
 				})
 				continue
 			} else {
 				file := &core.ObjectInfo{
-					PID:    q[0].id,
-					MTime:  fi.ModTime().Unix(),
-					Type:   core.OBJ_TYPE_FILE,
-					Status: core.OBJ_NORMAL,
-					Name:   fi.Name(),
-					Size:   fi.Size(),
+					PID:   q[0].id,
+					MTime: fi.ModTime().Unix(),
+					Type:  core.OBJ_TYPE_FILE,
+					Name:  fi.Name(),
+					Size:  fi.Size(),
 				}
 				if file.Size > 0 {
 					u = append(u, uploadInfo{

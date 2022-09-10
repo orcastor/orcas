@@ -274,11 +274,10 @@ func (osi *OrcasSDKImpl) putObjects(c core.Ctx, bktID int64, o []*core.ObjectInf
 				// 如果是文件，需要新建一个版本，版本更新的逻辑需要jobs来完成
 				if o[i].Type == core.OBJ_TYPE_FILE {
 					vers = append(vers, &core.ObjectInfo{
-						PID:    ids[i],
-						MTime:  o[i].MTime,
-						Type:   core.OBJ_TYPE_VERSION,
-						Status: core.OBJ_NORMAL,
-						Size:   o[i].Size,
+						PID:   ids[i],
+						MTime: o[i].MTime,
+						Type:  core.OBJ_TYPE_VERSION,
+						Size:  o[i].Size,
 					})
 				}
 			}
@@ -290,6 +289,7 @@ func (osi *OrcasSDKImpl) putObjects(c core.Ctx, bktID int64, o []*core.ObjectInf
 				fmt.Println(err)
 				return nil, err
 			}
+			// 需要定时任务把首版本的DataID更新掉
 		}
 	case RENAME: // 重命名
 		m := make(map[int]int)
@@ -498,6 +498,9 @@ func (osi *OrcasSDKImpl) uploadFiles(c core.Ctx, bktID int64, u []uploadInfo,
 			if u[i].o.DataID != id { // 包括小于0的
 				u[i].o.DataID = id
 			}
+			if d[i].PkgID == 0 { // 如果不是打包数据，对象ID可以复用数据ID
+				u[i].o.ID = u[i].o.DataID
+			}
 			f = append(f, u[i].o)
 		}
 		if _, err := osi.putObjects(c, bktID, f); err != nil {
@@ -522,15 +525,15 @@ func (DummyArchiver) Decompress(in io.Reader, out io.Writer) error {
 }
 
 type dataReader struct {
-	c                core.Ctx
-	h                core.Handler
-	buf              bytes.Buffer
-	bktID            int64
-	dataID           int64
-	offset, size, sn int
-	getSize, remain  int
-	kind             uint32
-	endecKey         string
+	c               core.Ctx
+	h               core.Handler
+	buf             bytes.Buffer
+	bktID           int64
+	dataID          int64
+	size, sn        int
+	getSize, remain int
+	offset, kind    uint32
+	endecKey        string
 }
 
 func newDataReader(c core.Ctx, h core.Handler, bktID int64, d *core.DataInfo, endecKey string) *dataReader {
@@ -551,7 +554,7 @@ func (dr *dataReader) Read(p []byte) (n int, err error) {
 		return dr.buf.Read(p)
 	}
 	if dr.remain > 0 {
-		buf, err := dr.h.GetData(dr.c, dr.bktID, dr.dataID, dr.sn, dr.offset, dr.getSize)
+		buf, err := dr.h.GetData(dr.c, dr.bktID, dr.dataID, dr.sn, int(dr.offset), dr.getSize)
 		if err != nil {
 			fmt.Println(runtime.Caller(0))
 			fmt.Println(err)
@@ -583,27 +586,11 @@ func (osi *OrcasSDKImpl) downloadFile(c core.Ctx, bktID int64, o *core.ObjectInf
 		return nil
 	}
 
-	dataID := o.DataID
-	// 如果不是首版本
-	if dataID == 0 {
-		os, _, _, err := osi.h.List(c, bktID, o.ID, core.ListOptions{
-			Type:  core.OBJ_TYPE_VERSION,
-			Count: 1,
-			Order: "-id",
-		})
-		if err != nil || len(os) < 1 {
-			fmt.Println(runtime.Caller(0))
-			fmt.Println(err)
-			return err
-		}
-		dataID = os[0].DataID
-	}
-
 	var d *core.DataInfo
-	if dataID == core.EmptyDataID {
+	if o.DataID == core.EmptyDataID {
 		d = core.EmptyDataInfo()
 	} else {
-		d, err = osi.h.GetDataInfo(c, bktID, dataID)
+		d, err = osi.h.GetDataInfo(c, bktID, o.DataID)
 		if err != nil {
 			fmt.Println(runtime.Caller(0))
 			fmt.Println(err)
@@ -674,7 +661,7 @@ func (dp *dataPkger) Push(c core.Ctx, h core.Handler, bktID int64, b []byte, d *
 	// 填充内容
 	dp.buf.Write(b)
 	// 记录偏移
-	d.PkgOffset = offset
+	d.PkgOffset = uint32(offset)
 	// 记录下来要设置打包数据的数据信息
 	dp.infos = append(dp.infos, d)
 	return true, nil
