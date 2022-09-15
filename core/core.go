@@ -28,6 +28,9 @@ type Handler interface {
 	// 设置自定义的存储适配器
 	SetAdapter(ma MetadataAdapter, da DataAdapter)
 
+	// 登录用户
+	Login(c Ctx, usr, pwd string) error
+
 	PutBkt(c Ctx, o []*BucketInfo) error
 
 	// 只有文件长度、HdrCRC32是预Ref，如果成功返回新DataID，失败返回0
@@ -90,6 +93,10 @@ func (ch *RWHandler) SetOptions(opt Options) {
 func (ch *RWHandler) SetAdapter(ma MetadataAdapter, da DataAdapter) {
 	ch.ma = ma
 	ch.da = da
+}
+
+func (ch *RWHandler) Login(c Ctx, usr, pwd string) error {
+	return nil
 }
 
 func (ch *RWHandler) PutBkt(c Ctx, o []*BucketInfo) error {
