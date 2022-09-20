@@ -217,11 +217,13 @@ func (dma *DefaultMetadataAdapter) PutBkt(c Ctx, o []*BucketInfo) error {
 	}
 	defer db.Close()
 
-	_, err = b.Table(db, BKT_TBL, c).ReplaceInto(&o)
+	if _, err = b.Table(db, BKT_TBL, c).ReplaceInto(&o); err != nil {
+		return ERR_EXEC_DB
+	}
 	for _, x := range o {
 		InitBucketDB(x.ID)
 	}
-	return ERR_EXEC_DB
+	return nil
 }
 
 func (dma *DefaultMetadataAdapter) GetBkt(c Ctx, ids []int64) (o []*BucketInfo, err error) {
