@@ -89,7 +89,7 @@ func TestReadBytes(t *testing.T) {
 
 		Convey("offset - invalid x with all", func() {
 			bs, err := dda.ReadBytes(c, bktID, key, 0, 12, -1)
-			So(err, ShouldBeNil)
+			So(err, ShouldEqual, ERR_READ_FILE)
 			So(bs, ShouldBeNil)
 		})
 
