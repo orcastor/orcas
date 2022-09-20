@@ -152,7 +152,7 @@ func GetDB(bktID ...interface{}) (*sql.DB, error) {
 func InitDB() error {
 	db, err := GetDB()
 	if err != nil {
-		return err
+		return ERR_OPEN_DB
 	}
 	defer db.Close()
 
@@ -172,7 +172,7 @@ func InitDB() error {
 func InitBucketDB(bktID int64) error {
 	db, err := GetDB(bktID)
 	if err != nil {
-		return err
+		return ERR_OPEN_DB
 	}
 	defer db.Close()
 
@@ -213,7 +213,7 @@ func (dma *DefaultMetadataAdapter) Close() {
 func (dma *DefaultMetadataAdapter) PutBkt(c Ctx, o []*BucketInfo) error {
 	db, err := GetDB()
 	if err != nil {
-		return err
+		return ERR_OPEN_DB
 	}
 	defer db.Close()
 
@@ -221,35 +221,39 @@ func (dma *DefaultMetadataAdapter) PutBkt(c Ctx, o []*BucketInfo) error {
 	for _, x := range o {
 		InitBucketDB(x.ID)
 	}
-	return err
+	return ERR_EXEC_DB
 }
 
 func (dma *DefaultMetadataAdapter) GetBkt(c Ctx, ids []int64) (o []*BucketInfo, err error) {
 	db, err := GetDB()
 	if err != nil {
-		return nil, err
+		return nil, ERR_OPEN_DB
 	}
 	defer db.Close()
 
-	_, err = b.Table(db, BKT_TBL, c).Select(&o, b.Where(b.In("id", ids)))
+	if _, err = b.Table(db, BKT_TBL, c).Select(&o, b.Where(b.In("id", ids))); err != nil {
+		return nil, ERR_QUERY_DB
+	}
 	return
 }
 
 func (dma *DefaultMetadataAdapter) ListBkt(c Ctx, uid int64) (o []*BucketInfo, err error) {
 	db, err := GetDB()
 	if err != nil {
-		return nil, err
+		return nil, ERR_OPEN_DB
 	}
 	defer db.Close()
 
-	_, err = b.Table(db, BKT_TBL, c).Select(&o, b.Where(b.Eq("uid", uid)))
+	if _, err = b.Table(db, BKT_TBL, c).Select(&o, b.Where(b.Eq("uid", uid))); err != nil {
+		return nil, ERR_QUERY_DB
+	}
 	return
 }
 
 func (dma *DefaultMetadataAdapter) RefData(c Ctx, bktID int64, d []*DataInfo) ([]int64, error) {
 	db, err := GetDB(bktID)
 	if err != nil {
-		return nil, err
+		return nil, ERR_OPEN_DB
 	}
 	defer db.Close()
 
@@ -263,7 +267,7 @@ func (dma *DefaultMetadataAdapter) RefData(c Ctx, bktID int64, d []*DataInfo) ([
 	// 把待查询数据放到临时表
 	if _, err = b.Table(db, tbl, c).Insert(&d,
 		b.Fields("o_size", "h_crc32", "crc32", "md5")); err != nil {
-		return nil, err
+		return nil, ERR_EXEC_DB
 	}
 	var refs []struct {
 		ID       int64  `borm:"max(a.id)"`
@@ -277,7 +281,7 @@ func (dma *DefaultMetadataAdapter) RefData(c Ctx, bktID int64, d []*DataInfo) ([
 		b.Join(`on a.o_size=b.o_size and a.h_crc32=b.h_crc32 and 
 			(b.crc32=0 or b.md5=0 or (a.crc32=b.crc32 and a.md5=b.md5))`),
 		b.GroupBy("b.o_size", "b.h_crc32", "b.crc32", "b.md5")); err != nil {
-		return nil, err
+		return nil, ERR_QUERY_DB
 	}
 	// 删除临时表
 	db.Exec(`DROP TABLE ` + tbl)
@@ -310,36 +314,40 @@ func (dma *DefaultMetadataAdapter) RefData(c Ctx, bktID int64, d []*DataInfo) ([
 			aux[key] = int64(^i)
 		}
 	}
-	return res, err
+	return res, nil
 }
 
 func (dma *DefaultMetadataAdapter) PutData(c Ctx, bktID int64, d []*DataInfo) error {
 	db, err := GetDB(bktID)
 	if err != nil {
-		return err
+		return ERR_OPEN_DB
 	}
 	defer db.Close()
 
-	_, err = b.Table(db, DATA_TBL, c).ReplaceInto(&d)
-	return err
+	if _, err = b.Table(db, DATA_TBL, c).ReplaceInto(&d); err != nil {
+		return ERR_EXEC_DB
+	}
+	return nil
 }
 
 func (dma *DefaultMetadataAdapter) GetData(c Ctx, bktID, id int64) (d *DataInfo, err error) {
 	db, err := GetDB(bktID)
 	if err != nil {
-		return nil, err
+		return nil, ERR_OPEN_DB
 	}
 	defer db.Close()
 
 	d = &DataInfo{}
-	_, err = b.Table(db, DATA_TBL, c).Select(d, b.Where(b.Eq("id", id)))
+	if _, err = b.Table(db, DATA_TBL, c).Select(d, b.Where(b.Eq("id", id))); err != nil {
+		return nil, ERR_QUERY_DB
+	}
 	return
 }
 
 func (dma *DefaultMetadataAdapter) PutObj(c Ctx, bktID int64, o []*ObjectInfo) (ids []int64, err error) {
 	db, err := GetDB(bktID)
 	if err != nil {
-		return nil, err
+		return nil, ERR_OPEN_DB
 	}
 	defer db.Close()
 
@@ -347,10 +355,14 @@ func (dma *DefaultMetadataAdapter) PutObj(c Ctx, bktID int64, o []*ObjectInfo) (
 		ids = append(ids, x.ID)
 	}
 
-	if n, err := b.Table(db, OBJ_TBL, c).InsertIgnore(&o); err == nil && n != len(o) {
+	var n int
+	if n, err = b.Table(db, OBJ_TBL, c).InsertIgnore(&o); err != nil {
+		return nil, ERR_EXEC_DB
+	}
+	if n != len(o) {
 		var inserted []int64
 		if _, err = b.Table(db, OBJ_TBL, c).Select(&inserted, b.Fields("id"), b.Where(b.In("id", ids))); err != nil {
-			return nil, err
+			return nil, ERR_QUERY_DB
 		}
 		// 处理有冲突的情况
 		m := make(map[int64]struct{}, 0)
@@ -364,29 +376,33 @@ func (dma *DefaultMetadataAdapter) PutObj(c Ctx, bktID int64, o []*ObjectInfo) (
 			}
 		}
 	}
-	return ids, err
+	return
 }
 
 func (dma *DefaultMetadataAdapter) GetObj(c Ctx, bktID int64, ids []int64) (o []*ObjectInfo, err error) {
 	db, err := GetDB(bktID)
 	if err != nil {
-		return nil, err
+		return nil, ERR_OPEN_DB
 	}
 	defer db.Close()
 
-	_, err = b.Table(db, OBJ_TBL, c).Select(&o, b.Where(b.In("id", ids)))
+	if _, err = b.Table(db, OBJ_TBL, c).Select(&o, b.Where(b.In("id", ids))); err != nil {
+		return nil, ERR_QUERY_DB
+	}
 	return
 }
 
 func (dma *DefaultMetadataAdapter) SetObj(c Ctx, bktID int64, fields []string, o *ObjectInfo) error {
 	db, err := GetDB(bktID)
 	if err != nil {
-		return err
+		return ERR_OPEN_DB
 	}
 	defer db.Close()
 
-	_, err = b.Table(db, OBJ_TBL, c).Update(o, b.Fields(fields...), b.Where(b.Eq("id", o.ID)))
-	return err
+	if _, err = b.Table(db, OBJ_TBL, c).Update(o, b.Fields(fields...), b.Where(b.Eq("id", o.ID))); err != nil {
+		return ERR_EXEC_DB
+	}
+	return nil
 }
 
 func toDelim(field string, o *ObjectInfo) string {
@@ -453,23 +469,25 @@ func (dma *DefaultMetadataAdapter) ListObj(c Ctx, bktID, pid int64,
 
 	db, err := GetDB(bktID)
 	if err != nil {
-		return nil, 0, "", err
+		return nil, 0, "", ERR_OPEN_DB
 	}
 	defer db.Close()
 
 	if _, err = b.Table(db, OBJ_TBL, c).Select(&cnt,
 		b.Fields("count(1)"),
 		b.Where(conds...)); err != nil {
-		return nil, 0, "", err
+		return nil, 0, "", ERR_QUERY_DB
 	}
 
 	if count > 0 {
 		var orderBy string
 		orderBy, order = doOrder(delim, order, &conds)
-		_, err = b.Table(db, OBJ_TBL, c).Select(&o,
+		if _, err = b.Table(db, OBJ_TBL, c).Select(&o,
 			b.Where(conds...),
 			b.OrderBy(orderBy),
-			b.Limit(count))
+			b.Limit(count)); err != nil {
+			return nil, 0, "", ERR_QUERY_DB
+		}
 
 		if len(o) > 0 {
 			d = toDelim(order, o[len(o)-1])
