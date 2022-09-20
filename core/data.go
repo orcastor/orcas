@@ -100,7 +100,7 @@ func (dda *DefaultDataAdapter) Write(c Ctx, bktID, dataID int64, sn int, buf []b
 
 	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0666)
 	if err != nil {
-		return err
+		return ERR_OPEN_FILE
 	}
 
 	ah := &AsyncHandle{F: f, B: bufio.NewWriter(f)}
@@ -125,7 +125,7 @@ func (dda *DefaultDataAdapter) ReadBytes(c Ctx, bktID, dataID int64, sn, offset,
 
 	f, err := os.Open(toFilePath(Conf().Path, bktID, dataID, sn))
 	if err != nil {
-		return nil, err
+		return nil, ERR_OPEN_FILE
 	}
 	defer f.Close()
 
@@ -137,7 +137,7 @@ func (dda *DefaultDataAdapter) ReadBytes(c Ctx, bktID, dataID int64, sn, offset,
 	if size == -1 {
 		fi, err := f.Stat()
 		if err != nil || fi.Size() < int64(offset) {
-			return nil, err
+			return nil, ERR_READ_FILE
 		}
 		buf = make([]byte, fi.Size()-int64(offset))
 	} else {
@@ -146,7 +146,7 @@ func (dda *DefaultDataAdapter) ReadBytes(c Ctx, bktID, dataID int64, sn, offset,
 
 	n, err := bufio.NewReaderSize(f, cap(buf)).Read(buf)
 	if err != nil {
-		return nil, err
+		return nil, ERR_READ_FILE
 	}
 	if size > 0 && n < int(size) {
 		return buf[:n], nil
