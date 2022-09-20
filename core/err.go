@@ -12,4 +12,8 @@ const (
 
 	ERR_OPEN_FILE = Error("open file failed")
 	ERR_READ_FILE = Error("read file failed")
+
+	ERR_OPEN_DB  = Error("open db failed")
+	ERR_QUERY_DB = Error("query db failed")
+	ERR_EXEC_DB  = Error("exec db failed")
 )
