@@ -96,6 +96,17 @@ func EmptyDataInfo() *DataInfo {
 	}
 }
 
+type UserInfo struct {
+	ID     int64  `borm:"id"`
+	Usr    string `borm:"usr"`
+	Pwd    string `borm:"pwd"` // PBKDF2-HMAC-SHA256
+	Key    string `borm:"key"`
+	Role   uint32 `borm:"role"`
+	Name   string `borm:"name"`
+	Avatar string `borm:"avatar"`
+	// Perm uint32 `borm:"perm"`
+}
+
 const (
 	BKT_TBL = "bkt"
 	USR_TBL = "usr"
