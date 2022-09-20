@@ -1,7 +1,5 @@
 package core
 
-import "errors"
-
 const (
 	NA = 1 << iota
 	DR
@@ -47,6 +45,10 @@ func (dac *DefaultAccessCtrlMgr) CheckRole(c Ctx, role int) error {
 	return nil
 }
 
-func Auth(c Ctx, usr, pwd, otp string) (Ctx, error) {
-	return nil, errors.New("auth failed")
+func Auth(c Ctx, usr, pwd, otp string) error {
+	// pwd -> rsa decode
+	// pwd from db or cache
+	// pbkdf2 check
+	// set uid & key to ctx
+	return ERR_AUTH_FAILED
 }
