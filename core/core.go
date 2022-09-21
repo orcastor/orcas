@@ -31,8 +31,6 @@ type Handler interface {
 	// 登录用户
 	Login(c Ctx, usr, pwd string) error
 
-	PutBkt(c Ctx, o []*BucketInfo) error
-
 	// 只有文件长度、HdrCRC32是预Ref，如果成功返回新DataID，失败返回0
 	// 有文件长度、CRC32、MD5，成功返回引用的DataID，失败返回0，客户端发现DataID有变化，说明不需要上传数据
 	// 如果非预Ref DataID传0，说明跳过了预Ref
@@ -59,15 +57,23 @@ type Handler interface {
 	Delete(c Ctx, bktID, id int64) error
 }
 
-type RWHandler struct {
+type Admin interface {
+	// 传入underlying，返回当前的，构成链式调用
+	New(a Admin) Admin
+	Close()
+
+	PutBkt(c Ctx, o []*BucketInfo) error
+}
+
+type LocalHandler struct {
 	ma  MetadataAdapter
 	da  DataAdapter
 	acm AccessCtrlMgr
 	ig  *idgen.IDGen
 }
 
-func NewRWHandler() Handler {
-	return &RWHandler{
+func NewLocalHandler() Handler {
+	return &LocalHandler{
 		ma:  &DefaultMetadataAdapter{},
 		da:  &DefaultDataAdapter{},
 		acm: &DefaultAccessCtrlMgr{},
@@ -76,49 +82,45 @@ func NewRWHandler() Handler {
 }
 
 // 传入underlying，返回当前的，构成链式调用
-func (ch *RWHandler) New(Handler) Handler {
+func (lh *LocalHandler) New(Handler) Handler {
 	// 忽略下层handler
-	return ch
+	return lh
 }
 
-func (ch *RWHandler) Close() {
-	ch.da.Close()
-	ch.ma.Close()
+func (lh *LocalHandler) Close() {
+	lh.da.Close()
+	lh.ma.Close()
 }
 
-func (ch *RWHandler) SetOptions(opt Options) {
-	ch.da.SetOptions(opt)
+func (lh *LocalHandler) SetOptions(opt Options) {
+	lh.da.SetOptions(opt)
 }
 
-func (ch *RWHandler) SetAdapter(ma MetadataAdapter, da DataAdapter) {
-	ch.ma = ma
-	ch.da = da
+func (lh *LocalHandler) SetAdapter(ma MetadataAdapter, da DataAdapter) {
+	lh.ma = ma
+	lh.da = da
 }
 
-func (ch *RWHandler) Login(c Ctx, usr, pwd string) error {
-	return nil
-}
-
-func (ch *RWHandler) PutBkt(c Ctx, o []*BucketInfo) error {
-	if err := ch.acm.CheckRole(c, ADMIN); err != nil {
-		return err
-	}
-	return ch.ma.PutBkt(c, o)
+func (lh *LocalHandler) Login(c Ctx, usr, pwd string) error {
+	// pwd from db or cache
+	// pbkdf2 check
+	// set uid & key to ctx
+	return ERR_AUTH_FAILED
 }
 
 // 只有文件长度、HdrCRC32是预Ref，如果成功返回新DataID，失败返回0
 // 有文件长度、CRC32、MD5，成功返回引用的DataID，失败返回0，客户端发现DataID有变化，说明不需要上传数据
 // 如果非预Ref DataID传0，说明跳过了预Ref
-func (ch *RWHandler) Ref(c Ctx, bktID int64, d []*DataInfo) ([]int64, error) {
-	if err := ch.acm.CheckPermission(c, MDRW, bktID); err != nil {
+func (lh *LocalHandler) Ref(c Ctx, bktID int64, d []*DataInfo) ([]int64, error) {
+	if err := lh.acm.CheckPermission(c, MDRW, bktID); err != nil {
 		return nil, err
 	}
-	return ch.ma.RefData(c, bktID, d)
+	return lh.ma.RefData(c, bktID, d)
 }
 
 // 打包上传或者小文件，sn传-1，大文件sn从0开始，DataID不传默认创建一个新的
-func (ch *RWHandler) PutData(c Ctx, bktID, dataID int64, sn int, buf []byte) (int64, error) {
-	if err := ch.acm.CheckPermission(c, DW, bktID); err != nil {
+func (lh *LocalHandler) PutData(c Ctx, bktID, dataID int64, sn int, buf []byte) (int64, error) {
+	if err := lh.acm.CheckPermission(c, DW, bktID); err != nil {
 		return 0, err
 	}
 
@@ -126,22 +128,22 @@ func (ch *RWHandler) PutData(c Ctx, bktID, dataID int64, sn int, buf []byte) (in
 		if len(buf) <= 0 {
 			dataID = EmptyDataID
 		} else {
-			dataID, _ = ch.ig.New()
+			dataID, _ = lh.ig.New()
 		}
 	}
-	return dataID, ch.da.Write(c, bktID, dataID, sn, buf)
+	return dataID, lh.da.Write(c, bktID, dataID, sn, buf)
 }
 
 // 上传完数据以后，再创建元数据
-func (ch *RWHandler) PutDataInfo(c Ctx, bktID int64, d []*DataInfo) (ids []int64, err error) {
-	if err := ch.acm.CheckPermission(c, MDW, bktID); err != nil {
+func (lh *LocalHandler) PutDataInfo(c Ctx, bktID int64, d []*DataInfo) (ids []int64, err error) {
+	if err := lh.acm.CheckPermission(c, MDW, bktID); err != nil {
 		return nil, err
 	}
 
 	var n []*DataInfo
 	for _, x := range d {
 		if x.ID == 0 {
-			x.ID, _ = ch.ig.New()
+			x.ID, _ = lh.ig.New()
 		}
 		ids = append(ids, x.ID)
 		if x.ID > 0 {
@@ -154,41 +156,41 @@ func (ch *RWHandler) PutDataInfo(c Ctx, bktID int64, d []*DataInfo) (ids []int64
 			ids[i] = ids[^ids[i]]
 		}
 	}
-	return ids, ch.ma.PutData(c, bktID, n)
+	return ids, lh.ma.PutData(c, bktID, n)
 }
 
-func (ch *RWHandler) GetDataInfo(c Ctx, bktID, id int64) (*DataInfo, error) {
-	if err := ch.acm.CheckPermission(c, MDR, bktID); err != nil {
+func (lh *LocalHandler) GetDataInfo(c Ctx, bktID, id int64) (*DataInfo, error) {
+	if err := lh.acm.CheckPermission(c, MDR, bktID); err != nil {
 		return nil, err
 	}
-	return ch.ma.GetData(c, bktID, id)
+	return lh.ma.GetData(c, bktID, id)
 }
 
 // 只传一个参数说明是sn，传两个参数说明是sn+offset，传三个参数说明是sn+offset+size
-func (ch *RWHandler) GetData(c Ctx, bktID, id int64, sn int, offset ...int) ([]byte, error) {
-	if err := ch.acm.CheckPermission(c, DR, bktID); err != nil {
+func (lh *LocalHandler) GetData(c Ctx, bktID, id int64, sn int, offset ...int) ([]byte, error) {
+	if err := lh.acm.CheckPermission(c, DR, bktID); err != nil {
 		return nil, err
 	}
 
 	switch len(offset) {
 	case 0:
-		return ch.da.Read(c, bktID, id, sn)
+		return lh.da.Read(c, bktID, id, sn)
 	case 1:
-		return ch.da.ReadBytes(c, bktID, id, sn, offset[0], -1)
+		return lh.da.ReadBytes(c, bktID, id, sn, offset[0], -1)
 	}
-	return ch.da.ReadBytes(c, bktID, id, sn, offset[0], offset[1])
+	return lh.da.ReadBytes(c, bktID, id, sn, offset[0], offset[1])
 }
 
 // 垃圾回收时有数据没有元数据引用的为脏数据（需要留出窗口时间），有元数据没有数据的为损坏数据
 // PID支持用补码来直接引用当次还未上传的对象的ID
-func (ch *RWHandler) Put(c Ctx, bktID int64, o []*ObjectInfo) ([]int64, error) {
-	if err := ch.acm.CheckPermission(c, MDW, bktID); err != nil {
+func (lh *LocalHandler) Put(c Ctx, bktID int64, o []*ObjectInfo) ([]int64, error) {
+	if err := lh.acm.CheckPermission(c, MDW, bktID); err != nil {
 		return nil, err
 	}
 
 	for _, x := range o {
 		if x.ID == 0 {
-			x.ID, _ = ch.ig.New()
+			x.ID, _ = lh.ig.New()
 		}
 		if x.Name == "" {
 			x.Name = strconv.FormatInt(x.ID, 10)
@@ -199,50 +201,79 @@ func (ch *RWHandler) Put(c Ctx, bktID int64, o []*ObjectInfo) ([]int64, error) {
 			x.PID = o[^x.PID].ID
 		}
 	}
-	return ch.ma.PutObj(c, bktID, o)
+	return lh.ma.PutObj(c, bktID, o)
 }
 
-func (ch *RWHandler) Get(c Ctx, bktID int64, ids []int64) ([]*ObjectInfo, error) {
-	if err := ch.acm.CheckPermission(c, MDR, bktID); err != nil {
+func (lh *LocalHandler) Get(c Ctx, bktID int64, ids []int64) ([]*ObjectInfo, error) {
+	if err := lh.acm.CheckPermission(c, MDR, bktID); err != nil {
 		return nil, err
 	}
-	return ch.ma.GetObj(c, bktID, ids)
+	return lh.ma.GetObj(c, bktID, ids)
 }
 
-func (ch *RWHandler) List(c Ctx, bktID, pid int64, opt ListOptions) ([]*ObjectInfo, int64, string, error) {
-	if err := ch.acm.CheckPermission(c, MDR, bktID); err != nil {
+func (lh *LocalHandler) List(c Ctx, bktID, pid int64, opt ListOptions) ([]*ObjectInfo, int64, string, error) {
+	if err := lh.acm.CheckPermission(c, MDR, bktID); err != nil {
 		return nil, 0, "", err
 	}
-	return ch.ma.ListObj(c, bktID, pid, opt.Word, opt.Delim, opt.Order, opt.Count)
+	return lh.ma.ListObj(c, bktID, pid, opt.Word, opt.Delim, opt.Order, opt.Count)
 }
 
-// 如果存在同名文件，会报错：Error: stepping, UNIQUE constraint failed: obj.name (19)
-func (ch *RWHandler) Rename(c Ctx, bktID, id int64, name string) error {
-	if err := ch.acm.CheckPermission(c, MDW, bktID); err != nil {
+func (lh *LocalHandler) Rename(c Ctx, bktID, id int64, name string) error {
+	if err := lh.acm.CheckPermission(c, MDW, bktID); err != nil {
 		return err
 	}
-	return ch.ma.SetObj(c, bktID, []string{"name"}, &ObjectInfo{ID: id, Name: name})
+	return lh.ma.SetObj(c, bktID, []string{"name"}, &ObjectInfo{ID: id, Name: name})
 }
 
-func (ch *RWHandler) MoveTo(c Ctx, bktID, id, pid int64) error {
-	if err := ch.acm.CheckPermission(c, MDRW, bktID); err != nil {
+func (lh *LocalHandler) MoveTo(c Ctx, bktID, id, pid int64) error {
+	if err := lh.acm.CheckPermission(c, MDRW, bktID); err != nil {
 		return err
 	}
-	return ch.ma.SetObj(c, bktID, []string{"pid"}, &ObjectInfo{ID: id, PID: pid})
+	return lh.ma.SetObj(c, bktID, []string{"pid"}, &ObjectInfo{ID: id, PID: pid})
 }
 
-func (ch *RWHandler) Recycle(c Ctx, bktID, id int64) error {
-	if err := ch.acm.CheckPermission(c, MDRW, bktID); err != nil {
+func (lh *LocalHandler) Recycle(c Ctx, bktID, id int64) error {
+	if err := lh.acm.CheckPermission(c, MDRW, bktID); err != nil {
+		return err
+	}
+	// TODO
+	return nil
+}
+
+func (lh *LocalHandler) Delete(c Ctx, bktID, id int64) error {
+	if err := lh.acm.CheckPermission(c, MDD, bktID); err != nil {
 		return err
 	}
 	// TODO
 	return nil
 }
 
-func (ch *RWHandler) Delete(c Ctx, bktID, id int64) error {
-	if err := ch.acm.CheckPermission(c, MDD, bktID); err != nil {
+type LocalAdmin struct {
+	aa  AdminAdapter
+	acm AccessCtrlMgr
+	ig  *idgen.IDGen
+}
+
+func NewLocalAdmin() Admin {
+	return &LocalAdmin{
+		aa:  &DefaultAdminAdapter{},
+		acm: &DefaultAccessCtrlMgr{},
+		ig:  idgen.NewIDGen(nil, 0), // 需要改成配置
+	}
+}
+
+// 传入underlying，返回当前的，构成链式调用
+func (la *LocalAdmin) New(Admin) Admin {
+	// 忽略下层handler
+	return la
+}
+
+func (la *LocalAdmin) Close() {
+}
+
+func (la *LocalAdmin) PutBkt(c Ctx, o []*BucketInfo) error {
+	if err := la.acm.CheckRole(c, ADMIN); err != nil {
 		return err
 	}
-	// TODO
-	return nil
+	return la.aa.PutBkt(c, o)
 }
