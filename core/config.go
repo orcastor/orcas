@@ -1,9 +1,5 @@
 package core
 
-import "context"
-
-type Ctx context.Context
-
 var config *CoreConfig
 
 type CoreConfig struct {
