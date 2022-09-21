@@ -22,7 +22,7 @@ func TestListBkt(t *testing.T) {
 	Convey("normal", t, func() {
 		Convey("put bkt", func() {
 			InitDB()
-			dma := &DefaultMetadataAdapter{}
+			daa := &DefaultAdminAdapter{}
 			id1, _ := idgen.NewIDGen(nil, 0).New()
 			id2, _ := idgen.NewIDGen(nil, 0).New()
 			uid, _ := idgen.NewIDGen(nil, 0).New()
@@ -38,9 +38,9 @@ func TestListBkt(t *testing.T) {
 				UID:  uid,
 				Type: 1,
 			}
-			So(dma.PutBkt(c, []*BucketInfo{b1, b2}), ShouldBeNil)
+			So(daa.PutBkt(c, []*BucketInfo{b1, b2}), ShouldBeNil)
 
-			bs, err := dma.ListBkt(c, uid)
+			bs, err := daa.ListBkt(c, uid)
 			So(err, ShouldBeNil)
 			So(len(bs), ShouldEqual, 2)
 			So(bs[0], ShouldResemble, b1)
