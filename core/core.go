@@ -29,7 +29,7 @@ type Handler interface {
 	SetAdapter(ma MetadataAdapter, da DataAdapter)
 
 	// 登录用户
-	Login(c Ctx, usr, pwd string) error
+	Login(c Ctx, usr, pwd string) (*UserInfo, []*BucketInfo, error)
 
 	// 只有文件长度、HdrCRC32是预Ref，如果成功返回新DataID，失败返回0
 	// 有文件长度、CRC32、MD5，成功返回引用的DataID，失败返回0，客户端发现DataID有变化，说明不需要上传数据
@@ -101,11 +101,11 @@ func (lh *LocalHandler) SetAdapter(ma MetadataAdapter, da DataAdapter) {
 	lh.da = da
 }
 
-func (lh *LocalHandler) Login(c Ctx, usr, pwd string) error {
+func (lh *LocalHandler) Login(c Ctx, usr, pwd string) (*UserInfo, []*BucketInfo, error) {
 	// pwd from db or cache
 	// pbkdf2 check
 	// set uid & key to ctx
-	return ERR_AUTH_FAILED
+	return nil, nil, ERR_AUTH_FAILED
 }
 
 // 只有文件长度、HdrCRC32是预Ref，如果成功返回新DataID，失败返回0
