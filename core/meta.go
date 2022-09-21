@@ -104,7 +104,6 @@ type UserInfo struct {
 	Role   uint32 `borm:"role"`
 	Name   string `borm:"name"`
 	Avatar string `borm:"avatar"`
-	// Perm uint32 `borm:"perm"`
 }
 
 const (
@@ -402,6 +401,10 @@ func (dma *DefaultMetadataAdapter) SetObj(c Ctx, bktID int64, fields []string, o
 	defer db.Close()
 
 	if _, err = b.Table(db, OBJ_TBL, c).Update(o, b.Fields(fields...), b.Where(b.Eq("id", o.ID))); err != nil {
+		// 如果存在同名文件，会报错：Error: stepping, UNIQUE constraint failed: obj.name (19)
+		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
+			return ERR_DUP_KEY
+		}
 		return ERR_EXEC_DB
 	}
 	return nil
