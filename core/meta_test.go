@@ -302,7 +302,7 @@ func TestGetObj(t *testing.T) {
 			ids, err := dma.PutObj(c, bktID, []*ObjectInfo{d})
 			So(err, ShouldBeNil)
 			So(len(ids), ShouldEqual, 1)
-			So(ids[0], ShouldNotEqual, d)
+			So(ids[0], ShouldNotEqual, 0)
 
 			d1, err := dma.GetObj(c, bktID, ids)
 			So(err, ShouldBeNil)
@@ -331,22 +331,40 @@ func TestSetObj(t *testing.T) {
 			Size:   1,
 			Ext:    "{}",
 		}
-		ids, err := dma.PutObj(c, bktID, []*ObjectInfo{d})
+		id1, _ := ig.New()
+		d1 := &ObjectInfo{
+			ID:     id1,
+			PID:    pid,
+			MTime:  time.Now().Unix(),
+			DataID: did,
+			Type:   OBJ_TYPE_DIR,
+			Name:   "test2",
+			Size:   1,
+			Ext:    "{}",
+		}
+		ids, err := dma.PutObj(c, bktID, []*ObjectInfo{d, d1})
 		So(err, ShouldBeNil)
 		So(len(ids), ShouldEqual, 1)
-		So(ids[0], ShouldNotEqual, d)
+		So(ids[0], ShouldNotEqual, 0)
 
-		d1, err := dma.GetObj(c, bktID, ids)
+		o, err := dma.GetObj(c, bktID, ids)
 		So(err, ShouldBeNil)
-		So(len(d1), ShouldEqual, 1)
-		So(d1[0], ShouldResemble, d)
+		So(len(o), ShouldEqual, 1)
+		So(o[0], ShouldResemble, d)
 		Convey("set obj name", func() {
 			d.Name = "test1"
 			dma.SetObj(c, bktID, []string{"name"}, &ObjectInfo{ID: id, Name: d.Name})
-			d1, err = dma.GetObj(c, bktID, ids)
+			o, err = dma.GetObj(c, bktID, ids)
 			So(err, ShouldBeNil)
-			So(len(d1), ShouldEqual, 1)
-			So(d1[0], ShouldResemble, d)
+			So(len(o), ShouldEqual, 1)
+			So(o[0], ShouldResemble, d)
+		})
+
+		Convey("same obj name", func() {
+			d.Name = "test2"
+			dma.SetObj(c, bktID, []string{"name"}, &ObjectInfo{ID: id, Name: d.Name})
+			_, err = dma.GetObj(c, bktID, ids)
+			So(err, ShouldEqual, ERR_DUP_KEY)
 		})
 	})
 }
