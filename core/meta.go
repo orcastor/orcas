@@ -24,6 +24,16 @@ type BucketInfo struct {
 	// SnapshotID int64 // 最新快照版本ID
 }
 
+type UserInfo struct {
+	ID     int64  `borm:"id"`     // 用户ID
+	Usr    string `borm:"usr"`    // 用户名
+	Pwd    string `borm:"pwd"`    // 密码，加密方式PBKDF2-HMAC-SHA256
+	Key    string `borm:"key"`    // 数据库key
+	Role   uint32 `borm:"role"`   // 用户角色：普通用户 / 管理员
+	Name   string `borm:"name"`   // 名称
+	Avatar string `borm:"avatar"` // 头像
+}
+
 // 对象类型
 const (
 	OBJ_TYPE_MALFORMED = iota - 1
@@ -96,29 +106,31 @@ func EmptyDataInfo() *DataInfo {
 	}
 }
 
-type UserInfo struct {
-	ID     int64  `borm:"id"`
-	Usr    string `borm:"usr"`
-	Pwd    string `borm:"pwd"` // PBKDF2-HMAC-SHA256
-	Key    string `borm:"key"`
-	Role   uint32 `borm:"role"`
-	Name   string `borm:"name"`
-	Avatar string `borm:"avatar"`
-}
-
 const (
 	BKT_TBL = "bkt"
 	USR_TBL = "usr"
-	ACL_TBL = "acl"
 
 	OBJ_TBL  = "obj"
 	DATA_TBL = "data"
 )
 
-type BucketMetadataAdapter interface {
+type UserAdminAdapter interface {
+	PutUsr(c Ctx, u *UserInfo) error
+	GetUsr(c Ctx, ids []int64) ([]*UserInfo, error)
+	SetUsr(c Ctx, fields []string, u *UserInfo) error
+}
+
+type BucketAdminAdapter interface {
 	PutBkt(c Ctx, o []*BucketInfo) error
 	GetBkt(c Ctx, ids []int64) ([]*BucketInfo, error)
 	ListBkt(c Ctx, uid int64) ([]*BucketInfo, error)
+}
+
+type AdminAdapter interface {
+	Close()
+
+	UserAdminAdapter
+	BucketAdminAdapter
 }
 
 type DataMetadataAdapter interface {
@@ -137,7 +149,6 @@ type ObjectMetadataAdapter interface {
 type MetadataAdapter interface {
 	Close()
 
-	BucketMetadataAdapter
 	DataMetadataAdapter
 	ObjectMetadataAdapter
 }
@@ -163,8 +174,18 @@ func InitDB() error {
 		name TEXT NOT NULL
 	)`)
 
+	db.Exec(`CREATE TABLE usr (id BIGINT PRIMARY KEY NOT NULL,
+		role TINYINT NOT NULL,
+		usr TEXT NOT NULL,
+		pwd TEXT NOT NULL,
+		name TEXT NOT NULL,
+		avatar TEXT NOT NULL,
+		key TEXT NOT NULL
+	)`)
+
 	db.Exec(`CREATE INDEX ix_uid on bkt (uid)`)
 	db.Exec(`CREATE UNIQUE INDEX uk_name on bkt (name)`)
+	db.Exec(`CREATE UNIQUE INDEX uk_usr on bkt (usr)`)
 	return nil
 }
 
@@ -207,48 +228,6 @@ type DefaultMetadataAdapter struct {
 }
 
 func (dma *DefaultMetadataAdapter) Close() {
-}
-
-func (dma *DefaultMetadataAdapter) PutBkt(c Ctx, o []*BucketInfo) error {
-	db, err := GetDB()
-	if err != nil {
-		return ERR_OPEN_DB
-	}
-	defer db.Close()
-
-	if _, err = b.Table(db, BKT_TBL, c).ReplaceInto(&o); err != nil {
-		return ERR_EXEC_DB
-	}
-	for _, x := range o {
-		InitBucketDB(x.ID)
-	}
-	return nil
-}
-
-func (dma *DefaultMetadataAdapter) GetBkt(c Ctx, ids []int64) (o []*BucketInfo, err error) {
-	db, err := GetDB()
-	if err != nil {
-		return nil, ERR_OPEN_DB
-	}
-	defer db.Close()
-
-	if _, err = b.Table(db, BKT_TBL, c).Select(&o, b.Where(b.In("id", ids))); err != nil {
-		return nil, ERR_QUERY_DB
-	}
-	return
-}
-
-func (dma *DefaultMetadataAdapter) ListBkt(c Ctx, uid int64) (o []*BucketInfo, err error) {
-	db, err := GetDB()
-	if err != nil {
-		return nil, ERR_OPEN_DB
-	}
-	defer db.Close()
-
-	if _, err = b.Table(db, BKT_TBL, c).Select(&o, b.Where(b.Eq("uid", uid))); err != nil {
-		return nil, ERR_QUERY_DB
-	}
-	return
 }
 
 func (dma *DefaultMetadataAdapter) RefData(c Ctx, bktID int64, d []*DataInfo) ([]int64, error) {
@@ -497,6 +476,66 @@ func (dma *DefaultMetadataAdapter) ListObj(c Ctx, bktID, pid int64,
 		if len(o) > 0 {
 			d = toDelim(order, o[len(o)-1])
 		}
+	}
+	return
+}
+
+type DefaultAdminAdapter struct {
+}
+
+func (daa *DefaultAdminAdapter) Close() {
+}
+
+func (daa *DefaultAdminAdapter) PutUsr(c Ctx, u *UserInfo) error {
+	return nil
+}
+
+func (daa *DefaultAdminAdapter) GetUsr(c Ctx, ids []int64) ([]*UserInfo, error) {
+	return nil, nil
+}
+
+func (daa *DefaultAdminAdapter) SetUsr(c Ctx, fields []string, u *UserInfo) error {
+	return nil
+}
+
+func (daa *DefaultAdminAdapter) PutBkt(c Ctx, o []*BucketInfo) error {
+	db, err := GetDB()
+	if err != nil {
+		return ERR_OPEN_DB
+	}
+	defer db.Close()
+
+	if _, err = b.Table(db, BKT_TBL, c).ReplaceInto(&o); err != nil {
+		return ERR_EXEC_DB
+	}
+	for _, x := range o {
+		InitBucketDB(x.ID)
+	}
+	return nil
+}
+
+func (daa *DefaultAdminAdapter) GetBkt(c Ctx, ids []int64) (o []*BucketInfo, err error) {
+	db, err := GetDB()
+	if err != nil {
+		return nil, ERR_OPEN_DB
+	}
+	defer db.Close()
+
+	if _, err = b.Table(db, BKT_TBL, c).Select(&o, b.Where(b.In("id", ids))); err != nil {
+		return nil, ERR_QUERY_DB
+	}
+	return
+}
+
+func (daa *DefaultAdminAdapter) ListBkt(c Ctx, uid int64) (o []*BucketInfo, err error) {
+	db, err := GetDB()
+	if err != nil {
+		return nil, ERR_OPEN_DB
+	}
+	defer db.Close()
+
+	if _, err = b.Table(db, BKT_TBL, c).Select(&o, b.Where(b.Eq("uid", uid))); err != nil {
+		return nil, ERR_QUERY_DB
 	}
 	return
 }
