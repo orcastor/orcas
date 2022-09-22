@@ -32,14 +32,14 @@ func init() {
 	bktID, _ = idgen.NewIDGen(nil, 0).New()
 	core.InitDB()
 	core.InitBucketDB(bktID)
-	core.NewRWHandler().PutBkt(context.TODO(), []*core.BucketInfo{{ID: bktID, Name: "zhangwei", UID: 9999, Type: 1}})
 	// bktID = 30403939270656
+	core.NewLocalAdmin().PutBkt(context.TODO(), []*core.BucketInfo{{ID: bktID, Name: "zhangwei", UID: 9999, Type: 1}})
 }
 
 func TestUpload(t *testing.T) {
 	Convey("upload dir", t, func() {
 		c := context.TODO()
-		sdk := New(core.NewRWHandler())
+		sdk := New(core.NewLocalHandler())
 		defer sdk.Close()
 
 		sdk.SetConfig(cfg)
@@ -50,7 +50,7 @@ func TestUpload(t *testing.T) {
 func TestDownload(t *testing.T) {
 	Convey("download dir", t, func() {
 		c := context.TODO()
-		sdk := New(core.NewRWHandler())
+		sdk := New(core.NewLocalHandler())
 		defer sdk.Close()
 
 		sdk.SetConfig(cfg)
