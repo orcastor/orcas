@@ -31,16 +31,17 @@ func init() {
 	})
 	bktID, _ = idgen.NewIDGen(nil, 0).New()
 	core.InitDB()
-	core.InitBucketDB(bktID)
 	// bktID = 30403939270656
-	core.NewLocalAdmin().PutBkt(context.TODO(), []*core.BucketInfo{{ID: bktID, Name: "zhangwei", UID: 9999, Type: 1}})
+	core.InitBucketDB(context.TODO(), bktID)
+	core.NewLocalAdmin().PutBkt(context.TODO(), []*core.BucketInfo{{ID: bktID, Name: "备份测试", UID: 1, Type: 1}})
 }
 
 func TestUpload(t *testing.T) {
 	Convey("upload dir", t, func() {
-		c := context.TODO()
 		sdk := New(core.NewLocalHandler())
 		defer sdk.Close()
+
+		c, _, _, _ := sdk.Handler().Login(context.TODO(), "orcas", "orcas")
 
 		sdk.SetConfig(cfg)
 		So(sdk.Upload(c, bktID, core.ROOT_OID, path), ShouldBeNil)
@@ -49,9 +50,10 @@ func TestUpload(t *testing.T) {
 
 func TestDownload(t *testing.T) {
 	Convey("download dir", t, func() {
-		c := context.TODO()
 		sdk := New(core.NewLocalHandler())
 		defer sdk.Close()
+
+		c, _, _, _ := sdk.Handler().Login(context.TODO(), "orcas", "orcas")
 
 		sdk.SetConfig(cfg)
 		id, _ := sdk.Path2ID(c, bktID, core.ROOT_OID, filepath.Base(path))
