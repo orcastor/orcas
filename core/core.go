@@ -1,9 +1,13 @@
 package core
 
 import (
+	"crypto/sha1"
+	"encoding/base64"
 	"strconv"
+	"strings"
 
 	"github.com/orca-zhang/idgen"
+	"golang.org/x/crypto/pbkdf2"
 )
 
 type ListOptions struct {
@@ -13,6 +17,7 @@ type ListOptions struct {
 	Count int    // 查询个数
 	Order string // 排序方式，id/mtime/name/size/type 前缀 +: 升序（默认） -: 降序
 	Brief int    // 显示更少内容(只在网络传输层，节省流量时有效)，0: FULL(default), 1: without EXT, 2:only ID
+	// 可以考虑改用FieldMask实现 https://mp.weixin.qq.com/s/L7He7M4JWi84z1emuokjbQ
 }
 
 type Options struct {
@@ -29,7 +34,7 @@ type Handler interface {
 	SetAdapter(ma MetadataAdapter, da DataAdapter)
 
 	// 登录用户
-	Login(c Ctx, usr, pwd string) (*UserInfo, []*BucketInfo, error)
+	Login(c Ctx, usr, pwd string) (Ctx, *UserInfo, []*BucketInfo, error)
 
 	// 只有文件长度、HdrCRC32是预Ref，如果成功返回新DataID，失败返回0
 	// 有文件长度、CRC32、MD5，成功返回引用的DataID，失败返回0，客户端发现DataID有变化，说明不需要上传数据
@@ -101,11 +106,33 @@ func (lh *LocalHandler) SetAdapter(ma MetadataAdapter, da DataAdapter) {
 	lh.da = da
 }
 
-func (lh *LocalHandler) Login(c Ctx, usr, pwd string) (*UserInfo, []*BucketInfo, error) {
+func (lh *LocalHandler) Login(c Ctx, usr, pwd string) (Ctx, *UserInfo, []*BucketInfo, error) {
 	// pwd from db or cache
+	u, err := lh.ma.GetUsr2(c, usr)
+	if err != nil {
+		return c, nil, nil, ERR_AUTH_FAILED
+	}
+
 	// pbkdf2 check
+	vs := strings.Split(u.Pwd, ":")
+	if len(vs) < 3 {
+		return c, nil, nil, ERR_AUTH_FAILED
+	}
+
+	// iter/salt/hash
+	iter, _ := strconv.Atoi(vs[0])
+	salt, _ := base64.URLEncoding.DecodeString(vs[1])
+	dk := pbkdf2.Key([]byte(pwd), salt, iter, 32, sha1.New)
+	if base64.URLEncoding.EncodeToString(dk) != vs[2] {
+		return c, nil, nil, ERR_INCORRECT_PWD
+	}
+
+	// list buckets
+	b, _ := lh.ma.ListBkt(c, u.ID)
+
 	// set uid & key to ctx
-	return nil, nil, ERR_AUTH_FAILED
+	c, u.Pwd, u.Key = userInfo2Ctx(c, u), "", ""
+	return c, u, b, nil
 }
 
 // 只有文件长度、HdrCRC32是预Ref，如果成功返回新DataID，失败返回0
@@ -249,14 +276,14 @@ func (lh *LocalHandler) Delete(c Ctx, bktID, id int64) error {
 }
 
 type LocalAdmin struct {
-	aa  AdminAdapter
+	ma  MetadataAdapter
 	acm AccessCtrlMgr
 	ig  *idgen.IDGen
 }
 
 func NewLocalAdmin() Admin {
 	return &LocalAdmin{
-		aa:  &DefaultAdminAdapter{},
+		ma:  &DefaultMetadataAdapter{},
 		acm: &DefaultAccessCtrlMgr{},
 		ig:  idgen.NewIDGen(nil, 0), // 需要改成配置
 	}
@@ -275,5 +302,5 @@ func (la *LocalAdmin) PutBkt(c Ctx, o []*BucketInfo) error {
 	if err := la.acm.CheckRole(c, ADMIN); err != nil {
 		return err
 	}
-	return la.aa.PutBkt(c, o)
+	return la.ma.PutBkt(c, o)
 }
