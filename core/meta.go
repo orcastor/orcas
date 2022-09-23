@@ -52,7 +52,7 @@ type ObjectInfo struct {
 	Type   int    `borm:"type"`  // 对象类型，-1: malformed, 0: none, 1: dir, 2: file, 3: version, 4: preview(thumb/m3u8/pdf)
 	Name   string `borm:"name"`  // 对象名称
 	Size   int64  `borm:"size"`  // 对象的大小，目录的大小是子对象数，文件的大小是最新版本的字节数
-	Ext    string `borm:"ext"`   // 对象的扩展信息
+	Extra  string `borm:"ext"`   // 对象的扩展信息
 	// BktID int64 // 桶ID，如果支持引用别的桶的数据，为0说明是本桶
 }
 
@@ -114,23 +114,17 @@ const (
 	DATA_TBL = "data"
 )
 
-type UserAdminAdapter interface {
+type UserMetadataAdapter interface {
 	PutUsr(c Ctx, u *UserInfo) error
 	GetUsr(c Ctx, ids []int64) ([]*UserInfo, error)
+	GetUsr2(c Ctx, usr string) (*UserInfo, error)
 	SetUsr(c Ctx, fields []string, u *UserInfo) error
 }
 
-type BucketAdminAdapter interface {
+type BucketMetadataAdapter interface {
 	PutBkt(c Ctx, o []*BucketInfo) error
 	GetBkt(c Ctx, ids []int64) ([]*BucketInfo, error)
 	ListBkt(c Ctx, uid int64) ([]*BucketInfo, error)
-}
-
-type AdminAdapter interface {
-	Close()
-
-	UserAdminAdapter
-	BucketAdminAdapter
 }
 
 type DataMetadataAdapter interface {
@@ -149,14 +143,25 @@ type ObjectMetadataAdapter interface {
 type MetadataAdapter interface {
 	Close()
 
+	BucketMetadataAdapter
+	UserMetadataAdapter
 	DataMetadataAdapter
 	ObjectMetadataAdapter
 }
 
-func GetDB(bktID ...interface{}) (*sql.DB, error) {
-	dirPath := filepath.Join(Conf().Path, fmt.Sprint(bktID...))
+func GetDB(c ...interface{}) (*sql.DB, error) {
+	param := "?_journal=WAL&cache=shared&mode=rwc&nolock=1"
+	dirPath := Conf().Path
+	if len(c) > 1 {
+		dirPath = filepath.Join(dirPath, fmt.Sprint(c[1]))
+		if c, ok := c[0].(Ctx); ok {
+			if key := getKey(c); key != "" {
+				param += "&key=" + key
+			}
+		}
+	}
 	os.MkdirAll(dirPath, 0766)
-	return sql.Open("sqlite3", filepath.Join(dirPath, "meta.db")+"?_journal=WAL&cache=shared&mode=rwc&nolock=1")
+	return sql.Open("sqlite3", filepath.Join(dirPath, "meta.db")+param)
 }
 
 func InitDB() error {
@@ -186,11 +191,12 @@ func InitDB() error {
 	db.Exec(`CREATE INDEX ix_uid on bkt (uid)`)
 	db.Exec(`CREATE UNIQUE INDEX uk_name on bkt (name)`)
 	db.Exec(`CREATE UNIQUE INDEX uk_usr on bkt (usr)`)
+	db.Exec(`INSERT OR IGNORE INTO usr VALUES (1, 1, 'orcas', '1000:Zd54dfEjoftaY8NiAINGag==:q1yB510yT5tGIGNewItVSg==', 'orcas', '', '')`)
 	return nil
 }
 
-func InitBucketDB(bktID int64) error {
-	db, err := GetDB(bktID)
+func InitBucketDB(c Ctx, bktID int64) error {
+	db, err := GetDB(c, bktID)
 	if err != nil {
 		return ERR_OPEN_DB
 	}
@@ -231,7 +237,7 @@ func (dma *DefaultMetadataAdapter) Close() {
 }
 
 func (dma *DefaultMetadataAdapter) RefData(c Ctx, bktID int64, d []*DataInfo) ([]int64, error) {
-	db, err := GetDB(bktID)
+	db, err := GetDB(c, bktID)
 	if err != nil {
 		return nil, ERR_OPEN_DB
 	}
@@ -298,7 +304,7 @@ func (dma *DefaultMetadataAdapter) RefData(c Ctx, bktID int64, d []*DataInfo) ([
 }
 
 func (dma *DefaultMetadataAdapter) PutData(c Ctx, bktID int64, d []*DataInfo) error {
-	db, err := GetDB(bktID)
+	db, err := GetDB(c, bktID)
 	if err != nil {
 		return ERR_OPEN_DB
 	}
@@ -311,7 +317,7 @@ func (dma *DefaultMetadataAdapter) PutData(c Ctx, bktID int64, d []*DataInfo) er
 }
 
 func (dma *DefaultMetadataAdapter) GetData(c Ctx, bktID, id int64) (d *DataInfo, err error) {
-	db, err := GetDB(bktID)
+	db, err := GetDB(c, bktID)
 	if err != nil {
 		return nil, ERR_OPEN_DB
 	}
@@ -325,7 +331,7 @@ func (dma *DefaultMetadataAdapter) GetData(c Ctx, bktID, id int64) (d *DataInfo,
 }
 
 func (dma *DefaultMetadataAdapter) PutObj(c Ctx, bktID int64, o []*ObjectInfo) (ids []int64, err error) {
-	db, err := GetDB(bktID)
+	db, err := GetDB(c, bktID)
 	if err != nil {
 		return nil, ERR_OPEN_DB
 	}
@@ -360,7 +366,7 @@ func (dma *DefaultMetadataAdapter) PutObj(c Ctx, bktID int64, o []*ObjectInfo) (
 }
 
 func (dma *DefaultMetadataAdapter) GetObj(c Ctx, bktID int64, ids []int64) (o []*ObjectInfo, err error) {
-	db, err := GetDB(bktID)
+	db, err := GetDB(c, bktID)
 	if err != nil {
 		return nil, ERR_OPEN_DB
 	}
@@ -373,7 +379,7 @@ func (dma *DefaultMetadataAdapter) GetObj(c Ctx, bktID int64, ids []int64) (o []
 }
 
 func (dma *DefaultMetadataAdapter) SetObj(c Ctx, bktID int64, fields []string, o *ObjectInfo) error {
-	db, err := GetDB(bktID)
+	db, err := GetDB(c, bktID)
 	if err != nil {
 		return ERR_OPEN_DB
 	}
@@ -451,7 +457,7 @@ func (dma *DefaultMetadataAdapter) ListObj(c Ctx, bktID, pid int64,
 		}
 	}
 
-	db, err := GetDB(bktID)
+	db, err := GetDB(c, bktID)
 	if err != nil {
 		return nil, 0, "", ERR_OPEN_DB
 	}
@@ -480,25 +486,33 @@ func (dma *DefaultMetadataAdapter) ListObj(c Ctx, bktID, pid int64,
 	return
 }
 
-type DefaultAdminAdapter struct {
-}
-
-func (daa *DefaultAdminAdapter) Close() {
-}
-
-func (daa *DefaultAdminAdapter) PutUsr(c Ctx, u *UserInfo) error {
+func (dma *DefaultMetadataAdapter) PutUsr(c Ctx, u *UserInfo) error {
 	return nil
 }
 
-func (daa *DefaultAdminAdapter) GetUsr(c Ctx, ids []int64) ([]*UserInfo, error) {
+func (dma *DefaultMetadataAdapter) GetUsr(c Ctx, ids []int64) ([]*UserInfo, error) {
 	return nil, nil
 }
 
-func (daa *DefaultAdminAdapter) SetUsr(c Ctx, fields []string, u *UserInfo) error {
+func (dma *DefaultMetadataAdapter) GetUsr2(c Ctx, usr string) (o *UserInfo, err error) {
+	db, err := GetDB()
+	if err != nil {
+		return nil, ERR_OPEN_DB
+	}
+	defer db.Close()
+
+	o = &UserInfo{}
+	if _, err = b.Table(db, USR_TBL, c).Select(&o, b.Where(b.Eq("usr", usr))); err != nil {
+		return nil, ERR_QUERY_DB
+	}
+	return
+}
+
+func (dma *DefaultMetadataAdapter) SetUsr(c Ctx, fields []string, u *UserInfo) error {
 	return nil
 }
 
-func (daa *DefaultAdminAdapter) PutBkt(c Ctx, o []*BucketInfo) error {
+func (dma *DefaultMetadataAdapter) PutBkt(c Ctx, o []*BucketInfo) error {
 	db, err := GetDB()
 	if err != nil {
 		return ERR_OPEN_DB
@@ -509,12 +523,12 @@ func (daa *DefaultAdminAdapter) PutBkt(c Ctx, o []*BucketInfo) error {
 		return ERR_EXEC_DB
 	}
 	for _, x := range o {
-		InitBucketDB(x.ID)
+		InitBucketDB(c, x.ID)
 	}
 	return nil
 }
 
-func (daa *DefaultAdminAdapter) GetBkt(c Ctx, ids []int64) (o []*BucketInfo, err error) {
+func (dma *DefaultMetadataAdapter) GetBkt(c Ctx, ids []int64) (o []*BucketInfo, err error) {
 	db, err := GetDB()
 	if err != nil {
 		return nil, ERR_OPEN_DB
@@ -527,7 +541,7 @@ func (daa *DefaultAdminAdapter) GetBkt(c Ctx, ids []int64) (o []*BucketInfo, err
 	return
 }
 
-func (daa *DefaultAdminAdapter) ListBkt(c Ctx, uid int64) (o []*BucketInfo, err error) {
+func (dma *DefaultMetadataAdapter) ListBkt(c Ctx, uid int64) (o []*BucketInfo, err error) {
 	db, err := GetDB()
 	if err != nil {
 		return nil, ERR_OPEN_DB
