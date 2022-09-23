@@ -44,6 +44,7 @@ type Config struct {
 
 type OrcasSDK interface {
 	Close()
+	Handler() core.Handler
 	SetConfig(cfg Config)
 
 	Path2ID(c core.Ctx, bktID, pid int64, rpath string) (id int64, err error)
@@ -66,6 +67,10 @@ func New(h core.Handler) OrcasSDK {
 
 func (osi *OrcasSDKImpl) Close() {
 	osi.h.Close()
+}
+
+func (osi *OrcasSDKImpl) Handler() core.Handler {
+	return osi.h
 }
 
 func (osi *OrcasSDKImpl) SetConfig(cfg Config) {
