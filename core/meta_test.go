@@ -1,6 +1,7 @@
 package core
 
 import (
+	"context"
 	"fmt"
 	"testing"
 	"time"
@@ -22,7 +23,7 @@ func TestListBkt(t *testing.T) {
 	Convey("normal", t, func() {
 		Convey("put bkt", func() {
 			InitDB()
-			daa := &DefaultAdminAdapter{}
+			dma := &DefaultMetadataAdapter{}
 			id1, _ := idgen.NewIDGen(nil, 0).New()
 			id2, _ := idgen.NewIDGen(nil, 0).New()
 			uid, _ := idgen.NewIDGen(nil, 0).New()
@@ -38,9 +39,9 @@ func TestListBkt(t *testing.T) {
 				UID:  uid,
 				Type: 1,
 			}
-			So(daa.PutBkt(c, []*BucketInfo{b1, b2}), ShouldBeNil)
+			So(dma.PutBkt(c, []*BucketInfo{b1, b2}), ShouldBeNil)
 
-			bs, err := daa.ListBkt(c, uid)
+			bs, err := dma.ListBkt(c, uid)
 			So(err, ShouldBeNil)
 			So(len(bs), ShouldEqual, 2)
 			So(bs[0], ShouldResemble, b1)
@@ -52,7 +53,8 @@ func TestListBkt(t *testing.T) {
 func TestRefData(t *testing.T) {
 	Convey("normal", t, func() {
 		dma := &DefaultMetadataAdapter{}
-		InitBucketDB(bktID)
+		InitBucketDB(context.TODO(), bktID)
+
 		id, _ := idgen.NewIDGen(nil, 0).New()
 		So(dma.PutData(c, bktID, []*DataInfo{{
 			ID:       id,
@@ -217,8 +219,8 @@ func TestRefData(t *testing.T) {
 func TestGetData(t *testing.T) {
 	Convey("normal", t, func() {
 		Convey("get data info", func() {
+			InitBucketDB(context.TODO(), bktID)
 			dma := &DefaultMetadataAdapter{}
-			InitBucketDB(bktID)
 			id, _ := idgen.NewIDGen(nil, 0).New()
 			d := &DataInfo{
 				ID:   id,
@@ -237,8 +239,9 @@ func TestGetData(t *testing.T) {
 func TestPutObj(t *testing.T) {
 	Convey("normal", t, func() {
 		Convey("put same name obj", func() {
+			InitBucketDB(context.TODO(), bktID)
+
 			dma := &DefaultMetadataAdapter{}
-			InitBucketDB(bktID)
 			ig := idgen.NewIDGen(nil, 0)
 			id, _ := ig.New()
 			pid, _ := ig.New()
@@ -251,7 +254,7 @@ func TestPutObj(t *testing.T) {
 				Type:   OBJ_TYPE_DIR,
 				Name:   "test",
 				Size:   1,
-				Ext:    "{}",
+				Extra:  "{}",
 			}
 			ids, err := dma.PutObj(c, bktID, []*ObjectInfo{d})
 			So(err, ShouldBeNil)
@@ -267,7 +270,7 @@ func TestPutObj(t *testing.T) {
 				Type:   OBJ_TYPE_DIR,
 				Name:   "test",
 				Size:   1,
-				Ext:    "{}",
+				Extra:  "{}",
 			}
 			// push same name diff id obj
 			ids, err = dma.PutObj(c, bktID, []*ObjectInfo{d1, d})
@@ -283,8 +286,9 @@ func TestPutObj(t *testing.T) {
 func TestGetObj(t *testing.T) {
 	Convey("normal", t, func() {
 		Convey("get obj info", func() {
+			InitBucketDB(context.TODO(), bktID)
+
 			dma := &DefaultMetadataAdapter{}
-			InitBucketDB(bktID)
 			ig := idgen.NewIDGen(nil, 0)
 			id, _ := ig.New()
 			pid, _ := ig.New()
@@ -297,7 +301,7 @@ func TestGetObj(t *testing.T) {
 				Type:   OBJ_TYPE_DIR,
 				Name:   "test",
 				Size:   1,
-				Ext:    "{}",
+				Extra:  "{}",
 			}
 			ids, err := dma.PutObj(c, bktID, []*ObjectInfo{d})
 			So(err, ShouldBeNil)
@@ -314,9 +318,9 @@ func TestGetObj(t *testing.T) {
 
 func TestSetObj(t *testing.T) {
 	Convey("normal", t, func() {
+		InitBucketDB(context.TODO(), bktID)
 
 		dma := &DefaultMetadataAdapter{}
-		InitBucketDB(bktID)
 		ig := idgen.NewIDGen(nil, 0)
 		id, _ := ig.New()
 		pid, _ := ig.New()
@@ -329,7 +333,7 @@ func TestSetObj(t *testing.T) {
 			Type:   OBJ_TYPE_DIR,
 			Name:   "test",
 			Size:   1,
-			Ext:    "{}",
+			Extra:  "{}",
 		}
 		id1, _ := ig.New()
 		d1 := &ObjectInfo{
@@ -340,7 +344,7 @@ func TestSetObj(t *testing.T) {
 			Type:   OBJ_TYPE_DIR,
 			Name:   "test2",
 			Size:   1,
-			Ext:    "{}",
+			Extra:  "{}",
 		}
 		ids, err := dma.PutObj(c, bktID, []*ObjectInfo{d, d1})
 		So(err, ShouldBeNil)
@@ -372,9 +376,9 @@ func TestSetObj(t *testing.T) {
 
 func TestListObj(t *testing.T) {
 	Convey("normal", t, func() {
+		InitBucketDB(context.TODO(), bktID)
 
 		dma := &DefaultMetadataAdapter{}
-		InitBucketDB(bktID)
 		ig := idgen.NewIDGen(nil, 0)
 		pid, _ := ig.New()
 
@@ -399,7 +403,7 @@ func TestListObj(t *testing.T) {
 			Type:   OBJ_TYPE_DIR,
 			Name:   "test1",
 			Size:   0,
-			Ext:    "{}",
+			Extra:  "{}",
 		}
 		d2 := &ObjectInfo{
 			ID:     id2,
@@ -409,7 +413,7 @@ func TestListObj(t *testing.T) {
 			Type:   OBJ_TYPE_FILE,
 			Name:   "test2",
 			Size:   2,
-			Ext:    "{}",
+			Extra:  "{}",
 		}
 		d3 := &ObjectInfo{
 			ID:     id3,
@@ -419,7 +423,7 @@ func TestListObj(t *testing.T) {
 			Type:   OBJ_TYPE_VERSION,
 			Name:   "test3",
 			Size:   3,
-			Ext:    "{}",
+			Extra:  "{}",
 		}
 		d4 := &ObjectInfo{
 			ID:     id4,
@@ -429,7 +433,7 @@ func TestListObj(t *testing.T) {
 			Type:   OBJ_TYPE_PREVIEW,
 			Name:   "test4",
 			Size:   3,
-			Ext:    "{}",
+			Extra:  "{}",
 		}
 		d5 := &ObjectInfo{
 			ID:     id5,
@@ -439,7 +443,7 @@ func TestListObj(t *testing.T) {
 			Type:   OBJ_TYPE_PREVIEW,
 			Name:   "test5",
 			Size:   4,
-			Ext:    "{}",
+			Extra:  "{}",
 		}
 		ids, err := dma.PutObj(c, bktID, []*ObjectInfo{d1, d2, d3, d4, d5})
 		So(err, ShouldBeNil)
