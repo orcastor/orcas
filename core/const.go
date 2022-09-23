@@ -11,8 +11,9 @@ func (e Error) Error() string {
 }
 
 const (
-	ERR_AUTH_FAILED = Error("auth failed")
-	ERR_NEED_LOGIN  = Error("need login")
+	ERR_AUTH_FAILED   = Error("auth failed")
+	ERR_NEED_LOGIN    = Error("need login")
+	ERR_INCORRECT_PWD = Error("incorrect username or password")
 
 	ERR_NO_PERM = Error("no permission")
 	ERR_NO_ROLE = Error("role mismatch")
