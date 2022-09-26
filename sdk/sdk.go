@@ -1,6 +1,7 @@
 package sdk
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io/ioutil"
@@ -29,6 +30,8 @@ const (
 )
 
 type Config struct {
+	UserName string
+	Password string
 	DataSync bool   // 断电保护策略(Power-off Protection Policy)，强制每次写入数据后刷到磁盘
 	RefLevel uint32 // 秒传级别设置：OFF（默认） / FULL: Ref / FAST: TryRef+Ref
 	PkgThres uint32 // 打包个数限制，不设置默认1000个
@@ -45,7 +48,7 @@ type Config struct {
 type OrcasSDK interface {
 	Close()
 	Handler() core.Handler
-	SetConfig(cfg Config)
+	Login(cfg Config) (core.Ctx, *core.UserInfo, []*core.BucketInfo, error)
 
 	Path2ID(c core.Ctx, bktID, pid int64, rpath string) (id int64, err error)
 	ID2Path(c core.Ctx, bktID, id int64) (rpath string, err error)
@@ -73,7 +76,13 @@ func (osi *OrcasSDKImpl) Handler() core.Handler {
 	return osi.h
 }
 
-func (osi *OrcasSDKImpl) SetConfig(cfg Config) {
+func (osi *OrcasSDKImpl) Login(cfg Config) (core.Ctx, *core.UserInfo, []*core.BucketInfo, error) {
+	if cfg.UserName == "" {
+		return nil, nil, nil, errors.New(`UserName is empty.`)
+	}
+	if cfg.Password == "" {
+		return nil, nil, nil, errors.New(`Password is empty.`)
+	}
 	if cfg.PkgThres <= 0 {
 		cfg.PkgThres = 1000
 	}
@@ -87,20 +96,21 @@ func (osi *OrcasSDKImpl) SetConfig(cfg Config) {
 	}
 	if cfg.Conflict == RENAME {
 		if !strings.Contains(cfg.NameTmpl, "%s") {
-			panic(`cfg.NameTmp should contains "%s".`)
+			return nil, nil, nil, fmt.Errorf(`cfg.NameTmp should contains "%s".`)
 		}
 	}
 	switch cfg.EndecWay {
 	case core.DATA_ENDEC_SM4:
 		if len(cfg.EndecKey) != 16 {
-			panic(`The length of EndecKey for DATA_ENDEC_SM4 should be 16.`)
+			return nil, nil, nil, errors.New(`The length of EndecKey for DATA_ENDEC_SM4 should be 16.`)
 		}
 	case core.DATA_ENDEC_AES256:
 		if len(cfg.EndecKey) <= 16 {
-			panic(`The length of EndecKey for DATA_ENDEC_AES256 should be greater than 16.`)
+			return nil, nil, nil, errors.New(`The length of EndecKey for DATA_ENDEC_AES256 should be greater than 16.`)
 		}
 	}
 	osi.cfg = cfg
+	return osi.h.Login(context.TODO(), cfg.UserName, cfg.Password)
 }
 
 func (osi *OrcasSDKImpl) skip(name string) bool {
