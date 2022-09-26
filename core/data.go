@@ -25,10 +25,10 @@ type DataAdapter interface {
 
 const interval = time.Second
 
-var Q = ecache.NewLRUCache(16, 1024, interval)
+var queue = ecache.NewLRUCache(16, 1024, interval)
 
 func init() {
-	Q.Inspect(func(action int, key string, iface *interface{}, bytes []byte, status int) {
+	queue.Inspect(func(action int, key string, iface *interface{}, bytes []byte, status int) {
 		// evicted / updated / deleted
 		if (action == ecache.PUT && status <= 0) || (action == ecache.DEL && status == 1) {
 			(*iface).(*AsyncHandle).Close()
@@ -40,14 +40,14 @@ func init() {
 		for {
 			now := time.Now().UnixNano()
 			keys := []string{}
-			Q.Walk(func(key string, iface *interface{}, bytes []byte, expireAt int64) bool {
+			queue.Walk(func(key string, iface *interface{}, bytes []byte, expireAt int64) bool {
 				if expireAt < now {
 					keys = append(keys, key)
 				}
 				return true
 			})
 			for _, k := range keys {
-				Q.Del(k)
+				queue.Del(k)
 			}
 			time.Sleep(interval)
 		}
@@ -55,7 +55,7 @@ func init() {
 }
 
 func HasInflight() (b bool) {
-	Q.Walk(func(key string, iface *interface{}, bytes []byte, expireAt int64) bool {
+	queue.Walk(func(key string, iface *interface{}, bytes []byte, expireAt int64) bool {
 		b = true
 		return false
 	})
@@ -109,7 +109,7 @@ func (dda *DefaultDataAdapter) Write(c Ctx, bktID, dataID int64, sn int, buf []b
 		ah.Close()
 	} else {
 		go ah.B.Flush()
-		Q.Put(path, ah)
+		queue.Put(path, ah)
 	}
 	return err
 }
