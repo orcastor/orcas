@@ -2,7 +2,6 @@ package sdk
 
 import (
 	"bytes"
-	"context"
 	"fmt"
 	"os/exec"
 	"path/filepath"
@@ -16,6 +15,8 @@ import (
 var mntPath = "/tmp/test/"
 var path = "/home/semaphore/go/"
 var cfg = Config{
+	UserName: "orcas",
+	Password: "orcas",
 	DataSync: true,
 	RefLevel: FULL,
 	WiseCmpr: core.DATA_CMPR_ZSTD,
@@ -29,9 +30,13 @@ func init() {
 		Path: mntPath,
 	})
 	core.InitDB()
+
 	sdk := New(core.NewLocalHandler())
 	defer sdk.Close()
-	c, _, b, _ := sdk.Handler().Login(context.TODO(), "orcas", "orcas")
+
+	c, _, b, err := sdk.Login(cfg)
+	So(err, ShouldBeNil)
+
 	if len(b) <= 0 {
 		bktID, _ := idgen.NewIDGen(nil, 0).New()
 		core.InitBucketDB(c, bktID)
@@ -44,10 +49,9 @@ func TestUpload(t *testing.T) {
 		sdk := New(core.NewLocalHandler())
 		defer sdk.Close()
 
-		c, _, b, err := sdk.Handler().Login(context.TODO(), "orcas", "orcas")
+		c, _, b, err := sdk.Login(cfg)
 		So(err, ShouldBeNil)
 
-		sdk.SetConfig(cfg)
 		So(sdk.Upload(c, b[0].ID, core.ROOT_OID, path), ShouldBeNil)
 	})
 }
@@ -57,15 +61,13 @@ func TestDownload(t *testing.T) {
 		sdk := New(core.NewLocalHandler())
 		defer sdk.Close()
 
-		c, _, b, err := sdk.Handler().Login(context.TODO(), "orcas", "orcas")
+		c, _, b, err := sdk.Login(cfg)
 		So(err, ShouldBeNil)
 
-		sdk.SetConfig(cfg)
 		id, _ := sdk.Path2ID(c, b[0].ID, core.ROOT_OID, filepath.Base(path))
-		fmt.Println(id)
-		fmt.Println(sdk.ID2Path(c, b[0].ID, id))
-
 		So(sdk.Download(c, b[0].ID, id, mntPath), ShouldBeNil)
+
+		fmt.Println(sdk.ID2Path(c, b[0].ID, id))
 	})
 }
 
