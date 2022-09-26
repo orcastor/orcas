@@ -1,6 +1,12 @@
 package core
 
-import "context"
+import (
+	"context"
+	"fmt"
+	"time"
+
+	"github.com/orca-zhang/ecache"
+)
 
 const (
 	NA  = 1 << iota
@@ -28,6 +34,8 @@ type AccessCtrlMgr interface {
 	CheckRole(c Ctx, role uint32) error
 }
 
+var cache = ecache.NewLRUCache(16, 256, 30*time.Second)
+
 type DefaultAccessCtrlMgr struct {
 	ma MetadataAdapter
 }
@@ -41,13 +49,24 @@ func (dacm *DefaultAccessCtrlMgr) CheckPermission(c Ctx, action int, bktID int64
 	if uid <= 0 {
 		return ERR_NEED_LOGIN
 	}
+	bk := fmt.Sprintf("bkt:%d", bktID)
+	if u, ok := cache.GetInt64(bk); ok {
+		if u == uid {
+			return nil
+		} else {
+			return ERR_NO_PERM
+		}
+	}
 	b, err := dacm.ma.GetBkt(c, []int64{bktID})
 	if err != nil {
 		return err
 	}
 	// check is owner of the bucket
-	if len(b) > 0 && b[0].UID == uid {
-		return nil
+	if len(b) > 0 {
+		cache.PutInt64(bk, b[0].UID)
+		if b[0].UID == uid {
+			return nil
+		}
 	}
 	return ERR_NO_PERM
 }
@@ -57,12 +76,23 @@ func (dacm *DefaultAccessCtrlMgr) CheckRole(c Ctx, role uint32) error {
 	if uid <= 0 {
 		return ERR_NEED_LOGIN
 	}
+	rk := fmt.Sprintf("role:%d", uid)
+	if r, ok := cache.GetInt64(rk); ok {
+		if uint32(r) == role {
+			return nil
+		} else {
+			return ERR_NO_ROLE
+		}
+	}
 	u, err := dacm.ma.GetUsr(c, []int64{uid})
 	if err != nil {
 		return err
 	}
-	if len(u) > 0 && u[0].Role == role {
-		return nil
+	if len(u) > 0 {
+		cache.PutInt64(rk, int64(u[0].Role))
+		if u[0].Role == role {
+			return nil
+		}
 	}
 	return ERR_NO_ROLE
 }
