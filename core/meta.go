@@ -487,11 +487,29 @@ func (dma *DefaultMetadataAdapter) ListObj(c Ctx, bktID, pid int64,
 }
 
 func (dma *DefaultMetadataAdapter) PutUsr(c Ctx, u *UserInfo) error {
+	db, err := GetDB()
+	if err != nil {
+		return ERR_OPEN_DB
+	}
+	defer db.Close()
+
+	if _, err = b.Table(db, USR_TBL, c).ReplaceInto(&u); err != nil {
+		return ERR_EXEC_DB
+	}
 	return nil
 }
 
-func (dma *DefaultMetadataAdapter) GetUsr(c Ctx, ids []int64) ([]*UserInfo, error) {
-	return nil, nil
+func (dma *DefaultMetadataAdapter) GetUsr(c Ctx, ids []int64) (o []*UserInfo, err error) {
+	db, err := GetDB()
+	if err != nil {
+		return nil, ERR_OPEN_DB
+	}
+	defer db.Close()
+
+	if _, err = b.Table(db, USR_TBL, c).Select(&o, b.Where(b.In("id", ids))); err != nil {
+		return nil, ERR_QUERY_DB
+	}
+	return
 }
 
 func (dma *DefaultMetadataAdapter) GetUsr2(c Ctx, usr string) (o *UserInfo, err error) {
@@ -502,13 +520,23 @@ func (dma *DefaultMetadataAdapter) GetUsr2(c Ctx, usr string) (o *UserInfo, err 
 	defer db.Close()
 
 	o = &UserInfo{}
-	if _, err = b.Table(db, USR_TBL, c).Select(&o, b.Where(b.Eq("usr", usr))); err != nil {
+	if _, err = b.Table(db, USR_TBL, c).Select(o, b.Where(b.Eq("usr", usr))); err != nil {
 		return nil, ERR_QUERY_DB
 	}
 	return
 }
 
 func (dma *DefaultMetadataAdapter) SetUsr(c Ctx, fields []string, u *UserInfo) error {
+	db, err := GetDB()
+	if err != nil {
+		return ERR_OPEN_DB
+	}
+	defer db.Close()
+
+	if _, err = b.Table(db, USR_TBL, c).Update(&u,
+		b.Fields(fields...), b.Where(b.Eq("id", u.ID))); err != nil {
+		return ERR_EXEC_DB
+	}
 	return nil
 }
 
