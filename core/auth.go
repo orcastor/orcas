@@ -106,10 +106,8 @@ func userInfo2Ctx(c Ctx, u *UserInfo) Ctx {
 
 func getUID(c Ctx) int64 {
 	if v, ok := c.Value("o").(map[string]interface{}); ok {
-		if uid, okk := v["uid"]; okk {
-			if u, okkk := uid.(int64); okkk {
-				return u
-			}
+		if uid, okk := v["uid"].(int64); okk {
+			return uid
 		}
 	}
 	return 0
@@ -117,10 +115,8 @@ func getUID(c Ctx) int64 {
 
 func getKey(c Ctx) string {
 	if v, ok := c.Value("o").(map[string]interface{}); ok {
-		if key, okk := v["key"]; okk {
-			if k, okkk := key.(string); okkk {
-				return k
-			}
+		if key, okk := v["key"].(string); okk {
+			return key
 		}
 	}
 	return ""
