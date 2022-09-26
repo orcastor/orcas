@@ -13,7 +13,6 @@ import (
 	. "github.com/smartystreets/goconvey/convey"
 )
 
-var bktID int64
 var mntPath = "/tmp/test/"
 var path = "/home/semaphore/go/"
 var cfg = Config{
@@ -29,11 +28,15 @@ func init() {
 	core.Init(&core.CoreConfig{
 		Path: mntPath,
 	})
-	bktID, _ = idgen.NewIDGen(nil, 0).New()
 	core.InitDB()
-	// bktID = 30403939270656
-	core.InitBucketDB(context.TODO(), bktID)
-	core.NewLocalAdmin().PutBkt(context.TODO(), []*core.BucketInfo{{ID: bktID, Name: "备份测试", UID: 1, Type: 1}})
+	sdk := New(core.NewLocalHandler())
+	defer sdk.Close()
+	c, _, b, _ := sdk.Handler().Login(context.TODO(), "orcas", "orcas")
+	if len(b) <= 0 {
+		bktID, _ := idgen.NewIDGen(nil, 0).New()
+		core.InitBucketDB(c, bktID)
+		core.NewLocalAdmin().PutBkt(c, []*core.BucketInfo{{ID: bktID, Name: "备份测试", UID: 1, Type: 1}})
+	}
 }
 
 func TestUpload(t *testing.T) {
@@ -41,10 +44,11 @@ func TestUpload(t *testing.T) {
 		sdk := New(core.NewLocalHandler())
 		defer sdk.Close()
 
-		c, _, _, _ := sdk.Handler().Login(context.TODO(), "orcas", "orcas")
+		c, _, b, err := sdk.Handler().Login(context.TODO(), "orcas", "orcas")
+		So(err, ShouldBeNil)
 
 		sdk.SetConfig(cfg)
-		So(sdk.Upload(c, bktID, core.ROOT_OID, path), ShouldBeNil)
+		So(sdk.Upload(c, b[0].ID, core.ROOT_OID, path), ShouldBeNil)
 	})
 }
 
@@ -53,14 +57,15 @@ func TestDownload(t *testing.T) {
 		sdk := New(core.NewLocalHandler())
 		defer sdk.Close()
 
-		c, _, _, _ := sdk.Handler().Login(context.TODO(), "orcas", "orcas")
+		c, _, b, err := sdk.Handler().Login(context.TODO(), "orcas", "orcas")
+		So(err, ShouldBeNil)
 
 		sdk.SetConfig(cfg)
-		id, _ := sdk.Path2ID(c, bktID, core.ROOT_OID, filepath.Base(path))
+		id, _ := sdk.Path2ID(c, b[0].ID, core.ROOT_OID, filepath.Base(path))
 		fmt.Println(id)
-		fmt.Println(sdk.ID2Path(c, bktID, id))
+		fmt.Println(sdk.ID2Path(c, b[0].ID, id))
 
-		So(sdk.Download(c, bktID, id, mntPath), ShouldBeNil)
+		So(sdk.Download(c, b[0].ID, id, mntPath), ShouldBeNil)
 	})
 }
 
