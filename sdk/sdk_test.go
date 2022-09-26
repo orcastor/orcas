@@ -34,9 +34,7 @@ func init() {
 	sdk := New(core.NewLocalHandler())
 	defer sdk.Close()
 
-	c, _, b, err := sdk.Login(cfg)
-	So(err, ShouldBeNil)
-
+	c, _, b, _ := sdk.Login(cfg)
 	if len(b) <= 0 {
 		bktID, _ := idgen.NewIDGen(nil, 0).New()
 		core.InitBucketDB(c, bktID)
