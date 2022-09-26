@@ -96,7 +96,7 @@ func (osi *OrcasSDKImpl) Login(cfg Config) (core.Ctx, *core.UserInfo, []*core.Bu
 	}
 	if cfg.Conflict == RENAME {
 		if !strings.Contains(cfg.NameTmpl, "%s") {
-			return nil, nil, nil, fmt.Errorf(`cfg.NameTmp should contains "%s".`)
+			return nil, nil, nil, errors.New(`cfg.NameTmp should contains "%s".`)
 		}
 	}
 	switch cfg.EndecWay {
