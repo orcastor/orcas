@@ -78,10 +78,11 @@ type LocalHandler struct {
 }
 
 func NewLocalHandler() Handler {
+	dma := &DefaultMetadataAdapter{}
 	return &LocalHandler{
-		ma:  &DefaultMetadataAdapter{},
+		ma:  dma,
 		da:  &DefaultDataAdapter{},
-		acm: &DefaultAccessCtrlMgr{},
+		acm: &DefaultAccessCtrlMgr{ma: dma},
 		ig:  idgen.NewIDGen(nil, 0), // 需要改成配置
 	}
 }
@@ -104,6 +105,7 @@ func (lh *LocalHandler) SetOptions(opt Options) {
 func (lh *LocalHandler) SetAdapter(ma MetadataAdapter, da DataAdapter) {
 	lh.ma = ma
 	lh.da = da
+	lh.acm.SetAdapter(ma)
 }
 
 func (lh *LocalHandler) Login(c Ctx, usr, pwd string) (Ctx, *UserInfo, []*BucketInfo, error) {
@@ -122,8 +124,9 @@ func (lh *LocalHandler) Login(c Ctx, usr, pwd string) (Ctx, *UserInfo, []*Bucket
 	// iter/salt/hash
 	iter, _ := strconv.Atoi(vs[0])
 	salt, _ := base64.URLEncoding.DecodeString(vs[1])
-	dk := pbkdf2.Key([]byte(pwd), salt, iter, 32, sha1.New)
-	if base64.URLEncoding.EncodeToString(dk) != vs[2] {
+	dk := pbkdf2.Key([]byte(pwd), salt, iter, 16, sha1.New)
+	d := base64.URLEncoding.EncodeToString(dk)
+	if d != vs[2] {
 		return c, nil, nil, ERR_INCORRECT_PWD
 	}
 
@@ -282,9 +285,10 @@ type LocalAdmin struct {
 }
 
 func NewLocalAdmin() Admin {
+	dma := &DefaultMetadataAdapter{}
 	return &LocalAdmin{
-		ma:  &DefaultMetadataAdapter{},
-		acm: &DefaultAccessCtrlMgr{},
+		ma:  dma,
+		acm: &DefaultAccessCtrlMgr{ma: dma},
 		ig:  idgen.NewIDGen(nil, 0), // 需要改成配置
 	}
 }
