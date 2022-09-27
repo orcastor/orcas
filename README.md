@@ -1,5 +1,5 @@
 <p align="center">
-  <a href="#">
+  <a href="https://orcastor.github.io/doc/">
     <img src="https://orcastor.github.io/doc/logo.svg">
   </a>
 </p>
@@ -8,7 +8,7 @@
 
 <p align="center">
   <a href="/go.mod#L3" alt="go version">
-    <img src="https://img.shields.io/badge/go%20version-%3E=1.14-brightgreen?style=flat"/>
+    <img src="https://img.shields.io/badge/go%20version-%3E=1.16-brightgreen?style=flat"/>
   </a>
   <a href="https://goreportcard.com/badge/github.com/orcastor/orcas" alt="goreport">
     <img src="https://goreportcard.com/badge/github.com/orcastor/orcas?v=20220901">
