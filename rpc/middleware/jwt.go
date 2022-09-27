@@ -6,9 +6,9 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/dgrijalva/jwt-go"
 	"github.com/gin-gonic/gin"
 	"github.com/go-redis/redis/v7"
+	"github.com/golang-jwt/jwt"
 	"github.com/gotomicro/ego/core/elog"
 )
 
