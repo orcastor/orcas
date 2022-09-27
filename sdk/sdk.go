@@ -30,8 +30,8 @@ const (
 )
 
 type Config struct {
-	UserName string
-	Password string
+	UserName string // 用户名
+	Password string // 密码
 	DataSync bool   // 断电保护策略(Power-off Protection Policy)，强制每次写入数据后刷到磁盘
 	RefLevel uint32 // 秒传级别设置：OFF（默认） / FULL: Ref / FAST: TryRef+Ref
 	PkgThres uint32 // 打包个数限制，不设置默认1000个
