@@ -1,12 +1,12 @@
 module github.com/orcastor/orcas
 
-go 1.14
+go 1.16
 
 require (
-	github.com/dgrijalva/jwt-go v3.2.0+incompatible
 	github.com/gin-gonic/gin v1.8.1
 	github.com/go-kit/kit v0.10.0
 	github.com/go-redis/redis/v7 v7.4.1
+	github.com/golang-jwt/jwt v3.2.2+incompatible
 	github.com/gotomicro/ego v1.1.5
 	github.com/h2non/filetype v1.1.3
 	github.com/mattn/go-sqlite3 v1.14.6
