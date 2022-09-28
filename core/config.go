@@ -3,7 +3,7 @@ package core
 var config *CoreConfig
 
 type CoreConfig struct {
-	Path string `yaml:"path"`
+	Path string `yaml:"path" json:"path,omitempty"`
 }
 
 func Init(c *CoreConfig) {

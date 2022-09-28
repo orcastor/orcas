@@ -43,7 +43,7 @@ type Handler interface {
 	// sn从0开始，DataID不传默认创建一个新的
 	PutData(c Ctx, bktID, dataID int64, sn int, buf []byte) (int64, error)
 	// 只传一个参数说明是sn，传两个参数说明是sn+offset，传三个参数说明是sn+offset+size
-	GetData(c Ctx, bktID, id int64, sn int, offset ...int) ([]byte, error)
+	GetData(c Ctx, bktID, id int64, sn int, offset []int) ([]byte, error)
 	// 上传元数据
 	PutDataInfo(c Ctx, bktID int64, d []*DataInfo) ([]int64, error)
 	// 获取数据信息
@@ -197,7 +197,7 @@ func (lh *LocalHandler) GetDataInfo(c Ctx, bktID, id int64) (*DataInfo, error) {
 }
 
 // 只传一个参数说明是sn，传两个参数说明是sn+offset，传三个参数说明是sn+offset+size
-func (lh *LocalHandler) GetData(c Ctx, bktID, id int64, sn int, offset ...int) ([]byte, error) {
+func (lh *LocalHandler) GetData(c Ctx, bktID, id int64, sn int, offset []int) ([]byte, error) {
 	if err := lh.acm.CheckPermission(c, DR, bktID); err != nil {
 		return nil, err
 	}

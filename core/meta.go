@@ -15,23 +15,23 @@ import (
 const ROOT_OID int64 = 0
 
 type BucketInfo struct {
-	ID    int64  `borm:"id"`    // 桶ID
-	Name  string `borm:"name"`  // 桶名称
-	UID   int64  `borm:"uid"`   // 拥有者
-	Type  int    `borm:"type"`  // 桶类型，0: none, 1: normal ...
-	Quota int64  `borm:"quota"` // 配额
-	Usage int64  `borm:"usage"` // 使用量，统计所有版本的原始大小
+	ID    int64  `borm:"id" json:"id,omitempty"`       // 桶ID
+	Name  string `borm:"name" json:"name,omitempty"`   // 桶名称
+	UID   int64  `borm:"uid" json:"uid,omitempty"`     // 拥有者
+	Type  int    `borm:"type" json:"type,omitempty"`   // 桶类型，0: none, 1: normal ...
+	Quota int64  `borm:"quota" json:"quota,omitempty"` // 配额
+	Usage int64  `borm:"usage" json:"usage,omitempty"` // 使用量，统计所有版本的原始大小
 	// SnapshotID int64 // 最新快照版本ID
 }
 
 type UserInfo struct {
-	ID     int64  `borm:"id"`     // 用户ID
-	Usr    string `borm:"usr"`    // 用户名
-	Pwd    string `borm:"pwd"`    // 密码，加密方式PBKDF2-HMAC-SHA256
-	Key    string `borm:"key"`    // 数据库key
-	Role   uint32 `borm:"role"`   // 用户角色：普通用户 / 管理员
-	Name   string `borm:"name"`   // 名称
-	Avatar string `borm:"avatar"` // 头像
+	ID     int64  `borm:"id" json:"id,omitempty"`         // 用户ID
+	Usr    string `borm:"usr" json:"usr,omitempty"`       // 用户名
+	Pwd    string `borm:"pwd" json:"pwd,omitempty"`       // 密码，加密方式PBKDF2-HMAC-SHA256
+	Key    string `borm:"key" json:"key,omitempty"`       // 数据库key
+	Role   uint32 `borm:"role" json:"role,omitempty"`     // 用户角色：普通用户 / 管理员
+	Name   string `borm:"name" json:"name,omitempty"`     // 名称
+	Avatar string `borm:"avatar" json:"avatar,omitempty"` // 头像
 }
 
 // 对象类型
@@ -45,14 +45,14 @@ const (
 )
 
 type ObjectInfo struct {
-	ID     int64  `borm:"id"`    // 对象ID（idgen随机生成的id）
-	PID    int64  `borm:"pid"`   // 父对象ID
-	MTime  int64  `borm:"mtime"` // 更新时间，秒级时间戳
-	DataID int64  `borm:"did"`   // 数据ID，如果为0，说明没有数据（新创建的文件，DataID就是对象ID，作为对象的首版本数据）
-	Type   int    `borm:"type"`  // 对象类型，-1: malformed, 0: none, 1: dir, 2: file, 3: version, 4: preview(thumb/m3u8/pdf)
-	Name   string `borm:"name"`  // 对象名称
-	Size   int64  `borm:"size"`  // 对象的大小，目录的大小是子对象数，文件的大小是最新版本的字节数
-	Extra  string `borm:"ext"`   // 对象的扩展信息
+	ID     int64  `borm:"id" json:"id,omitempty"`       // 对象ID（idgen随机生成的id）
+	PID    int64  `borm:"pid" json:"pid,omitempty"`     // 父对象ID
+	MTime  int64  `borm:"mtime" json:"mtime,omitempty"` // 更新时间，秒级时间戳
+	DataID int64  `borm:"did" json:"did,omitempty"`     // 数据ID，如果为0，说明没有数据（新创建的文件，DataID就是对象ID，作为对象的首版本数据）
+	Type   int    `borm:"type" json:"type,omitempty"`   // 对象类型，-1: malformed, 0: none, 1: dir, 2: file, 3: version, 4: preview(thumb/m3u8/pdf)
+	Name   string `borm:"name" json:"name,omitempty"`   // 对象名称
+	Size   int64  `borm:"size" json:"size,omitempty"`   // 对象的大小，目录的大小是子对象数，文件的大小是最新版本的字节数
+	Extra  string `borm:"ext" json:"ext,omitempty"`     // 对象的扩展信息
 	// BktID int64 // 桶ID，如果支持引用别的桶的数据，为0说明是本桶
 }
 
@@ -82,16 +82,16 @@ const (
 )
 
 type DataInfo struct {
-	ID        int64  `borm:"id"`      // 数据ID（idgen随机生成的id）
-	Size      int64  `borm:"size"`    // 数据的大小
-	OrigSize  int64  `borm:"o_size"`  // 数据的原始大小
-	HdrCRC32  uint32 `borm:"h_crc32"` // 头部100KB的CRC32校验值
-	CRC32     uint32 `borm:"crc32"`   // 整个数据的CRC32校验值（最原始数据）
-	MD5       int64  `borm:"md5"`     // 整个数据的MD5值（最原始数据）
-	Cksum     uint32 `borm:"cksum"`   // 整个数据的CRC32校验值（最终数据，用于一致性审计）
-	Kind      uint32 `borm:"kind"`    // 数据状态，正常、损坏、加密、压缩、类型（用于预览等）
-	PkgID     int64  `borm:"pkg_id"`  // 打包数据的ID（也是idgen生成的id）
-	PkgOffset uint32 `borm:"pkg_off"` // 打包数据的偏移位置
+	ID        int64  `borm:"id" json:"id,omitempty"`           // 数据ID（idgen随机生成的id）
+	Size      int64  `borm:"size" json:"size,omitempty"`       // 数据的大小
+	OrigSize  int64  `borm:"o_size" json:"o_size,omitempty"`   // 数据的原始大小
+	HdrCRC32  uint32 `borm:"h_crc32" json:"h_crc32,omitempty"` // 头部100KB的CRC32校验值
+	CRC32     uint32 `borm:"crc32" json:"crc32,omitempty"`     // 整个数据的CRC32校验值（最原始数据）
+	MD5       int64  `borm:"md5" json:"md5,omitempty"`         // 整个数据的MD5值（最原始数据）
+	Cksum     uint32 `borm:"cksum" json:"cksum,omitempty"`     // 整个数据的CRC32校验值（最终数据，用于一致性审计）
+	Kind      uint32 `borm:"kind" json:"kind,omitempty"`       // 数据状态，正常、损坏、加密、压缩、类型（用于预览等）
+	PkgID     int64  `borm:"pkg_id" json:"pkg_id,omitempty"`   // 打包数据的ID（也是idgen生成的id）
+	PkgOffset uint32 `borm:"pkg_off" json:"pkg_off,omitempty"` // 打包数据的偏移位置
 	// PkgID不为0说明是打包数据
 	// SnapshotID int64 // 快照版本ID
 }
@@ -256,11 +256,11 @@ func (dma *DefaultMetadataAdapter) RefData(c Ctx, bktID int64, d []*DataInfo) ([
 		return nil, ERR_EXEC_DB
 	}
 	var refs []struct {
-		ID       int64  `borm:"max(a.id)"`
-		OrigSize int64  `borm:"b.o_size"`
-		HdrCRC32 uint32 `borm:"b.h_crc32"`
-		CRC32    uint32 `borm:"b.crc32"`
-		MD5      int64  `borm:"b.md5"`
+		ID       int64  `borm:"max(a.id)" json:"max(a.id),omitempty"`
+		OrigSize int64  `borm:"b.o_size" json:"b.o_size,omitempty"`
+		HdrCRC32 uint32 `borm:"b.h_crc32" json:"b.h_crc32,omitempty"`
+		CRC32    uint32 `borm:"b.crc32" json:"b.crc32,omitempty"`
+		MD5      int64  `borm:"b.md5" json:"b.md5,omitempty"`
 	}
 	// 联表查询
 	if _, err = b.Table(db, `data a, `+tbl+` b`, c).Select(&refs,
