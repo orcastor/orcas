@@ -2,14 +2,13 @@ package middleware
 
 import (
 	"errors"
-	"fmt"
 	"strconv"
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/go-redis/redis/v7"
 	"github.com/golang-jwt/jwt"
 	"github.com/gotomicro/ego/core/elog"
+	"github.com/orcastor/orcas/rpc/util"
 )
 
 var noAuthPath = map[string]bool{
@@ -30,22 +29,17 @@ var (
 	ErrTokenInvalid   = errors.New("token invalid")
 )
 
-func RedisCli() redis.Cmdable {
-	// TODO
-	return nil
-}
-
 type Claims struct {
-	Username  string `json:"username"`
-	Privilege int64  `json:"privilege"`
+	User string `json:"u"`
+	Role uint32 `json:"r"`
 	jwt.StandardClaims
 }
 
-func GenerateToken(username string, uid, privilege int64) (string, int64, error) {
+func GenerateToken(user string, uid int64, role uint32) (string, int64, error) {
 	expireTime := time.Now().Add(24 * time.Hour).Unix()
 	token, err := jwt.NewWithClaims(jwt.SigningMethodHS256, Claims{
-		username,
-		privilege,
+		user,
+		role,
 		jwt.StandardClaims{
 			Audience:  strconv.FormatInt(uid, 10),
 			ExpiresAt: expireTime,
@@ -75,10 +69,6 @@ func ParseToken(token string) (*Claims, error) {
 	return tokenClaims.Claims.(*Claims), nil
 }
 
-func CacheKeyJWTToken(uid int64) string {
-	return fmt.Sprintf("%s:token:%d", MOD_NAME, uid)
-}
-
 func JWT() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		if noAuthPath[c.FullPath()] {
@@ -91,31 +81,18 @@ func JWT() gin.HandlerFunc {
 		if err != nil {
 			elog.Errorf("%+v", err)
 			if err == ErrTokenExpired {
-				JWTAbortResponse(c, int(TokenExpiredCode), "token expired")
+				util.AbortResponse(c, int(TokenExpiredCode), "token expired")
 			} else {
-				JWTAbortResponse(c, int(TokenErrorCode), "token error")
+				util.AbortResponse(c, int(TokenErrorCode), "token error")
 			}
 			return
 		} else {
 			elog.Infof("login_info: %+v", claims)
 			uid, _ := strconv.ParseInt(claims.StandardClaims.Audience, 10, 64)
-			if val, err := RedisCli().Get(CacheKeyJWTToken(uid)).Result(); val != token {
-				elog.Errorf("CheckTokenCache error: %+v,%s,%s", err, val, token)
-				JWTAbortResponse(c, int(TokenExpiredCode), "token expired")
-				return
-			}
 			c.Set("uid", uid)
 		}
 		c.Next()
 	}
-}
-
-func JWTAbortResponse(c *gin.Context, code int, msg string) {
-	c.AbortWithStatusJSON(200, map[string]interface{}{
-		"code": code,
-		"msg":  msg,
-		"ts":   time.Now().Unix(),
-	})
 }
 
 func GetToken(c *gin.Context) (token string) {
