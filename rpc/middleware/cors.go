@@ -8,8 +8,6 @@ import (
 
 func CORS() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		method := c.Request.Method
-
 		c.Header("Access-Control-Allow-Origin", "*")
 		c.Header("Access-Control-Allow-Headers", "Content-Type,AccessToken,X-CSRF-Token, Authorization, Token")
 		c.Header("Access-Control-Allow-Methods", "POST, GET, OPTIONS")
@@ -17,10 +15,11 @@ func CORS() gin.HandlerFunc {
 		c.Header("Access-Control-Allow-Credentials", "true")
 
 		// 放行所有OPTIONS方法
-		if method == "OPTIONS" {
+		if c.Request.Method == "OPTIONS" {
 			c.AbortWithStatus(http.StatusNoContent)
+			return
 		}
-		// 处理请求
+
 		c.Next()
 	}
 }
