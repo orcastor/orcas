@@ -551,7 +551,7 @@ func (dr *dataReader) Read(p []byte) (n int, err error) {
 		return dr.buf.Read(p)
 	}
 	if dr.remain > 0 {
-		buf, err := dr.h.GetData(dr.c, dr.bktID, dr.dataID, dr.sn, int(dr.offset), dr.getSize)
+		buf, err := dr.h.GetData(dr.c, dr.bktID, dr.dataID, dr.sn, []int{int(dr.offset), dr.getSize})
 		if err != nil {
 			fmt.Println(runtime.Caller(0))
 			fmt.Println(err)
