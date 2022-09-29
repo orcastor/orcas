@@ -112,7 +112,11 @@ func (lh *LocalHandler) Login(c Ctx, usr, pwd string) (Ctx, *UserInfo, []*Bucket
 	// pwd from db or cache
 	u, err := lh.ma.GetUsr2(c, usr)
 	if err != nil {
-		return c, nil, nil, ERR_AUTH_FAILED
+		return c, nil, nil, err
+	}
+
+	if u.ID <= 0 {
+		return c, nil, nil, ERR_INCORRECT_PWD
 	}
 
 	// pbkdf2 check
