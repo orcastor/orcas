@@ -12,12 +12,13 @@ import (
 )
 
 var noAuthPath = map[string]bool{
-	"/login": true,
+	"":           true,
+	"/":          true,
+	"/api/login": true,
 }
 
 const (
 	TokenExpiredCode int32 = 401
-	TokenErrorCode   int32 = 402
 
 	MOD_NAME   = "orcas"
 	JWT_SECRET = "xxxxxxxx"
@@ -83,7 +84,7 @@ func JWT() gin.HandlerFunc {
 			if err == ErrTokenExpired {
 				util.AbortResponse(c, int(TokenExpiredCode), "token expired")
 			} else {
-				util.AbortResponse(c, int(TokenErrorCode), "token error")
+				util.AbortResponse(c, int(TokenExpiredCode), "token error")
 			}
 			return
 		} else {
