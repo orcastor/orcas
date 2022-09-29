@@ -18,6 +18,7 @@ func main() {
 	core.Init(&core.CoreConfig{
 		Path: mntPath,
 	})
+	core.InitDB()
 	hanlder := core.NewLocalHandler()
 	if err := ego.New().Serve(func() *egin.Component {
 		server := egin.Load("server.http").Build()
@@ -26,7 +27,7 @@ func main() {
 		server.Use(middleware.CORS())
 		server.Use(middleware.JWT())
 
-		server.POST("/login", func(ctx *gin.Context) {
+		server.POST("/api/login", func(ctx *gin.Context) {
 			var req struct {
 				UserName string `json:"username"`
 				Password string `json:"password"`
