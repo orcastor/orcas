@@ -27,7 +27,8 @@ func main() {
 		server.Use(middleware.CORS())
 		server.Use(middleware.JWT())
 
-		server.POST("/api/login", func(ctx *gin.Context) {
+		api := server.Group("/api")
+		api.POST("/login", func(ctx *gin.Context) {
 			var req struct {
 				UserName string `json:"username"`
 				Password string `json:"password"`
@@ -44,7 +45,34 @@ func main() {
 				"bkts":         b,
 				"access_token": token,
 			})
-			return
+		})
+		api.POST("/list", func(ctx *gin.Context) {
+			var req struct {
+				BktID int64            `json:"b,omitempty"`
+				PID   int64            `json:"p,omitempty"`
+				Opt   core.ListOptions `json:"o"`
+			}
+			ctx.BindJSON(&req)
+			o, c, d, err := hanlder.List(ctx.Request.Context(), req.BktID, req.PID, req.Opt)
+			if err != nil {
+				util.AbortResponse(ctx, 100, err.Error())
+				return
+			}
+			switch req.Opt.Brief {
+			case 1:
+				for i := range o {
+					o[i].Extra = ""
+				}
+			case 2:
+				for i := range o {
+					o[i] = &core.ObjectInfo{ID: o[i].ID}
+				}
+			}
+			util.Response(ctx, gin.H{
+				"o": o,
+				"c": c,
+				"d": d,
+			})
 		})
 		return server
 	}()).Run(); err != nil {
