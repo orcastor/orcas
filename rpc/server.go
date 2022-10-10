@@ -74,6 +74,25 @@ func main() {
 				"d": d,
 			})
 		})
+		api.POST("/get", func(ctx *gin.Context) {
+			var req struct {
+				BktID int64 `json:"b,omitempty"`
+				ID    int64 `json:"i,omitempty"`
+			}
+			ctx.BindJSON(&req)
+			o, err := hanlder.Get(ctx.Request.Context(), req.BktID, []int64{req.ID})
+			if err != nil {
+				util.AbortResponse(ctx, 100, err.Error())
+				return
+			}
+			if len(o) > 0 {
+				util.Response(ctx, gin.H{
+					"o": o[0],
+				})
+				return
+			}
+			util.Response(ctx, gin.H{})
+		})
 		return server
 	}()).Run(); err != nil {
 		elog.Panic("startup", elog.Any("err", err))
