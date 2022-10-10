@@ -138,7 +138,7 @@ func (lh *LocalHandler) Login(c Ctx, usr, pwd string) (Ctx, *UserInfo, []*Bucket
 	b, _ := lh.ma.ListBkt(c, u.ID)
 
 	// set uid & key to ctx
-	c, u.Pwd, u.Key = userInfo2Ctx(c, u), "", ""
+	c, u.Pwd, u.Key = UserInfo2Ctx(c, u), "", ""
 	return c, u, b, nil
 }
 

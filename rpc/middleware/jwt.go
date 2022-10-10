@@ -8,6 +8,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt"
 	"github.com/gotomicro/ego/core/elog"
+	"github.com/orcastor/orcas/core"
 	"github.com/orcastor/orcas/rpc/util"
 )
 
@@ -90,7 +91,9 @@ func JWT() gin.HandlerFunc {
 		} else {
 			elog.Infof("login_info: %+v", claims)
 			uid, _ := strconv.ParseInt(claims.StandardClaims.Audience, 10, 64)
-			c.Set("uid", uid)
+			c.Request = c.Request.WithContext((core.UserInfo2Ctx(c.Request.Context(), &core.UserInfo{
+				ID: uid,
+			})))
 		}
 		c.Next()
 	}

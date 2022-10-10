@@ -97,7 +97,7 @@ func (dacm *DefaultAccessCtrlMgr) CheckRole(c Ctx, role uint32) error {
 	return ERR_NO_ROLE
 }
 
-func userInfo2Ctx(c Ctx, u *UserInfo) Ctx {
+func UserInfo2Ctx(c Ctx, u *UserInfo) Ctx {
 	return context.WithValue(c, "o", map[string]interface{}{
 		"uid": u.ID,
 		"key": u.Key,
