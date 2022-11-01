@@ -30,8 +30,8 @@ func main() {
 		api := server.Group("/api")
 		api.POST("/login", func(ctx *gin.Context) {
 			var req struct {
-				UserName string `json:"username"`
-				Password string `json:"password"`
+				UserName string `json:"u"`
+				Password string `json:"p"`
 			}
 			ctx.BindJSON(&req)
 			_, u, b, err := hanlder.Login(ctx.Request.Context(), req.UserName, req.Password)
@@ -41,8 +41,8 @@ func main() {
 			}
 			token, _, err := middleware.GenerateToken(u.Usr, u.ID, u.Role)
 			util.Response(ctx, gin.H{
-				"user":         u,
-				"bkts":         b,
+				"u":            u,
+				"b":            b,
 				"access_token": token,
 			})
 		})
