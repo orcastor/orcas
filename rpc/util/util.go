@@ -12,7 +12,6 @@ func AbortResponse(c *gin.Context, code int, msg string) {
 func Response(c *gin.Context, data gin.H) {
 	c.AbortWithStatusJSON(200, gin.H{
 		"code": 0,
-		"msg":  "ok",
 		"data": data,
 	})
 }
