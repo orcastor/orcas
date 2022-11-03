@@ -94,6 +94,7 @@ func JWT() gin.HandlerFunc {
 			c.Request = c.Request.WithContext((core.UserInfo2Ctx(c.Request.Context(), &core.UserInfo{
 				ID: uid,
 			})))
+			c.Set("uid", uid)
 		}
 		c.Next()
 	}
@@ -114,7 +115,7 @@ func GetToken(c *gin.Context) (token string) {
 	return
 }
 
-func GetUid(c *gin.Context) int64 {
+func GetUID(c *gin.Context) int64 {
 	if uid, ok := c.Get("uid"); ok {
 		return uid.(int64)
 	}

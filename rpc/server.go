@@ -93,6 +93,11 @@ func main() {
 			}
 			util.Response(ctx, gin.H{})
 		})
+		api.POST("/token", func(ctx *gin.Context) {
+			util.Response(ctx, gin.H{
+				"uid": middleware.GetUID(ctx),
+			})
+		})
 		return server
 	}()).Run(); err != nil {
 		elog.Panic("startup", elog.Any("err", err))
