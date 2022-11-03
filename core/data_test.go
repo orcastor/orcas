@@ -11,9 +11,6 @@ import (
 )
 
 func init() {
-	Init(&CoreConfig{
-		Path: "/tmp/test/",
-	})
 	bktID, _ = idgen.NewIDGen(nil, 0).New()
 }
 

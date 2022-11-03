@@ -94,7 +94,7 @@ func toFilePath(path string, bcktID, dataID int64, sn int) string {
 }
 
 func (dda *DefaultDataAdapter) Write(c Ctx, bktID, dataID int64, sn int, buf []byte) error {
-	path := toFilePath(Conf().Path, bktID, dataID, sn)
+	path := toFilePath(ORCAS_DATA, bktID, dataID, sn)
 	// 不用判断是否存在，以及是否创建成功，如果失败，下面写入文件之前会报错
 	os.MkdirAll(filepath.Dir(path), 0766)
 
@@ -115,7 +115,7 @@ func (dda *DefaultDataAdapter) Write(c Ctx, bktID, dataID int64, sn int, buf []b
 }
 
 func (dda *DefaultDataAdapter) Read(c Ctx, bktID, dataID int64, sn int) ([]byte, error) {
-	return ioutil.ReadFile(toFilePath(Conf().Path, bktID, dataID, sn))
+	return ioutil.ReadFile(toFilePath(ORCAS_DATA, bktID, dataID, sn))
 }
 
 func (dda *DefaultDataAdapter) ReadBytes(c Ctx, bktID, dataID int64, sn, offset, size int) ([]byte, error) {
@@ -123,7 +123,7 @@ func (dda *DefaultDataAdapter) ReadBytes(c Ctx, bktID, dataID int64, sn, offset,
 		return dda.Read(c, bktID, dataID, sn)
 	}
 
-	f, err := os.Open(toFilePath(Conf().Path, bktID, dataID, sn))
+	f, err := os.Open(toFilePath(ORCAS_DATA, bktID, dataID, sn))
 	if err != nil {
 		return nil, ERR_OPEN_FILE
 	}

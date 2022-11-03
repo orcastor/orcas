@@ -1,6 +1,14 @@
 package core
 
-import "context"
+import (
+	"context"
+	"os"
+)
+
+const ROOT_OID int64 = 0
+
+var ORCAS_BASE = os.Getenv("ORCAS_BASE")
+var ORCAS_DATA = os.Getenv("ORCAS_DATA")
 
 type Ctx context.Context
 

@@ -26,9 +26,6 @@ var cfg = Config{
 }
 
 func init() {
-	core.Init(&core.CoreConfig{
-		Path: mntPath,
-	})
 	core.InitDB()
 
 	sdk := New(core.NewLocalHandler())

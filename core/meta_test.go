@@ -13,9 +13,6 @@ import (
 var bktID = int64(0)
 
 func init() {
-	Init(&CoreConfig{
-		Path: "/tmp/test/",
-	})
 	bktID, _ = idgen.NewIDGen(nil, 0).New()
 }
 

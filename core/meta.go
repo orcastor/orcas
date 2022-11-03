@@ -12,8 +12,6 @@ import (
 	b "github.com/orca-zhang/borm"
 )
 
-const ROOT_OID int64 = 0
-
 type BucketInfo struct {
 	ID    int64  `borm:"id" json:"i,omitempty"`    // 桶ID
 	Name  string `borm:"name" json:"n,omitempty"`  // 桶名称
@@ -151,9 +149,9 @@ type MetadataAdapter interface {
 
 func GetDB(c ...interface{}) (*sql.DB, error) {
 	param := "?_journal=WAL&cache=shared&mode=rwc&nolock=1"
-	dirPath := Conf().Path
+	dirPath := ORCAS_BASE
 	if len(c) > 1 {
-		dirPath = filepath.Join(dirPath, fmt.Sprint(c[1]))
+		dirPath = filepath.Join(ORCAS_DATA, fmt.Sprint(c[1]))
 		if c, ok := c[0].(Ctx); ok {
 			if key := getKey(c); key != "" {
 				param += "&key=" + key

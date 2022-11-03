@@ -2,6 +2,7 @@ package middleware
 
 import (
 	"errors"
+	"os"
 	"strconv"
 	"time"
 
@@ -18,11 +19,12 @@ var noAuthPath = map[string]bool{
 	"/api/login": true,
 }
 
+var ORCAS_SECRET = os.Getenv("ORCAS_SECRET")
+
 const (
 	TokenExpiredCode int32 = 599
 
-	MOD_NAME   = "orcas"
-	JWT_SECRET = "xxxxxxxx"
+	MOD_NAME = "orcas"
 )
 
 var (
@@ -47,13 +49,13 @@ func GenerateToken(user string, uid int64, role uint32) (string, int64, error) {
 			ExpiresAt: expireTime,
 			Issuer:    MOD_NAME,
 		},
-	}).SignedString([]byte(JWT_SECRET))
+	}).SignedString([]byte(ORCAS_SECRET))
 	return token, expireTime, err
 }
 
 func ParseToken(token string) (*Claims, error) {
 	tokenClaims, err := jwt.ParseWithClaims(token, &Claims{}, func(token *jwt.Token) (interface{}, error) {
-		return []byte(JWT_SECRET), nil
+		return []byte(ORCAS_SECRET), nil
 	})
 
 	if err != nil {
