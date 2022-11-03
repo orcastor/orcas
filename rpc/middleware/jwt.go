@@ -19,7 +19,7 @@ var noAuthPath = map[string]bool{
 }
 
 const (
-	TokenExpiredCode int32 = 401
+	TokenExpiredCode int32 = 599
 
 	MOD_NAME   = "orcas"
 	JWT_SECRET = "xxxxxxxx"
