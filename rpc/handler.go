@@ -45,6 +45,7 @@ func list(ctx *gin.Context) {
 	case 1:
 		for i := range o {
 			o[i].Extra = ""
+			o[i].PID = 0
 		}
 	case 2:
 		for i := range o {
