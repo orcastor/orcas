@@ -533,7 +533,7 @@ type dataReader struct {
 	endecKey        string
 }
 
-func newDataReader(c core.Ctx, h core.Handler, bktID int64, d *core.DataInfo, endecKey string) *dataReader {
+func NewDataReader(c core.Ctx, h core.Handler, bktID int64, d *core.DataInfo, endecKey string) *dataReader {
 	dr := &dataReader{c: c, h: h, bktID: bktID, remain: int(d.Size), kind: d.Kind, endecKey: endecKey}
 	if d.PkgID > 0 {
 		dr.dataID = d.PkgID
@@ -634,7 +634,7 @@ func (osi *OrcasSDKImpl) downloadFile(c core.Ctx, bktID int64, o *core.ObjectInf
 		decmpr = &DummyArchiver{}
 	}
 
-	if err = decmpr.Decompress(newDataReader(c, osi.h, bktID, d, osi.cfg.EndecKey), b); err != nil {
+	if err = decmpr.Decompress(NewDataReader(c, osi.h, bktID, d, osi.cfg.EndecKey), b); err != nil {
 		fmt.Println(runtime.Caller(0))
 		fmt.Println(err)
 		return err
