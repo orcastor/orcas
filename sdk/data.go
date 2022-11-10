@@ -109,6 +109,8 @@ func (l *listener) OnData(c core.Ctx, h core.Handler, dp *dataPkger, buf []byte)
 					l.cmpr = &archiver.Zstd{}
 				} else if l.cfg.WiseCmpr&core.DATA_CMPR_GZIP != 0 {
 					l.cmpr = &archiver.Gz{}
+				} else if l.cfg.WiseCmpr&core.DATA_CMPR_BR != 0 {
+					l.cmpr = &archiver.Brotli{}
 				}
 			}
 			// 如果是黑名单类型，不压缩
@@ -629,6 +631,8 @@ func (osi *OrcasSDKImpl) downloadFile(c core.Ctx, bktID int64, o *core.ObjectInf
 			decmpr = &archiver.Zstd{}
 		} else if d.Kind&core.DATA_CMPR_GZIP != 0 {
 			decmpr = &archiver.Gz{}
+		} else if d.Kind&core.DATA_CMPR_BR != 0 {
+			decmpr = &archiver.Brotli{}
 		}
 	} else {
 		decmpr = &DummyArchiver{}
