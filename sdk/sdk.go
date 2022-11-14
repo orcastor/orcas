@@ -36,6 +36,7 @@ type Config struct {
 	RefLevel uint32 // 秒传级别设置：OFF（默认） / FULL: Ref / FAST: TryRef+Ref
 	PkgThres uint32 // 打包个数限制，不设置默认1000个
 	WiseCmpr uint32 // 智能压缩，根据文件类型决定是否压缩，取值见core.DATA_CMPR_MASK
+	CmprQlty uint32 // 压缩级别，br:[0,11]，gzip:[-3,9]，zstd:[0,10]
 	EndecWay uint32 // 加密方式，取值见core.DATA_ENDEC_MASK
 	EndecKey string // 加密KEY，SM4需要固定为16个字符，AES256需要大于16个字符
 	DontSync string // 不同步的文件名通配符（https://pkg.go.dev/path/filepath#Match），用分号分隔

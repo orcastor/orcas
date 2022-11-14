@@ -15,6 +15,7 @@ import (
 	"sort"
 
 	"github.com/h2non/filetype"
+	"github.com/klauspost/compress/zstd"
 	"github.com/mholt/archiver/v3"
 	"github.com/mkmueller/aes256"
 	"github.com/orcastor/orcas/core"
@@ -106,11 +107,11 @@ func (l *listener) OnData(c core.Ctx, h core.Handler, dp *dataPkger, buf []byte)
 				if l.cfg.WiseCmpr&core.DATA_CMPR_SNAPPY != 0 {
 					l.cmpr = &archiver.Snappy{}
 				} else if l.cfg.WiseCmpr&core.DATA_CMPR_ZSTD != 0 {
-					l.cmpr = &archiver.Zstd{}
+					l.cmpr = &archiver.Zstd{EncoderOptions: []zstd.EOption{zstd.WithEncoderLevel(zstd.EncoderLevel(l.cfg.CmprQlty))}}
 				} else if l.cfg.WiseCmpr&core.DATA_CMPR_GZIP != 0 {
-					l.cmpr = &archiver.Gz{}
+					l.cmpr = &archiver.Gz{CompressionLevel: int(l.cfg.CmprQlty)}
 				} else if l.cfg.WiseCmpr&core.DATA_CMPR_BR != 0 {
-					l.cmpr = &archiver.Brotli{}
+					l.cmpr = &archiver.Brotli{Quality: int(l.cfg.CmprQlty)}
 				}
 			}
 			// 如果是黑名单类型，不压缩

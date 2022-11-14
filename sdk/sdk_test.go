@@ -12,6 +12,7 @@ import (
 	. "github.com/smartystreets/goconvey/convey"
 )
 
+// ORCAS_BASE=/tmp/test ORCAS_DATA=/tmp/test ORCAS_SECRET=xxxxxxxx go test . -run=TestUpload
 var mntPath = "/tmp/test/"
 var path = "/home/semaphore/go/"
 var cfg = Config{
@@ -22,6 +23,8 @@ var cfg = Config{
 	WiseCmpr: core.DATA_CMPR_ZSTD,
 	EndecWay: core.DATA_ENDEC_AES256,
 	EndecKey: "1234567890abcdef12345678",
+	WiseCmpr: core.DATA_CMPR_BR,
+	CmprQlty: 5,
 	DontSync: ".*",
 }
 

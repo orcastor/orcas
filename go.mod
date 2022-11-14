@@ -5,10 +5,10 @@ go 1.16
 require (
 	github.com/gin-gonic/gin v1.8.1
 	github.com/go-kit/kit v0.10.0
-	github.com/go-redis/redis/v7 v7.4.1
 	github.com/golang-jwt/jwt v3.2.2+incompatible
 	github.com/gotomicro/ego v1.1.5
 	github.com/h2non/filetype v1.1.3
+	github.com/klauspost/compress v1.11.4
 	github.com/mattn/go-sqlite3 v1.14.6
 	github.com/mholt/archiver/v3 v3.5.1
 	github.com/mkmueller/aes256 v0.0.0-20171112015946-1ce9e9b3f91a
