@@ -3,6 +3,7 @@ module github.com/orcastor/orcas
 go 1.16
 
 require (
+	github.com/andybalholm/brotli v1.0.4 // indirect
 	github.com/gin-gonic/gin v1.8.1
 	github.com/go-kit/kit v0.10.0
 	github.com/golang-jwt/jwt v3.2.2+incompatible
