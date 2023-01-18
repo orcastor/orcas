@@ -3,10 +3,8 @@ package sdk
 import (
 	"bufio"
 	"bytes"
-	"crypto/md5"
 	"encoding/binary"
 	"fmt"
-	"hash"
 	"hash/crc32"
 	"io"
 	"os"
@@ -17,6 +15,7 @@ import (
 	"github.com/h2non/filetype"
 	"github.com/klauspost/compress/zstd"
 	"github.com/mholt/archiver/v3"
+	md5simd "github.com/minio/md5-simd"
 	"github.com/mkmueller/aes256"
 	"github.com/orcastor/orcas/core"
 	"github.com/tjfoc/gmsm/sm4"
@@ -53,17 +52,19 @@ type listener struct {
 	d       *core.DataInfo
 	cfg     Config
 	action  uint32
-	md5Hash hash.Hash
+	md5Hash md5simd.Hasher
 	once    bool
 	sn, cnt int
 	cmprBuf bytes.Buffer
 	cmpr    archiver.Compressor
 }
 
+var md5Svr = md5simd.NewServer()
+
 func newListener(bktID int64, d *core.DataInfo, cfg Config, action uint32) *listener {
 	l := &listener{bktID: bktID, d: d, cfg: cfg, action: action}
 	if action&CRC32_MD5 != 0 {
-		l.md5Hash = md5.New()
+		l.md5Hash = md5Svr.NewHash()
 	}
 	return l
 }
@@ -189,6 +190,7 @@ func (l *listener) OnData(c core.Ctx, h core.Handler, dp *dataPkger, buf []byte)
 func (l *listener) OnFinish(c core.Ctx, h core.Handler) error {
 	if l.action&CRC32_MD5 != 0 {
 		l.d.MD5 = int64(binary.BigEndian.Uint64(l.md5Hash.Sum(nil)[4:12]))
+		l.md5Hash.Close()
 	}
 	if l.cmprBuf.Len() > 0 {
 		encodedBuf, err := l.encode(l.cmprBuf.Bytes())
