@@ -107,7 +107,7 @@ func (l *listener) OnData(c core.Ctx, h core.Handler, dp *dataPkger, buf []byte)
 				if l.cfg.WiseCmpr&core.DATA_CMPR_SNAPPY != 0 {
 					l.cmpr = &archiver.Snappy{}
 				} else if l.cfg.WiseCmpr&core.DATA_CMPR_ZSTD != 0 {
-					l.cmpr = &archiver.Zstd{EncoderOptions: []zstd.EOption{zstd.WithEncoderLevel(zstd.EncoderLevel(l.cfg.CmprQlty))}}
+					l.cmpr = &archiver.Zstd{EncoderOptions: []zstd.EOption{zstd.WithEncoderLevel(zstd.EncoderLevelFromZstd(int(l.cfg.CmprQlty)))}}
 				} else if l.cfg.WiseCmpr&core.DATA_CMPR_GZIP != 0 {
 					l.cmpr = &archiver.Gz{CompressionLevel: int(l.cfg.CmprQlty)}
 				} else if l.cfg.WiseCmpr&core.DATA_CMPR_BR != 0 {
