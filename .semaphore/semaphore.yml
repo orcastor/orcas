@@ -14,9 +14,9 @@ blocks:
             - export GO111MODULE=on
             - export GOPATH=~/go
             - 'export PATH=/home/semaphore/go/bin:$PATH'
+            - rm -fr /home/semaphore/go/pkg/mod/cache
             - checkout
             - go get ./...
             - go test -coverprofile=coverage.txt -covermode=atomic -v ./...
             - 'bash <(curl -s https://codecov.io/bash) -t 8c2bdd22-0aab-4cc1-a473-cd6db39aed9b || echo "Codecov did not collect coverage reports"'
             - du -hcs /tmp/test/*
-            #- go build -v .
