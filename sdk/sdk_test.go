@@ -12,7 +12,7 @@ import (
 	. "github.com/smartystreets/goconvey/convey"
 )
 
-// ORCAS_BASE=/tmp/test ORCAS_DATA=/tmp/test ORCAS_SECRET=xxxxxxxx go test . -run=TestUpload
+// ORCAS_BASE=/tmp/test ORCAS_DATA=/tmp/test ORCAS_SECRET=xxxxxxxx go test . -run=TestUpload -v
 var mntPath = "/tmp/test/"
 var path = "/home/semaphore/go/"
 var cfg = Config{

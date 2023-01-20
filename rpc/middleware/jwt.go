@@ -91,7 +91,7 @@ func JWT() gin.HandlerFunc {
 			}
 			return
 		} else {
-			elog.Infof("login_info: %+v", claims)
+			elog.Debugf("login_info: %+v", claims)
 			uid, _ := strconv.ParseInt(claims.StandardClaims.Audience, 10, 64)
 			c.Request = c.Request.WithContext((core.UserInfo2Ctx(c.Request.Context(), &core.UserInfo{
 				ID: uid,
