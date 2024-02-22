@@ -16,7 +16,7 @@ type ListOptions struct {
 	Type  int    `json:"t,omitempty"` // 对象类型，-1: malformed, 0: 不过滤(default), 1: dir, 2: file, 3: version, 4: preview(thumb/m3u8/pdf)
 	Count int    `json:"c,omitempty"` // 查询个数
 	Order string `json:"o,omitempty"` // 排序方式，id/mtime/name/size/type 前缀 +: 升序（默认） -: 降序
-	Brief int    `json:"b,omitempty"` // 显示更少内容(只在网络传输层，节省流量时有效)，0: FULL(default), 1: without EXT, 2:only ID
+	Brief int    `json:"e,omitempty"` // 显示更少内容(只在网络传输层，节省流量时有效)，0: FULL(default), 1: without EXT, 2:only ID
 	// 可以考虑改用FieldMask实现 https://mp.weixin.qq.com/s/L7He7M4JWi84z1emuokjbQ
 }
 

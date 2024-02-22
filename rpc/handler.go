@@ -1,11 +1,10 @@
 package main
 
 import (
+	"github.com/gin-gonic/gin"
 	"github.com/orcastor/orcas/core"
 	"github.com/orcastor/orcas/rpc/middleware"
 	"github.com/orcastor/orcas/rpc/util"
-
-	"github.com/gin-gonic/gin"
 )
 
 var hanlder = core.NewLocalHandler()
@@ -31,21 +30,25 @@ func login(ctx *gin.Context) {
 
 func list(ctx *gin.Context) {
 	var req struct {
-		BktID int64            `json:"b,omitempty"`
-		PID   int64            `json:"p,omitempty"`
-		Opt   core.ListOptions `json:"o"`
+		BktID int64 `json:"b,omitempty"`
+		PID   int64 `json:"p,omitempty"`
+		core.ListOptions
 	}
 	ctx.BindJSON(&req)
-	o, c, d, err := hanlder.List(ctx.Request.Context(), req.BktID, req.PID, req.Opt)
+	if req.Count == 0 {
+		req.Count = 1000
+	}
+	o, cnt, delimiter, err := hanlder.List(ctx.Request.Context(), req.BktID, req.PID, req.ListOptions)
 	if err != nil {
 		util.AbortResponse(ctx, 100, err.Error())
 		return
 	}
-	switch req.Opt.Brief {
+	switch req.Brief {
 	case 1:
 		for i := range o {
 			o[i].Extra = ""
 			o[i].PID = 0
+			o[i].DataID = 0
 		}
 	case 2:
 		for i := range o {
@@ -54,8 +57,8 @@ func list(ctx *gin.Context) {
 	}
 	util.Response(ctx, gin.H{
 		"o": o,
-		"c": c,
-		"d": d,
+		"c": cnt,
+		"d": delimiter,
 	})
 }
 
