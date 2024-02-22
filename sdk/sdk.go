@@ -187,6 +187,7 @@ func (osi *OrcasSDKImpl) Upload(c core.Ctx, bktID, pid int64, lpath string) erro
 	f.Close()
 
 	o := &core.ObjectInfo{
+		ID:    osi.h.NewID(),
 		PID:   pid,
 		MTime: fi.ModTime().Unix(),
 		Type:  core.OBJ_TYPE_FILE,
@@ -253,6 +254,7 @@ func (osi *OrcasSDKImpl) Upload(c core.Ctx, bktID, pid int64, lpath string) erro
 			}
 			if fi.IsDir() {
 				dirs = append(dirs, &core.ObjectInfo{
+					ID:    osi.h.NewID(),
 					PID:   q[0].id,
 					MTime: fi.ModTime().Unix(),
 					Type:  core.OBJ_TYPE_DIR,
@@ -261,6 +263,7 @@ func (osi *OrcasSDKImpl) Upload(c core.Ctx, bktID, pid int64, lpath string) erro
 				continue
 			} else {
 				file := &core.ObjectInfo{
+					ID:    osi.h.NewID(),
 					PID:   q[0].id,
 					MTime: fi.ModTime().Unix(),
 					Type:  core.OBJ_TYPE_FILE,

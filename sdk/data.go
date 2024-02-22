@@ -22,20 +22,6 @@ import (
 	"github.com/tjfoc/gmsm/sm4"
 )
 
-var CmprBlacklist = map[string]int{
-	"image/png":                   1,
-	"image/jpeg":                  1,
-	"application/epub+zip":        1,
-	"application/zip":             1,
-	"application/x-tar":           1,
-	"application/vnd.rar":         1,
-	"application/gzip":            1,
-	"application/x-bzip2":         1,
-	"application/x-7z-compressed": 1,
-	"application/x-xz":            1,
-	"application/zstd":            1,
-}
-
 const (
 	UPLOAD_DATA = 1 << iota
 	CRC32_MD5
@@ -102,7 +88,7 @@ func (l *listener) OnData(c core.Ctx, h core.Handler, dp *dataPkger, buf []byte)
 		// 如果开启智能压缩的，检查文件类型确定是否要压缩
 		if l.cfg.WiseCmpr > 0 {
 			kind, _ := filetype.Match(buf)
-			if CmprBlacklist[kind.MIME.Value] == 0 {
+			if kind == filetype.Unknown { // 多媒体、存档、应用
 				l.d.Kind |= l.cfg.WiseCmpr
 				if l.cfg.WiseCmpr&core.DATA_CMPR_SNAPPY != 0 {
 					l.cmpr = &archiver.Snappy{}

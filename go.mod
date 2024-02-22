@@ -8,7 +8,7 @@ require (
 	github.com/go-kit/kit v0.10.0
 	github.com/golang-jwt/jwt v3.2.2+incompatible
 	github.com/gotomicro/ego v1.1.5
-	github.com/h2non/filetype v1.1.3
+	github.com/h2non/filetype v1.1.4-0.20231228185113-6469358c2bcb
 	github.com/klauspost/compress v1.11.4
 	github.com/mattn/go-sqlite3 v1.14.6
 	github.com/mholt/archiver/v3 v3.5.1

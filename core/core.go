@@ -36,6 +36,7 @@ type Handler interface {
 	// 登录用户
 	Login(c Ctx, usr, pwd string) (Ctx, *UserInfo, []*BucketInfo, error)
 
+	NewID() int64
 	// 只有文件长度、HdrCRC32是预Ref，如果成功返回新DataID，失败返回0
 	// 有文件长度、CRC32、MD5，成功返回引用的DataID，失败返回0，客户端发现DataID有变化，说明不需要上传数据
 	// 如果非预Ref DataID传0，说明跳过了预Ref
@@ -140,6 +141,11 @@ func (lh *LocalHandler) Login(c Ctx, usr, pwd string) (Ctx, *UserInfo, []*Bucket
 	// set uid & key to ctx
 	c, u.Pwd, u.Key = UserInfo2Ctx(c, u), "", ""
 	return c, u, b, nil
+}
+
+func (lh *LocalHandler) NewID() int64 {
+	id, _ := lh.ig.New()
+	return id
 }
 
 // 只有文件长度、HdrCRC32是预Ref，如果成功返回新DataID，失败返回0
