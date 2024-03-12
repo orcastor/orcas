@@ -21,6 +21,10 @@ func login(ctx *gin.Context) {
 		return
 	}
 	token, _, err := middleware.GenerateToken(u.Usr, u.ID, u.Role)
+	if err != nil {
+		util.AbortResponse(ctx, 100, err.Error())
+		return
+	}
 	util.Response(ctx, gin.H{
 		"u":            u,
 		"b":            b,

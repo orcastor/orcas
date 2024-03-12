@@ -14,9 +14,10 @@ import (
 )
 
 var noAuthPath = map[string]bool{
-	"":           true,
-	"/":          true,
-	"/api/login": true,
+	"":                 true,
+	"/":                true,
+	"/api/login":       true,
+	"/admin/api/login": true,
 }
 
 var ORCAS_SECRET = os.Getenv("ORCAS_SECRET")
