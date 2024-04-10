@@ -13,7 +13,9 @@
   <a href="https://goreportcard.com/badge/github.com/orcastor/orcas" alt="goreport">
     <img src="https://goreportcard.com/badge/github.com/orcastor/orcas?v=20220901">
   </a>
-<a href="https://app.fossa.com/projects/git%2Bgithub.com%2Forcastor%2Forcas?ref=badge_shield" alt="FOSSA Status"><img src="https://app.fossa.com/api/projects/git%2Bgithub.com%2Forcastor%2Forcas.svg?type=shield"/></a>
+  <a href="https://app.fossa.com/projects/git%2Bgithub.com%2Forcastor%2Forcas?ref=badge_shield" alt="FOSSA Status">
+    <img src="https://app.fossa.com/api/projects/git%2Bgithub.com%2Forcastor%2Forcas.svg?type=shield"/>
+  </a>
   <a href='https://orca-zhang.semaphoreci.com/branches/733643c4-54d7-4cc4-9b1e-c3c77c8ff7db' alt='Build Status'>
     <img src='https://orca-zhang.semaphoreci.com/badges/orcas/branches/master.svg?style=shields&key=78c39699-2da0-4322-9372-0839f9dcde76'>
   </a>
@@ -30,12 +32,12 @@
 
 主要特性：
 
-- ✅ 对象级重删（秒传）
-- ✅ 小对象打包
-- ✅ 大对象分片
-- ✅ 对象多版本
-- ✅ 零知识加密（端到端加密，国际标准算法）
-- ✅ 智能压缩
+- ⏱ 对象级重删（秒传）
+- 📦 小对象打包
+- 🔪 大对象分片
+- 🗂 对象多版本
+- 🔐 零知识加密（端到端加密，国际标准算法）
+- 🗜 智能压缩
 - [ ] [差分同步](https://github.com/orcastor/xdelta)
 - [ ] 实时快照
 
