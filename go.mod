@@ -9,11 +9,12 @@ require (
 	github.com/golang-jwt/jwt v3.2.2+incompatible
 	github.com/gotomicro/ego v1.1.5
 	github.com/h2non/filetype v1.1.4-0.20231228185113-6469358c2bcb
+	github.com/hanwen/go-fuse/v2 v2.9.0 // indirect
 	github.com/klauspost/compress v1.11.4
 	github.com/mattn/go-sqlite3 v1.14.6
 	github.com/mholt/archiver/v3 v3.5.1
 	github.com/mkmueller/aes256 v0.0.0-20171112015946-1ce9e9b3f91a
-	github.com/orca-zhang/borm v0.0.0-20220921122740-135bb95b3a65
+	github.com/orca-zhang/borm v0.0.0-20250923160046-6f14fa36e5bb
 	github.com/orca-zhang/ecache v1.1.1
 	github.com/orca-zhang/idgen v0.0.0-20220909041521-2662ff4c3c3e
 	github.com/prometheus/client_golang v1.12.1

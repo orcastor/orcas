@@ -29,25 +29,35 @@ const (
 )
 
 const (
-	PKG_ALIGN = 4096
-	PKG_SIZE  = 4194304
-	HDR_SIZE  = 102400
+	PKG_ALIGN     = 4096
+	PKG_SIZE      = 4194304 // 默认分片大小，如果配置未设置则使用此值
+	HDR_SIZE      = 102400
+	DEFAULT_CHUNK = 4 * 1024 * 1024 // 默认4MB
 )
 
 type listener struct {
-	bktID   int64
-	d       *core.DataInfo
-	cfg     Config
-	action  uint32
-	md5Hash hash.Hash
-	once    bool
-	sn, cnt int
-	cmprBuf bytes.Buffer
-	cmpr    archiver.Compressor
+	bktID     int64
+	d         *core.DataInfo
+	cfg       Config
+	action    uint32
+	md5Hash   hash.Hash
+	once      bool
+	sn, cnt   int
+	cmprBuf   bytes.Buffer
+	cmpr      archiver.Compressor
+	chunkSize int64 // 从桶配置中获取的分片大小
 }
 
-func newListener(bktID int64, d *core.DataInfo, cfg Config, action uint32) *listener {
-	l := &listener{bktID: bktID, d: d, cfg: cfg, action: action}
+// getChunkSize 获取分片大小（从桶配置中获取，如果未设置则使用默认值）
+func (l *listener) getChunkSize() int64 {
+	if l.chunkSize > 0 {
+		return l.chunkSize
+	}
+	return DEFAULT_CHUNK
+}
+
+func newListener(bktID int64, d *core.DataInfo, cfg Config, action uint32, chunkSize int64) *listener {
+	l := &listener{bktID: bktID, d: d, cfg: cfg, action: action, chunkSize: chunkSize}
 	if action&CRC32_MD5 != 0 {
 		l.md5Hash = md5.New()
 	}
@@ -121,8 +131,9 @@ func (l *listener) OnData(c core.Ctx, h core.Handler, dp *dataPkger, buf []byte)
 			cmprBuf = buf
 		} else {
 			l.cmpr.Compress(bytes.NewBuffer(buf), &l.cmprBuf)
+			chunkSize := l.getChunkSize()
 			// 如果压缩后更大了，恢复原始的
-			if l.d.OrigSize < PKG_SIZE {
+			if l.d.OrigSize < chunkSize {
 				if l.cmprBuf.Len() >= len(buf) {
 					l.d.Kind &= ^core.DATA_CMPR_MASK
 					cmprBuf = buf
@@ -131,8 +142,8 @@ func (l *listener) OnData(c core.Ctx, h core.Handler, dp *dataPkger, buf []byte)
 				}
 				l.cmprBuf.Reset()
 			} else {
-				if l.cmprBuf.Len() >= PKG_SIZE {
-					cmprBuf = l.cmprBuf.Next(PKG_SIZE)
+				if l.cmprBuf.Len() >= int(chunkSize) {
+					cmprBuf = l.cmprBuf.Next(int(chunkSize))
 				}
 			}
 		}
@@ -150,7 +161,8 @@ func (l *listener) OnData(c core.Ctx, h core.Handler, dp *dataPkger, buf []byte)
 			}
 
 			// 需要上传
-			if l.d.OrigSize < PKG_SIZE {
+			chunkSize := l.getChunkSize()
+			if l.d.OrigSize < chunkSize {
 				// 7. 检查是否要打包
 				if ok, err := dp.Push(c, h, l.bktID, encodedBuf, l.d); err == nil {
 					if ok {
@@ -205,7 +217,8 @@ func (osi *OrcasSDKImpl) readFile(c core.Ctx, path string, dp *dataPkger, l *lis
 
 	var n int
 	var once bool
-	buf := make([]byte, PKG_SIZE)
+	chunkSize := l.getChunkSize()
+	buf := make([]byte, chunkSize)
 	for {
 		if n, err = f.Read(buf); n <= 0 || err != nil {
 			break
@@ -364,8 +377,14 @@ func (osi *OrcasSDKImpl) uploadFiles(c core.Ctx, bktID int64, u []uploadInfo,
 		}
 	}
 
+	// 从桶配置中获取chunkSize
+	var chunkSize int64 = DEFAULT_CHUNK
+	buckets, err := osi.h.GetBkt(c, []int64{bktID})
+	if err == nil && len(buckets) > 0 && buckets[0].ChunkSize > 0 {
+		chunkSize = buckets[0].ChunkSize
+	}
 	if dp == nil {
-		dp = newDataPkger(osi.cfg.PkgThres)
+		dp = newDataPkger(osi.cfg.PkgThres, chunkSize)
 	}
 
 	var u1, u2 []uploadInfo
@@ -375,8 +394,9 @@ func (osi *OrcasSDKImpl) uploadFiles(c core.Ctx, bktID int64, u []uploadInfo,
 	switch level {
 	case FAST:
 		// 如果要预先秒传的，先读取hdrCRC32，排队检查
+		// 使用从桶配置中获取的chunkSize
 		for i, fi := range u {
-			if fi.o.Size > PKG_SIZE {
+			if fi.o.Size > chunkSize {
 				u1 = append(u1, fi)
 				d1 = append(d1, d[i])
 			} else {
@@ -388,7 +408,7 @@ func (osi *OrcasSDKImpl) uploadFiles(c core.Ctx, bktID int64, u []uploadInfo,
 			u, d, u1, d1 = u1, d1, nil, nil
 			for i, fi := range u {
 				if err := osi.readFile(c, filepath.Join(fi.path, fi.o.Name), dp,
-					newListener(bktID, d[i], osi.cfg, HDR_CRC32&^doneAction).Once()); err != nil {
+					newListener(bktID, d[i], osi.cfg, HDR_CRC32&^doneAction, chunkSize).Once()); err != nil {
 					fmt.Println(runtime.Caller(0))
 					fmt.Println(err)
 				}
@@ -422,7 +442,7 @@ func (osi *OrcasSDKImpl) uploadFiles(c core.Ctx, bktID int64, u []uploadInfo,
 		// 如果不需要预先秒传或者预先秒传失败的，整个读取crc32和md5以后尝试秒传
 		for i, fi := range u {
 			if err := osi.readFile(c, filepath.Join(fi.path, fi.o.Name), dp,
-				newListener(bktID, d[i], osi.cfg, (HDR_CRC32|CRC32_MD5)&^doneAction)); err != nil {
+				newListener(bktID, d[i], osi.cfg, (HDR_CRC32|CRC32_MD5)&^doneAction, chunkSize)); err != nil {
 				fmt.Println(runtime.Caller(0))
 				fmt.Println(err)
 			}
@@ -454,6 +474,7 @@ func (osi *OrcasSDKImpl) uploadFiles(c core.Ctx, bktID int64, u []uploadInfo,
 			return err
 		}
 		// 秒传失败的（包括超过大小或者预先秒传失败），普通上传
+		// 注意：这里递归调用 uploadFiles，chunkSize 已经在上层获取并传递给了 dp
 		if err := osi.uploadFiles(c, bktID, u1, d1, dp, OFF, doneAction|HDR_CRC32|CRC32_MD5); err != nil {
 			fmt.Println(runtime.Caller(0))
 			fmt.Println(err)
@@ -465,7 +486,7 @@ func (osi *OrcasSDKImpl) uploadFiles(c core.Ctx, bktID int64, u []uploadInfo,
 			// 如果是引用别人的，也就是<0的，不用再传了就
 			if d[i].ID >= 0 {
 				if err := osi.readFile(c, filepath.Join(fi.path, fi.o.Name), dp,
-					newListener(bktID, d[i], osi.cfg, (UPLOAD_DATA|HDR_CRC32|CRC32_MD5)&^doneAction)); err != nil {
+					newListener(bktID, d[i], osi.cfg, (UPLOAD_DATA|HDR_CRC32|CRC32_MD5)&^doneAction, chunkSize)); err != nil {
 					fmt.Println(runtime.Caller(0))
 					fmt.Println(err)
 				}
@@ -540,7 +561,8 @@ func (dr *dataReader) Read(p []byte) (n int, err error) {
 		return dr.buf.Read(p)
 	}
 	if dr.remain > 0 {
-		buf, err := dr.h.GetData(dr.c, dr.bktID, dr.dataID, dr.sn, []int{int(dr.offset), dr.getSize})
+		// GetData 的 offsetOrSize 参数：只传一个参数说明是sn，传两个参数说明是sn+offset，传三个参数说明是sn+offset+size
+		buf, err := dr.h.GetData(dr.c, dr.bktID, dr.dataID, dr.sn, int(dr.offset), dr.getSize)
 		if err != nil {
 			fmt.Println(runtime.Caller(0))
 			fmt.Println(err)
@@ -634,15 +656,20 @@ func (osi *OrcasSDKImpl) downloadFile(c core.Ctx, bktID int64, o *core.ObjectInf
 }
 
 type dataPkger struct {
-	buf   *bytes.Buffer
-	infos []*core.DataInfo
-	thres uint32
+	buf       *bytes.Buffer
+	infos     []*core.DataInfo
+	thres     uint32
+	chunkSize int64 // 分片大小
 }
 
-func newDataPkger(thres uint32) *dataPkger {
+func newDataPkger(thres uint32, chunkSize int64) *dataPkger {
+	if chunkSize <= 0 {
+		chunkSize = DEFAULT_CHUNK
+	}
 	return &dataPkger{
-		buf:   bytes.NewBuffer(make([]byte, 0, PKG_SIZE)),
-		thres: thres,
+		buf:       bytes.NewBuffer(make([]byte, 0, chunkSize)),
+		thres:     thres,
+		chunkSize: chunkSize,
 	}
 }
 
@@ -652,7 +679,12 @@ func (dp *dataPkger) SetThres(thres uint32) {
 
 func (dp *dataPkger) Push(c core.Ctx, h core.Handler, bktID int64, b []byte, d *core.DataInfo) (bool, error) {
 	offset := dp.buf.Len()
-	if offset+ /*offset%PKG_ALIGN+*/ len(b) > PKG_SIZE || len(dp.infos) >= int(dp.thres) || len(b) >= PKG_SIZE {
+	// 使用配置的chunkSize而不是PKG_SIZE常量
+	chunkSize := dp.chunkSize
+	if chunkSize <= 0 {
+		chunkSize = DEFAULT_CHUNK
+	}
+	if offset+ /*offset%PKG_ALIGN+*/ len(b) > int(chunkSize) || len(dp.infos) >= int(dp.thres) || len(b) >= int(chunkSize) {
 		return false, dp.Flush(c, h, bktID)
 	}
 	// 写入前再处理对齐，最后一块就不用补齐了，PS：需要测试一下读性能差多少

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -13,12 +14,16 @@ import (
 )
 
 type BucketInfo struct {
-	ID    int64  `borm:"id" json:"i,omitempty"`    // 桶ID
-	Name  string `borm:"name" json:"n,omitempty"`  // 桶名称
-	UID   int64  `borm:"uid" json:"u,omitempty"`   // 拥有者
-	Type  int    `borm:"type" json:"t,omitempty"`  // 桶类型，0: none, 1: normal ...
-	Quota int64  `borm:"quota" json:"q,omitempty"` // 配额
-	Usage int64  `borm:"usage" json:"s,omitempty"` // 使用量，统计所有版本的原始大小
+	ID           int64  `borm:"id" json:"i,omitempty"`             // 桶ID
+	Name         string `borm:"name" json:"n,omitempty"`           // 桶名称
+	UID          int64  `borm:"uid" json:"u,omitempty"`            // 拥有者
+	Type         int    `borm:"type" json:"t,omitempty"`           // 桶类型，0: none, 1: normal ...
+	Quota        int64  `borm:"quota" json:"q,omitempty"`          // 配额，小于0表示不限制
+	Used         int64  `borm:"used" json:"s,omitempty"`           // 逻辑使用量，统计所有版本的原始大小
+	RealUsed     int64  `borm:"real_used" json:"ru,omitempty"`     // 实际物理使用量，统计实际存储的数据大小
+	LogicalUsed  int64  `borm:"logical_used" json:"lu,omitempty"`  // 逻辑占用，统计所有有效对象（未删除的，PID >= 0）的逻辑占用大小（考虑去重，但不包括已删除对象）
+	DedupSavings int64  `borm:"dedup_savings" json:"ds,omitempty"` // 秒传节省空间，统计去重节省的数据量（LogicalUsed - 唯一数据块大小）
+	ChunkSize    int64  `borm:"chunk_size" json:"cs,omitempty"`    // 分片大小（字节），0或未设置则使用默认值4MB
 	// SnapshotID int64 // 最新快照版本ID
 }
 
@@ -51,7 +56,6 @@ type ObjectInfo struct {
 	Name   string `borm:"name" json:"n,omitempty"`  // 对象名称
 	Size   int64  `borm:"size" json:"s,omitempty"`  // 对象的大小，目录的大小是子对象数，文件的大小是最新版本的字节数
 	Extra  string `borm:"ext" json:"e,omitempty"`   // 对象的扩展信息
-	// BktID int64 // 桶ID，如果支持引用别的桶的数据，为0说明是本桶
 }
 
 // 数据状态
@@ -123,12 +127,46 @@ type BucketMetadataAdapter interface {
 	PutBkt(c Ctx, o []*BucketInfo) error
 	GetBkt(c Ctx, ids []int64) ([]*BucketInfo, error)
 	ListBkt(c Ctx, uid int64) ([]*BucketInfo, error)
+	ListAllBuckets(c Ctx) ([]*BucketInfo, error) // 获取所有bucket（用于定时任务）
+	// 更新桶配额和使用量
+	UpdateBktQuota(c Ctx, bktID int64, quota int64) error
+	// 增加桶的实际使用量（用于上传数据时）
+	IncBktRealUsed(c Ctx, bktID int64, size int64) error
+	// 减少桶的实际使用量（用于删除数据时）
+	DecBktRealUsed(c Ctx, bktID int64, size int64) error
+	// 增加桶的逻辑使用量（用于创建对象时，包括秒传）
+	IncBktUsed(c Ctx, bktID int64, size int64) error
+	// 减少桶的逻辑使用量（用于删除对象时）
+	DecBktUsed(c Ctx, bktID int64, size int64) error
+	// 增加桶的逻辑占用（用于创建对象时，只统计有效对象）
+	IncBktLogicalUsed(c Ctx, bktID int64, size int64) error
+	// 减少桶的逻辑占用（用于删除对象时）
+	DecBktLogicalUsed(c Ctx, bktID int64, size int64) error
+	// 增加桶的秒传节省空间（用于秒传时，节省的数据量）
+	IncBktDedupSavings(c Ctx, bktID int64, size int64) error
+	// 减少桶的秒传节省空间（用于删除对象时）
+	DecBktDedupSavings(c Ctx, bktID int64, size int64) error
+}
+
+// DuplicateGroup 重复数据组
+type DuplicateGroup struct {
+	Key     string  // 校验值key: "OrigSize:HdrCRC32:CRC32:MD5"
+	DataIDs []int64 // 具有相同校验值的DataID列表
 }
 
 type DataMetadataAdapter interface {
 	RefData(c Ctx, bktID int64, d []*DataInfo) ([]int64, error)
 	PutData(c Ctx, bktID int64, d []*DataInfo) error
 	GetData(c Ctx, bktID, id int64) (*DataInfo, error)
+	ListAllData(c Ctx, bktID int64, offset, limit int) ([]*DataInfo, int64, error) // offset: 偏移量, limit: 每页数量, 返回数据和总数
+	// 查找重复数据：返回具有相同校验值的DataID分组（OrigSize, HdrCRC32, CRC32, MD5都相同）
+	FindDuplicateData(c Ctx, bktID int64, offset, limit int) ([]DuplicateGroup, int64, error) // 返回重复数据组和总数
+	// 更新对象的DataID引用
+	UpdateObjDataID(c Ctx, bktID int64, oldDataID, newDataID int64) error
+	// 删除数据元信息
+	DeleteData(c Ctx, bktID int64, dataIDs []int64) error
+	// 查找可以打包的小文件数据（用于碎片整理）
+	FindSmallPackageData(c Ctx, bktID int64, maxSize int64, offset, limit int) ([]*DataInfo, int64, error)
 }
 
 type ObjectMetadataAdapter interface {
@@ -136,6 +174,18 @@ type ObjectMetadataAdapter interface {
 	GetObj(c Ctx, bktID int64, ids []int64) ([]*ObjectInfo, error)
 	SetObj(c Ctx, bktID int64, fields []string, o *ObjectInfo) error
 	ListObj(c Ctx, bktID, pid int64, wd, delim, order string, count int) ([]*ObjectInfo, int64, string, error)
+	CountDataRefs(c Ctx, bktID int64, dataIDs []int64) (map[int64]int64, error)               // 统计DataID的引用计数
+	DeleteObj(c Ctx, bktID int64, id int64) error                                             // 删除对象（标记为已删除，PID翻转成负数）
+	ListDeletedObjs(c Ctx, bktID int64, beforeTime int64, limit int) ([]*ObjectInfo, error)   // 列出已删除的对象（PID < 0）
+	ListRecycleBin(c Ctx, bktID int64, opt ListOptions) ([]*ObjectInfo, int64, string, error) // 列举回收站（PID < 0的对象）
+	// 查询所有指定类型的对象（未删除的，pid >= 0）
+	ListObjsByType(c Ctx, bktID int64, objType int) ([]*ObjectInfo, error)
+	// 查询指定目录下的所有子对象（未删除的，pid >= 0）
+	ListChildren(c Ctx, bktID int64, pid int64) ([]*ObjectInfo, error)
+	// 根据DataID查询所有引用该数据的对象
+	GetObjByDataID(c Ctx, bktID int64, dataID int64) ([]*ObjectInfo, error)
+	// 查询文件的所有版本（按MTime降序排列，最新的在前）
+	ListVersions(c Ctx, bktID int64, fileID int64) ([]*ObjectInfo, error)
 }
 
 type MetadataAdapter interface {
@@ -169,13 +219,26 @@ func InitDB() error {
 	}
 	defer db.Close()
 
-	db.Exec(`CREATE TABLE bkt (id BIGINT PRIMARY KEY NOT NULL,
+	db.Exec(`CREATE TABLE IF NOT EXISTS bkt (id BIGINT PRIMARY KEY NOT NULL,
 		uid BIGINT NOT NULL,
 		quota BIGINT NOT NULL,
-		usage BIGINT NOT NULL,
+		used BIGINT NOT NULL,
+		real_used BIGINT NOT NULL DEFAULT 0,
+		logical_used BIGINT NOT NULL DEFAULT 0,
+		dedup_savings BIGINT NOT NULL DEFAULT 0,
 		type TINYINT NOT NULL,
-		name TEXT NOT NULL
+		name TEXT NOT NULL,
+		chunk_size BIGINT NOT NULL DEFAULT 0
 	)`)
+
+	// 添加新列的迁移（如果列不存在，忽略错误）
+	// SQLite会在列已存在时返回错误，但我们可以安全地忽略它
+	_, _ = db.Exec(`ALTER TABLE bkt ADD COLUMN logical_used BIGINT NOT NULL DEFAULT 0`)
+	_, _ = db.Exec(`ALTER TABLE bkt ADD COLUMN dedup_savings BIGINT NOT NULL DEFAULT 0`)
+
+	// 迁移旧列名usage到used（如果存在旧列但不存在新列）
+	_, _ = db.Exec(`ALTER TABLE bkt ADD COLUMN used BIGINT NOT NULL DEFAULT 0`)
+	_, _ = db.Exec(`UPDATE bkt SET used = usage WHERE used = 0 AND usage != 0`)
 
 	db.Exec(`CREATE TABLE usr (id BIGINT PRIMARY KEY NOT NULL,
 		role TINYINT NOT NULL,
@@ -196,11 +259,11 @@ func InitDB() error {
 func InitBucketDB(c Ctx, bktID int64) error {
 	db, err := GetDB(c, bktID)
 	if err != nil {
-		return ERR_OPEN_DB
+		return fmt.Errorf("%w: %v", ERR_OPEN_DB, err)
 	}
 	defer db.Close()
 
-	db.Exec(`CREATE TABLE obj (id BIGINT PRIMARY KEY NOT NULL,
+	_, err = db.Exec(`CREATE TABLE IF NOT EXISTS obj (id BIGINT PRIMARY KEY NOT NULL,
 		pid BIGINT NOT NULL,
 		did BIGINT NOT NULL,
 		size BIGINT NOT NULL,
@@ -209,22 +272,37 @@ func InitBucketDB(c Ctx, bktID int64) error {
 		name TEXT NOT NULL,
 		ext TEXT NOT NULL
 	)`)
+	if err != nil {
+		return fmt.Errorf("%w: create obj table: %v", ERR_EXEC_DB, err)
+	}
 
-	db.Exec(`CREATE TABLE data (id BIGINT PRIMARY KEY NOT NULL,
+	_, err = db.Exec(`CREATE TABLE IF NOT EXISTS data (id BIGINT PRIMARY KEY NOT NULL,
 		size BIGINT NOT NULL,
 		o_size BIGINT NOT NULL,
 		md5 BIGINT NOT NULL,
 		pkg_id BIGINT NOT NULL,
-		pkg_off UNSIGNED INT NOT NULL,
-		h_crc32 UNSIGNED INT NOT NULL,
-		crc32 UNSIGNED INT NOT NULL,
-		cksum UNSIGNED INT NOT NULL,
+		pkg_off INTEGER NOT NULL,
+		h_crc32 INTEGER NOT NULL,
+		crc32 INTEGER NOT NULL,
+		cksum INTEGER NOT NULL,
 		kind SMALLINT NOT NULL
 	)`)
+	if err != nil {
+		return fmt.Errorf("%w: create data table: %v", ERR_EXEC_DB, err)
+	}
 
-	db.Exec(`CREATE UNIQUE INDEX uk_pid_name on obj (pid, name)`)
-	db.Exec(`CREATE INDEX ix_ref ON data (o_size, h_crc32, crc32, md5)`)
-	db.Exec(`PRAGMA temp_store = MEMORY`)
+	_, err = db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS uk_pid_name on obj (pid, name)`)
+	if err != nil {
+		return fmt.Errorf("%w: create index uk_pid_name: %v", ERR_EXEC_DB, err)
+	}
+	_, err = db.Exec(`CREATE INDEX IF NOT EXISTS ix_ref ON data (o_size, h_crc32, crc32, md5)`)
+	if err != nil {
+		return fmt.Errorf("%w: create index ix_ref: %v", ERR_EXEC_DB, err)
+	}
+	_, err = db.Exec(`PRAGMA temp_store = MEMORY`)
+	if err != nil {
+		return fmt.Errorf("%w: set pragma: %v", ERR_EXEC_DB, err)
+	}
 	return nil
 }
 
@@ -249,7 +327,7 @@ func (dma *DefaultMetadataAdapter) RefData(c Ctx, bktID int64, d []*DataInfo) ([
 		md5 BIGINT NOT NULL
 	)`)
 	// 把待查询数据放到临时表
-	if _, err = b.Table(db, tbl, c).Insert(&d,
+	if _, err = b.TableContext(c, db, tbl).Insert(&d,
 		b.Fields("o_size", "h_crc32", "crc32", "md5")); err != nil {
 		return nil, ERR_EXEC_DB
 	}
@@ -261,7 +339,7 @@ func (dma *DefaultMetadataAdapter) RefData(c Ctx, bktID int64, d []*DataInfo) ([
 		MD5      int64  `borm:"b.md5"`
 	}
 	// 联表查询
-	if _, err = b.Table(db, `data a, `+tbl+` b`, c).Select(&refs,
+	if _, err = b.TableContext(c, db, `data a, `+tbl+` b`).Select(&refs,
 		b.Join(`on a.o_size=b.o_size and a.h_crc32=b.h_crc32 and 
 			(b.crc32=0 or b.md5=0 or (a.crc32=b.crc32 and a.md5=b.md5))`),
 		b.GroupBy("b.o_size", "b.h_crc32", "b.crc32", "b.md5")); err != nil {
@@ -308,7 +386,7 @@ func (dma *DefaultMetadataAdapter) PutData(c Ctx, bktID int64, d []*DataInfo) er
 	}
 	defer db.Close()
 
-	if _, err = b.Table(db, DATA_TBL, c).ReplaceInto(&d); err != nil {
+	if _, err = b.TableContext(c, db, DATA_TBL).ReplaceInto(&d); err != nil {
 		return ERR_EXEC_DB
 	}
 	return nil
@@ -322,8 +400,202 @@ func (dma *DefaultMetadataAdapter) GetData(c Ctx, bktID, id int64) (d *DataInfo,
 	defer db.Close()
 
 	d = &DataInfo{}
-	if _, err = b.Table(db, DATA_TBL, c).Select(d, b.Where(b.Eq("id", id))); err != nil {
+	if _, err = b.TableContext(c, db, DATA_TBL).Select(d, b.Where(b.Eq("id", id))); err != nil {
 		return nil, ERR_QUERY_DB
+	}
+	return
+}
+
+func (dma *DefaultMetadataAdapter) ListAllData(c Ctx, bktID int64, offset, limit int) (d []*DataInfo, total int64, err error) {
+	db, err := GetDB(c, bktID)
+	if err != nil {
+		return nil, 0, ERR_OPEN_DB
+	}
+	defer db.Close()
+
+	// 获取总数
+	if _, err = b.TableContext(c, db, DATA_TBL).Select(&total, b.Fields("count(1)")); err != nil {
+		return nil, 0, ERR_QUERY_DB
+	}
+
+	// 分页查询数据：使用原生SQL实现LIMIT和OFFSET
+	if limit > 0 {
+		query := fmt.Sprintf("SELECT * FROM %s ORDER BY id LIMIT %d OFFSET %d", DATA_TBL, limit, offset)
+		rows, err2 := db.Query(query)
+		if err2 != nil {
+			return nil, 0, ERR_QUERY_DB
+		}
+		defer rows.Close()
+
+		for rows.Next() {
+			var di DataInfo
+			err2 = rows.Scan(&di.ID, &di.Size, &di.OrigSize, &di.MD5, &di.PkgID, &di.PkgOffset,
+				&di.HdrCRC32, &di.CRC32, &di.Cksum, &di.Kind)
+			if err2 != nil {
+				continue
+			}
+			d = append(d, &di)
+		}
+		if err2 != nil && err2 != rows.Err() {
+			return nil, 0, ERR_QUERY_DB
+		}
+	} else {
+		// limit为0表示获取全部（用于向后兼容，但不推荐）
+		if _, err = b.TableContext(c, db, DATA_TBL).Select(&d); err != nil {
+			return nil, 0, ERR_QUERY_DB
+		}
+	}
+	return
+}
+
+func (dma *DefaultMetadataAdapter) FindDuplicateData(c Ctx, bktID int64, offset, limit int) (groups []DuplicateGroup, total int64, err error) {
+	db, err := GetDB(c, bktID)
+	if err != nil {
+		return nil, 0, ERR_OPEN_DB
+	}
+	defer db.Close()
+
+	// 查找具有相同校验值的重复数据（需要OrigSize, HdrCRC32, CRC32, MD5都相同）
+	// 首先获取总数（重复组数）
+	query := `SELECT COUNT(*) FROM (
+		SELECT o_size, h_crc32, crc32, md5, COUNT(*) as cnt
+		FROM data
+		WHERE o_size > 0 AND h_crc32 > 0 AND crc32 > 0 AND md5 != 0
+		GROUP BY o_size, h_crc32, crc32, md5
+		HAVING cnt > 1
+	)`
+	err = db.QueryRow(query).Scan(&total)
+	if err != nil {
+		return nil, 0, ERR_QUERY_DB
+	}
+	if total == 0 {
+		return groups, 0, nil
+	}
+
+	// 分页查询重复数据组
+	if limit > 0 {
+		query = fmt.Sprintf(`SELECT o_size, h_crc32, crc32, md5, GROUP_CONCAT(id) as ids
+			FROM data
+			WHERE o_size > 0 AND h_crc32 > 0 AND crc32 > 0 AND md5 != 0
+			GROUP BY o_size, h_crc32, crc32, md5
+			HAVING COUNT(*) > 1
+			ORDER BY MIN(id)
+			LIMIT %d OFFSET %d`, limit, offset)
+	} else {
+		query = `SELECT o_size, h_crc32, crc32, md5, GROUP_CONCAT(id) as ids
+			FROM data
+			WHERE o_size > 0 AND h_crc32 > 0 AND crc32 > 0 AND md5 != 0
+			GROUP BY o_size, h_crc32, crc32, md5
+			HAVING COUNT(*) > 1
+			ORDER BY MIN(id)`
+	}
+
+	rows, err := db.Query(query)
+	if err != nil {
+		return nil, 0, ERR_QUERY_DB
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var oSize int64
+		var hCrc32, crc32 uint32
+		var md5 int64
+		var idsStr string
+		if err = rows.Scan(&oSize, &hCrc32, &crc32, &md5, &idsStr); err != nil {
+			continue
+		}
+
+		// 解析ID列表
+		idStrs := strings.Split(idsStr, ",")
+		dataIDs := make([]int64, 0, len(idStrs))
+		for _, idStr := range idStrs {
+			id, err2 := strconv.ParseInt(strings.TrimSpace(idStr), 10, 64)
+			if err2 != nil {
+				continue
+			}
+			dataIDs = append(dataIDs, id)
+		}
+
+		if len(dataIDs) > 1 {
+			key := fmt.Sprintf("%d:%d:%d:%d", oSize, hCrc32, crc32, md5)
+			groups = append(groups, DuplicateGroup{
+				Key:     key,
+				DataIDs: dataIDs,
+			})
+		}
+	}
+	return
+}
+
+func (dma *DefaultMetadataAdapter) UpdateObjDataID(c Ctx, bktID int64, oldDataID, newDataID int64) error {
+	db, err := GetDB(c, bktID)
+	if err != nil {
+		return ERR_OPEN_DB
+	}
+	defer db.Close()
+
+	// 更新所有引用oldDataID的对象，将其DataID改为newDataID
+	_, err = db.Exec("UPDATE obj SET did = ? WHERE did = ?", newDataID, oldDataID)
+	if err != nil {
+		return ERR_EXEC_DB
+	}
+	return nil
+}
+
+func (dma *DefaultMetadataAdapter) DeleteData(c Ctx, bktID int64, dataIDs []int64) error {
+	if len(dataIDs) == 0 {
+		return nil
+	}
+	db, err := GetDB(c, bktID)
+	if err != nil {
+		return ERR_OPEN_DB
+	}
+	defer db.Close()
+
+	// 批量删除数据元信息
+	_, err = b.TableContext(c, db, DATA_TBL).Delete(b.Where(b.In("id", dataIDs)))
+	if err != nil {
+		return ERR_EXEC_DB
+	}
+	return nil
+}
+
+func (dma *DefaultMetadataAdapter) FindSmallPackageData(c Ctx, bktID int64, maxSize int64, offset, limit int) (d []*DataInfo, total int64, err error) {
+	db, err := GetDB(c, bktID)
+	if err != nil {
+		return nil, 0, ERR_OPEN_DB
+	}
+	defer db.Close()
+
+	// 查找小文件数据：pkg_id=0（未打包）、o_size < maxSize 的数据
+	// 获取总数
+	query := fmt.Sprintf("SELECT COUNT(*) FROM data WHERE pkg_id = 0 AND o_size > 0 AND o_size < %d", maxSize)
+	err = db.QueryRow(query).Scan(&total)
+	if err != nil {
+		return nil, 0, ERR_QUERY_DB
+	}
+
+	// 分页查询
+	if limit > 0 {
+		query = fmt.Sprintf("SELECT * FROM data WHERE pkg_id = 0 AND o_size > 0 AND o_size < %d ORDER BY id LIMIT %d OFFSET %d", maxSize, limit, offset)
+	} else {
+		query = fmt.Sprintf("SELECT * FROM data WHERE pkg_id = 0 AND o_size > 0 AND o_size < %d ORDER BY id", maxSize)
+	}
+
+	rows, err := db.Query(query)
+	if err != nil {
+		return nil, 0, ERR_QUERY_DB
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var di DataInfo
+		err2 := rows.Scan(&di.ID, &di.Size, &di.OrigSize, &di.MD5, &di.PkgID, &di.PkgOffset,
+			&di.HdrCRC32, &di.CRC32, &di.Cksum, &di.Kind)
+		if err2 != nil {
+			continue
+		}
+		d = append(d, &di)
 	}
 	return
 }
@@ -340,12 +612,12 @@ func (dma *DefaultMetadataAdapter) PutObj(c Ctx, bktID int64, o []*ObjectInfo) (
 	}
 
 	var n int
-	if n, err = b.Table(db, OBJ_TBL, c).InsertIgnore(&o); err != nil {
+	if n, err = b.TableContext(c, db, OBJ_TBL).InsertIgnore(&o); err != nil {
 		return nil, ERR_EXEC_DB
 	}
 	if n != len(o) {
 		var inserted []int64
-		if _, err = b.Table(db, OBJ_TBL, c).Select(&inserted, b.Fields("id"), b.Where(b.In("id", ids))); err != nil {
+		if _, err = b.TableContext(c, db, OBJ_TBL).Select(&inserted, b.Fields("id"), b.Where(b.In("id", ids))); err != nil {
 			return nil, ERR_QUERY_DB
 		}
 		// 处理有冲突的情况
@@ -370,7 +642,7 @@ func (dma *DefaultMetadataAdapter) GetObj(c Ctx, bktID int64, ids []int64) (o []
 	}
 	defer db.Close()
 
-	if _, err = b.Table(db, OBJ_TBL, c).Select(&o, b.Where(b.In("id", ids))); err != nil {
+	if _, err = b.TableContext(c, db, OBJ_TBL).Select(&o, b.Where(b.In("id", ids))); err != nil {
 		return nil, ERR_QUERY_DB
 	}
 	return
@@ -383,7 +655,7 @@ func (dma *DefaultMetadataAdapter) SetObj(c Ctx, bktID int64, fields []string, o
 	}
 	defer db.Close()
 
-	if _, err = b.Table(db, OBJ_TBL, c).Update(o, b.Fields(fields...), b.Where(b.Eq("id", o.ID))); err != nil {
+	if _, err = b.TableContext(c, db, OBJ_TBL).Update(o, b.Fields(fields...), b.Where(b.Eq("id", o.ID))); err != nil {
 		// 如果存在同名文件，会报错：Error: stepping, UNIQUE constraint failed: obj.name (19)
 		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
 			return ERR_DUP_KEY
@@ -449,7 +721,8 @@ func (dma *DefaultMetadataAdapter) ListObj(c Ctx, bktID, pid int64,
 	conds := []interface{}{b.Eq("pid", pid)}
 	if wd != "" {
 		if strings.ContainsAny(wd, "*?") {
-			conds = append(conds, b.GLOB("name", wd))
+			// sqlite 分支使用 LIKE 模式匹配
+			conds = append(conds, fmt.Sprintf("name LIKE '%s'", strings.ReplaceAll(strings.ReplaceAll(wd, "*", "%"), "?", "_")))
 		} else {
 			conds = append(conds, b.Eq("name", wd))
 		}
@@ -461,7 +734,7 @@ func (dma *DefaultMetadataAdapter) ListObj(c Ctx, bktID, pid int64,
 	}
 	defer db.Close()
 
-	if _, err = b.Table(db, OBJ_TBL, c).Select(&cnt,
+	if _, err = b.TableContext(c, db, OBJ_TBL).Select(&cnt,
 		b.Fields("count(1)"),
 		b.Where(conds...)); err != nil {
 		return nil, 0, "", ERR_QUERY_DB
@@ -470,7 +743,7 @@ func (dma *DefaultMetadataAdapter) ListObj(c Ctx, bktID, pid int64,
 	if count > 0 {
 		var orderBy string
 		orderBy, order = doOrder(delim, order, &conds)
-		if _, err = b.Table(db, OBJ_TBL, c).Select(&o,
+		if _, err = b.TableContext(c, db, OBJ_TBL).Select(&o,
 			b.Where(conds...),
 			b.OrderBy(orderBy),
 			b.Limit(count)); err != nil {
@@ -491,7 +764,7 @@ func (dma *DefaultMetadataAdapter) PutUsr(c Ctx, u *UserInfo) error {
 	}
 	defer db.Close()
 
-	if _, err = b.Table(db, USR_TBL, c).ReplaceInto(&u); err != nil {
+	if _, err = b.TableContext(c, db, USR_TBL).ReplaceInto(&u); err != nil {
 		return ERR_EXEC_DB
 	}
 	return nil
@@ -504,7 +777,7 @@ func (dma *DefaultMetadataAdapter) GetUsr(c Ctx, ids []int64) (o []*UserInfo, er
 	}
 	defer db.Close()
 
-	if _, err = b.Table(db, USR_TBL, c).Select(&o, b.Where(b.In("id", ids))); err != nil {
+	if _, err = b.TableContext(c, db, USR_TBL).Select(&o, b.Where(b.In("id", ids))); err != nil {
 		return nil, ERR_QUERY_DB
 	}
 	return
@@ -518,7 +791,7 @@ func (dma *DefaultMetadataAdapter) GetUsr2(c Ctx, usr string) (o *UserInfo, err 
 	defer db.Close()
 
 	o = &UserInfo{}
-	if _, err = b.Table(db, USR_TBL, c).Select(o, b.Where(b.Eq("usr", usr))); err != nil {
+	if _, err = b.TableContext(c, db, USR_TBL).Select(o, b.Where(b.Eq("usr", usr))); err != nil {
 		return nil, ERR_QUERY_DB
 	}
 	return
@@ -531,7 +804,7 @@ func (dma *DefaultMetadataAdapter) SetUsr(c Ctx, fields []string, u *UserInfo) e
 	}
 	defer db.Close()
 
-	if _, err = b.Table(db, USR_TBL, c).Update(&u,
+	if _, err = b.TableContext(c, db, USR_TBL).Update(&u,
 		b.Fields(fields...), b.Where(b.Eq("id", u.ID))); err != nil {
 		return ERR_EXEC_DB
 	}
@@ -545,7 +818,7 @@ func (dma *DefaultMetadataAdapter) PutBkt(c Ctx, o []*BucketInfo) error {
 	}
 	defer db.Close()
 
-	if _, err = b.Table(db, BKT_TBL, c).ReplaceInto(&o); err != nil {
+	if _, err = b.TableContext(c, db, BKT_TBL).ReplaceInto(&o); err != nil {
 		return ERR_EXEC_DB
 	}
 	for _, x := range o {
@@ -561,7 +834,7 @@ func (dma *DefaultMetadataAdapter) GetBkt(c Ctx, ids []int64) (o []*BucketInfo, 
 	}
 	defer db.Close()
 
-	if _, err = b.Table(db, BKT_TBL, c).Select(&o, b.Where(b.In("id", ids))); err != nil {
+	if _, err = b.TableContext(c, db, BKT_TBL).Select(&o, b.Where(b.In("id", ids))); err != nil {
 		return nil, ERR_QUERY_DB
 	}
 	return
@@ -574,8 +847,356 @@ func (dma *DefaultMetadataAdapter) ListBkt(c Ctx, uid int64) (o []*BucketInfo, e
 	}
 	defer db.Close()
 
-	if _, err = b.Table(db, BKT_TBL, c).Select(&o, b.Where(b.Eq("uid", uid))); err != nil {
+	if _, err = b.TableContext(c, db, BKT_TBL).Select(&o, b.Where(b.Eq("uid", uid))); err != nil {
 		return nil, ERR_QUERY_DB
+	}
+	return
+}
+
+func (dma *DefaultMetadataAdapter) ListAllBuckets(c Ctx) (o []*BucketInfo, err error) {
+	db, err := GetDB()
+	if err != nil {
+		return nil, ERR_OPEN_DB
+	}
+	defer db.Close()
+
+	if _, err = b.TableContext(c, db, BKT_TBL).Select(&o); err != nil {
+		return nil, ERR_QUERY_DB
+	}
+	return
+}
+
+func (dma *DefaultMetadataAdapter) UpdateBktQuota(c Ctx, bktID int64, quota int64) error {
+	db, err := GetDB()
+	if err != nil {
+		return ERR_OPEN_DB
+	}
+	defer db.Close()
+
+	if _, err = b.TableContext(c, db, BKT_TBL).Update(&BucketInfo{Quota: quota},
+		b.Fields("quota"), b.Where(b.Eq("id", bktID))); err != nil {
+		return ERR_EXEC_DB
+	}
+	return nil
+}
+
+func (dma *DefaultMetadataAdapter) IncBktRealUsed(c Ctx, bktID int64, size int64) error {
+	// 使用ecache异步合并刷新，不立即写入数据库
+	updateBucketStatsCache(bktID, 0, size, 0, 0)
+	return nil
+}
+
+func (dma *DefaultMetadataAdapter) DecBktRealUsed(c Ctx, bktID int64, size int64) error {
+	// 使用ecache异步合并刷新，不立即写入数据库
+	updateBucketStatsCache(bktID, 0, -size, 0, 0)
+	return nil
+}
+
+func (dma *DefaultMetadataAdapter) IncBktUsed(c Ctx, bktID int64, size int64) error {
+	// 使用ecache异步合并刷新，不立即写入数据库
+	updateBucketStatsCache(bktID, size, 0, 0, 0)
+	return nil
+}
+
+func (dma *DefaultMetadataAdapter) DecBktUsed(c Ctx, bktID int64, size int64) error {
+	// 使用ecache异步合并刷新，不立即写入数据库
+	updateBucketStatsCache(bktID, -size, 0, 0, 0)
+	return nil
+}
+
+func (dma *DefaultMetadataAdapter) IncBktLogicalUsed(c Ctx, bktID int64, size int64) error {
+	// 使用ecache异步合并刷新，不立即写入数据库
+	updateBucketStatsCache(bktID, 0, 0, size, 0)
+	return nil
+}
+
+func (dma *DefaultMetadataAdapter) DecBktLogicalUsed(c Ctx, bktID int64, size int64) error {
+	// 使用ecache异步合并刷新，不立即写入数据库
+	updateBucketStatsCache(bktID, 0, 0, -size, 0)
+	return nil
+}
+
+func (dma *DefaultMetadataAdapter) IncBktDedupSavings(c Ctx, bktID int64, size int64) error {
+	// 使用ecache异步合并刷新，不立即写入数据库
+	updateBucketStatsCache(bktID, 0, 0, 0, size)
+	return nil
+}
+
+func (dma *DefaultMetadataAdapter) DecBktDedupSavings(c Ctx, bktID int64, size int64) error {
+	// 使用ecache异步合并刷新，不立即写入数据库
+	updateBucketStatsCache(bktID, 0, 0, 0, -size)
+	return nil
+}
+
+func (dma *DefaultMetadataAdapter) CountDataRefs(c Ctx, bktID int64, dataIDs []int64) (map[int64]int64, error) {
+	db, err := GetDB(c, bktID)
+	if err != nil {
+		return nil, ERR_OPEN_DB
+	}
+	defer db.Close()
+
+	if len(dataIDs) == 0 {
+		return make(map[int64]int64), nil
+	}
+
+	// 统计每个DataID被引用的次数
+	type refCount struct {
+		DataID int64 `borm:"did"`
+		Count  int64 `borm:"count(1)"`
+	}
+	var counts []refCount
+	// 排除已删除的对象（pid >= 0，因为删除时PID会被翻转成负数）
+	whereConds := []interface{}{b.In("did", dataIDs), "pid >= 0"}
+	if _, err = b.TableContext(c, db, OBJ_TBL).Select(&counts,
+		b.Fields("did", "count(1)"),
+		b.Where(whereConds...),
+		b.GroupBy("did")); err != nil {
+		return nil, ERR_QUERY_DB
+	}
+
+	result := make(map[int64]int64)
+	for _, c := range counts {
+		result[c.DataID] = c.Count
+	}
+	// 确保所有查询的dataID都在结果中（即使引用数为0）
+	for _, dataID := range dataIDs {
+		if _, exists := result[dataID]; !exists {
+			result[dataID] = 0
+		}
+	}
+	return result, nil
+}
+
+func (dma *DefaultMetadataAdapter) ListObjsByType(c Ctx, bktID int64, objType int) ([]*ObjectInfo, error) {
+	db, err := GetDB(c, bktID)
+	if err != nil {
+		return nil, ERR_OPEN_DB
+	}
+	defer db.Close()
+
+	var objs []*ObjectInfo
+	_, err = b.TableContext(c, db, OBJ_TBL).Select(&objs,
+		b.Where(b.Eq("type", objType), "pid >= 0"))
+	if err != nil {
+		return nil, ERR_QUERY_DB
+	}
+	return objs, nil
+}
+
+func (dma *DefaultMetadataAdapter) ListChildren(c Ctx, bktID int64, pid int64) ([]*ObjectInfo, error) {
+	db, err := GetDB(c, bktID)
+	if err != nil {
+		return nil, ERR_OPEN_DB
+	}
+	defer db.Close()
+
+	var children []*ObjectInfo
+	_, err = b.TableContext(c, db, OBJ_TBL).Select(&children,
+		b.Where(b.Eq("pid", pid), "pid >= 0"))
+	if err != nil {
+		return nil, ERR_QUERY_DB
+	}
+	return children, nil
+}
+
+func (dma *DefaultMetadataAdapter) GetObjByDataID(c Ctx, bktID int64, dataID int64) ([]*ObjectInfo, error) {
+	db, err := GetDB(c, bktID)
+	if err != nil {
+		return nil, ERR_OPEN_DB
+	}
+	defer db.Close()
+
+	var objs []*ObjectInfo
+	_, err = b.TableContext(c, db, OBJ_TBL).Select(&objs,
+		b.Where(b.Eq("did", dataID)))
+	if err != nil {
+		return nil, ERR_QUERY_DB
+	}
+	return objs, nil
+}
+
+func (dma *DefaultMetadataAdapter) ListVersions(c Ctx, bktID int64, fileID int64) ([]*ObjectInfo, error) {
+	db, err := GetDB(c, bktID)
+	if err != nil {
+		return nil, ERR_OPEN_DB
+	}
+	defer db.Close()
+
+	var versions []*ObjectInfo
+	// 查询所有版本对象（type=3, pid=fileID, 未删除的pid>=0）
+	query := "SELECT * FROM obj WHERE pid = ? AND type = ? AND pid >= 0 ORDER BY mtime DESC"
+	rows, err := db.Query(query, fileID, OBJ_TYPE_VERSION)
+	if err != nil {
+		return nil, ERR_QUERY_DB
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var obj ObjectInfo
+		err = rows.Scan(&obj.ID, &obj.PID, &obj.DataID, &obj.Size, &obj.MTime, &obj.Type, &obj.Name, &obj.Extra)
+		if err != nil {
+			continue
+		}
+		versions = append(versions, &obj)
+	}
+	return versions, nil
+}
+
+func (dma *DefaultMetadataAdapter) DeleteObj(c Ctx, bktID int64, id int64) error {
+	db, err := GetDB(c, bktID)
+	if err != nil {
+		return ERR_OPEN_DB
+	}
+	defer db.Close()
+
+	// 获取对象信息
+	obj := &ObjectInfo{}
+	if _, err = b.TableContext(c, db, OBJ_TBL).Select(obj, b.Where(b.Eq("id", id))); err != nil {
+		return ERR_QUERY_DB
+	}
+
+	// 将对象的PID翻转成负数来标记为已删除（这样可以从原来的树形结构中消失）
+	// 同时更新MTime为当前时间戳
+	// 注意：如果原PID为0（ROOT_OID），则使用-1作为特殊标记
+	newPID := -obj.PID
+	if newPID == 0 {
+		newPID = -1 // ROOT_OID 的负数仍然是0，使用-1作为特殊标记
+	}
+	currentTime := time.Now().Unix()
+
+	// 检查是否在同一父目录下已有同名且已删除的对象（PID < 0 且 |PID| == 原PID）
+	// 如果存在，需要重命名当前对象以避免冲突
+	var conflictingObjs []*ObjectInfo
+	conflictCond := fmt.Sprintf("pid = %d AND name = ? AND id != %d", newPID, id)
+	if _, err = b.TableContext(c, db, OBJ_TBL).Select(&conflictingObjs,
+		b.Where(conflictCond, obj.Name)); err == nil && len(conflictingObjs) > 0 {
+		// 存在冲突，重命名当前对象（添加时间戳后缀）
+		ext := filepath.Ext(obj.Name)
+		nameWithoutExt := strings.TrimSuffix(obj.Name, ext)
+		newName := fmt.Sprintf("%s_%d%s", nameWithoutExt, currentTime, ext)
+		obj.Name = newName
+	}
+
+	// 更新对象的PID和MTime，如果名称冲突还需要更新名称
+	updateFields := []string{"pid", "mtime"}
+	hasNameChange := len(conflictingObjs) > 0
+	if hasNameChange {
+		updateFields = append(updateFields, "name")
+	}
+
+	if _, err = b.TableContext(c, db, OBJ_TBL).Update(&ObjectInfo{
+		ID:    id,
+		PID:   newPID,
+		MTime: currentTime,
+		Name:  obj.Name,
+	}, b.Fields(updateFields...), b.Where(b.Eq("id", id))); err != nil {
+		return ERR_EXEC_DB
+	}
+	return nil
+}
+
+func (dma *DefaultMetadataAdapter) ListDeletedObjs(c Ctx, bktID int64, beforeTime int64, limit int) ([]*ObjectInfo, error) {
+	db, err := GetDB(c, bktID)
+	if err != nil {
+		return nil, ERR_OPEN_DB
+	}
+	defer db.Close()
+
+	var objs []*ObjectInfo
+	// PID < 0 或 PID = -1 表示已删除的对象
+	conds := []interface{}{"pid < 0 OR pid = -1"}
+	if beforeTime > 0 {
+		conds = append(conds, b.Lte("mtime", beforeTime))
+	}
+
+	if limit > 0 {
+		if _, err = b.TableContext(c, db, OBJ_TBL).Select(&objs,
+			b.Where(conds...),
+			b.OrderBy("mtime"),
+			b.Limit(limit)); err != nil {
+			return nil, ERR_QUERY_DB
+		}
+	} else {
+		if _, err = b.TableContext(c, db, OBJ_TBL).Select(&objs,
+			b.Where(conds...),
+			b.OrderBy("mtime")); err != nil {
+			return nil, ERR_QUERY_DB
+		}
+	}
+	return objs, nil
+}
+
+func (dma *DefaultMetadataAdapter) ListRecycleBin(c Ctx, bktID int64, opt ListOptions) (o []*ObjectInfo, cnt int64, d string, err error) {
+	db, err := GetDB(c, bktID)
+	if err != nil {
+		return nil, 0, "", ERR_OPEN_DB
+	}
+	defer db.Close()
+
+	// PID < 0 或 PID = -1 表示已删除的对象
+	conds := []interface{}{"pid < 0 OR pid = -1"}
+
+	// 处理过滤词
+	if opt.Word != "" {
+		if strings.ContainsAny(opt.Word, "*?") {
+			// sqlite 分支使用 LIKE 模式匹配
+			conds = append(conds, fmt.Sprintf("name LIKE '%s'", strings.ReplaceAll(strings.ReplaceAll(opt.Word, "*", "%"), "?", "_")))
+		} else {
+			conds = append(conds, b.Eq("name", opt.Word))
+		}
+	}
+
+	// 获取总数
+	if _, err = b.TableContext(c, db, OBJ_TBL).Select(&cnt,
+		b.Fields("count(1)"),
+		b.Where(conds...)); err != nil {
+		return nil, 0, "", ERR_QUERY_DB
+	}
+
+	if opt.Count > 0 {
+		// 处理排序
+		order := opt.Order
+		if order == "" {
+			order = "mtime"
+		}
+		fn := b.Gt
+		orderBy := order
+		switch order[0] {
+		case '-':
+			fn = b.Lt
+			order = order[1:]
+			orderBy = order + " desc"
+		case '+':
+			order = order[1:]
+			orderBy = order
+		}
+		if order != "id" && order != "name" {
+			orderBy = orderBy + ", id"
+		}
+
+		// 处理delimiter（用于分页）
+		if opt.Delim != "" {
+			ds := strings.Split(opt.Delim, ":")
+			if len(ds) > 0 && ds[0] != "" {
+				if order == "id" || order == "name" {
+					conds = append(conds, fn(order, ds[0]))
+				} else if len(ds) == 2 {
+					conds = append(conds, b.Or(fn(order, ds[0]),
+						b.And(b.Eq(order, ds[0]), b.Gt("id", ds[1]))))
+				}
+			}
+		}
+
+		if _, err = b.TableContext(c, db, OBJ_TBL).Select(&o,
+			b.Where(conds...),
+			b.OrderBy(orderBy),
+			b.Limit(opt.Count)); err != nil {
+			return nil, 0, "", ERR_QUERY_DB
+		}
+
+		if len(o) > 0 {
+			d = toDelim(order, o[len(o)-1])
+		}
 	}
 	return
 }
