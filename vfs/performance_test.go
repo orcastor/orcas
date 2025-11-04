@@ -255,6 +255,12 @@ func TestPerformanceComprehensive(t *testing.T) {
 		results = append(results, result)
 	})
 
+	// 测试场景7: 大文件，单线程（100MB）
+	t.Run("LargeFile_SingleThread", func(t *testing.T) {
+		result := runPerformanceTest(t, "large_single", 100*1024*1024, 4*1024*1024, 1, 1, nil)
+		results = append(results, result)
+	})
+
 	// 打印性能报告
 	printPerformanceReport(results)
 }
