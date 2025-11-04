@@ -261,6 +261,18 @@ func TestPerformanceComprehensive(t *testing.T) {
 		results = append(results, result)
 	})
 
+	// 测试场景8: 大文件+压缩+加密，单线程（100MB）
+	t.Run("LargeFile_CompressedEncrypted_SingleThread", func(t *testing.T) {
+		sdkCfg := &sdk.Config{
+			WiseCmpr: core.DATA_CMPR_SNAPPY,
+			CmprQlty: 1,
+			EndecWay: core.DATA_ENDEC_AES256,
+			EndecKey: "this is a test encryption key that is long enough for AES256",
+		}
+		result := runPerformanceTest(t, "large_compressed_encrypted_single", 100*1024*1024, 4*1024*1024, 1, 1, sdkCfg)
+		results = append(results, result)
+	})
+
 	// 打印性能报告
 	printPerformanceReport(results)
 }
