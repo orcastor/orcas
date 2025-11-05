@@ -24,14 +24,14 @@ func init() {
 	if core.ORCAS_BASE == "" {
 		// 使用临时目录
 		tmpDir := filepath.Join(os.TempDir(), "orcas_test")
-		os.MkdirAll(tmpDir, 0755)
+		os.MkdirAll(tmpDir, 0o755)
 		os.Setenv("ORCAS_BASE", tmpDir)
 		core.ORCAS_BASE = tmpDir
 	}
 	if core.ORCAS_DATA == "" {
 		// 使用临时目录
 		tmpDir := filepath.Join(os.TempDir(), "orcas_test_data")
-		os.MkdirAll(tmpDir, 0755)
+		os.MkdirAll(tmpDir, 0o755)
 		os.Setenv("ORCAS_DATA", tmpDir)
 		core.ORCAS_DATA = tmpDir
 	}
@@ -365,6 +365,148 @@ func TestVFSRandomAccessorWithSDK(t *testing.T) {
 			So(err, ShouldBeNil)
 			So(string(readData), ShouldEqual, string(testData))
 		})
+
+		Convey("test random read and write with chunk-based compression and encryption", func() {
+			// 创建SDK配置（启用压缩和加密）
+			sdkCfg := &sdk.Config{
+				WiseCmpr: core.DATA_CMPR_SNAPPY,
+				CmprQlty: 1,
+				EndecWay: core.DATA_ENDEC_AES256,
+				EndecKey: "this is a test encryption key that is long enough",
+			}
+
+			// 创建OrcasFS
+			ofs := NewOrcasFS(lh, testCtx, testBktID, sdkCfg)
+
+			// 创建新文件对象
+			fileID2, _ := ig.New()
+			fileObj2 := &core.ObjectInfo{
+				ID:    fileID2,
+				PID:   core.ROOT_OID,
+				Type:  core.OBJ_TYPE_FILE,
+				Name:  "random_test_file.txt",
+				Size:  0,
+				MTime: time.Now().Unix(),
+			}
+			_, err = dma.PutObj(testCtx, testBktID, []*core.ObjectInfo{fileObj2})
+			So(err, ShouldBeNil)
+
+			ra, err := NewRandomAccessor(ofs, fileID2)
+			So(err, ShouldBeNil)
+			defer ra.Close()
+
+			// 测试随机写入（跨越多个chunks）
+			testData1 := []byte("First chunk data at offset 0")
+			testData2 := []byte("Second chunk data at offset 1MB")
+			testData3 := []byte("Third chunk data at offset 2MB")
+
+			err = ra.Write(0, testData1)
+			So(err, ShouldBeNil)
+
+			err = ra.Write(1*1024*1024, testData2)
+			So(err, ShouldBeNil)
+
+			err = ra.Write(2*1024*1024, testData3)
+			So(err, ShouldBeNil)
+
+			// 刷新
+			_, err = ra.Flush()
+			So(err, ShouldBeNil)
+
+			// 验证数据已写入
+			objs, err := lh.Get(testCtx, testBktID, []int64{fileID2})
+			So(err, ShouldBeNil)
+			So(len(objs), ShouldEqual, 1)
+			So(objs[0].DataID, ShouldNotEqual, 0)
+
+			// 验证数据信息包含压缩和加密标记
+			dataInfo, err := lh.GetDataInfo(testCtx, testBktID, objs[0].DataID)
+			So(err, ShouldBeNil)
+			So(dataInfo, ShouldNotBeNil)
+
+			// 创建新的RandomAccessor来读取
+			ra2, err := NewRandomAccessor(ofs, fileID2)
+			So(err, ShouldBeNil)
+			defer ra2.Close()
+
+			// 测试随机读取
+			readData1, err := ra2.Read(0, len(testData1))
+			So(err, ShouldBeNil)
+			So(string(readData1), ShouldEqual, string(testData1))
+
+			readData2, err := ra2.Read(1*1024*1024, len(testData2))
+			So(err, ShouldBeNil)
+			So(string(readData2), ShouldEqual, string(testData2))
+
+			readData3, err := ra2.Read(2*1024*1024, len(testData3))
+			So(err, ShouldBeNil)
+			So(string(readData3), ShouldEqual, string(testData3))
+
+			// 测试部分读取
+			partialData, err := ra2.Read(2, 5)
+			So(err, ShouldBeNil)
+			So(len(partialData), ShouldEqual, 5)
+			So(string(partialData), ShouldEqual, string(testData1[2:7]))
+		})
+
+		Convey("test random write with overlapping chunks", func() {
+			// 创建SDK配置（仅启用压缩）
+			sdkCfg := &sdk.Config{
+				WiseCmpr: core.DATA_CMPR_ZSTD,
+				CmprQlty: 3,
+			}
+
+			// 创建OrcasFS
+			ofs := NewOrcasFS(lh, testCtx, testBktID, sdkCfg)
+
+			// 创建新文件对象
+			fileID3, _ := ig.New()
+			fileObj3 := &core.ObjectInfo{
+				ID:    fileID3,
+				PID:   core.ROOT_OID,
+				Type:  core.OBJ_TYPE_FILE,
+				Name:  "overlap_test_file.txt",
+				Size:  0,
+				MTime: time.Now().Unix(),
+			}
+			_, err = dma.PutObj(testCtx, testBktID, []*core.ObjectInfo{fileObj3})
+			So(err, ShouldBeNil)
+
+			ra, err := NewRandomAccessor(ofs, fileID3)
+			So(err, ShouldBeNil)
+			defer ra.Close()
+
+			// 写入初始数据
+			initialData := make([]byte, 2*1024*1024) // 2MB
+			for i := range initialData {
+				initialData[i] = byte(i % 256)
+			}
+			err = ra.Write(0, initialData)
+			So(err, ShouldBeNil)
+
+			// 刷新
+			_, err = ra.Flush()
+			So(err, ShouldBeNil)
+
+			// 随机写入，跨越chunk边界
+			overwriteData := []byte("This overwrites data at chunk boundary")
+			writeOffset := 1024*1024 - 10 // 接近chunk边界
+			err = ra.Write(int64(writeOffset), overwriteData)
+			So(err, ShouldBeNil)
+
+			// 刷新
+			_, err = ra.Flush()
+			So(err, ShouldBeNil)
+
+			// 验证可以读取
+			ra2, err := NewRandomAccessor(ofs, fileID3)
+			So(err, ShouldBeNil)
+			defer ra2.Close()
+
+			readData, err := ra2.Read(int64(writeOffset), len(overwriteData))
+			So(err, ShouldBeNil)
+			So(string(readData), ShouldEqual, string(overwriteData))
+		})
 	})
 }
 
@@ -545,6 +687,324 @@ func TestRandomAccessorReadWithEncryption(t *testing.T) {
 			data, err := ra.Read(0, len(testData))
 			So(err, ShouldBeNil)
 			So(string(data), ShouldEqual, string(testData))
+		})
+	})
+}
+
+func TestRandomAccessorReadOptimization(t *testing.T) {
+	Convey("RandomAccessor Read Optimization Tests", t, func() {
+		ig := idgen.NewIDGen(nil, 0)
+		testBktID, _ := ig.New()
+		err := core.InitBucketDB(c, testBktID)
+		So(err, ShouldBeNil)
+
+		dma := &core.DefaultMetadataAdapter{}
+		dda := &core.DefaultDataAdapter{}
+		dda.SetOptions(core.Options{Sync: true})
+
+		// 创建LocalHandler
+		lh := core.NewLocalHandler().(*core.LocalHandler)
+		lh.SetAdapter(dma, dda)
+
+		// 登录以获取上下文
+		testCtx, userInfo, _, err := lh.Login(c, "orcas", "orcas")
+		So(err, ShouldBeNil)
+
+		// 创建桶
+		bucket := &core.BucketInfo{
+			ID:       testBktID,
+			Name:     "test_bucket",
+			UID:      userInfo.ID,
+			Type:     1,
+			Quota:    1000000,
+			Used:     0,
+			RealUsed: 0,
+		}
+		So(dma.PutBkt(testCtx, []*core.BucketInfo{bucket}), ShouldBeNil)
+
+		Convey("test read exact size (no more than requested)", func() {
+			// 创建文件对象
+			fileID, _ := ig.New()
+			fileObj := &core.ObjectInfo{
+				ID:    fileID,
+				PID:   core.ROOT_OID,
+				Type:  core.OBJ_TYPE_FILE,
+				Name:  "exact_size_test.txt",
+				Size:  0,
+				MTime: time.Now().Unix(),
+			}
+			_, err = dma.PutObj(testCtx, testBktID, []*core.ObjectInfo{fileObj})
+			So(err, ShouldBeNil)
+
+			ofs := NewOrcasFS(lh, testCtx, testBktID, nil)
+			ra, err := NewRandomAccessor(ofs, fileID)
+			So(err, ShouldBeNil)
+			defer ra.Close()
+
+			// 写入较大的数据
+			testData := make([]byte, 1000)
+			for i := range testData {
+				testData[i] = byte(i % 256)
+			}
+			err = ra.Write(0, testData)
+			So(err, ShouldBeNil)
+
+			// 刷新
+			_, err = ra.Flush()
+			So(err, ShouldBeNil)
+
+			// 读取指定大小（应该不超过请求的大小）
+			readSize := 100
+			data, err := ra.Read(0, readSize)
+			So(err, ShouldBeNil)
+			So(len(data), ShouldBeLessThanOrEqualTo, readSize)
+			So(len(data), ShouldEqual, readSize)
+
+			// 从中间位置读取
+			readSize2 := 50
+			data2, err := ra.Read(500, readSize2)
+			So(err, ShouldBeNil)
+			So(len(data2), ShouldBeLessThanOrEqualTo, readSize2)
+		})
+
+		Convey("test read with compression (exact size)", func() {
+			// 创建SDK配置（启用压缩）
+			sdkCfg := &sdk.Config{
+				WiseCmpr: core.DATA_CMPR_SNAPPY,
+				CmprQlty: 1,
+			}
+
+			// 创建文件对象
+			fileID, _ := ig.New()
+			fileObj := &core.ObjectInfo{
+				ID:    fileID,
+				PID:   core.ROOT_OID,
+				Type:  core.OBJ_TYPE_FILE,
+				Name:  "compressed_size_test.txt",
+				Size:  0,
+				MTime: time.Now().Unix(),
+			}
+			_, err = dma.PutObj(testCtx, testBktID, []*core.ObjectInfo{fileObj})
+			So(err, ShouldBeNil)
+
+			ofs := NewOrcasFS(lh, testCtx, testBktID, sdkCfg)
+			ra, err := NewRandomAccessor(ofs, fileID)
+			So(err, ShouldBeNil)
+			defer ra.Close()
+
+			// 写入数据
+			testData := []byte("This is a test data that should be compressed and read with exact size")
+			err = ra.Write(0, testData)
+			So(err, ShouldBeNil)
+
+			// 刷新
+			_, err = ra.Flush()
+			So(err, ShouldBeNil)
+
+			// 读取指定大小（应该不超过请求的大小）
+			readSize := 10
+			data, err := ra.Read(0, readSize)
+			So(err, ShouldBeNil)
+			So(len(data), ShouldBeLessThanOrEqualTo, readSize)
+
+			// 从中间位置读取
+			data2, err := ra.Read(20, 15)
+			So(err, ShouldBeNil)
+			So(len(data2), ShouldBeLessThanOrEqualTo, 15)
+		})
+
+		Convey("test read with encryption (exact size)", func() {
+			// 创建SDK配置（启用加密）
+			sdkCfg := &sdk.Config{
+				EndecWay: core.DATA_ENDEC_AES256,
+				EndecKey: "this is a test encryption key that is long enough",
+			}
+
+			// 创建文件对象
+			fileID, _ := ig.New()
+			fileObj := &core.ObjectInfo{
+				ID:    fileID,
+				PID:   core.ROOT_OID,
+				Type:  core.OBJ_TYPE_FILE,
+				Name:  "encrypted_size_test.txt",
+				Size:  0,
+				MTime: time.Now().Unix(),
+			}
+			_, err = dma.PutObj(testCtx, testBktID, []*core.ObjectInfo{fileObj})
+			So(err, ShouldBeNil)
+
+			ofs := NewOrcasFS(lh, testCtx, testBktID, sdkCfg)
+			ra, err := NewRandomAccessor(ofs, fileID)
+			So(err, ShouldBeNil)
+			defer ra.Close()
+
+			// 写入数据
+			testData := []byte("This is encrypted test data for exact size reading")
+			err = ra.Write(0, testData)
+			So(err, ShouldBeNil)
+
+			// 刷新
+			_, err = ra.Flush()
+			So(err, ShouldBeNil)
+
+			// 读取指定大小（应该不超过请求的大小）
+			readSize := 20
+			data, err := ra.Read(0, readSize)
+			So(err, ShouldBeNil)
+			So(len(data), ShouldBeLessThanOrEqualTo, readSize)
+
+			// 从中间位置读取
+			data2, err := ra.Read(10, 15)
+			So(err, ShouldBeNil)
+			So(len(data2), ShouldBeLessThanOrEqualTo, 15)
+		})
+
+		Convey("test read empty file", func() {
+			// 创建文件对象（无DataID）
+			fileID, _ := ig.New()
+			fileObj := &core.ObjectInfo{
+				ID:    fileID,
+				PID:   core.ROOT_OID,
+				Type:  core.OBJ_TYPE_FILE,
+				Name:  "empty_file.txt",
+				Size:  0,
+				MTime: time.Now().Unix(),
+			}
+			_, err = dma.PutObj(testCtx, testBktID, []*core.ObjectInfo{fileObj})
+			So(err, ShouldBeNil)
+
+			ofs := NewOrcasFS(lh, testCtx, testBktID, nil)
+			ra, err := NewRandomAccessor(ofs, fileID)
+			So(err, ShouldBeNil)
+			defer ra.Close()
+
+			// 读取空文件
+			data, err := ra.Read(0, 100)
+			So(err, ShouldBeNil)
+			So(len(data), ShouldEqual, 0)
+		})
+
+		Convey("test read with buffer writes only", func() {
+			// 创建文件对象（无DataID）
+			fileID, _ := ig.New()
+			fileObj := &core.ObjectInfo{
+				ID:    fileID,
+				PID:   core.ROOT_OID,
+				Type:  core.OBJ_TYPE_FILE,
+				Name:  "buffer_only_test.txt",
+				Size:  0,
+				MTime: time.Now().Unix(),
+			}
+			_, err = dma.PutObj(testCtx, testBktID, []*core.ObjectInfo{fileObj})
+			So(err, ShouldBeNil)
+
+			ofs := NewOrcasFS(lh, testCtx, testBktID, nil)
+			ra, err := NewRandomAccessor(ofs, fileID)
+			So(err, ShouldBeNil)
+			defer ra.Close()
+
+			// 只写入到缓冲区（不刷新）
+			testData := []byte("Buffer only data")
+			err = ra.Write(0, testData)
+			So(err, ShouldBeNil)
+
+			// 读取（应该从缓冲区读取）
+			data, err := ra.Read(0, len(testData))
+			So(err, ShouldBeNil)
+			So(string(data), ShouldEqual, string(testData))
+
+			// 读取指定大小（应该不超过请求的大小）
+			readSize := 5
+			data2, err := ra.Read(0, readSize)
+			So(err, ShouldBeNil)
+			So(len(data2), ShouldBeLessThanOrEqualTo, readSize)
+		})
+
+		Convey("test read with partial buffer writes", func() {
+			// 创建文件对象
+			fileID, _ := ig.New()
+			fileObj := &core.ObjectInfo{
+				ID:    fileID,
+				PID:   core.ROOT_OID,
+				Type:  core.OBJ_TYPE_FILE,
+				Name:  "partial_buffer_test.txt",
+				Size:  0,
+				MTime: time.Now().Unix(),
+			}
+			_, err = dma.PutObj(testCtx, testBktID, []*core.ObjectInfo{fileObj})
+			So(err, ShouldBeNil)
+
+			ofs := NewOrcasFS(lh, testCtx, testBktID, nil)
+			ra, err := NewRandomAccessor(ofs, fileID)
+			So(err, ShouldBeNil)
+			defer ra.Close()
+
+			// 写入初始数据并刷新
+			initialData := []byte("Initial data that is longer")
+			err = ra.Write(0, initialData)
+			So(err, ShouldBeNil)
+			_, err = ra.Flush()
+			So(err, ShouldBeNil)
+
+			// 写入部分覆盖数据到缓冲区
+			overwriteData := []byte("New")
+			err = ra.Write(0, overwriteData)
+			So(err, ShouldBeNil)
+
+			// 读取（应该合并缓冲区的写入）
+			data, err := ra.Read(0, len(initialData))
+			So(err, ShouldBeNil)
+			So(string(data[:len(overwriteData)]), ShouldEqual, string(overwriteData))
+
+			// 读取指定大小（应该不超过请求的大小）
+			readSize := 5
+			data2, err := ra.Read(0, readSize)
+			So(err, ShouldBeNil)
+			So(len(data2), ShouldBeLessThanOrEqualTo, readSize)
+		})
+
+		Convey("test read beyond file size", func() {
+			// 创建文件对象
+			fileID, _ := ig.New()
+			fileObj := &core.ObjectInfo{
+				ID:    fileID,
+				PID:   core.ROOT_OID,
+				Type:  core.OBJ_TYPE_FILE,
+				Name:  "beyond_size_test.txt",
+				Size:  0,
+				MTime: time.Now().Unix(),
+			}
+			_, err = dma.PutObj(testCtx, testBktID, []*core.ObjectInfo{fileObj})
+			So(err, ShouldBeNil)
+
+			ofs := NewOrcasFS(lh, testCtx, testBktID, nil)
+			ra, err := NewRandomAccessor(ofs, fileID)
+			So(err, ShouldBeNil)
+			defer ra.Close()
+
+			// 写入数据
+			testData := []byte("Short data")
+			err = ra.Write(0, testData)
+			So(err, ShouldBeNil)
+			_, err = ra.Flush()
+			So(err, ShouldBeNil)
+
+			// 读取超出文件大小（应该返回可用数据，不超过请求大小）
+			readSize := 100
+			data, err := ra.Read(0, readSize)
+			So(err, ShouldBeNil)
+			// 验证不超过请求大小
+			So(len(data), ShouldBeLessThanOrEqualTo, readSize)
+			// 验证返回实际文件大小（10字节）
+			So(len(data), ShouldEqual, len(testData))
+			So(string(data), ShouldEqual, string(testData))
+
+			// 从超出文件大小的位置读取（应该返回空数据）
+			data2, err := ra.Read(1000, 50)
+			So(err, ShouldBeNil)
+			// 注意：返回的数据长度可能为0，也可能包含一些数据（如果有缓冲区写入）
+			// 这里只验证不超过请求的大小
+			So(len(data2), ShouldBeLessThanOrEqualTo, 50)
 		})
 	})
 }

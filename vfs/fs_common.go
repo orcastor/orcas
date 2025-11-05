@@ -1,27 +1,13 @@
-//go:build windows
-// +build windows
-
+// Package vfs 提供ORCAS文件系统实现，支持FUSE挂载和随机访问API
 package vfs
 
 import (
-	"sync"
-
 	"github.com/orcastor/orcas/core"
 	"github.com/orcastor/orcas/sdk"
 )
 
-// OrcasNode Windows上的最小化实现（仅用于测试，不支持FUSE挂载）
-type OrcasNode struct {
-	fs     *OrcasFS
-	objID  int64
-	obj    *core.ObjectInfo
-	objMu  sync.RWMutex
-	isRoot bool
-	ra     *RandomAccessor
-}
-
 // OrcasFS 实现ORCAS文件系统，将ORCAS对象存储映射为文件系统
-// 这个结构体不依赖FUSE，可以在Windows上使用
+// 这个结构体在所有平台上都可用
 type OrcasFS struct {
 	h         core.Handler
 	c         core.Ctx
@@ -33,6 +19,7 @@ type OrcasFS struct {
 }
 
 // NewOrcasFS 创建新的ORCAS文件系统
+// 这个函数在所有平台上都可用
 func NewOrcasFS(h core.Handler, c core.Ctx, bktID int64, sdkCfg *sdk.Config) *OrcasFS {
 	// 创建SDK实例
 	sdkInstance := sdk.New(h)
@@ -52,12 +39,12 @@ func NewOrcasFS(h core.Handler, c core.Ctx, bktID int64, sdkCfg *sdk.Config) *Or
 		sdkCfg:    sdkCfg,
 		chunkSize: chunkSize,
 	}
-	ofs.root = &OrcasNode{
-		fs:     ofs,
-		objID:  core.ROOT_OID,
-		obj:    nil,
-		objMu:  sync.RWMutex{},
-		isRoot: true,
-	}
+
+	// root节点初始化
+	// Windows平台需要立即初始化root节点，因为不依赖FUSE（在fs_win.go中实现）
+	// 其他平台的root节点会在Mount时通过FUSE的Inode系统初始化（在fs.go中实现）
+	// initRootNode 方法在平台特定的文件中实现（fs_win.go 或 fs.go）
+	ofs.initRootNode()
+
 	return ofs
 }

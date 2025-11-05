@@ -16,7 +16,6 @@ import (
 	"github.com/mkmueller/aes256"
 	"github.com/orca-zhang/ecache"
 	"github.com/orcastor/orcas/core"
-	"github.com/orcastor/orcas/sdk"
 	"github.com/tjfoc/gmsm/sm4"
 )
 
@@ -35,15 +34,8 @@ var (
 		},
 	}
 
-	// 对象池：重用字符串缓冲区（用于缓存key生成）
-	cacheKeyPool = sync.Pool{
-		New: func() interface{} {
-			return make([]byte, 0, 64) // 预分配64字节容量
-		},
-	}
-
 	// ecache缓存：缓存DataInfo，减少数据库查询
-	// key: "data_info_<bktID>_<dataID>", value: *core.DataInfo
+	// key: "<bktID>_<dataID>", value: *core.DataInfo
 	dataInfoCache = ecache.NewLRUCache(16, 512, 30*time.Second)
 
 	// ecache缓存：缓存文件对象信息，减少数据库查询
@@ -111,25 +103,8 @@ func NewRandomAccessor(fs *OrcasFS, fileID int64) (*RandomAccessor, error) {
 // 优化：减少锁持有时间，提高并发性能，使用原子操作优化
 func (ra *RandomAccessor) Write(offset int64, data []byte) error {
 	// 优化：减少数据复制，只有在必要时才复制
-	// 注意：data可能被外部修改，所以需要复制
-	dataLen := len(data)
-	var dataCopy []byte
-	if dataLen == 0 {
-		dataCopy = nil // 优化：空数据不需要分配
-	} else {
-		dataCopy = make([]byte, dataLen)
-		copy(dataCopy, data)
-	}
-
-	// 优化：使用原子操作更新totalSize，减少锁竞争
-	currentTotalSize := atomic.AddInt64(&ra.buffer.totalSize, int64(dataLen))
-
-	// 优化：使用固定长度数组 + 原子操作移动写入下标，避免临时对象创建
-	// 原子地获取并递增写入位置
-	writeIndex := atomic.AddInt64(&ra.buffer.writeIndex, 1) - 1 // 获取递增后的值，然后减1得到当前索引
-
 	// 检查是否超出容量（优化：提前检查，避免越界）
-	if writeIndex >= int64(len(ra.buffer.operations)) {
+	if atomic.LoadInt64(&ra.buffer.writeIndex)+1 >= int64(len(ra.buffer.operations)) || atomic.LoadInt64(&ra.buffer.totalSize) >= core.GetWriteBufferConfig().MaxBufferSize {
 		// 超出容量，需要强制刷新
 		// 先回退writeIndex（因为已经超出了）
 		atomic.AddInt64(&ra.buffer.writeIndex, -1)
@@ -138,26 +113,18 @@ func (ra *RandomAccessor) Write(offset int64, data []byte) error {
 		if err != nil {
 			return err
 		}
-		// 刷新后，重新获取写入位置（此时writeIndex应该已经被Flush重置为0）
-		writeIndex = atomic.AddInt64(&ra.buffer.writeIndex, 1) - 1
-		// 写入新的数据
-		ra.buffer.operations[writeIndex].Offset = offset
-		ra.buffer.operations[writeIndex].Data = dataCopy
-	} else {
-		// 直接写入到固定位置（避免创建新的WriteOperation对象）
-		ra.buffer.operations[writeIndex].Offset = offset
-		ra.buffer.operations[writeIndex].Data = dataCopy
-
-		// 检查是否需要立即刷新（优化：合并条件判断）
-		// 注意：不在这里直接调用Flush，让调用方决定何时刷新
-		// 如果需要异步刷新，应该由调用方启动goroutine
-		if currentTotalSize >= core.GetWriteBufferConfig().MaxBufferSize {
-			_, err := ra.Flush()
-			if err != nil {
-				return err
-			}
-		}
 	}
+
+	// 刷新后，重新获取写入位置（此时writeIndex应该已经被Flush重置为0）
+	writeIndex := atomic.AddInt64(&ra.buffer.writeIndex, 1) - 1
+
+	// 优化：使用原子操作更新totalSize，减少锁竞争
+	atomic.AddInt64(&ra.buffer.totalSize, int64(len(data)))
+
+	// 写入新的数据
+	ra.buffer.operations[writeIndex].Offset = offset
+	ra.buffer.operations[writeIndex].Data = make([]byte, len(data))
+	copy(ra.buffer.operations[writeIndex].Data, data)
 	return nil
 }
 
@@ -197,134 +164,136 @@ func (ra *RandomAccessor) Read(offset int64, size int) ([]byte, error) {
 		return nil, err
 	}
 
-	// 读取原文件数据
-	// 重要：必须先检查DataInfo，确定数据是否有压缩或加密
-	// 如果有压缩或加密，必须使用SDK的DataReader来解密解压，不能直接读取
-	var fileData []byte
-	if fileObj.DataID > 0 && fileObj.DataID != core.EmptyDataID {
-		// 优化：使用更高效的key生成（函数内部已使用对象池）
-		dataInfoCacheKey := formatCacheKey(ra.fs.bktID, fileObj.DataID)
+	// 如果没有数据ID，直接处理缓冲区写入操作
+	if fileObj.DataID == 0 || fileObj.DataID == core.EmptyDataID {
+		return ra.readFromBuffer(offset, size), nil
+	}
 
-		var dataInfo *core.DataInfo
-		if cached, ok := dataInfoCache.Get(dataInfoCacheKey); ok {
-			if info, ok := cached.(*core.DataInfo); ok && info != nil {
-				dataInfo = info
-			}
+	// 获取DataInfo
+	dataInfoCacheKey := formatCacheKey(ra.fs.bktID, fileObj.DataID)
+	var dataInfo *core.DataInfo
+	if cached, ok := dataInfoCache.Get(dataInfoCacheKey); ok {
+		if info, ok := cached.(*core.DataInfo); ok && info != nil {
+			dataInfo = info
 		}
+	}
 
-		// 如果缓存未命中，从数据库获取
+	// 如果缓存未命中，从数据库获取
+	if dataInfo == nil {
 		var err error
-		if dataInfo == nil {
-			dataInfo, err = ra.fs.h.GetDataInfo(ra.fs.c, ra.fs.bktID, fileObj.DataID)
-			if err == nil && dataInfo != nil {
-				// 更新缓存（重用已生成的key）
-				dataInfoCache.Put(dataInfoCacheKey, dataInfo)
-			}
-		}
-
+		dataInfo, err = ra.fs.h.GetDataInfo(ra.fs.c, ra.fs.bktID, fileObj.DataID)
 		if err != nil {
 			// 如果获取DataInfo失败，尝试直接读取（可能是旧数据格式）
 			data, readErr := ra.fs.h.GetData(ra.fs.c, ra.fs.bktID, fileObj.DataID, 0)
 			if readErr == nil && len(data) > 0 {
-				fileData = data
-			} else {
-				fileData = []byte{}
+				return ra.readFromDataAndBuffer(data, offset, size), nil
 			}
-		} else if dataInfo != nil {
-			// 检查数据是否有压缩或加密
-			hasCompression := dataInfo.Kind&core.DATA_CMPR_MASK != 0
-			hasEncryption := dataInfo.Kind&core.DATA_ENDEC_MASK != 0
-
-			// 如果没有压缩和加密，可以直接使用Handler读取（更简单可靠）
-			if !hasCompression && !hasEncryption {
-				data, readErr := ra.fs.h.GetData(ra.fs.c, ra.fs.bktID, fileObj.DataID, 0)
-				if readErr == nil {
-					fileData = data
-				} else {
-					// 如果读取失败，可能是数据还未同步或文件不存在
-					fileData = []byte{}
-				}
-			} else {
-				// 有压缩或加密，必须使用SDK的DataReader来解密解压
-				// 不能直接读取，因为压缩会改变数据布局，加密会有填充
-				var endecKey string
-				if ra.fs.sdkCfg != nil {
-					endecKey = ra.fs.sdkCfg.EndecKey
-				}
-				reader := sdk.NewDataReader(ra.fs.c, ra.fs.h, ra.fs.bktID, dataInfo, endecKey)
-
-				// 如果数据有压缩，需要解压缩
-				var decompressor archiver.Decompressor
-				if hasCompression {
-					if dataInfo.Kind&core.DATA_CMPR_SNAPPY != 0 {
-						decompressor = &archiver.Snappy{}
-					} else if dataInfo.Kind&core.DATA_CMPR_ZSTD != 0 {
-						decompressor = &archiver.Zstd{}
-					} else if dataInfo.Kind&core.DATA_CMPR_GZIP != 0 {
-						decompressor = &archiver.Gz{}
-					} else if dataInfo.Kind&core.DATA_CMPR_BR != 0 {
-						decompressor = &archiver.Brotli{}
-					}
-				}
-
-				// 读取完整文件（简化实现，实际应该支持流式读取）
-				if decompressor != nil {
-					// 需要解压缩
-					var decompressedBuf bytes.Buffer
-					err := decompressor.Decompress(reader, &decompressedBuf)
-					if err != nil && err != io.EOF {
-						// 解压缩失败，返回错误
-						return nil, fmt.Errorf("failed to decompress data: %w", err)
-					}
-					fileData = decompressedBuf.Bytes()
-				} else {
-					// 无压缩，直接读取（可能有加密，DataReader会自动处理解密）
-					allData, err := io.ReadAll(reader)
-					if err != nil && err != io.EOF {
-						return nil, fmt.Errorf("failed to read encrypted data: %w", err)
-					}
-					fileData = allData
-				}
-			}
+			return ra.readFromBuffer(offset, size), nil
 		}
+		// 更新缓存
+		dataInfoCache.Put(dataInfoCacheKey, dataInfo)
 	}
 
-	// 优化：使用原子操作读取writeIndex，获取实际的操作数量（无锁并发读取）
+	// 检查数据是否有压缩或加密
+	hasCompression := dataInfo.Kind&core.DATA_CMPR_MASK != 0
+	hasEncryption := dataInfo.Kind&core.DATA_ENDEC_MASK != 0
+
+	// 创建数据读取器（抽象读取接口，统一处理未压缩和压缩加密的数据）
+	var reader dataReader
+	if !hasCompression && !hasEncryption {
+		// 未压缩未加密：直接按chunk读取
+		reader = newPlainDataReader(ra.fs.c, ra.fs.h, ra.fs.bktID, fileObj.DataID, ra.fs.chunkSize)
+	} else {
+		// 压缩/加密：使用decodingChunkReader（会自动解密解压）
+		var endecKey string
+		if ra.fs.sdkCfg != nil {
+			endecKey = ra.fs.sdkCfg.EndecKey
+		}
+		reader = newDecodingChunkReader(ra.fs.c, ra.fs.h, ra.fs.bktID, dataInfo, endecKey)
+	}
+
+	// 统一处理读取逻辑（包含写入操作的合并）
+	fileData, operationsHandled := ra.readWithWrites(reader, offset, size)
+	if operationsHandled {
+		return fileData, nil
+	}
+
+	// 如果读取失败或未处理写入操作，从缓冲区读取
+	return ra.readFromBuffer(offset, size), nil
+}
+
+// readFromDataAndBuffer 从数据和缓冲区读取并合并
+func (ra *RandomAccessor) readFromDataAndBuffer(data []byte, offset int64, size int) []byte {
+	// 获取缓冲区写入操作
 	writeIndex := atomic.LoadInt64(&ra.buffer.writeIndex)
 	var operations []WriteOperation
 	if writeIndex > 0 {
-		// 复制实际使用的部分（避免修改原始数组）
 		operations = make([]WriteOperation, writeIndex)
 		copy(operations, ra.buffer.operations[:writeIndex])
 	}
 
 	// 合并写入操作
 	mergedOps := mergeWriteOperations(operations)
-	modifiedData := applyWritesToData(fileData, mergedOps)
+	modifiedData := applyWritesToData(data, mergedOps)
 
-	// 读取指定范围
-	if offset >= int64(len(modifiedData)) {
-		// 如果偏移超出数据长度，返回空数据而不是EOF（允许稀疏读取）
-		return []byte{}, nil
+	// 截取指定范围
+	return ra.extractRange(modifiedData, offset, size)
+}
+
+// readFromBuffer 只从缓冲区读取（处理写入操作）
+func (ra *RandomAccessor) readFromBuffer(offset int64, size int) []byte {
+	// 获取缓冲区写入操作
+	writeIndex := atomic.LoadInt64(&ra.buffer.writeIndex)
+	var operations []WriteOperation
+	if writeIndex > 0 {
+		operations = make([]WriteOperation, writeIndex)
+		copy(operations, ra.buffer.operations[:writeIndex])
 	}
+
+	// 合并写入操作
+	mergedOps := mergeWriteOperations(operations)
+	var modifiedData []byte
+	if len(mergedOps) > 0 {
+		// 计算需要的数据大小
+		var maxSize int64
+		for _, op := range mergedOps {
+			opEnd := op.Offset + int64(len(op.Data))
+			if opEnd > maxSize {
+				maxSize = opEnd
+			}
+		}
+		modifiedData = applyWritesToData(nil, mergedOps)
+	} else {
+		modifiedData = []byte{}
+	}
+
+	// 截取指定范围
+	return ra.extractRange(modifiedData, offset, size)
+}
+
+// extractRange 从数据中截取指定范围
+func (ra *RandomAccessor) extractRange(data []byte, offset int64, size int) []byte {
+	if offset >= int64(len(data)) {
+		return []byte{}
+	}
+
 	end := offset + int64(size)
-	if end > int64(len(modifiedData)) {
-		end = int64(len(modifiedData))
+	if end > int64(len(data)) {
+		end = int64(len(data))
 	}
 
 	if offset >= end {
-		return nil, nil // 优化：返回nil而不是空slice，减少临时对象
+		return []byte{}
 	}
 
-	// 优化：如果返回的是整个slice，直接返回，否则创建新的slice
-	resultLen := end - offset
-	if offset == 0 && end == int64(len(modifiedData)) {
-		return modifiedData, nil
+	// 如果返回的是整个slice，直接返回，否则创建新的slice
+	if offset == 0 && end == int64(len(data)) {
+		return data
 	}
-	// 优化：使用切片操作，避免不必要的copy（如果数据不会在外部修改）
-	result := make([]byte, resultLen)
-	copy(result, modifiedData[offset:end])
-	return result, nil
+
+	result := make([]byte, end-offset)
+	copy(result, data[offset:end])
+	return result
 }
 
 // Flush 刷新缓冲区，返回新版本ID（如果没有待刷新数据返回0）
@@ -366,8 +335,7 @@ func (ra *RandomAccessor) applyRandomWritesWithSDK(fileObj *core.ObjectInfo, wri
 		return 0, fmt.Errorf("handler is not LocalHandler")
 	}
 
-	// 创建新版本对象
-	newVersionID := ra.fs.h.NewID()
+	// 创建新数据ID
 	newDataID := ra.fs.h.NewID()
 
 	// 计算新文件大小
@@ -500,79 +468,61 @@ func (ra *RandomAccessor) applyRandomWritesWithSDK(fileObj *core.ObjectInfo, wri
 }
 
 // applyWritesStreamingCompressed 处理已压缩或加密的数据
-// 需要完整读取（无法避免），但流式写入以减少内存占用
+// 流式处理：按chunk读取原数据，应用写入操作，立即处理并写入新对象
 func (ra *RandomAccessor) applyWritesStreamingCompressed(oldDataInfo *core.DataInfo, writes []WriteOperation,
-	dataInfo *core.DataInfo, chunkSize int64, newSize int64) (int64, error) {
-	// 对于已压缩或加密的数据，必须完整读取（无法避免）
-	// 因为压缩会改变数据布局，加密有填充，无法按偏移读取
+	dataInfo *core.DataInfo, chunkSize int64, newSize int64,
+) (int64, error) {
+	// 现在每个chunk是独立压缩加密的，可以按chunk流式处理
+	// 直接按chunk读取、解密、解压，不使用DataReader
+
 	var endecKey string
 	if ra.fs.sdkCfg != nil {
 		endecKey = ra.fs.sdkCfg.EndecKey
 	}
-	reader := sdk.NewDataReader(ra.fs.c, ra.fs.h, ra.fs.bktID, oldDataInfo, endecKey)
-	originalData, err := io.ReadAll(reader)
-	if err != nil && err != io.EOF {
-		return 0, fmt.Errorf("failed to read compressed/encrypted data: %w", err)
+
+	// 创建一个reader来按chunk读取、解密、解压
+	reader := newDecodingChunkReader(ra.fs.c, ra.fs.h, ra.fs.bktID, oldDataInfo, endecKey)
+
+	chunkSizeInt := int(chunkSize)
+	if chunkSizeInt <= 0 {
+		chunkSizeInt = 4 * 1024 * 1024 // 默认4MB
 	}
 
-	// 应用写入操作
-	modifiedData := applyWritesToData(originalData, writes)
-
-	// 流式写入（使用processDataWithSDK，它已经是按chunk处理的）
-	// 注意：如果originalData很大，这里可以考虑优化，但压缩加密需要完整数据
-
-	// 使用SDK配置处理压缩和加密
-	if ra.fs.sdkCfg != nil {
-		err = ra.processDataWithSDK(modifiedData, dataInfo, chunkSize)
-		if err != nil {
-			return 0, err
-		}
-		// 保存数据元数据
-		_, err = ra.fs.h.PutDataInfo(ra.fs.c, ra.fs.bktID, []*core.DataInfo{dataInfo})
-		if err != nil {
-			return 0, err
-		}
-
-		// 优化：使用更高效的key生成（函数内部已使用对象池）
-		dataInfoCache.Put(formatCacheKey(ra.fs.bktID, dataInfo.ID), dataInfo)
-	} else {
-		// 没有SDK配置，直接写入
-		dataInfo.Size = int64(len(modifiedData))
-		dataInfo.OrigSize = int64(len(modifiedData))
-		chunkSizeInt := int(chunkSize)
-		if chunkSizeInt <= 0 {
-			chunkSizeInt = 4 * 1024 * 1024 // 默认4MB
-		}
-		sn := 0
-		for i := 0; i < len(modifiedData); i += chunkSizeInt {
-			end := i + chunkSizeInt
-			if end > len(modifiedData) {
-				end = len(modifiedData)
-			}
-			chunk := modifiedData[i:end]
-			if _, err := ra.fs.h.PutData(ra.fs.c, ra.fs.bktID, dataInfo.ID, sn, chunk); err != nil {
-				return 0, err
-			}
-			sn++
-		}
-		_, err = ra.fs.h.PutDataInfo(ra.fs.c, ra.fs.bktID, []*core.DataInfo{dataInfo})
-		if err != nil {
-			return 0, err
-		}
-
-		// 优化：使用更高效的key生成（函数内部已使用对象池）
-		dataInfoCache.Put(formatCacheKey(ra.fs.bktID, dataInfo.ID), dataInfo)
+	// 预先计算每个chunk相关的写入操作索引
+	chunkCount := int((newSize + chunkSize - 1) / chunkSize)
+	writesByChunk := make([][]int, chunkCount)
+	avgWritesPerChunk := len(writes) / chunkCount
+	if avgWritesPerChunk < 1 {
+		avgWritesPerChunk = 1
+	}
+	for i := range writesByChunk {
+		writesByChunk[i] = make([]int, 0, avgWritesPerChunk)
 	}
 
-	newVersionID := ra.fs.h.NewID()
-	return newVersionID, nil
+	for i, write := range writes {
+		writeEnd := write.Offset + int64(len(write.Data))
+		startChunk := int(write.Offset / chunkSize)
+		endChunk := int((writeEnd + chunkSize - 1) / chunkSize)
+		if endChunk >= chunkCount {
+			endChunk = chunkCount - 1
+		}
+		if startChunk < 0 {
+			startChunk = 0
+		}
+		for chunkIdx := startChunk; chunkIdx <= endChunk; chunkIdx++ {
+			writesByChunk[chunkIdx] = append(writesByChunk[chunkIdx], i)
+		}
+	}
+
+	// 流式处理：按chunk读取、处理、写入
+	return ra.processWritesStreaming(reader, writesByChunk, writes, dataInfo, chunkSizeInt, newSize, chunkCount)
 }
 
 // applyWritesStreamingUncompressed 处理未压缩未加密的数据
 // 可以按chunk流式读取和处理，只读取受影响的数据范围
 func (ra *RandomAccessor) applyWritesStreamingUncompressed(fileObj *core.ObjectInfo, oldDataInfo *core.DataInfo,
-	writes []WriteOperation, dataInfo *core.DataInfo, chunkSizeInt int, newSize int64) (int64, error) {
-
+	writes []WriteOperation, dataInfo *core.DataInfo, chunkSizeInt int, newSize int64,
+) (int64, error) {
 	// 对于未压缩未加密的数据，可以按chunk流式处理
 	// 优化：预先为每个chunk计算相关的写入操作，减少循环中的重复检查
 
@@ -694,38 +644,553 @@ func (ra *RandomAccessor) applyWritesStreamingUncompressed(fileObj *core.ObjectI
 	}
 
 	// 有SDK配置，需要压缩和加密
-	// 对于未压缩未加密的源数据，可以按chunk读取，但压缩加密需要完整数据
-	// 所以这里仍然需要读取完整数据，但可以流式写入
-	oldDataID := fileObj.DataID
-	var originalData []byte
-	if oldDataID > 0 && oldDataID != core.EmptyDataID {
-		// 读取完整数据（压缩加密需要完整数据）
-		data, err := ra.fs.h.GetData(ra.fs.c, ra.fs.bktID, oldDataID, 0)
-		if err == nil && len(data) > 0 {
-			originalData = data
+	// 流式处理：按chunk读取原数据，应用写入操作，立即处理并写入新对象
+
+	// 预先计算每个chunk相关的写入操作索引
+	chunkCount := int((newSize + int64(chunkSizeInt) - 1) / int64(chunkSizeInt))
+	writesByChunk := make([][]int, chunkCount)
+	avgWritesPerChunk := len(writes) / chunkCount
+	if avgWritesPerChunk < 1 {
+		avgWritesPerChunk = 1
+	}
+	for i := range writesByChunk {
+		writesByChunk[i] = make([]int, 0, avgWritesPerChunk)
+	}
+
+	for i, write := range writes {
+		writeEnd := write.Offset + int64(len(write.Data))
+		startChunk := int(write.Offset / int64(chunkSizeInt))
+		endChunk := int((writeEnd + int64(chunkSizeInt) - 1) / int64(chunkSizeInt))
+		if endChunk >= chunkCount {
+			endChunk = chunkCount - 1
+		}
+		if startChunk < 0 {
+			startChunk = 0
+		}
+		for chunkIdx := startChunk; chunkIdx <= endChunk; chunkIdx++ {
+			writesByChunk[chunkIdx] = append(writesByChunk[chunkIdx], i)
 		}
 	}
 
-	// 应用写入操作
-	modifiedData := applyWritesToData(originalData, writes)
+	// 对于未压缩未加密的数据，可以直接按chunk读取，不需要先读取全部数据
+	// 创建一个特殊的reader来支持按chunk读取
+	var reader io.Reader
+	oldDataID := fileObj.DataID
+	if oldDataID > 0 && oldDataID != core.EmptyDataID {
+		// 创建plainDataReader，支持按chunk读取
+		reader = newPlainDataReader(ra.fs.c, ra.fs.h, ra.fs.bktID, oldDataID, int64(chunkSizeInt))
+	}
 
-	// 流式写入（processDataWithSDK已经是按chunk处理的）
-	err := ra.processDataWithSDK(modifiedData, dataInfo, int64(chunkSizeInt))
-	if err != nil {
-		return 0, err
+	// 流式处理：按chunk读取、处理、写入
+	return ra.processWritesStreaming(reader, writesByChunk, writes, dataInfo, chunkSizeInt, newSize, chunkCount)
+}
+
+// processWritesStreaming 流式处理写入操作
+// 按chunk读取原数据，应用写入操作，立即处理（压缩/加密）并写入新对象
+func (ra *RandomAccessor) processWritesStreaming(
+	reader io.Reader,
+	writesByChunk [][]int,
+	writes []WriteOperation,
+	dataInfo *core.DataInfo,
+	chunkSizeInt int,
+	newSize int64,
+	chunkCount int,
+) (int64, error) {
+	cfg := ra.fs.sdkCfg
+
+	// 初始化压缩器（如果启用智能压缩）
+	var cmpr archiver.Compressor
+	var hasCmpr bool
+	if cfg != nil && cfg.WiseCmpr > 0 {
+		// 压缩器将在处理第一个chunk时确定（需要检查文件类型）
+		hasCmpr = true
+		if cfg.WiseCmpr&core.DATA_CMPR_SNAPPY != 0 {
+			cmpr = &archiver.Snappy{}
+		} else if cfg.WiseCmpr&core.DATA_CMPR_ZSTD != 0 {
+			cmpr = &archiver.Zstd{EncoderOptions: []zstd.EOption{zstd.WithEncoderLevel(zstd.EncoderLevelFromZstd(int(cfg.CmprQlty)))}}
+		} else if cfg.WiseCmpr&core.DATA_CMPR_GZIP != 0 {
+			cmpr = &archiver.Gz{CompressionLevel: int(cfg.CmprQlty)}
+		} else if cfg.WiseCmpr&core.DATA_CMPR_BR != 0 {
+			cmpr = &archiver.Brotli{Quality: int(cfg.CmprQlty)}
+		}
+		if cmpr != nil {
+			dataInfo.Kind |= cfg.WiseCmpr
+		}
+	}
+
+	// 如果设置了加密，设置加密标记
+	if cfg != nil && cfg.EndecWay > 0 {
+		dataInfo.Kind |= cfg.EndecWay
+	}
+
+	// 计算CRC32（原始数据）
+	var crc32Val uint32
+	var dataCRC32 uint32
+
+	sn := 0
+	currentPos := int64(0)
+	firstChunk := true
+
+	// 按chunk流式处理
+	for chunkIdx := 0; chunkIdx < chunkCount; chunkIdx++ {
+		pos := int64(chunkIdx * chunkSizeInt)
+		chunkEnd := pos + int64(chunkSizeInt)
+		if chunkEnd > newSize {
+			chunkEnd = newSize
+		}
+		actualChunkSize := int(chunkEnd - pos)
+
+		// 从对象池获取chunk缓冲区
+		chunkData := chunkDataPool.Get().([]byte)
+		if cap(chunkData) < actualChunkSize {
+			chunkData = make([]byte, actualChunkSize)
+		} else {
+			chunkData = chunkData[:actualChunkSize]
+		}
+
+		// 1. 从reader读取原数据的这个chunk
+		// 注意：reader是顺序的，需要按顺序读取到当前位置
+		if reader != nil {
+			// 需要读取到当前chunk的位置
+			bytesToSkip := pos - currentPos
+			if bytesToSkip > 0 {
+				// 跳过不需要的数据（读取并丢弃）
+				skipBuf := make([]byte, bytesToSkip)
+				_, err := io.ReadFull(reader, skipBuf)
+				if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
+					chunkDataPool.Put(chunkData[:0])
+					return 0, fmt.Errorf("failed to skip to chunk position: %w", err)
+				}
+			}
+			currentPos = pos
+
+			// 读取当前chunk的数据
+			n, err := reader.Read(chunkData)
+			if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
+				chunkDataPool.Put(chunkData[:0])
+				return 0, fmt.Errorf("failed to read chunk: %w", err)
+			}
+			// 如果读取的数据少于chunk大小，剩余部分保持为0（新数据）
+			if n < actualChunkSize {
+				// 清零剩余部分
+				for i := n; i < actualChunkSize; i++ {
+					chunkData[i] = 0
+				}
+			}
+			currentPos = chunkEnd
+		} else {
+			// 没有原数据，初始化为0
+			for i := range chunkData {
+				chunkData[i] = 0
+			}
+		}
+
+		// 2. 应用写入操作到当前chunk
+		for _, writeIdx := range writesByChunk[chunkIdx] {
+			write := writes[writeIdx]
+			writeEnd := write.Offset + int64(len(write.Data))
+
+			// 计算重叠范围
+			overlapStart := int64(0)
+			if write.Offset > pos {
+				overlapStart = write.Offset - pos
+			}
+			overlapEnd := int64(actualChunkSize)
+			if writeEnd-pos < overlapEnd {
+				overlapEnd = writeEnd - pos
+			}
+			if overlapStart < overlapEnd {
+				writeDataStart := int64(0)
+				if write.Offset < pos {
+					writeDataStart = pos - write.Offset
+				}
+				copyLen := overlapEnd - overlapStart
+				copy(chunkData[overlapStart:overlapEnd], write.Data[writeDataStart:writeDataStart+copyLen])
+			}
+		}
+
+		// 3. 如果是第一个chunk，检查文件类型确定是否压缩
+		if firstChunk && cfg != nil && cfg.WiseCmpr > 0 && len(chunkData) > 0 {
+			kind, _ := filetype.Match(chunkData)
+			if kind != filetype.Unknown {
+				// 不是未知类型，不压缩
+				dataInfo.Kind &= ^core.DATA_CMPR_MASK
+				cmpr = nil
+				hasCmpr = false
+			}
+			firstChunk = false
+		}
+
+		// 4. 计算原始数据的CRC32
+		dataCRC32 = crc32.Update(dataCRC32, crc32.IEEETable, chunkData)
+
+		// 5. 压缩（如果启用）
+		var processedChunk []byte
+		if hasCmpr && cmpr != nil {
+			var cmprBuf bytes.Buffer
+			err := cmpr.Compress(bytes.NewBuffer(chunkData), &cmprBuf)
+			if err != nil {
+				processedChunk = chunkData
+				// 压缩失败，只在第一个chunk时移除压缩标记
+				if firstChunk {
+					dataInfo.Kind &= ^core.DATA_CMPR_MASK
+					hasCmpr = false
+				}
+			} else {
+				// 如果压缩后更大或相等，使用原始数据，移除压缩标记
+				// 注意：这个逻辑只在第一个chunk时执行，因为一旦决定压缩，后续chunk都应该保持一致
+				if firstChunk && cmprBuf.Len() >= len(chunkData) {
+					processedChunk = chunkData
+					dataInfo.Kind &= ^core.DATA_CMPR_MASK
+					hasCmpr = false
+				} else if !firstChunk && cmprBuf.Len() >= len(chunkData) {
+					// 后续chunk如果压缩后更大，仍然使用压缩后的数据（保持一致性）
+					processedChunk = cmprBuf.Bytes()
+				} else {
+					processedChunk = cmprBuf.Bytes()
+				}
+			}
+		} else {
+			processedChunk = chunkData
+		}
+
+		// 6. 加密（如果启用）
+		var encodedChunk []byte
+		var err error
+		if cfg != nil && dataInfo.Kind&core.DATA_ENDEC_AES256 != 0 {
+			encodedChunk, err = aes256.Encrypt(cfg.EndecKey, processedChunk)
+		} else if cfg != nil && dataInfo.Kind&core.DATA_ENDEC_SM4 != 0 {
+			encodedChunk, err = sm4.Sm4Cbc([]byte(cfg.EndecKey), processedChunk, true)
+		} else {
+			encodedChunk = processedChunk
+		}
+		if err != nil {
+			encodedChunk = processedChunk
+		}
+
+		// 7. 更新最终数据的校验和
+		crc32Val = crc32.Update(crc32Val, crc32.IEEETable, encodedChunk)
+
+		// 8. 更新大小（如果压缩或加密了）
+		if dataInfo.Kind&core.DATA_CMPR_MASK != 0 || dataInfo.Kind&core.DATA_ENDEC_MASK != 0 {
+			dataInfo.Size += int64(len(encodedChunk))
+		}
+
+		// 9. 立即写入新对象（流式写入）
+		encodedChunkCopy := make([]byte, len(encodedChunk))
+		copy(encodedChunkCopy, encodedChunk)
+		if _, err := ra.fs.h.PutData(ra.fs.c, ra.fs.bktID, dataInfo.ID, sn, encodedChunkCopy); err != nil {
+			chunkDataPool.Put(chunkData[:0])
+			return 0, err
+		}
+		sn++
+
+		// 归还chunkData到对象池
+		chunkDataPool.Put(chunkData[:0])
+	}
+
+	// 设置CRC32和校验和
+	dataInfo.CRC32 = dataCRC32
+	if dataInfo.Kind&core.DATA_CMPR_MASK == 0 && dataInfo.Kind&core.DATA_ENDEC_MASK == 0 {
+		dataInfo.Size = dataInfo.OrigSize
+		dataInfo.Cksum = dataCRC32
+	} else {
+		dataInfo.Cksum = crc32Val
 	}
 
 	// 保存数据元数据
-	_, err = ra.fs.h.PutDataInfo(ra.fs.c, ra.fs.bktID, []*core.DataInfo{dataInfo})
+	_, err := ra.fs.h.PutDataInfo(ra.fs.c, ra.fs.bktID, []*core.DataInfo{dataInfo})
 	if err != nil {
 		return 0, err
 	}
 
-	// 优化：使用更高效的key生成（函数内部已使用对象池）
+	// 更新缓存
 	dataInfoCache.Put(formatCacheKey(ra.fs.bktID, dataInfo.ID), dataInfo)
 
 	newVersionID := ra.fs.h.NewID()
 	return newVersionID, nil
+}
+
+// dataReader 数据读取器接口，统一处理不同格式的数据读取
+type dataReader interface {
+	io.Reader
+}
+
+// readWithWrites 统一处理读取逻辑：计算读取范围、读取数据、应用写入操作、截取结果
+func (ra *RandomAccessor) readWithWrites(reader dataReader, offset int64, size int) ([]byte, bool) {
+	// 1. 检查缓冲区中的写入操作，确定需要读取的数据范围
+	writeIndex := atomic.LoadInt64(&ra.buffer.writeIndex)
+	var operations []WriteOperation
+	if writeIndex > 0 {
+		operations = make([]WriteOperation, writeIndex)
+		copy(operations, ra.buffer.operations[:writeIndex])
+	}
+	mergedOps := mergeWriteOperations(operations)
+
+	// 2. 计算实际需要读取的数据范围（考虑写入操作的影响）
+	readStart := offset
+	readEnd := offset + int64(size)
+	if len(mergedOps) > 0 {
+		for _, op := range mergedOps {
+			opEnd := op.Offset + int64(len(op.Data))
+			if op.Offset < readEnd && opEnd > readStart {
+				if op.Offset < readStart {
+					readStart = op.Offset
+				}
+				if opEnd > readEnd {
+					readEnd = opEnd
+				}
+			}
+		}
+	}
+
+	// 3. 只读取需要的数据范围
+	readSize := readEnd - readStart
+	if readSize <= 0 {
+		return []byte{}, true
+	}
+
+	// 跳过readStart之前的数据
+	if readStart > 0 {
+		skipBuf := make([]byte, readStart)
+		_, err := io.ReadFull(reader, skipBuf)
+		if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
+			return nil, false
+		}
+	}
+
+	// 读取需要的数据范围
+	readData := make([]byte, readSize)
+	n, err := io.ReadFull(reader, readData)
+	// 如果读取失败或读取的数据少于请求的大小，只返回读取到的数据
+	if err != nil {
+		// io.EOF 或 io.ErrUnexpectedEOF 表示已读取完所有可用数据
+		if err == io.EOF || err == io.ErrUnexpectedEOF {
+			if n > 0 {
+				readData = readData[:n]
+			} else {
+				readData = []byte{}
+			}
+		} else {
+			// 其他错误，返回失败
+			return nil, false
+		}
+	} else if int64(n) < readSize {
+		// 读取的数据少于请求的大小（文件末尾），截取实际读取的数据
+		readData = readData[:n]
+	}
+
+	// 4. 应用写入操作到读取的数据
+	if len(mergedOps) > 0 {
+		adjustedOps := make([]WriteOperation, 0, len(mergedOps))
+		for _, op := range mergedOps {
+			opEnd := op.Offset + int64(len(op.Data))
+			if op.Offset < readEnd && opEnd > readStart {
+				adjustedOp := WriteOperation{
+					Offset: op.Offset - readStart,
+					Data:   op.Data,
+				}
+				adjustedOps = append(adjustedOps, adjustedOp)
+			}
+		}
+		if len(adjustedOps) > 0 {
+			readData = applyWritesToData(readData, adjustedOps)
+		}
+	}
+
+	// 5. 截取请求的范围（offset到offset+size，相对于readStart）
+	resultOffset := offset - readStart
+	resultEnd := resultOffset + int64(size)
+	if resultEnd > int64(len(readData)) {
+		resultEnd = int64(len(readData))
+	}
+	if resultOffset < 0 {
+		resultOffset = 0
+	}
+	if resultOffset >= resultEnd {
+		return []byte{}, true
+	}
+
+	return readData[resultOffset:resultEnd], true
+}
+
+// plainDataReader 支持按chunk读取未压缩未加密的数据
+type plainDataReader struct {
+	c          core.Ctx
+	h          core.Handler
+	bktID      int64
+	dataID     int64
+	chunkSize  int64
+	currentPos int64
+	sn         int
+	buf        []byte
+	bufPos     int
+}
+
+func newPlainDataReader(c core.Ctx, h core.Handler, bktID, dataID int64, chunkSize int64) *plainDataReader {
+	if chunkSize <= 0 {
+		chunkSize = 4 * 1024 * 1024 // 默认4MB
+	}
+	return &plainDataReader{
+		c:         c,
+		h:         h,
+		bktID:     bktID,
+		dataID:    dataID,
+		chunkSize: chunkSize,
+	}
+}
+
+func (pr *plainDataReader) Read(p []byte) (n int, err error) {
+	totalRead := 0
+	for len(p) > 0 {
+		// 如果缓冲区为空或已读完，读取下一个chunk
+		if pr.buf == nil || pr.bufPos >= len(pr.buf) {
+			// 使用sn来读取chunk（未压缩未加密的数据按chunk存储）
+			chunkData, err := pr.h.GetData(pr.c, pr.bktID, pr.dataID, pr.sn)
+			if err != nil {
+				// 如果读取失败，可能是chunk不存在（文件末尾）
+				if totalRead == 0 {
+					return 0, io.EOF
+				}
+				return totalRead, nil
+			}
+			if len(chunkData) == 0 {
+				if totalRead == 0 {
+					return 0, io.EOF
+				}
+				return totalRead, nil
+			}
+			pr.buf = chunkData
+			pr.bufPos = 0
+			pr.sn++
+		}
+
+		// 从缓冲区复制数据
+		copyLen := len(p)
+		available := len(pr.buf) - pr.bufPos
+		if copyLen > available {
+			copyLen = available
+		}
+		copy(p[:copyLen], pr.buf[pr.bufPos:pr.bufPos+copyLen])
+
+		pr.bufPos += copyLen
+		pr.currentPos += int64(copyLen)
+		totalRead += copyLen
+		p = p[copyLen:]
+	}
+
+	return totalRead, nil
+}
+
+// decodingChunkReader 支持按chunk读取、解密、解压的数据（流式读取，边读边处理）
+type decodingChunkReader struct {
+	c          core.Ctx
+	h          core.Handler
+	bktID      int64
+	dataID     int64
+	kind       uint32
+	endecKey   string
+	currentPos int64
+	sn         int
+	buf        []byte
+	bufPos     int
+	remain     int
+}
+
+func newDecodingChunkReader(c core.Ctx, h core.Handler, bktID int64, dataInfo *core.DataInfo, endecKey string) *decodingChunkReader {
+	dr := &decodingChunkReader{
+		c:        c,
+		h:        h,
+		bktID:    bktID,
+		kind:     dataInfo.Kind,
+		endecKey: endecKey,
+		remain:   int(dataInfo.Size),
+	}
+	if dataInfo.PkgID > 0 {
+		dr.dataID = dataInfo.PkgID
+	} else {
+		dr.dataID = dataInfo.ID
+	}
+	return dr
+}
+
+func (dr *decodingChunkReader) Read(p []byte) (n int, err error) {
+	totalRead := 0
+	for len(p) > 0 && dr.remain > 0 {
+		// 如果缓冲区为空或已读完，读取下一个chunk
+		if dr.buf == nil || dr.bufPos >= len(dr.buf) {
+			// 读取chunk（压缩加密后的数据）
+			encryptedChunk, err := dr.h.GetData(dr.c, dr.bktID, dr.dataID, dr.sn)
+			if err != nil {
+				// 如果读取失败，可能是chunk不存在（文件末尾）
+				if totalRead == 0 {
+					return 0, io.EOF
+				}
+				return totalRead, nil
+			}
+			dr.remain -= len(encryptedChunk)
+			dr.sn++
+
+			// 1. 先解密（如果启用）
+			decodedChunk := encryptedChunk
+			if dr.kind&core.DATA_ENDEC_AES256 != 0 {
+				decodedChunk, err = aes256.Decrypt(dr.endecKey, encryptedChunk)
+			} else if dr.kind&core.DATA_ENDEC_SM4 != 0 {
+				decodedChunk, err = sm4.Sm4Cbc([]byte(dr.endecKey), encryptedChunk, false)
+			}
+			if err != nil {
+				// 解密失败，使用原始数据
+				decodedChunk = encryptedChunk
+			}
+
+			// 2. 再解压缩（如果启用）
+			finalChunk := decodedChunk
+			if dr.kind&core.DATA_CMPR_MASK != 0 {
+				var decompressor archiver.Decompressor
+				if dr.kind&core.DATA_CMPR_SNAPPY != 0 {
+					decompressor = &archiver.Snappy{}
+				} else if dr.kind&core.DATA_CMPR_ZSTD != 0 {
+					decompressor = &archiver.Zstd{}
+				} else if dr.kind&core.DATA_CMPR_GZIP != 0 {
+					decompressor = &archiver.Gz{}
+				} else if dr.kind&core.DATA_CMPR_BR != 0 {
+					decompressor = &archiver.Brotli{}
+				}
+
+				if decompressor != nil {
+					var decompressedBuf bytes.Buffer
+					err := decompressor.Decompress(bytes.NewReader(decodedChunk), &decompressedBuf)
+					if err != nil {
+						// 解压缩失败，使用解密后的数据
+						finalChunk = decodedChunk
+					} else {
+						finalChunk = decompressedBuf.Bytes()
+					}
+				}
+			}
+
+			dr.buf = finalChunk
+			dr.bufPos = 0
+		}
+
+		// 从缓冲区复制数据
+		copyLen := len(p)
+		available := len(dr.buf) - dr.bufPos
+		if copyLen > available {
+			copyLen = available
+		}
+		copy(p[:copyLen], dr.buf[dr.bufPos:dr.bufPos+copyLen])
+
+		dr.bufPos += copyLen
+		dr.currentPos += int64(copyLen)
+		totalRead += copyLen
+		p = p[copyLen:]
+	}
+
+	if dr.remain <= 0 && totalRead == 0 {
+		return 0, io.EOF
+	}
+	return totalRead, nil
 }
 
 // Close 关闭随机访问对象，自动刷新所有待处理的写入
@@ -859,129 +1324,4 @@ func applyWritesToData(data []byte, writes []WriteOperation) []byte {
 	}
 
 	return result
-}
-
-// processDataWithSDK 使用SDK的逻辑处理数据（压缩和加密）
-func (ra *RandomAccessor) processDataWithSDK(data []byte, dataInfo *core.DataInfo, chunkSize int64) error {
-	cfg := ra.fs.sdkCfg
-	if cfg == nil {
-		return fmt.Errorf("SDK config is nil")
-	}
-
-	// 压缩和加密方式将在处理第一个数据块时确定
-
-	// 处理数据块
-	sn := 0
-	chunkSizeInt := int(chunkSize)
-	if chunkSizeInt <= 0 {
-		chunkSizeInt = 4 * 1024 * 1024 // 默认4MB
-	}
-
-	// 计算CRC32（原始数据）
-	var crc32Val uint32
-	var dataCRC32 uint32 // 原始数据的CRC32
-
-	// 初始化压缩器（如果启用智能压缩）
-	var cmpr archiver.Compressor
-	if cfg.WiseCmpr > 0 && len(data) > 0 {
-		kind, _ := filetype.Match(data)
-		if kind == filetype.Unknown {
-			if cfg.WiseCmpr&core.DATA_CMPR_SNAPPY != 0 {
-				cmpr = &archiver.Snappy{}
-			} else if cfg.WiseCmpr&core.DATA_CMPR_ZSTD != 0 {
-				cmpr = &archiver.Zstd{EncoderOptions: []zstd.EOption{zstd.WithEncoderLevel(zstd.EncoderLevelFromZstd(int(cfg.CmprQlty)))}}
-			} else if cfg.WiseCmpr&core.DATA_CMPR_GZIP != 0 {
-				cmpr = &archiver.Gz{CompressionLevel: int(cfg.CmprQlty)}
-			} else if cfg.WiseCmpr&core.DATA_CMPR_BR != 0 {
-				cmpr = &archiver.Brotli{Quality: int(cfg.CmprQlty)}
-			}
-		}
-	}
-
-	// 如果设置了压缩器，设置压缩标记
-	if cmpr != nil {
-		dataInfo.Kind |= cfg.WiseCmpr
-	}
-
-	// 如果设置了加密，设置加密标记
-	if cfg.EndecWay > 0 {
-		dataInfo.Kind |= cfg.EndecWay
-	}
-
-	// 处理数据块
-	for i := 0; i < len(data); {
-		end := i + chunkSizeInt
-		if end > len(data) {
-			end = len(data)
-		}
-		chunk := data[i:end]
-
-		// 计算原始数据的CRC32
-		dataCRC32 = crc32.Update(dataCRC32, crc32.IEEETable, chunk)
-
-		// 压缩
-		var processedChunk []byte
-		if dataInfo.Kind&core.DATA_CMPR_MASK != 0 && cmpr != nil {
-			var cmprBuf bytes.Buffer
-			err := cmpr.Compress(bytes.NewBuffer(chunk), &cmprBuf)
-			if err != nil {
-				processedChunk = chunk
-				// 压缩失败，移除压缩标记
-				dataInfo.Kind &= ^core.DATA_CMPR_MASK
-			} else {
-				// 如果压缩后更大，使用原始数据
-				if cmprBuf.Len() >= len(chunk) {
-					processedChunk = chunk
-					// 移除压缩标记
-					dataInfo.Kind &= ^core.DATA_CMPR_MASK
-				} else {
-					processedChunk = cmprBuf.Bytes()
-				}
-			}
-		} else {
-			processedChunk = chunk
-		}
-
-		// 加密
-		var encodedChunk []byte
-		var err error
-		if dataInfo.Kind&core.DATA_ENDEC_AES256 != 0 {
-			encodedChunk, err = aes256.Encrypt(cfg.EndecKey, processedChunk)
-		} else if dataInfo.Kind&core.DATA_ENDEC_SM4 != 0 {
-			encodedChunk, err = sm4.Sm4Cbc([]byte(cfg.EndecKey), processedChunk, true)
-		} else {
-			encodedChunk = processedChunk
-		}
-		if err != nil {
-			encodedChunk = processedChunk
-		}
-
-		// 更新最终数据的校验和（压缩和加密后的数据）
-		crc32Val = crc32.Update(crc32Val, crc32.IEEETable, encodedChunk)
-
-		// 更新大小（如果压缩或加密了）
-		if dataInfo.Kind&core.DATA_CMPR_MASK != 0 || dataInfo.Kind&core.DATA_ENDEC_MASK != 0 {
-			dataInfo.Size += int64(len(encodedChunk))
-		}
-
-		// 写入数据
-		if _, err := ra.fs.h.PutData(ra.fs.c, ra.fs.bktID, dataInfo.ID, sn, encodedChunk); err != nil {
-			return err
-		}
-		sn++
-		i = end
-	}
-
-	// 设置CRC32和校验和
-	dataInfo.CRC32 = dataCRC32 // 原始数据的CRC32
-	if dataInfo.Kind&core.DATA_CMPR_MASK == 0 && dataInfo.Kind&core.DATA_ENDEC_MASK == 0 {
-		// 没有压缩和加密，使用原始大小和CRC32作为校验和
-		dataInfo.Size = dataInfo.OrigSize
-		dataInfo.Cksum = dataCRC32
-	} else {
-		// 有压缩或加密，使用最终数据的CRC32作为校验和
-		dataInfo.Cksum = crc32Val
-	}
-
-	return nil
 }

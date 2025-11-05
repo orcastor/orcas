@@ -4,9 +4,12 @@ ORCAS VFS 使用 FUSE (Filesystem in Userspace) 技术，将 ORCAS 对象存储�
 
 ## 平台支持
 
-**注意**: FUSE 是 Unix/Linux 系统特有的功能，**不支持 Windows**。此功能只能在 Linux、macOS 等 Unix-like 系统上使用。
-
-在 Windows 上编译或运行此代码会失败，因为 `go-fuse` 库依赖 Unix 系统调用。
+- **Linux/macOS**: 使用 FUSE (Filesystem in Userspace) 技术，支持完整文件系统挂载功能
+- **Windows**: 
+  - 当前版本：仅支持 `RandomAccessor` API，不支持文件系统挂载
+  - 未来计划：考虑使用 [Dokany](https://github.com/dokan-dev/dokany) 实现 Windows 平台的文件系统挂载功能
+    - Dokany 是 Windows 上的 FUSE 替代方案，允许在用户空间创建自定义文件系统
+    - 需要安装 Dokany 驱动程序和 Go 绑定库
 
 ## 功能特性
 
@@ -97,7 +100,7 @@ func main() {
 
 ### 文件读写
 
-- **读取**: 使用 SDK 的 `NewDataReader` 读取文件数据，自动处理解密和解压缩
+- **读取**: 直接按chunk读取、解密、解压数据，不使用SDK的DataReader
   - 支持随机访问读取（通过偏移量）
   - 自动处理打包文件（如果文件被打包）
   - 自动处理加密数据的解密
@@ -120,13 +123,152 @@ func main() {
 2. **性能**: 文件系统操作会转换为ORCAS API调用，可能比本地文件系统慢
 3. **并发**: 支持多线程并发访问，但需要注意ORCAS Handler的线程安全性
 
+## 性能测试
+
+### 运行基准测试
+
+```bash
+# 运行所有基准测试
+go test -bench=BenchmarkRandomAccessor -benchmem ./vfs
+
+# 运行特定测试
+go test -bench=BenchmarkRandomAccessor_Read_1MB -benchmem ./vfs
+
+# 运行并生成性能分析报告
+go test -bench=BenchmarkRandomAccessor -benchmem -cpuprofile=cpu.prof -memprofile=mem.prof ./vfs
+```
+
+### 性能测试用例
+
+基准测试文件 `random_access_bench_test.go` 包含以下测试：
+
+1. **写入性能测试**
+   - 不同数据大小：1KB、10KB、100KB、1MB
+   - 写入并刷新性能
+   - 多次写入性能
+
+2. **读取性能测试**
+   - 不同数据大小：1KB、10KB、100KB、1MB
+   - 压缩数据读取
+   - 加密数据读取
+   - 压缩加密数据读取
+
+3. **随机访问性能测试**
+   - 随机偏移读取
+   - 精确大小读取（验证不超过请求大小）
+   - 流式读取性能
+
+4. **缓冲区操作性能测试**
+   - 带缓冲区写入的读取性能
+
+### 性能优化特性
+
+- **精确大小控制**：读取数据不超过请求的 size，减少内存占用
+- **流式处理**：按 chunk 流式读取，边读边处理，避免一次性加载全部数据
+- **内存优化**：使用对象池重用缓冲区，减少 GC 压力
+- **并发优化**：使用原子操作减少锁竞争
+
+## 环境信息
+
+### 系统要求
+
+- **操作系统**：
+  - Linux（推荐）：支持完整 FUSE 功能
+  - macOS：支持完整 FUSE 功能（需要安装 macOSFUSE）
+  - Windows：
+    - 当前：仅支持 RandomAccessor API（程序化访问）
+    - 未来：计划支持 Dokany 文件系统挂载（需要安装 Dokany 驱动）
+
+- **Go 版本**：Go 1.18 或更高版本
+
+- **依赖项**：
+  - `github.com/hanwen/go-fuse/v2`：FUSE 库（仅 Linux/macOS）
+  - `github.com/orcastor/orcas/core`：ORCAS 核心库
+  - `github.com/orcastor/orcas/sdk`：ORCAS SDK
+  - **Windows 挂载（未来）**：需要 Dokany 驱动程序和 Go 绑定库
+
+### 环境变量
+
+- `ORCAS_BASE`：ORCAS 基础目录（数据库存储位置）
+- `ORCAS_DATA`：ORCAS 数据目录（文件数据存储位置）
+
+如果未设置，测试时会自动使用临时目录。
+
+### macOS FUSE 安装
+
+在 macOS 上使用 FUSE 功能，需要安装 macOSFUSE：
+
+```bash
+# 使用 Homebrew 安装
+brew install --cask macfuse
+
+# 或使用官方安装包
+# 下载地址：https://github.com/osxfuse/osxfuse/releases
+```
+
+安装后需要重启系统或重新登录。
+
+### Windows Dokany 安装（未来支持）
+
+在 Windows 上使用文件系统挂载功能，需要安装 Dokany：
+
+1. **下载并安装 Dokany 驱动**：
+   - 访问 [Dokany 官方 GitHub](https://github.com/dokan-dev/dokany/releases)
+   - 下载最新版本的安装包（DokanSetup_*.exe）
+   - 运行安装程序并重启系统
+
+2. **安装 Go 绑定库**（待开发）：
+   ```bash
+   # 等待 Dokany Go 绑定库可用
+   # go get github.com/dokan-dev/dokany-go
+   ```
+
+3. **注意事项**：
+   - Dokany 需要管理员权限进行安装
+   - 安装后需要重启系统
+   - 不同版本的 Windows 可能存在兼容性差异，建议在 Windows 10/11 上使用
+
+### 测试环境
+
+测试和基准测试使用以下环境：
+
+- **临时目录**：使用系统临时目录（`os.TempDir()`）
+- **数据库**：每次测试创建独立的数据库实例
+- **数据隔离**：每个测试使用独立的 bucket ID
+
 ## 依赖
 
-- `github.com/hanwen/go-fuse/v2`: FUSE库
+- `github.com/hanwen/go-fuse/v2`: FUSE库（仅 Linux/macOS）
 
 ## 限制
 
 - 当前实现为简化版本，某些高级特性（如符号链接、硬链接）尚未支持
 - 文件截断操作需要完善
 - 大文件的分片读取需要优化
+- Windows 平台当前仅支持 RandomAccessor API，不支持文件系统挂载
+  - 未来计划通过 Dokany 实现 Windows 平台的文件系统挂载功能
+
+## Windows 平台支持计划
+
+### 当前状态
+- ✅ 支持 `RandomAccessor` API（程序化访问）
+- ❌ 不支持文件系统挂载
+
+### 未来计划
+考虑使用 [Dokany](https://github.com/dokan-dev/dokany) 实现 Windows 平台的文件系统挂载：
+
+**优势**：
+- 类似 FUSE 的用户空间文件系统实现
+- 无需编写内核驱动
+- 支持完整的文件系统操作
+
+**实现要求**：
+1. 安装 Dokany 驱动程序
+2. 使用或开发 Dokany 的 Go 绑定库
+3. 实现 Dokany 的文件系统接口（类似 FUSE 接口）
+
+**注意事项**：
+- Dokany 需要管理员权限安装
+- 不同 Windows 版本可能存在兼容性差异
+- 需要测试与常用软件的兼容性（如 Office、WPS 等）
 

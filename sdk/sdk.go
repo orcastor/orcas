@@ -356,7 +356,7 @@ func (osi *OrcasSDKImpl) Download(c core.Ctx, bktID, id int64, lpath string) err
 	q := []elem{{id: id, path: filepath.Join(lpath, o[0].Name)}}
 	var delim string
 	for len(q) > 0 {
-		os.MkdirAll(q[0].path, 0766)
+		os.MkdirAll(q[0].path, 0o766)
 		o, _, d, err := osi.h.List(c, bktID, q[0].id, core.ListOptions{
 			Delim: delim,
 			Count: 1000,

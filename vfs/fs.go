@@ -14,11 +14,27 @@ import (
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
 	"github.com/orcastor/orcas/core"
-	"github.com/orcastor/orcas/sdk"
 )
+
+// initRootNode 初始化root节点（非Windows平台实现）
+// 在非Windows平台上，root节点在Mount时初始化，而不是在NewOrcasFS时初始化
+func (ofs *OrcasFS) initRootNode() {
+	// 非Windows平台：root节点在Mount时初始化，这里不初始化
+	// 这样可以在Mount时通过FUSE的Inode系统正确初始化
+}
 
 // Mount 挂载文件系统到指定路径（仅Linux/Unix）
 func (ofs *OrcasFS) Mount(mountPoint string, opts *fuse.MountOptions) (*fuse.Server, error) {
+	// 初始化root节点（如果还没有初始化）
+	if ofs.root == nil {
+		ofs.root = &OrcasNode{
+			fs:     ofs,
+			objID:  core.ROOT_OID,
+			obj:    nil,
+			objMu:  sync.RWMutex{},
+			isRoot: true,
+		}
+	}
 	// 设置root节点的fs引用
 	ofs.root.fs = ofs
 
@@ -54,18 +70,20 @@ type OrcasNode struct {
 	raMu   sync.Mutex
 }
 
-var _ fs.InodeEmbedder = (*OrcasNode)(nil)
-var _ = fs.NodeLookuper(&OrcasNode{})
-var _ = fs.NodeReaddirer(&OrcasNode{})
-var _ = fs.NodeCreater(&OrcasNode{})
-var _ = fs.NodeMkdirer(&OrcasNode{})
-var _ = fs.NodeUnlinker(&OrcasNode{})
-var _ = fs.NodeRmdirer(&OrcasNode{})
-var _ = fs.NodeRenamer(&OrcasNode{})
-var _ = fs.NodeGetattrer(&OrcasNode{})
-var _ = fs.FileReader(&OrcasNode{})
-var _ = fs.FileWriter(&OrcasNode{})
-var _ = fs.FileReleaser(&OrcasNode{})
+var (
+	_ fs.InodeEmbedder = (*OrcasNode)(nil)
+	_                  = fs.NodeLookuper(&OrcasNode{})
+	_                  = fs.NodeReaddirer(&OrcasNode{})
+	_                  = fs.NodeCreater(&OrcasNode{})
+	_                  = fs.NodeMkdirer(&OrcasNode{})
+	_                  = fs.NodeUnlinker(&OrcasNode{})
+	_                  = fs.NodeRmdirer(&OrcasNode{})
+	_                  = fs.NodeRenamer(&OrcasNode{})
+	_                  = fs.NodeGetattrer(&OrcasNode{})
+	_                  = fs.FileReader(&OrcasNode{})
+	_                  = fs.FileWriter(&OrcasNode{})
+	_                  = fs.FileReleaser(&OrcasNode{})
+)
 
 // getObj 获取对象信息（带缓存）
 func (n *OrcasNode) getObj() (*core.ObjectInfo, error) {
@@ -132,11 +150,11 @@ func (n *OrcasNode) Getattr(ctx context.Context, f fs.FileHandle, out *fuse.Attr
 func getMode(objType int) uint32 {
 	switch objType {
 	case core.OBJ_TYPE_DIR:
-		return syscall.S_IFDIR | 0755
+		return syscall.S_IFDIR | 0o755
 	case core.OBJ_TYPE_FILE:
-		return syscall.S_IFREG | 0644
+		return syscall.S_IFREG | 0o644
 	default:
-		return syscall.S_IFREG | 0644
+		return syscall.S_IFREG | 0o644
 	}
 }
 
@@ -291,7 +309,7 @@ func (n *OrcasNode) Create(ctx context.Context, name string, flags uint32, mode 
 	fileInode := n.NewInode(ctx, fileNode, stableAttr)
 
 	// 填充EntryOut
-	out.Mode = syscall.S_IFREG | 0644
+	out.Mode = syscall.S_IFREG | 0o644
 	out.Size = 0
 	out.Mtime = uint64(fileObj.MTime)
 	out.Ctime = out.Mtime
@@ -348,7 +366,7 @@ func (n *OrcasNode) Mkdir(ctx context.Context, name string, mode uint32, out *fu
 	dirInode := n.NewInode(ctx, dirNode, stableAttr)
 
 	// 填充EntryOut
-	out.Mode = syscall.S_IFDIR | 0755
+	out.Mode = syscall.S_IFDIR | 0o755
 	out.Size = 0
 	out.Mtime = uint64(dirObj.MTime)
 	out.Ctime = out.Mtime
@@ -601,9 +619,9 @@ func (n *OrcasNode) getDataReader() (io.Reader, syscall.Errno) {
 		endecKey = n.fs.sdkCfg.EndecKey
 	}
 
-	// 创建新的DataReader（每次读取都创建新的，因为FUSE的读取是随机访问的）
-	// 如果需要优化，可以考虑缓存reader，但需要处理位置同步问题
-	reader := sdk.NewDataReader(n.fs.c, n.fs.h, n.fs.bktID, dataInfo, endecKey)
+	// 创建新的decodingChunkReader（每次读取都创建新的，因为FUSE的读取是随机访问的）
+	// 直接按chunk读取、解密、解压，不使用DataReader
+	reader := newDecodingChunkReader(n.fs.c, n.fs.h, n.fs.bktID, dataInfo, endecKey)
 
 	return reader, 0
 }

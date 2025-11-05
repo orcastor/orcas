@@ -76,7 +76,7 @@ func (l *listener) encode(src []byte) (dst []byte, err error) {
 		dst, err = aes256.Encrypt(l.cfg.EndecKey, src)
 	} else if l.d.Kind&core.DATA_ENDEC_SM4 != 0 {
 		// SM4加密
-		dst, err = sm4.Sm4Cbc([]byte(l.cfg.EndecKey), src, true) //sm4Cbc模式PKSC7填充加密
+		dst, err = sm4.Sm4Cbc([]byte(l.cfg.EndecKey), src, true) // sm4Cbc模式PKSC7填充加密
 	} else {
 		dst = src
 	}
@@ -117,6 +117,7 @@ func (l *listener) OnData(c core.Ctx, h core.Handler, dp *dataPkger, buf []byte)
 			l.d.Kind |= l.cfg.EndecWay
 		}
 	}
+	isFirstChunk := l.cnt == 0
 	l.cnt++
 
 	if l.action&CRC32_MD5 != 0 {
@@ -125,60 +126,67 @@ func (l *listener) OnData(c core.Ctx, h core.Handler, dp *dataPkger, buf []byte)
 	}
 
 	// 上传数据
+	// 重要：先切块（buf已经是chunk大小的数据），再对每个chunk独立压缩加密
 	if l.action&UPLOAD_DATA != 0 {
-		var cmprBuf []byte
-		if l.d.Kind&core.DATA_CMPR_MASK == 0 {
-			cmprBuf = buf
-		} else {
-			l.cmpr.Compress(bytes.NewBuffer(buf), &l.cmprBuf)
-			chunkSize := l.getChunkSize()
-			// 如果压缩后更大了，恢复原始的
-			if l.d.OrigSize < chunkSize {
-				if l.cmprBuf.Len() >= len(buf) {
+		// 对当前chunk进行处理
+		var processedChunk []byte
+
+		// 1. 先压缩（如果启用）
+		if l.d.Kind&core.DATA_CMPR_MASK != 0 && l.cmpr != nil {
+			l.cmprBuf.Reset()
+			err := l.cmpr.Compress(bytes.NewBuffer(buf), &l.cmprBuf)
+			if err != nil {
+				// 压缩失败，使用原始数据，移除压缩标记
+				// 注意：这个逻辑只在第一个chunk时执行，因为一旦决定压缩，后续chunk都应该保持一致
+				if isFirstChunk {
 					l.d.Kind &= ^core.DATA_CMPR_MASK
-					cmprBuf = buf
-				} else {
-					cmprBuf = l.cmprBuf.Bytes()
 				}
-				l.cmprBuf.Reset()
+				processedChunk = buf
 			} else {
-				if l.cmprBuf.Len() >= int(chunkSize) {
-					cmprBuf = l.cmprBuf.Next(int(chunkSize))
+				// 如果压缩后更大或相等，使用原始数据，移除压缩标记
+				// 注意：这个逻辑只在第一个chunk时执行，因为一旦决定压缩，后续chunk都应该保持一致
+				if isFirstChunk && l.cmprBuf.Len() >= len(buf) {
+					l.d.Kind &= ^core.DATA_CMPR_MASK
+					processedChunk = buf
+				} else {
+					processedChunk = l.cmprBuf.Bytes()
 				}
+			}
+		} else {
+			processedChunk = buf
+		}
+
+		// 2. 再加密（如果启用）
+		encodedBuf, encodeErr := l.encode(processedChunk)
+		if encodeErr != nil {
+			encodedBuf = processedChunk // 加密失败，使用未加密的数据
+		}
+
+		// 3. 更新校验和和大小
+		if l.d.Kind&core.DATA_CMPR_MASK != 0 || l.d.Kind&core.DATA_ENDEC_MASK != 0 {
+			l.d.Cksum = crc32.Update(l.d.Cksum, crc32.IEEETable, encodedBuf)
+			l.d.Size += int64(len(encodedBuf))
+		}
+
+		// 4. 上传数据块
+		chunkSize := l.getChunkSize()
+		if l.d.OrigSize < chunkSize {
+			// 小文件，检查是否要打包
+			var pushOk bool
+			if pushOk, err = dp.Push(c, h, l.bktID, encodedBuf, l.d); err == nil {
+				if pushOk {
+					encodedBuf = nil // 打包成功，不再上传
+				}
+			} else {
+				return l.once, err
 			}
 		}
 
-		if cmprBuf != nil {
-			// 加密
-			encodedBuf, err := l.encode(cmprBuf)
-			if err != nil {
+		if encodedBuf != nil {
+			if l.d.ID, err = h.PutData(c, l.bktID, l.d.ID, l.sn, encodedBuf); err != nil {
 				return l.once, err
 			}
-
-			if l.d.Kind&core.DATA_CMPR_MASK != 0 || l.d.Kind&core.DATA_ENDEC_MASK != 0 {
-				l.d.Cksum = crc32.Update(l.d.Cksum, crc32.IEEETable, encodedBuf)
-				l.d.Size += int64(len(encodedBuf))
-			}
-
-			// 需要上传
-			chunkSize := l.getChunkSize()
-			if l.d.OrigSize < chunkSize {
-				// 7. 检查是否要打包
-				if ok, err := dp.Push(c, h, l.bktID, encodedBuf, l.d); err == nil {
-					if ok {
-						encodedBuf = nil // 打包成功，不再上传
-					}
-				} else {
-					return l.once, err
-				}
-			}
-
-			if encodedBuf != nil {
-				if l.d.ID, err = h.PutData(c, l.bktID, l.d.ID, l.sn, encodedBuf); err != nil {
-					return l.once, err
-				}
-				l.sn++
-			}
+			l.sn++
 		}
 	}
 	return l.once, nil
@@ -188,7 +196,10 @@ func (l *listener) OnFinish(c core.Ctx, h core.Handler) error {
 	if l.action&CRC32_MD5 != 0 {
 		l.d.MD5 = int64(binary.BigEndian.Uint64(l.md5Hash.Sum(nil)[4:12]))
 	}
+	// 注意：现在每个chunk都在OnData中立即处理并上传，不需要在这里处理残留数据
+	// 如果压缩后产生了残留数据（理论上不应该，因为每个chunk独立压缩），这里处理
 	if l.cmprBuf.Len() > 0 {
+		// 对残留数据进行加密（如果启用）
 		encodedBuf, err := l.encode(l.cmprBuf.Bytes())
 		if err != nil {
 			return err
@@ -199,8 +210,9 @@ func (l *listener) OnFinish(c core.Ctx, h core.Handler) error {
 			return err
 		}
 		l.d.Cksum = crc32.Update(l.d.Cksum, crc32.IEEETable, encodedBuf)
-		l.d.Size += int64(l.cmprBuf.Len())
+		l.d.Size += int64(len(encodedBuf))
 	}
+	// 如果既没有压缩也没有加密，使用原始数据的CRC32和大小
 	if l.d.Kind&core.DATA_CMPR_MASK == 0 && l.d.Kind&core.DATA_ENDEC_MASK == 0 {
 		l.d.Cksum = l.d.CRC32
 		l.d.Size = l.d.OrigSize
@@ -272,7 +284,11 @@ func (osi *OrcasSDKImpl) putObjects(c core.Ctx, bktID int64, o []*core.ObjectInf
 		var vers []*core.ObjectInfo
 		for i := range ids {
 			if ids[i] <= 0 {
-				ids[i], err = osi.Path2ID(c, bktID, o[i].PID, o[i].Name)
+				var pathErr error
+				ids[i], pathErr = osi.Path2ID(c, bktID, o[i].PID, o[i].Name)
+				if pathErr != nil {
+					err = pathErr
+				}
 				// 如果是文件，需要新建一个版本，版本更新的逻辑需要jobs来完成
 				if o[i].Type == core.OBJ_TYPE_FILE {
 					vers = append(vers, &core.ObjectInfo{
@@ -360,7 +376,8 @@ func (u sizeSort) Less(i, j int) bool { return u[i].o.Size < u[j].o.Size || u[i]
 func (u sizeSort) Swap(i, j int)      { u[i], u[j] = u[j], u[i] }
 
 func (osi *OrcasSDKImpl) uploadFiles(c core.Ctx, bktID int64, u []uploadInfo,
-	d []*core.DataInfo, dp *dataPkger, level, doneAction uint32) error {
+	d []*core.DataInfo, dp *dataPkger, level, doneAction uint32,
+) error {
 	if len(u) <= 0 {
 		return nil
 	}
@@ -526,6 +543,7 @@ func (DummyArchiver) Compress(in io.Reader, out io.Writer) error {
 	_, err := io.Copy(out, in)
 	return err
 }
+
 func (DummyArchiver) Decompress(in io.Reader, out io.Writer) error {
 	_, err := io.Copy(out, in)
 	return err
@@ -571,20 +589,52 @@ func (dr *dataReader) Read(p []byte) (n int, err error) {
 		dr.remain -= len(buf)
 		dr.sn++
 
+		// 重要：先解密，再解压缩（因为每个chunk是独立压缩加密的）
+		// 1. 先解密（如果启用）
 		decodeBuf := buf
 		if dr.kind&core.DATA_ENDEC_AES256 != 0 {
 			// AES256解密
 			decodeBuf, err = aes256.Decrypt(dr.endecKey, buf)
 		} else if dr.kind&core.DATA_ENDEC_SM4 != 0 {
 			// SM4解密
-			decodeBuf, err = sm4.Sm4Cbc([]byte(dr.endecKey), buf, false) //sm4Cbc模式pksc7填充加密
+			decodeBuf, err = sm4.Sm4Cbc([]byte(dr.endecKey), buf, false) // sm4Cbc模式pksc7填充解密
 		}
 		if err != nil {
 			fmt.Println(runtime.Caller(0))
 			fmt.Println(err)
 			decodeBuf = buf
 		}
-		dr.buf.Write(decodeBuf)
+
+		// 2. 再解压缩（如果启用）
+		// 注意：每个chunk是独立压缩的，所以需要为每个chunk创建独立的解压缩器
+		finalBuf := decodeBuf
+		if dr.kind&core.DATA_CMPR_MASK != 0 {
+			var decompressor archiver.Decompressor
+			if dr.kind&core.DATA_CMPR_SNAPPY != 0 {
+				decompressor = &archiver.Snappy{}
+			} else if dr.kind&core.DATA_CMPR_ZSTD != 0 {
+				decompressor = &archiver.Zstd{}
+			} else if dr.kind&core.DATA_CMPR_GZIP != 0 {
+				decompressor = &archiver.Gz{}
+			} else if dr.kind&core.DATA_CMPR_BR != 0 {
+				decompressor = &archiver.Brotli{}
+			}
+
+			if decompressor != nil {
+				var decompressedBuf bytes.Buffer
+				err := decompressor.Decompress(bytes.NewReader(decodeBuf), &decompressedBuf)
+				if err != nil {
+					// 解压缩失败，使用解密后的数据（可能是压缩数据损坏或格式不对）
+					fmt.Println(runtime.Caller(0))
+					fmt.Println(err)
+					finalBuf = decodeBuf
+				} else {
+					finalBuf = decompressedBuf.Bytes()
+				}
+			}
+		}
+
+		dr.buf.Write(finalBuf)
 	}
 	return dr.buf.Read(p)
 }
@@ -597,15 +647,15 @@ func (osi *OrcasSDKImpl) downloadFile(c core.Ctx, bktID int64, o *core.ObjectInf
 	dataID := o.DataID
 	// 如果不是首版本
 	if dataID == 0 {
-		os, _, _, err := osi.h.List(c, bktID, o.ID, core.ListOptions{
+		os, _, _, listErr := osi.h.List(c, bktID, o.ID, core.ListOptions{
 			Type:  core.OBJ_TYPE_VERSION,
 			Count: 1,
 			Order: "-id",
 		})
-		if err != nil || len(os) < 1 {
+		if listErr != nil || len(os) < 1 {
 			fmt.Println(runtime.Caller(0))
-			fmt.Println(err)
-			return err
+			fmt.Println(listErr)
+			return listErr
 		}
 		dataID = os[0].DataID
 	}
@@ -622,9 +672,9 @@ func (osi *OrcasSDKImpl) downloadFile(c core.Ctx, bktID int64, o *core.ObjectInf
 		}
 	}
 
-	os.MkdirAll(filepath.Dir(lpath), 0766)
+	os.MkdirAll(filepath.Dir(lpath), 0o766)
 
-	f, err := os.OpenFile(lpath, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0666)
+	f, err := os.OpenFile(lpath, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0o666)
 	if err != nil {
 		return err
 	}
