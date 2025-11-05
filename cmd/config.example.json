@@ -1,0 +1,15 @@
+{
+  "user_name": "orcas",
+  "password": "orcas",
+  "data_sync": true,
+  "ref_level": "FULL",
+  "wise_cmpr": "GZIP",
+  "cmpr_qlty": 5,
+  "endec_way": "",
+  "endec_key": "",
+  "dont_sync": ".*",
+  "conflict": "COVER",
+  "name_tmpl": "%s的副本",
+  "workers_n": 16
+}
+
