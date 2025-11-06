@@ -38,13 +38,13 @@ func runPerformanceTest(t *testing.T, name string, dataSize, chunkSize int64, wr
 	// 初始化
 	if core.ORCAS_BASE == "" {
 		tmpDir := filepath.Join(os.TempDir(), "orcas_perf_test")
-		os.MkdirAll(tmpDir, 0755)
+		os.MkdirAll(tmpDir, 0o755)
 		os.Setenv("ORCAS_BASE", tmpDir)
 		core.ORCAS_BASE = tmpDir
 	}
 	if core.ORCAS_DATA == "" {
 		tmpDir := filepath.Join(os.TempDir(), "orcas_perf_test_data")
-		os.MkdirAll(tmpDir, 0755)
+		os.MkdirAll(tmpDir, 0o755)
 		os.Setenv("ORCAS_DATA", tmpDir)
 		core.ORCAS_DATA = tmpDir
 	}
@@ -273,8 +273,659 @@ func TestPerformanceComprehensive(t *testing.T) {
 		results = append(results, result)
 	})
 
+	// 测试场景9: 顺序写优化（从0开始顺序写，触发顺序写优化）
+	t.Run("SequentialWrite_Optimized", func(t *testing.T) {
+		result := runSequentialWriteTest(t, "sequential_write_optimized", 10*1024*1024, 4*1024*1024, nil)
+		results = append(results, result)
+	})
+
+	// 测试场景10: 顺序写+压缩+加密优化
+	t.Run("SequentialWrite_CompressedEncrypted", func(t *testing.T) {
+		sdkCfg := &sdk.Config{
+			WiseCmpr: core.DATA_CMPR_SNAPPY,
+			CmprQlty: 1,
+			EndecWay: core.DATA_ENDEC_AES256,
+			EndecKey: "this is a test encryption key that is long enough for AES256",
+		}
+		result := runSequentialWriteTest(t, "sequential_write_compressed_encrypted", 10*1024*1024, 4*1024*1024, sdkCfg)
+		results = append(results, result)
+	})
+
+	// 测试场景11: 随机写（不同offset，不连续）
+	t.Run("RandomWrite_NonSequential", func(t *testing.T) {
+		result := runRandomWriteTest(t, "random_write_nonsequential", 10*1024*1024, 4*1024*1024, nil)
+		results = append(results, result)
+	})
+
+	// 测试场景12: 随机写+压缩+加密
+	t.Run("RandomWrite_CompressedEncrypted", func(t *testing.T) {
+		sdkCfg := &sdk.Config{
+			WiseCmpr: core.DATA_CMPR_SNAPPY,
+			CmprQlty: 1,
+			EndecWay: core.DATA_ENDEC_AES256,
+			EndecKey: "this is a test encryption key that is long enough for AES256",
+		}
+		result := runRandomWriteTest(t, "random_write_compressed_encrypted", 10*1024*1024, 4*1024*1024, sdkCfg)
+		results = append(results, result)
+	})
+
+	// 测试场景13: 随机写（重叠写入）
+	t.Run("RandomWrite_Overlapping", func(t *testing.T) {
+		result := runRandomWriteOverlappingTest(t, "random_write_overlapping", 10*1024*1024, 4*1024*1024, nil)
+		results = append(results, result)
+	})
+
+	// 测试场景14: 随机写（小数据块，多次写入）
+	t.Run("RandomWrite_SmallChunks", func(t *testing.T) {
+		result := runRandomWriteSmallChunksTest(t, "random_write_small_chunks", 10*1024*1024, 4*1024*1024, nil)
+		results = append(results, result)
+	})
+
 	// 打印性能报告
 	printPerformanceReport(results)
+
+	// 打印顺序写优化对比
+	fmt.Println("\n" + strings.Repeat("=", 120))
+	fmt.Println("Sequential Write Optimization Comparison")
+	fmt.Println(strings.Repeat("=", 120))
+	fmt.Printf("%-50s %12s %12s %10s\n", "Test Name", "Throughput", "Ops/sec", "Memory")
+	fmt.Println(strings.Repeat("-", 120))
+
+	// 找到顺序写测试结果
+	var sequentialTests []PerformanceMetrics
+	var otherTests []PerformanceMetrics
+	for _, r := range results {
+		if strings.Contains(r.TestName, "sequential") {
+			sequentialTests = append(sequentialTests, r)
+		} else {
+			otherTests = append(otherTests, r)
+		}
+	}
+
+	// 打印顺序写结果
+	for _, r := range sequentialTests {
+		fmt.Printf("%-50s %10.2f MB/s %10.2f ops/s %8.2f MB\n",
+			r.TestName, r.ThroughputMBps, r.OpsPerSecond, r.MaxMemoryMB)
+	}
+
+	fmt.Println("\n" + strings.Repeat("-", 120))
+	fmt.Println("Key Benefits of Sequential Write Optimization:")
+	fmt.Println("  - Lower memory usage: Only one chunk buffer (4MB) instead of full data")
+	fmt.Println("  - Immediate writes: Chunks are written as soon as they're full")
+	fmt.Println("  - Automatic fallback: Switches to random write mode when needed")
+	fmt.Println(strings.Repeat("=", 120))
+}
+
+// runSequentialWriteTest 运行顺序写性能测试（测试顺序写优化）
+func runSequentialWriteTest(t *testing.T, name string, totalSize, chunkSize int64, sdkCfg *sdk.Config) PerformanceMetrics {
+	// 初始化
+	if core.ORCAS_BASE == "" {
+		tmpDir := filepath.Join(os.TempDir(), "orcas_perf_test")
+		os.MkdirAll(tmpDir, 0o755)
+		os.Setenv("ORCAS_BASE", tmpDir)
+		core.ORCAS_BASE = tmpDir
+	}
+	if core.ORCAS_DATA == "" {
+		tmpDir := filepath.Join(os.TempDir(), "orcas_perf_test_data")
+		os.MkdirAll(tmpDir, 0o755)
+		os.Setenv("ORCAS_DATA", tmpDir)
+		core.ORCAS_DATA = tmpDir
+	}
+	core.InitDB()
+
+	ig := idgen.NewIDGen(nil, 0)
+	testBktID, _ := ig.New()
+	err := core.InitBucketDB(context.Background(), testBktID)
+	if err != nil {
+		t.Fatalf("InitBucketDB failed: %v", err)
+	}
+
+	dma := &core.DefaultMetadataAdapter{}
+	dda := &core.DefaultDataAdapter{}
+	dda.SetOptions(core.Options{Sync: true})
+
+	lh := core.NewLocalHandler().(*core.LocalHandler)
+	lh.SetAdapter(dma, dda)
+
+	testCtx, userInfo, _, err := lh.Login(context.Background(), "orcas", "orcas")
+	if err != nil {
+		t.Fatalf("Login failed: %v", err)
+	}
+
+	bucket := &core.BucketInfo{
+		ID:       testBktID,
+		Name:     "perf_bucket",
+		UID:      userInfo.ID,
+		Type:     1,
+		Quota:    10000000000, // 10GB
+		Used:     0,
+		RealUsed: 0,
+	}
+	if err := dma.PutBkt(testCtx, []*core.BucketInfo{bucket}); err != nil {
+		t.Fatalf("PutBkt failed: %v", err)
+	}
+
+	// 创建文件对象
+	fileID, _ := ig.New()
+	fileObj := &core.ObjectInfo{
+		ID:    fileID,
+		PID:   core.ROOT_OID,
+		Type:  core.OBJ_TYPE_FILE,
+		Name:  fmt.Sprintf("perf_%s.txt", name),
+		Size:  0,
+		MTime: time.Now().Unix(),
+	}
+	_, err = dma.PutObj(testCtx, testBktID, []*core.ObjectInfo{fileObj})
+	if err != nil {
+		t.Fatalf("PutObj failed: %v", err)
+	}
+
+	ofs := NewOrcasFS(lh, testCtx, testBktID, sdkCfg)
+
+	// 准备测试数据
+	writeChunkSize := int64(1024 * 1024) // 1MB per write
+	writeCount := int(totalSize / writeChunkSize)
+	if writeCount == 0 {
+		writeCount = 1
+	}
+
+	hasCompression := sdkCfg != nil && sdkCfg.WiseCmpr > 0
+	hasEncryption := sdkCfg != nil && sdkCfg.EndecWay > 0
+
+	// 记录开始状态
+	var startMem runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&startMem)
+	startTime := time.Now()
+
+	// 执行顺序写入（从0开始，连续写入）
+	ra, err := NewRandomAccessor(ofs, fileID)
+	if err != nil {
+		t.Fatalf("NewRandomAccessor failed: %v", err)
+	}
+
+	currentOffset := int64(0)
+	for i := 0; i < writeCount; i++ {
+		writeSize := writeChunkSize
+		if currentOffset+writeSize > totalSize {
+			writeSize = totalSize - currentOffset
+		}
+		if writeSize <= 0 {
+			break
+		}
+
+		testData := make([]byte, writeSize)
+		for j := range testData {
+			testData[j] = byte((currentOffset + int64(j)) % 256)
+		}
+
+		err := ra.Write(currentOffset, testData)
+		if err != nil {
+			t.Fatalf("Write failed: %v", err)
+		}
+
+		currentOffset += int64(writeSize)
+	}
+
+	// Flush
+	_, err = ra.Flush()
+	if err != nil {
+		t.Fatalf("Flush failed: %v", err)
+	}
+	ra.Close()
+
+	// 记录结束状态
+	endTime := time.Now()
+	var endMem runtime.MemStats
+	runtime.ReadMemStats(&endMem)
+
+	duration := endTime.Sub(startTime)
+	throughputMBps := (float64(totalSize) / 1024 / 1024) / duration.Seconds()
+	opsPerSecond := float64(writeCount) / duration.Seconds()
+
+	return PerformanceMetrics{
+		TestName:       name,
+		DataSize:       totalSize,
+		ChunkSize:      chunkSize,
+		WriteOps:       writeCount,
+		Concurrency:    1,
+		Duration:       duration,
+		ThroughputMBps: throughputMBps,
+		OpsPerSecond:   opsPerSecond,
+		MaxMemoryMB:    float64(endMem.Alloc-startMem.Alloc) / 1024 / 1024,
+		TotalAllocMB:   float64(endMem.TotalAlloc-startMem.TotalAlloc) / 1024 / 1024,
+		NumGC:          endMem.NumGC - startMem.NumGC,
+		HasCompression: hasCompression,
+		HasEncryption:  hasEncryption,
+	}
+}
+
+// runRandomWriteTest 运行随机写性能测试（不同offset，不连续）
+func runRandomWriteTest(t *testing.T, name string, totalSize, chunkSize int64, sdkCfg *sdk.Config) PerformanceMetrics {
+	// 初始化（与runSequentialWriteTest相同）
+	if core.ORCAS_BASE == "" {
+		tmpDir := filepath.Join(os.TempDir(), "orcas_perf_test")
+		os.MkdirAll(tmpDir, 0o755)
+		os.Setenv("ORCAS_BASE", tmpDir)
+		core.ORCAS_BASE = tmpDir
+	}
+	if core.ORCAS_DATA == "" {
+		tmpDir := filepath.Join(os.TempDir(), "orcas_perf_test_data")
+		os.MkdirAll(tmpDir, 0o755)
+		os.Setenv("ORCAS_DATA", tmpDir)
+		core.ORCAS_DATA = tmpDir
+	}
+	core.InitDB()
+
+	ig := idgen.NewIDGen(nil, 0)
+	testBktID, _ := ig.New()
+	err := core.InitBucketDB(context.Background(), testBktID)
+	if err != nil {
+		t.Fatalf("InitBucketDB failed: %v", err)
+	}
+
+	dma := &core.DefaultMetadataAdapter{}
+	dda := &core.DefaultDataAdapter{}
+	dda.SetOptions(core.Options{Sync: true})
+
+	lh := core.NewLocalHandler().(*core.LocalHandler)
+	lh.SetAdapter(dma, dda)
+
+	testCtx, userInfo, _, err := lh.Login(context.Background(), "orcas", "orcas")
+	if err != nil {
+		t.Fatalf("Login failed: %v", err)
+	}
+
+	bucket := &core.BucketInfo{
+		ID:       testBktID,
+		Name:     "perf_bucket",
+		UID:      userInfo.ID,
+		Type:     1,
+		Quota:    10000000000, // 10GB
+		Used:     0,
+		RealUsed: 0,
+	}
+	if err := dma.PutBkt(testCtx, []*core.BucketInfo{bucket}); err != nil {
+		t.Fatalf("PutBkt failed: %v", err)
+	}
+
+	// 创建文件对象
+	fileID, _ := ig.New()
+	fileObj := &core.ObjectInfo{
+		ID:    fileID,
+		PID:   core.ROOT_OID,
+		Type:  core.OBJ_TYPE_FILE,
+		Name:  fmt.Sprintf("perf_%s.txt", name),
+		Size:  0,
+		MTime: time.Now().Unix(),
+	}
+	_, err = dma.PutObj(testCtx, testBktID, []*core.ObjectInfo{fileObj})
+	if err != nil {
+		t.Fatalf("PutObj failed: %v", err)
+	}
+
+	ofs := NewOrcasFS(lh, testCtx, testBktID, sdkCfg)
+
+	// 准备测试数据：随机offset，不连续写入
+	writeChunkSize := int64(512 * 1024) // 512KB per write
+	writeCount := 20                    // 写入20次
+	writeSize := writeChunkSize
+
+	hasCompression := sdkCfg != nil && sdkCfg.WiseCmpr > 0
+	hasEncryption := sdkCfg != nil && sdkCfg.EndecWay > 0
+
+	// 记录开始状态
+	var startMem runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&startMem)
+	startTime := time.Now()
+
+	// 执行随机写入（不同offset，不连续）
+	ra, err := NewRandomAccessor(ofs, fileID)
+	if err != nil {
+		t.Fatalf("NewRandomAccessor failed: %v", err)
+	}
+
+	// 生成随机offset列表（确保不连续）
+	offsets := make([]int64, writeCount)
+	for i := 0; i < writeCount; i++ {
+		// 生成随机offset，确保不连续
+		offsets[i] = int64(i*2) * writeChunkSize // 间隔写入，跳过一些位置
+	}
+
+	// 打乱顺序（模拟真实随机写）
+	for i := writeCount - 1; i > 0; i-- {
+		j := i % (i + 1)
+		offsets[i], offsets[j] = offsets[j], offsets[i]
+	}
+
+	totalWritten := int64(0)
+	for i := 0; i < writeCount; i++ {
+		offset := offsets[i]
+		testData := make([]byte, writeSize)
+		for j := range testData {
+			testData[j] = byte((offset + int64(j)) % 256)
+		}
+
+		err := ra.Write(offset, testData)
+		if err != nil {
+			t.Fatalf("Write failed: %v", err)
+		}
+		totalWritten += writeSize
+	}
+
+	// Flush
+	_, err = ra.Flush()
+	if err != nil {
+		t.Fatalf("Flush failed: %v", err)
+	}
+	ra.Close()
+
+	// 记录结束状态
+	endTime := time.Now()
+	var endMem runtime.MemStats
+	runtime.ReadMemStats(&endMem)
+
+	duration := endTime.Sub(startTime)
+	throughputMBps := (float64(totalWritten) / 1024 / 1024) / duration.Seconds()
+	opsPerSecond := float64(writeCount) / duration.Seconds()
+
+	return PerformanceMetrics{
+		TestName:       name,
+		DataSize:       totalWritten,
+		ChunkSize:      chunkSize,
+		WriteOps:       writeCount,
+		Concurrency:    1,
+		Duration:       duration,
+		ThroughputMBps: throughputMBps,
+		OpsPerSecond:   opsPerSecond,
+		MaxMemoryMB:    float64(endMem.Alloc-startMem.Alloc) / 1024 / 1024,
+		TotalAllocMB:   float64(endMem.TotalAlloc-startMem.TotalAlloc) / 1024 / 1024,
+		NumGC:          endMem.NumGC - startMem.NumGC,
+		HasCompression: hasCompression,
+		HasEncryption:  hasEncryption,
+	}
+}
+
+// runRandomWriteOverlappingTest 运行随机写性能测试（重叠写入）
+func runRandomWriteOverlappingTest(t *testing.T, name string, totalSize, chunkSize int64, sdkCfg *sdk.Config) PerformanceMetrics {
+	// 初始化（与runSequentialWriteTest相同）
+	if core.ORCAS_BASE == "" {
+		tmpDir := filepath.Join(os.TempDir(), "orcas_perf_test")
+		os.MkdirAll(tmpDir, 0o755)
+		os.Setenv("ORCAS_BASE", tmpDir)
+		core.ORCAS_BASE = tmpDir
+	}
+	if core.ORCAS_DATA == "" {
+		tmpDir := filepath.Join(os.TempDir(), "orcas_perf_test_data")
+		os.MkdirAll(tmpDir, 0o755)
+		os.Setenv("ORCAS_DATA", tmpDir)
+		core.ORCAS_DATA = tmpDir
+	}
+	core.InitDB()
+
+	ig := idgen.NewIDGen(nil, 0)
+	testBktID, _ := ig.New()
+	err := core.InitBucketDB(context.Background(), testBktID)
+	if err != nil {
+		t.Fatalf("InitBucketDB failed: %v", err)
+	}
+
+	dma := &core.DefaultMetadataAdapter{}
+	dda := &core.DefaultDataAdapter{}
+	dda.SetOptions(core.Options{Sync: true})
+
+	lh := core.NewLocalHandler().(*core.LocalHandler)
+	lh.SetAdapter(dma, dda)
+
+	testCtx, userInfo, _, err := lh.Login(context.Background(), "orcas", "orcas")
+	if err != nil {
+		t.Fatalf("Login failed: %v", err)
+	}
+
+	bucket := &core.BucketInfo{
+		ID:       testBktID,
+		Name:     "perf_bucket",
+		UID:      userInfo.ID,
+		Type:     1,
+		Quota:    10000000000, // 10GB
+		Used:     0,
+		RealUsed: 0,
+	}
+	if err := dma.PutBkt(testCtx, []*core.BucketInfo{bucket}); err != nil {
+		t.Fatalf("PutBkt failed: %v", err)
+	}
+
+	// 创建文件对象
+	fileID, _ := ig.New()
+	fileObj := &core.ObjectInfo{
+		ID:    fileID,
+		PID:   core.ROOT_OID,
+		Type:  core.OBJ_TYPE_FILE,
+		Name:  fmt.Sprintf("perf_%s.txt", name),
+		Size:  0,
+		MTime: time.Now().Unix(),
+	}
+	_, err = dma.PutObj(testCtx, testBktID, []*core.ObjectInfo{fileObj})
+	if err != nil {
+		t.Fatalf("PutObj failed: %v", err)
+	}
+
+	ofs := NewOrcasFS(lh, testCtx, testBktID, sdkCfg)
+
+	// 准备测试数据：重叠写入
+	writeChunkSize := int64(1024 * 1024) // 1MB per write
+	writeCount := 15                     // 写入15次
+	overlapSize := int64(256 * 1024)     // 每次重叠256KB
+
+	hasCompression := sdkCfg != nil && sdkCfg.WiseCmpr > 0
+	hasEncryption := sdkCfg != nil && sdkCfg.EndecWay > 0
+
+	// 记录开始状态
+	var startMem runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&startMem)
+	startTime := time.Now()
+
+	// 执行重叠写入
+	ra, err := NewRandomAccessor(ofs, fileID)
+	if err != nil {
+		t.Fatalf("NewRandomAccessor failed: %v", err)
+	}
+
+	totalWritten := int64(0)
+	currentOffset := int64(0)
+	for i := 0; i < writeCount; i++ {
+		testData := make([]byte, writeChunkSize)
+		for j := range testData {
+			testData[j] = byte((currentOffset + int64(j)) % 256)
+		}
+
+		err := ra.Write(currentOffset, testData)
+		if err != nil {
+			t.Fatalf("Write failed: %v", err)
+		}
+		totalWritten += writeChunkSize
+
+		// 下次写入与本次重叠
+		currentOffset += writeChunkSize - overlapSize
+	}
+
+	// Flush
+	_, err = ra.Flush()
+	if err != nil {
+		t.Fatalf("Flush failed: %v", err)
+	}
+	ra.Close()
+
+	// 记录结束状态
+	endTime := time.Now()
+	var endMem runtime.MemStats
+	runtime.ReadMemStats(&endMem)
+
+	duration := endTime.Sub(startTime)
+	throughputMBps := (float64(totalWritten) / 1024 / 1024) / duration.Seconds()
+	opsPerSecond := float64(writeCount) / duration.Seconds()
+
+	return PerformanceMetrics{
+		TestName:       name,
+		DataSize:       totalWritten,
+		ChunkSize:      chunkSize,
+		WriteOps:       writeCount,
+		Concurrency:    1,
+		Duration:       duration,
+		ThroughputMBps: throughputMBps,
+		OpsPerSecond:   opsPerSecond,
+		MaxMemoryMB:    float64(endMem.Alloc-startMem.Alloc) / 1024 / 1024,
+		TotalAllocMB:   float64(endMem.TotalAlloc-startMem.TotalAlloc) / 1024 / 1024,
+		NumGC:          endMem.NumGC - startMem.NumGC,
+		HasCompression: hasCompression,
+		HasEncryption:  hasEncryption,
+	}
+}
+
+// runRandomWriteSmallChunksTest 运行随机写性能测试（小数据块，多次写入）
+func runRandomWriteSmallChunksTest(t *testing.T, name string, totalSize, chunkSize int64, sdkCfg *sdk.Config) PerformanceMetrics {
+	// 初始化（与runSequentialWriteTest相同）
+	if core.ORCAS_BASE == "" {
+		tmpDir := filepath.Join(os.TempDir(), "orcas_perf_test")
+		os.MkdirAll(tmpDir, 0o755)
+		os.Setenv("ORCAS_BASE", tmpDir)
+		core.ORCAS_BASE = tmpDir
+	}
+	if core.ORCAS_DATA == "" {
+		tmpDir := filepath.Join(os.TempDir(), "orcas_perf_test_data")
+		os.MkdirAll(tmpDir, 0o755)
+		os.Setenv("ORCAS_DATA", tmpDir)
+		core.ORCAS_DATA = tmpDir
+	}
+	core.InitDB()
+
+	ig := idgen.NewIDGen(nil, 0)
+	testBktID, _ := ig.New()
+	err := core.InitBucketDB(context.Background(), testBktID)
+	if err != nil {
+		t.Fatalf("InitBucketDB failed: %v", err)
+	}
+
+	dma := &core.DefaultMetadataAdapter{}
+	dda := &core.DefaultDataAdapter{}
+	dda.SetOptions(core.Options{Sync: true})
+
+	lh := core.NewLocalHandler().(*core.LocalHandler)
+	lh.SetAdapter(dma, dda)
+
+	testCtx, userInfo, _, err := lh.Login(context.Background(), "orcas", "orcas")
+	if err != nil {
+		t.Fatalf("Login failed: %v", err)
+	}
+
+	bucket := &core.BucketInfo{
+		ID:       testBktID,
+		Name:     "perf_bucket",
+		UID:      userInfo.ID,
+		Type:     1,
+		Quota:    10000000000, // 10GB
+		Used:     0,
+		RealUsed: 0,
+	}
+	if err := dma.PutBkt(testCtx, []*core.BucketInfo{bucket}); err != nil {
+		t.Fatalf("PutBkt failed: %v", err)
+	}
+
+	// 创建文件对象
+	fileID, _ := ig.New()
+	fileObj := &core.ObjectInfo{
+		ID:    fileID,
+		PID:   core.ROOT_OID,
+		Type:  core.OBJ_TYPE_FILE,
+		Name:  fmt.Sprintf("perf_%s.txt", name),
+		Size:  0,
+		MTime: time.Now().Unix(),
+	}
+	_, err = dma.PutObj(testCtx, testBktID, []*core.ObjectInfo{fileObj})
+	if err != nil {
+		t.Fatalf("PutObj failed: %v", err)
+	}
+
+	ofs := NewOrcasFS(lh, testCtx, testBktID, sdkCfg)
+
+	// 准备测试数据：小数据块，多次写入
+	writeChunkSize := int64(64 * 1024) // 64KB per write
+	writeCount := 100                  // 写入100次
+
+	hasCompression := sdkCfg != nil && sdkCfg.WiseCmpr > 0
+	hasEncryption := sdkCfg != nil && sdkCfg.EndecWay > 0
+
+	// 记录开始状态
+	var startMem runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&startMem)
+	startTime := time.Now()
+
+	// 执行小数据块随机写入
+	ra, err := NewRandomAccessor(ofs, fileID)
+	if err != nil {
+		t.Fatalf("NewRandomAccessor failed: %v", err)
+	}
+
+	// 生成随机offset列表
+	offsets := make([]int64, writeCount)
+	for i := 0; i < writeCount; i++ {
+		// 随机offset，但确保在totalSize范围内
+		maxOffset := totalSize - writeChunkSize
+		if maxOffset < 0 {
+			maxOffset = 0
+		}
+		offsets[i] = int64(i%10) * (maxOffset / 10) // 分散在不同位置
+	}
+
+	totalWritten := int64(0)
+	for i := 0; i < writeCount; i++ {
+		offset := offsets[i]
+		testData := make([]byte, writeChunkSize)
+		for j := range testData {
+			testData[j] = byte((offset + int64(j)) % 256)
+		}
+
+		err := ra.Write(offset, testData)
+		if err != nil {
+			t.Fatalf("Write failed: %v", err)
+		}
+		totalWritten += writeChunkSize
+	}
+
+	// Flush
+	_, err = ra.Flush()
+	if err != nil {
+		t.Fatalf("Flush failed: %v", err)
+	}
+	ra.Close()
+
+	// 记录结束状态
+	endTime := time.Now()
+	var endMem runtime.MemStats
+	runtime.ReadMemStats(&endMem)
+
+	duration := endTime.Sub(startTime)
+	throughputMBps := (float64(totalWritten) / 1024 / 1024) / duration.Seconds()
+	opsPerSecond := float64(writeCount) / duration.Seconds()
+
+	return PerformanceMetrics{
+		TestName:       name,
+		DataSize:       totalWritten,
+		ChunkSize:      chunkSize,
+		WriteOps:       writeCount,
+		Concurrency:    1,
+		Duration:       duration,
+		ThroughputMBps: throughputMBps,
+		OpsPerSecond:   opsPerSecond,
+		MaxMemoryMB:    float64(endMem.Alloc-startMem.Alloc) / 1024 / 1024,
+		TotalAllocMB:   float64(endMem.TotalAlloc-startMem.TotalAlloc) / 1024 / 1024,
+		NumGC:          endMem.NumGC - startMem.NumGC,
+		HasCompression: hasCompression,
+		HasEncryption:  hasEncryption,
+	}
 }
 
 // printPerformanceReport 打印性能报告

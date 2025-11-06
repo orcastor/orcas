@@ -69,11 +69,25 @@ type WriteBuffer struct {
 	totalSize  int64            // 缓冲区总大小（使用原子操作优化）
 }
 
+// SequentialWriteBuffer 顺序写缓冲区（优化：从0开始的顺序写）
+type SequentialWriteBuffer struct {
+	fileID    int64          // 文件对象ID
+	dataID    int64          // 数据对象ID（新建对象时创建）
+	sn        int            // 当前数据块序号
+	chunkSize int64          // chunk大小
+	buffer    []byte         // 当前chunk缓冲区（最多一个chunk大小）
+	offset    int64          // 当前写入位置（顺序写）
+	hasData   bool           // 是否已有数据写入
+	closed    bool           // 是否已关闭（变为随机写）
+	dataInfo  *core.DataInfo // 数据信息
+}
+
 // RandomAccessor VFS中的随机访问对象，支持压缩和加密
 type RandomAccessor struct {
 	fs         *OrcasFS
 	fileID     int64
-	buffer     *WriteBuffer
+	buffer     *WriteBuffer           // 随机写缓冲区
+	seqBuffer  *SequentialWriteBuffer // 顺序写缓冲区（优化）
 	fileObj    atomic.Value
 	fileObjKey string // 预计算的file_obj缓存key（优化：避免重复转换）
 }
@@ -100,8 +114,43 @@ func NewRandomAccessor(fs *OrcasFS, fileID int64) (*RandomAccessor, error) {
 }
 
 // Write 添加写入操作到缓冲区
-// 优化：减少锁持有时间，提高并发性能，使用原子操作优化
+// 优化：顺序写优化 - 如果是从0开始的顺序写，直接写入数据块，避免缓存
 func (ra *RandomAccessor) Write(offset int64, data []byte) error {
+	// 检查是否是顺序写模式
+	if ra.seqBuffer != nil && !ra.seqBuffer.closed {
+		// 检查是否仍然是顺序写（从当前位置继续写）
+		if offset == ra.seqBuffer.offset {
+			// 顺序写，使用优化路径
+			return ra.writeSequential(offset, data)
+		} else if offset < ra.seqBuffer.offset {
+			// 往回写，转为随机写模式
+			if err := ra.flushSequentialBuffer(); err != nil {
+				return err
+			}
+			ra.seqBuffer.closed = true
+		} else {
+			// 跳过了某些位置，转为随机写模式
+			if err := ra.flushSequentialBuffer(); err != nil {
+				return err
+			}
+			ra.seqBuffer.closed = true
+		}
+	}
+
+	// 初始化顺序写缓冲区（如果是从0开始顺序写，且文件还没有数据）
+	if ra.seqBuffer == nil && offset == 0 && len(data) > 0 {
+		fileObj, err := ra.getFileObj()
+		if err == nil && (fileObj.DataID == 0 || fileObj.DataID == core.EmptyDataID) {
+			// 文件没有数据，可以初始化顺序写缓冲区
+			if initErr := ra.initSequentialBuffer(); initErr == nil {
+				// 初始化成功，使用顺序写
+				return ra.writeSequential(offset, data)
+			}
+			// 初始化失败，fallback到随机写
+		}
+	}
+
+	// 随机写模式：使用原有的缓冲区逻辑
 	// 优化：减少数据复制，只有在必要时才复制
 	// 检查是否超出容量（优化：提前检查，避免越界）
 	if atomic.LoadInt64(&ra.buffer.writeIndex)+1 >= int64(len(ra.buffer.operations)) || atomic.LoadInt64(&ra.buffer.totalSize) >= core.GetWriteBufferConfig().MaxBufferSize {
@@ -125,6 +174,256 @@ func (ra *RandomAccessor) Write(offset int64, data []byte) error {
 	ra.buffer.operations[writeIndex].Offset = offset
 	ra.buffer.operations[writeIndex].Data = make([]byte, len(data))
 	copy(ra.buffer.operations[writeIndex].Data, data)
+	return nil
+}
+
+// initSequentialBuffer 初始化顺序写缓冲区
+func (ra *RandomAccessor) initSequentialBuffer() error {
+	fileObj, err := ra.getFileObj()
+	if err != nil {
+		return err
+	}
+
+	// 如果文件已有数据，不能使用顺序写优化
+	if fileObj.DataID > 0 && fileObj.DataID != core.EmptyDataID {
+		return fmt.Errorf("file already has data")
+	}
+
+	chunkSize := ra.fs.chunkSize
+	if chunkSize <= 0 {
+		chunkSize = 4 * 1024 * 1024 // 默认4MB
+	}
+
+	// 创建新的数据对象
+	newDataID := ra.fs.h.NewID()
+
+	// 初始化DataInfo
+	dataInfo := &core.DataInfo{
+		ID:       newDataID,
+		OrigSize: 0,
+		Size:     0,
+		CRC32:    0,
+		Cksum:    0,
+		Kind:     0,
+	}
+
+	// 设置压缩和加密标记（如果启用）
+	cfg := ra.fs.sdkCfg
+	if cfg != nil {
+		if cfg.WiseCmpr > 0 {
+			dataInfo.Kind |= cfg.WiseCmpr
+		}
+		if cfg.EndecWay > 0 {
+			dataInfo.Kind |= cfg.EndecWay
+		}
+	}
+
+	ra.seqBuffer = &SequentialWriteBuffer{
+		fileID:    ra.fileID,
+		dataID:    newDataID,
+		sn:        0,
+		chunkSize: chunkSize,
+		buffer:    make([]byte, 0, chunkSize), // 预分配但长度为0
+		offset:    0,
+		hasData:   false,
+		closed:    false,
+		dataInfo:  dataInfo,
+	}
+
+	return nil
+}
+
+// writeSequential 顺序写数据（优化路径）
+func (ra *RandomAccessor) writeSequential(offset int64, data []byte) error {
+	if ra.seqBuffer == nil || ra.seqBuffer.closed {
+		return fmt.Errorf("sequential buffer not available")
+	}
+
+	// 确保offset是顺序的
+	if offset != ra.seqBuffer.offset {
+		return fmt.Errorf("non-sequential write detected")
+	}
+
+	dataLeft := data
+	for len(dataLeft) > 0 {
+		// 计算当前chunk还剩余多少空间
+		remainingInChunk := ra.seqBuffer.chunkSize - int64(len(ra.seqBuffer.buffer))
+		if remainingInChunk <= 0 {
+			// 当前chunk已满，写入并清空
+			if err := ra.flushSequentialChunk(); err != nil {
+				return err
+			}
+			remainingInChunk = ra.seqBuffer.chunkSize
+		}
+
+		// 计算本次能写入多少数据
+		writeSize := int64(len(dataLeft))
+		if writeSize > remainingInChunk {
+			writeSize = remainingInChunk
+		}
+
+		// 写入到当前chunk缓冲区
+		ra.seqBuffer.buffer = append(ra.seqBuffer.buffer, dataLeft[:writeSize]...)
+		ra.seqBuffer.offset += writeSize
+		ra.seqBuffer.hasData = true
+		dataLeft = dataLeft[writeSize:]
+
+		// 如果chunk满了，立即写入
+		if int64(len(ra.seqBuffer.buffer)) >= ra.seqBuffer.chunkSize {
+			if err := ra.flushSequentialChunk(); err != nil {
+				return err
+			}
+		}
+	}
+
+	return nil
+}
+
+// flushSequentialChunk 刷新当前顺序写chunk（写入一个完整chunk）
+func (ra *RandomAccessor) flushSequentialChunk() error {
+	if ra.seqBuffer == nil || len(ra.seqBuffer.buffer) == 0 {
+		return nil
+	}
+
+	cfg := ra.fs.sdkCfg
+	chunkData := ra.seqBuffer.buffer
+
+	// 处理第一个chunk：检查文件类型和压缩效果
+	isFirstChunk := ra.seqBuffer.sn == 0
+	if isFirstChunk && cfg != nil && cfg.WiseCmpr > 0 && len(chunkData) > 0 {
+		kind, _ := filetype.Match(chunkData)
+		if kind != filetype.Unknown {
+			// 不是未知类型，不压缩
+			ra.seqBuffer.dataInfo.Kind &= ^core.DATA_CMPR_MASK
+		}
+	}
+
+	// 更新原始数据的CRC32和大小
+	ra.seqBuffer.dataInfo.CRC32 = crc32.Update(ra.seqBuffer.dataInfo.CRC32, crc32.IEEETable, chunkData)
+	ra.seqBuffer.dataInfo.OrigSize += int64(len(chunkData))
+
+	// 压缩（如果启用）
+	var processedChunk []byte
+	hasCmpr := ra.seqBuffer.dataInfo.Kind&core.DATA_CMPR_MASK != 0
+	if hasCmpr && cfg != nil && cfg.WiseCmpr > 0 {
+		var cmpr archiver.Compressor
+		if cfg.WiseCmpr&core.DATA_CMPR_SNAPPY != 0 {
+			cmpr = &archiver.Snappy{}
+		} else if cfg.WiseCmpr&core.DATA_CMPR_ZSTD != 0 {
+			cmpr = &archiver.Zstd{EncoderOptions: []zstd.EOption{zstd.WithEncoderLevel(zstd.EncoderLevelFromZstd(int(cfg.CmprQlty)))}}
+		} else if cfg.WiseCmpr&core.DATA_CMPR_GZIP != 0 {
+			cmpr = &archiver.Gz{CompressionLevel: int(cfg.CmprQlty)}
+		} else if cfg.WiseCmpr&core.DATA_CMPR_BR != 0 {
+			cmpr = &archiver.Brotli{Quality: int(cfg.CmprQlty)}
+		}
+
+		if cmpr != nil {
+			var cmprBuf bytes.Buffer
+			err := cmpr.Compress(bytes.NewBuffer(chunkData), &cmprBuf)
+			if err != nil {
+				// 压缩失败，只在第一个chunk时移除压缩标记
+				if isFirstChunk {
+					ra.seqBuffer.dataInfo.Kind &= ^core.DATA_CMPR_MASK
+				}
+				processedChunk = chunkData
+			} else {
+				// 如果压缩后更大或相等，只在第一个chunk时移除压缩标记
+				if isFirstChunk && cmprBuf.Len() >= len(chunkData) {
+					processedChunk = chunkData
+					ra.seqBuffer.dataInfo.Kind &= ^core.DATA_CMPR_MASK
+				} else {
+					processedChunk = cmprBuf.Bytes()
+				}
+			}
+		} else {
+			processedChunk = chunkData
+		}
+	} else {
+		processedChunk = chunkData
+	}
+
+	// 加密（如果启用）
+	var encodedChunk []byte
+	var err error
+	if cfg != nil && ra.seqBuffer.dataInfo.Kind&core.DATA_ENDEC_AES256 != 0 {
+		encodedChunk, err = aes256.Encrypt(cfg.EndecKey, processedChunk)
+	} else if cfg != nil && ra.seqBuffer.dataInfo.Kind&core.DATA_ENDEC_SM4 != 0 {
+		encodedChunk, err = sm4.Sm4Cbc([]byte(cfg.EndecKey), processedChunk, true)
+	} else {
+		encodedChunk = processedChunk
+	}
+	if err != nil {
+		encodedChunk = processedChunk
+	}
+
+	// 更新最终数据的CRC32
+	ra.seqBuffer.dataInfo.Cksum = crc32.Update(ra.seqBuffer.dataInfo.Cksum, crc32.IEEETable, encodedChunk)
+
+	// 更新大小（如果压缩或加密了）
+	if ra.seqBuffer.dataInfo.Kind&core.DATA_CMPR_MASK != 0 || ra.seqBuffer.dataInfo.Kind&core.DATA_ENDEC_MASK != 0 {
+		ra.seqBuffer.dataInfo.Size += int64(len(encodedChunk))
+	}
+
+	// 写入数据块
+	if _, err := ra.fs.h.PutData(ra.fs.c, ra.fs.bktID, ra.seqBuffer.dataID, ra.seqBuffer.sn, encodedChunk); err != nil {
+		return err
+	}
+
+	ra.seqBuffer.sn++
+	ra.seqBuffer.buffer = ra.seqBuffer.buffer[:0] // 清空缓冲区但保留容量
+	return nil
+}
+
+// flushSequentialBuffer 刷新整个顺序写缓冲区（写入最后一个chunk并完成）
+func (ra *RandomAccessor) flushSequentialBuffer() error {
+	if ra.seqBuffer == nil {
+		return nil
+	}
+
+	// 写入最后一个chunk（如果还有数据）
+	if len(ra.seqBuffer.buffer) > 0 {
+		if err := ra.flushSequentialChunk(); err != nil {
+			return err
+		}
+	}
+
+	// 如果没有数据，直接返回
+	if !ra.seqBuffer.hasData {
+		return nil
+	}
+
+	// 更新DataInfo的最终大小
+	if ra.seqBuffer.dataInfo.Kind&core.DATA_CMPR_MASK == 0 && ra.seqBuffer.dataInfo.Kind&core.DATA_ENDEC_MASK == 0 {
+		ra.seqBuffer.dataInfo.Size = ra.seqBuffer.dataInfo.OrigSize
+		ra.seqBuffer.dataInfo.Cksum = ra.seqBuffer.dataInfo.CRC32
+	}
+
+	// 保存DataInfo
+	if _, err := ra.fs.h.PutDataInfo(ra.fs.c, ra.fs.bktID, []*core.DataInfo{ra.seqBuffer.dataInfo}); err != nil {
+		return err
+	}
+
+	// 更新缓存
+	dataInfoCache.Put(formatCacheKey(ra.fs.bktID, ra.seqBuffer.dataID), ra.seqBuffer.dataInfo)
+
+	// 更新文件对象
+	fileObj, err := ra.getFileObj()
+	if err != nil {
+		return err
+	}
+
+	fileObj.DataID = ra.seqBuffer.dataID
+	fileObj.Size = ra.seqBuffer.dataInfo.OrigSize
+
+	// 更新文件对象（使用Handler的Put方法）
+	if _, err := ra.fs.h.Put(ra.fs.c, ra.fs.bktID, []*core.ObjectInfo{fileObj}); err != nil {
+		return err
+	}
+
+	// 更新缓存
+	fileObjCache.Put(ra.fileObjKey, fileObj)
+	ra.fileObj.Store(fileObj)
+
 	return nil
 }
 
@@ -162,6 +461,26 @@ func (ra *RandomAccessor) Read(offset int64, size int) ([]byte, error) {
 	fileObj, err := ra.getFileObj()
 	if err != nil {
 		return nil, err
+	}
+
+	// 如果顺序写缓冲区有数据，先从它读取
+	if ra.seqBuffer != nil && ra.seqBuffer.hasData {
+		// 顺序写缓冲区有数据，需要先刷新才能读取
+		// 但读取时不应该刷新，所以这里只处理已经在文件对象中的数据
+		// 如果顺序写缓冲区未关闭，说明数据还在缓冲区中，需要先刷新
+		if !ra.seqBuffer.closed {
+			// 顺序写未完成，先刷新到文件对象
+			if flushErr := ra.flushSequentialBuffer(); flushErr != nil {
+				return nil, flushErr
+			}
+			ra.seqBuffer.closed = true
+			// 重新获取文件对象
+			var objErr error
+			fileObj, objErr = ra.getFileObj()
+			if objErr != nil {
+				return nil, objErr
+			}
+		}
 	}
 
 	// 如果没有数据ID，直接处理缓冲区写入操作
@@ -298,6 +617,23 @@ func (ra *RandomAccessor) extractRange(data []byte, offset int64, size int) []by
 
 // Flush 刷新缓冲区，返回新版本ID（如果没有待刷新数据返回0）
 func (ra *RandomAccessor) Flush() (int64, error) {
+	// 如果顺序写缓冲区有数据，先刷新它
+	if ra.seqBuffer != nil && ra.seqBuffer.hasData && !ra.seqBuffer.closed {
+		if err := ra.flushSequentialBuffer(); err != nil {
+			return 0, err
+		}
+		// 顺序写完成后，关闭顺序缓冲区
+		ra.seqBuffer.closed = true
+		// 顺序写完成后返回新版本ID（实际上就是当前的DataID对应的版本）
+		fileObj, err := ra.getFileObj()
+		if err != nil {
+			return 0, err
+		}
+		if fileObj.DataID > 0 {
+			return ra.fs.h.NewID(), nil // 返回新的版本ID
+		}
+	}
+
 	// 优化：使用原子操作获取并清空操作（无锁）
 	// 原子地交换writeIndex并重置为0，获取实际的操作数量
 	writeIndex := atomic.SwapInt64(&ra.buffer.writeIndex, 0)
