@@ -113,12 +113,12 @@ Based on real performance test data (continuously updated)
 - **After Optimization (Atomic Operations)**: ~900 ops/sec
 - **After Optimization (Remove Sync Flush)**: ~1800 ops/sec (peak)
 - **After Optimization (unsafe direct memory copy)**: 1800.15 ops/sec (stable high performance)
-- **After Optimization (Batch Write+Time Calibrator+Concurrent Test Optimization+Increased Write Volume)**: **2897.79 ops/sec** ✅ (stable high performance, lower GC pressure)
+- **After Optimization (Batch Write+Time Calibrator+Concurrent Test Optimization+Increased Write Volume)**: **2651.23 ops/sec** ✅ (stable high performance, lower GC pressure)
 
 ### Single Thread Operation Improvement Journey
 
 - **Before Optimization**: 1573.64 ops/sec
-- **After Optimization**: **5495.28 ops/sec** ✅ (249% improvement ⭐⭐⭐)
+- **After Optimization**: **5944.55 ops/sec** ✅ (278% improvement ⭐⭐⭐)
 
 ## Summary
 
