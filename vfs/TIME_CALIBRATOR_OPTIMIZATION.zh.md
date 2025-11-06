@@ -1,6 +1,6 @@
 # 时间校准器优化说明
 
-- [English](TIME_CALIBRATOR_OPTIMIZATION.en.md) | [中文](TIME_CALIBRATOR_OPTIMIZATION.zh.md)
+- [English](TIME_CALIBRATOR_OPTIMIZATION.md) | [中文](TIME_CALIBRATOR_OPTIMIZATION.zh.md)
 
 ## 优化概述
 
