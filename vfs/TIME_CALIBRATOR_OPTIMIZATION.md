@@ -1,40 +1,43 @@
-# 时间校准器优化说明
 
-## 优化概述
+# Time Calibrator Optimization
 
-实现了一个自定义的时间校准器，参考ecache的实现方式，使用自己的时间戳而不是每次调用`time.Now()`，从而减少GC压力，提升性能。
+- [English](TIME_CALIBRATOR_OPTIMIZATION.md) | [中文](TIME_CALIBRATOR_OPTIMIZATION.zh.md)
 
-## 问题分析
+## Optimization Overview
 
-### 原有问题
-- **频繁调用time.Now()**: 每次调用`time.Now()`都会创建一个`time.Time`临时对象
-- **GC压力**: 大量临时对象增加垃圾回收负担
-- **性能影响**: 在高并发场景下，频繁的GC会影响性能
+Implemented a custom time calibrator, referencing ecache's implementation approach, using its own timestamp instead of calling `time.Now()` each time, thereby reducing GC pressure and improving performance.
 
-### 优化方案
-参考ecache的实现，使用全局时间校准器：
-- **定期更新**: 后台协程定期更新时间戳（默认每毫秒）
-- **原子操作**: 使用`atomic.Int64`存储时间戳，保证线程安全
-- **无临时对象**: 直接返回int64时间戳，不创建临时对象
+## Problem Analysis
 
-## 实现细节
+### Original Problems
+- **Frequent calls to time.Now()**: Each call to `time.Now()` creates a temporary `time.Time` object
+- **GC Pressure**: Large numbers of temporary objects increase garbage collection burden
+- **Performance Impact**: In high concurrency scenarios, frequent GC affects performance
 
-### 时间校准器实现
+### Optimization Solution
+Reference ecache's implementation, use a global time calibrator:
+- **Periodic Updates**: Background goroutine periodically updates timestamp (default every millisecond)
+- **Atomic Operations**: Use `atomic.Int64` to store timestamp, ensuring thread safety
+- **No Temporary Objects**: Directly return int64 timestamp, no temporary object creation
+
+## Implementation Details
+
+### Time Calibrator Implementation
 
 ```go
 var (
-    // 时间校准器：使用自己的时间戳，减少time.Now()调用和GC压力
-    currentTimeStamp atomic.Int64 // 当前Unix时间戳（秒）
-    timeCalibratorOnce sync.Once  // 确保只初始化一次
+    // Time calibrator: use own timestamp, reduce time.Now() calls and GC pressure
+    currentTimeStamp atomic.Int64 // Current Unix timestamp (seconds)
+    timeCalibratorOnce sync.Once  // Ensure initialization only once
 )
 
-// initTimeCalibrator 初始化时间校准器
+// initTimeCalibrator initializes the time calibrator
 func initTimeCalibrator() {
     timeCalibratorOnce.Do(func() {
-        // 初始化当前时间戳
+        // Initialize current timestamp
         currentTimeStamp.Store(time.Now().Unix())
         
-        // 启动时间校准协程，每毫秒更新一次时间戳
+        // Start time calibrator goroutine, update timestamp every millisecond
         go func() {
             ticker := time.NewTicker(1 * time.Millisecond)
             defer ticker.Stop()
@@ -46,93 +49,93 @@ func initTimeCalibrator() {
     })
 }
 
-// Now 获取当前Unix时间戳（秒）
+// Now gets the current Unix timestamp (seconds)
 func Now() int64 {
     initTimeCalibrator()
     return currentTimeStamp.Load()
 }
 ```
 
-### 使用方式
+### Usage
 
-所有原来使用`time.Now().Unix()`的地方都替换为`core.Now()`：
+Replace all places that originally used `time.Now().Unix()` with `core.Now()`:
 
 ```go
-// 优化前
+// Before optimization
 mTime := time.Now().Unix()
 
-// 优化后
+// After optimization
 mTime := core.Now()
 ```
 
-## 优化效果
+## Optimization Effects
 
-### 性能提升
-1. **减少临时对象**: 每次获取时间戳不再创建`time.Time`对象
-2. **降低GC压力**: 减少GC频率和暂停时间
-3. **提升吞吐量**: 在高并发写入场景下，预计提升5-15%
+### Performance Improvements
+1. **Reduce Temporary Objects**: No longer create `time.Time` objects when getting timestamp
+2. **Lower GC Pressure**: Reduce GC frequency and pause time
+3. **Improve Throughput**: In high concurrency write scenarios, expected improvement of 5-15%
 
-### 精度保证
-- **更新频率**: 每毫秒更新一次（1ms精度）
-- **时间精度**: 对于大多数场景，1秒精度已经足够
-- **延迟误差**: 最大延迟1毫秒，可忽略不计
+### Precision Guarantee
+- **Update Frequency**: Update every millisecond (1ms precision)
+- **Time Precision**: For most scenarios, 1-second precision is sufficient
+- **Latency Error**: Maximum latency of 1 millisecond, negligible
 
-## 已优化的位置
+## Optimized Locations
 
 ### random_access.go
-- `applyRandomWritesWithSDK`: 创建版本对象时获取时间戳
-- 所有Flush操作中的时间戳获取
+- `applyRandomWritesWithSDK`: Get timestamp when creating version objects
+- All timestamp retrieval in Flush operations
 
 ### fs.go
-- 创建文件对象时获取MTime
-- 创建目录对象时获取MTime
+- Get MTime when creating file objects
+- Get MTime when creating directory objects
 
-## 技术细节
+## Technical Details
 
-### 线程安全
-- 使用`atomic.Int64`保证并发安全
-- 使用`sync.Once`确保只初始化一次
+### Thread Safety
+- Use `atomic.Int64` to ensure concurrent safety
+- Use `sync.Once` to ensure initialization only once
 
-### 内存占用
-- 仅占用一个int64（8字节）存储时间戳
-- 后台协程开销极小（每毫秒一次原子写操作）
+### Memory Usage
+- Only occupies one int64 (8 bytes) to store timestamp
+- Background goroutine overhead is minimal (one atomic write operation per millisecond)
 
-### 时间精度
-- 更新频率：1毫秒
-- 时间精度：Unix时间戳（秒级）
-- 适用场景：文件系统元数据时间戳（MTime）
+### Time Precision
+- Update frequency: 1 millisecond
+- Time precision: Unix timestamp (second-level)
+- Applicable scenarios: Filesystem metadata timestamps (MTime)
 
-## 注意事项
+## Notes
 
-1. **时间精度**: 时间校准器使用秒级精度，如果需要纳秒级精度，需要单独处理
-2. **初始化**: 时间校准器在首次调用时自动初始化，无需手动初始化
-3. **后台协程**: 时间校准器会启动一个后台协程，程序退出时会自动停止
+1. **Time Precision**: The time calibrator uses second-level precision. If nanosecond-level precision is needed, handle separately
+2. **Initialization**: The time calibrator automatically initializes on first call, no manual initialization required
+3. **Background Goroutine**: The time calibrator starts a background goroutine, which automatically stops when the program exits
 
-## 对比测试
+## Comparison Tests
 
-### 优化前
+### Before Optimization
 ```go
-// 每次调用创建临时对象
-mTime := time.Now().Unix()  // 创建time.Time对象
+// Creates temporary object on each call
+mTime := time.Now().Unix()  // Creates time.Time object
 ```
 
-### 优化后
+### After Optimization
 ```go
-// 直接返回时间戳，无临时对象
-mTime := core.Now()  // 仅原子读取int64
+// Directly returns timestamp, no temporary object
+mTime := core.Now()  // Only atomic read of int64
 ```
 
-### 性能对比
-- **对象创建**: 从每次调用创建对象 → 0次对象创建
-- **GC压力**: 显著降低
-- **读取性能**: 原子读取比`time.Now()`更高效
+### Performance Comparison
+- **Object Creation**: From creating object on each call → 0 object creations
+- **GC Pressure**: Significantly reduced
+- **Read Performance**: Atomic read is more efficient than `time.Now()`
 
-## 扩展建议
+## Extension Suggestions
 
-如果需要更高精度的时间戳（纳秒级），可以：
-1. 使用`atomic.Int64`存储纳秒时间戳
-2. 调整更新频率（如每100微秒更新一次）
-3. 提供`core.NowNano()`函数
+If higher precision timestamps (nanosecond-level) are needed, you can:
+1. Use `atomic.Int64` to store nanosecond timestamp
+2. Adjust update frequency (e.g., update every 100 microseconds)
+3. Provide `core.NowNano()` function
 
-但在大多数场景下，秒级精度已经足够。
+However, for most scenarios, second-level precision is sufficient.
 

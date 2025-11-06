@@ -15,41 +15,41 @@ import (
 	"github.com/orcastor/orcas/sdk"
 )
 
-// MountOptions 挂载选项
+// MountOptions mount options
 type MountOptions struct {
-	// 挂载点路径
+	// Mount point path
 	MountPoint string
-	// FUSE挂载选项
+	// FUSE mount options
 	FuseOptions []string
-	// 是否前台运行（false表示后台运行）
+	// Run in foreground (false means background)
 	Foreground bool
-	// 是否允许其他用户访问
+	// Allow other users to access
 	AllowOther bool
-	// 是否允许root访问
+	// Allow root access
 	AllowRoot bool
-	// 默认权限
+	// Default permissions
 	DefaultPermissions bool
-	// SDK配置（用于加密、压缩、秒传等特性）
+	// SDK configuration (for encryption, compression, instant upload, etc.)
 	SDKConfig *sdk.Config
 }
 
-// Mount 挂载ORCAS文件系统
+// Mount mounts ORCAS filesystem
 func Mount(h core.Handler, c core.Ctx, bktID int64, opts *MountOptions) (*fuse.Server, error) {
 	if opts == nil {
 		return nil, fmt.Errorf("mount options cannot be nil")
 	}
 
-	// 检查挂载点
+	// Check mount point
 	mountPoint, err := filepath.Abs(opts.MountPoint)
 	if err != nil {
 		return nil, fmt.Errorf("invalid mount point: %w", err)
 	}
 
-	// 检查挂载点是否存在
+	// Check if mount point exists
 	info, err := os.Stat(mountPoint)
 	if err != nil {
 		if os.IsNotExist(err) {
-			// 创建挂载点目录
+			// Create mount point directory
 			if err := os.MkdirAll(mountPoint, 0o755); err != nil {
 				return nil, fmt.Errorf("failed to create mount point: %w", err)
 			}
@@ -60,10 +60,10 @@ func Mount(h core.Handler, c core.Ctx, bktID int64, opts *MountOptions) (*fuse.S
 		return nil, fmt.Errorf("mount point is not a directory: %s", mountPoint)
 	}
 
-	// 创建文件系统，传入SDK配置
+	// Create filesystem, pass SDK configuration
 	ofs := NewOrcasFS(h, c, bktID, opts.SDKConfig)
 
-	// 构建FUSE挂载选项
+	// Build FUSE mount options
 	fuseOpts := &fuse.MountOptions{
 		Options: []string{
 			"default_permissions",
@@ -80,12 +80,12 @@ func Mount(h core.Handler, c core.Ctx, bktID int64, opts *MountOptions) (*fuse.S
 		fuseOpts.Options = append(fuseOpts.Options, "default_permissions")
 	}
 
-	// 添加自定义选项
+	// Add custom options
 	if len(opts.FuseOptions) > 0 {
 		fuseOpts.Options = append(fuseOpts.Options, opts.FuseOptions...)
 	}
 
-	// 挂载文件系统
+	// Mount filesystem
 	server, err := ofs.Mount(mountPoint, fuseOpts)
 	if err != nil {
 		return nil, fmt.Errorf("failed to mount: %w", err)
@@ -94,36 +94,36 @@ func Mount(h core.Handler, c core.Ctx, bktID int64, opts *MountOptions) (*fuse.S
 	return server, nil
 }
 
-// Serve 运行文件系统服务（阻塞直到卸载）
+// Serve runs filesystem service (blocks until unmount)
 func Serve(server *fuse.Server, foreground bool) error {
 	if foreground {
-		// 前台运行，等待信号
+		// Run in foreground, wait for signal
 		sigChan := make(chan os.Signal, 1)
 		signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
 
-		// 启动服务
+		// Start service
 		go func() {
 			server.Serve()
 		}()
 
-		// 等待信号
+		// Wait for signal
 		<-sigChan
 
-		// 卸载
+		// Unmount
 		return server.Unmount()
 	} else {
-		// 后台运行
+		// Run in background
 		server.Serve()
 		return nil
 	}
 }
 
-// Unmount 卸载文件系统
-// 注意：此函数需要传入已挂载的server，或使用系统命令卸载
-// 如果使用server.Unmount()，请直接调用server的方法
+// Unmount unmounts filesystem
+// Note: This function requires a mounted server, or use system command to unmount
+// If using server.Unmount(), please call server's method directly
 func Unmount(mountPoint string) error {
-	// 注意：在Unix系统上，可以使用系统命令卸载
-	// 例如：fusermount -u /mnt/point 或 umount /mnt/point
-	// 这里返回错误，提示用户使用server.Unmount()或系统命令
+	// Note: On Unix systems, can use system command to unmount
+	// For example: fusermount -u /mnt/point or umount /mnt/point
+	// Here returns error, prompting user to use server.Unmount() or system command
 	return fmt.Errorf("please use server.Unmount() or system command 'fusermount -u %s' to unmount", mountPoint)
 }

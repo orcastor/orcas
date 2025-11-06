@@ -4,7 +4,7 @@
   </a>
 </p>
 
-<p align="center"><strong>OrcaS: A Lightweight Object Storage System Ready to Use</strong></p>
+<p align="center"><strong>OrcaS：一款开箱即用的轻量级对象存储</strong></p>
 
 <p align="center">
   <a href="/go.mod#L3" alt="go version">
@@ -32,17 +32,16 @@
 
 - [English](README.md) | [中文](README.zh.md)
 
-## Key Features
+主要特性：
 
-- ⏱ Object-level Deduplication (Instant Upload)
-- 📦 Small Object Packaging
-- 🔪 Large Object Chunking
-- 🗂 Object Multi-versioning
-- 🔐 Zero-knowledge Encryption (End-to-end encryption, international standard algorithms)
-- 🗜 Smart Compression
-- [ ] [Delta Sync](https://github.com/orcastor/xdelta)
-- [ ] Real-time Snapshots
+- ⏱ 对象级重删（秒传）
+- 📦 小对象打包
+- 🔪 大对象分片
+- 🗂 对象多版本
+- 🔐 零知识加密（端到端加密，国际标准算法）
+- 🗜 智能压缩
+- [ ] [差分同步](https://github.com/orcastor/xdelta)
+- [ ] 实时快照
 
 
 [![FOSSA Status](https://app.fossa.com/api/projects/git%2Bgithub.com%2Forcastor%2Forcas.svg?type=large)](https://app.fossa.com/projects/git%2Bgithub.com%2Forcastor%2Forcas?ref=badge_large)
-

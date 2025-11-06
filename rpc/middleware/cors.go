@@ -17,7 +17,7 @@ func CORS() gin.HandlerFunc {
 			c.Header("Access-Control-Allow-Credentials", "true")
 		}
 
-		// 放行所有OPTIONS方法
+		// Allow all OPTIONS methods
 		if c.Request.Method == "OPTIONS" {
 			c.AbortWithStatus(http.StatusNoContent)
 			return
