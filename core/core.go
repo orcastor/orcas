@@ -93,8 +93,7 @@ type FixScrubIssuesResult struct {
 }
 
 type Options struct {
-	Sync            bool  // Force flush to disk after each data write
-	DirectSeekWrite *bool // Direct write to file with seek+offset (nil = default true). Set to false to use memory buffer if filesystem doesn't support seek
+	Sync bool // Force flush to disk after each data write
 }
 
 type Handler interface {
