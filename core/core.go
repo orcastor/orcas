@@ -5,7 +5,6 @@ import (
 	"encoding/base64"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/orca-zhang/idgen"
 	"golang.org/x/crypto/pbkdf2"
@@ -102,21 +101,11 @@ type Handler interface {
 	// 列举回收站
 	ListRecycleBin(c Ctx, bktID int64, opt ListOptions) (o []*ObjectInfo, cnt int64, delim string, err error)
 
-	// 审计数据完整性：检查元数据和数据文件的一致性
-	Scrub(c Ctx, bktID int64) (*ScrubResult, error)
-	// 扫描脏数据：检查上传失败、机器断电导致的不完整数据
-	ScanDirtyData(c Ctx, bktID int64) (*DirtyDataResult, error)
-	// 合并秒传重复数据：查找并合并具有相同校验值但不同DataID的重复数据
-	MergeDuplicateData(c Ctx, bktID int64) (*MergeDuplicateResult, error)
-	// 碎片整理：小文件离线归并打包，打包中被删除的数据块前移
-	Defragment(c Ctx, bktID int64, maxSize int64, accessWindow int64) (*DefragmentResult, error)
 	// 循环更新所有文件的最新版DataID、更新时间、大小和目录大小
 	UpdateFileLatestVersion(c Ctx, bktID int64) error
 
-	// 获取桶信息（用于获取桶配置）
-	GetBkt(c Ctx, ids []int64) ([]*BucketInfo, error)
-	// 设置桶配额
-	SetQuota(c Ctx, bktID int64, quota int64) error
+	// GetBkt Get bucket information (for getting bucket configuration)
+	GetBktInfo(c Ctx, bktID int64) (*BucketInfo, error)
 }
 
 type Admin interface {
@@ -124,7 +113,19 @@ type Admin interface {
 	New(a Admin) Admin
 	Close()
 
+	NewID() int64
+
 	PutBkt(c Ctx, o []*BucketInfo) error
+	// SetQuota Set bucket quota
+	SetQuota(c Ctx, bktID int64, quota int64) error
+	// 审计数据完整性：检查元数据和数据文件的一致性
+	Scrub(c Ctx, bktID int64) (*ScrubResult, error)
+	// 扫描脏数据：检查上传失败、机器断电导致的不完整数据
+	ScanDirtyData(c Ctx, bktID int64) (*DirtyDataResult, error)
+	// 合并秒传重复数据：查找并合并具有相同校验值但不同DataID的重复数据
+	MergeDuplicateData(c Ctx, bktID int64) (*MergeDuplicateResult, error)
+	// 碎片整理：小文件离线归并打包，打包中被删除的数据块前移
+	Defragment(c Ctx, bktID int64) (*DefragmentResult, error)
 }
 
 type LocalHandler struct {
@@ -317,7 +318,7 @@ func (lh *LocalHandler) Put(c Ctx, bktID int64, o []*ObjectInfo) ([]int64, error
 		if obj.Type == OBJ_TYPE_VERSION && obj.PID > 0 {
 			// 设置MTime（如果未设置）
 			if obj.MTime == 0 {
-				obj.MTime = time.Now().Unix()
+				obj.MTime = Now()
 			}
 		}
 	}
@@ -472,7 +473,7 @@ func (lh *LocalHandler) Delete(c Ctx, bktID, id int64) error {
 }
 
 func (lh *LocalHandler) CleanRecycleBin(c Ctx, bktID int64, targetID int64) error {
-	if err := lh.acm.CheckPermission(c, MDRW, bktID); err != nil {
+	if err := lh.acm.CheckPermission(c, ALL, bktID); err != nil {
 		return err
 	}
 	return CleanRecycleBin(c, bktID, lh, lh.ma, lh.da, targetID)
@@ -488,47 +489,22 @@ func (lh *LocalHandler) ListRecycleBin(c Ctx, bktID int64, opt ListOptions) ([]*
 	return lh.ma.ListRecycleBin(c, bktID, opt)
 }
 
-func (lh *LocalHandler) Scrub(c Ctx, bktID int64) (*ScrubResult, error) {
-	if err := lh.acm.CheckPermission(c, MDR, bktID); err != nil {
+func (lh *LocalHandler) GetBktInfo(c Ctx, bktID int64) (*BucketInfo, error) {
+	if err := lh.acm.CheckOwn(c, bktID); err != nil {
 		return nil, err
 	}
-	return ScrubData(c, bktID, lh.ma, lh.da)
-}
-
-func (lh *LocalHandler) ScanDirtyData(c Ctx, bktID int64) (*DirtyDataResult, error) {
-	if err := lh.acm.CheckPermission(c, MDR, bktID); err != nil {
+	buckets, err := lh.ma.GetBkt(c, []int64{bktID})
+	if err != nil {
 		return nil, err
 	}
-	return ScanDirtyData(c, bktID, lh.ma, lh.da)
-}
-
-func (lh *LocalHandler) GetBkt(c Ctx, ids []int64) ([]*BucketInfo, error) {
-	return lh.ma.GetBkt(c, ids)
-}
-
-func (lh *LocalHandler) SetQuota(c Ctx, bktID int64, quota int64) error {
-	if err := lh.acm.CheckPermission(c, MDW, bktID); err != nil {
-		return err
+	if len(buckets) == 0 {
+		return nil, ERR_QUERY_DB
 	}
-	return lh.ma.UpdateBktQuota(c, bktID, quota)
-}
-
-func (lh *LocalHandler) MergeDuplicateData(c Ctx, bktID int64) (*MergeDuplicateResult, error) {
-	if err := lh.acm.CheckPermission(c, MDRW, bktID); err != nil {
-		return nil, err
-	}
-	return MergeDuplicateData(c, bktID, lh.ma, lh.da)
-}
-
-func (lh *LocalHandler) Defragment(c Ctx, bktID int64, maxSize int64, accessWindow int64) (*DefragmentResult, error) {
-	if err := lh.acm.CheckPermission(c, MDRW, bktID); err != nil {
-		return nil, err
-	}
-	return Defragment(c, bktID, lh, lh.ma, lh.da, maxSize, accessWindow)
+	return buckets[0], nil
 }
 
 func (lh *LocalHandler) UpdateFileLatestVersion(c Ctx, bktID int64) error {
-	if err := lh.acm.CheckPermission(c, MDRW, bktID); err != nil {
+	if err := lh.acm.CheckPermission(c, ALL, bktID); err != nil {
 		return err
 	}
 	return UpdateFileLatestVersion(c, bktID, lh.ma)
@@ -536,6 +512,7 @@ func (lh *LocalHandler) UpdateFileLatestVersion(c Ctx, bktID int64) error {
 
 type LocalAdmin struct {
 	ma  MetadataAdapter
+	da  DataAdapter
 	acm AccessCtrlMgr
 	ig  *idgen.IDGen
 }
@@ -544,6 +521,7 @@ func NewLocalAdmin() Admin {
 	dma := &DefaultMetadataAdapter{}
 	return &LocalAdmin{
 		ma:  dma,
+		da:  &DefaultDataAdapter{},
 		acm: &DefaultAccessCtrlMgr{ma: dma},
 		ig:  idgen.NewIDGen(nil, 0), // 需要改成配置
 	}
@@ -558,9 +536,49 @@ func (la *LocalAdmin) New(Admin) Admin {
 func (la *LocalAdmin) Close() {
 }
 
+func (la *LocalAdmin) NewID() int64 {
+	id, _ := la.ig.New()
+	return id
+}
+
 func (la *LocalAdmin) PutBkt(c Ctx, o []*BucketInfo) error {
 	if err := la.acm.CheckRole(c, ADMIN); err != nil {
 		return err
 	}
 	return la.ma.PutBkt(c, o)
+}
+
+func (la *LocalAdmin) SetQuota(c Ctx, bktID int64, quota int64) error {
+	if err := la.acm.CheckRole(c, ADMIN); err != nil {
+		return err
+	}
+	return la.ma.UpdateBktQuota(c, bktID, quota)
+}
+
+func (la *LocalAdmin) Scrub(c Ctx, bktID int64) (*ScrubResult, error) {
+	if err := la.acm.CheckPermission(c, READ, bktID); err != nil {
+		return nil, err
+	}
+	return ScrubData(c, bktID, la.ma, la.da)
+}
+
+func (la *LocalAdmin) ScanDirtyData(c Ctx, bktID int64) (*DirtyDataResult, error) {
+	if err := la.acm.CheckPermission(c, ALL, bktID); err != nil {
+		return nil, err
+	}
+	return ScanDirtyData(c, bktID, la.ma, la.da)
+}
+
+func (la *LocalAdmin) MergeDuplicateData(c Ctx, bktID int64) (*MergeDuplicateResult, error) {
+	if err := la.acm.CheckPermission(c, ALL, bktID); err != nil {
+		return nil, err
+	}
+	return MergeDuplicateData(c, bktID, la.ma, la.da)
+}
+
+func (la *LocalAdmin) Defragment(c Ctx, bktID int64) (*DefragmentResult, error) {
+	if err := la.acm.CheckPermission(c, ALL, bktID); err != nil {
+		return nil, err
+	}
+	return Defragment(c, bktID, la, la.ma, la.da)
 }

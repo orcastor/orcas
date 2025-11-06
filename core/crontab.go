@@ -8,21 +8,21 @@ import (
 	"time"
 )
 
-// CronSchedule 解析cron表达式并判断是否应该执行
-// 格式：分钟 小时 天 月 星期
-// 支持通配符 * 和数字范围
+// CronSchedule parses cron expressions and determines if execution is needed
+// Format: minute hour day month weekday
+// Supports wildcard * and number ranges
 type CronSchedule struct {
-	Minute  []int // 分钟（0-59）
-	Hour    []int // 小时（0-23）
-	Day     []int // 天（1-31）
-	Month   []int // 月（1-12）
-	Weekday []int // 星期（0-6，0=周日）
+	Minute  []int // Minute (0-59)
+	Hour    []int // Hour (0-23)
+	Day     []int // Day (1-31)
+	Month   []int // Month (1-12)
+	Weekday []int // Weekday (0-6, 0=Sunday)
 }
 
-// ParseCronSchedule 解析cron表达式
-// 格式：分钟 小时 天 月 星期
-// 示例："0 2 * * *" 表示每天凌晨2点
-// 示例："0 4 * * 0" 表示每周日凌晨4点
+// ParseCronSchedule parses cron expression
+// Format: minute hour day month weekday
+// Example: "0 2 * * *" means every day at 2:00 AM
+// Example: "0 4 * * 0" means every Sunday at 4:00 AM
 func ParseCronSchedule(schedule string) (*CronSchedule, error) {
 	parts := strings.Fields(schedule)
 	if len(parts) != 5 {
@@ -31,35 +31,35 @@ func ParseCronSchedule(schedule string) (*CronSchedule, error) {
 
 	cs := &CronSchedule{}
 
-	// 解析分钟
+	// Parse minute
 	minute, err := parseCronField(parts[0], 0, 59)
 	if err != nil {
 		return nil, fmt.Errorf("invalid minute field: %v", err)
 	}
 	cs.Minute = minute
 
-	// 解析小时
+	// Parse hour
 	hour, err := parseCronField(parts[1], 0, 23)
 	if err != nil {
 		return nil, fmt.Errorf("invalid hour field: %v", err)
 	}
 	cs.Hour = hour
 
-	// 解析天
+	// Parse day
 	day, err := parseCronField(parts[2], 1, 31)
 	if err != nil {
 		return nil, fmt.Errorf("invalid day field: %v", err)
 	}
 	cs.Day = day
 
-	// 解析月
+	// Parse month
 	month, err := parseCronField(parts[3], 1, 12)
 	if err != nil {
 		return nil, fmt.Errorf("invalid month field: %v", err)
 	}
 	cs.Month = month
 
-	// 解析星期
+	// Parse weekday
 	weekday, err := parseCronField(parts[4], 0, 6)
 	if err != nil {
 		return nil, fmt.Errorf("invalid weekday field: %v", err)
@@ -341,7 +341,9 @@ func (cs *CronScheduler) runDefragmentJob(ctx context.Context) error {
 				continue
 			}
 
-			_, err := Defragment(ctx, bkt.ID, cs.h, cs.ma, cs.da, cs.config.DefragmentMaxSize, cs.config.DefragmentAccessWindow)
+			// Create Admin instance for Defragment
+			admin := NewLocalAdmin()
+			_, err := Defragment(ctx, bkt.ID, admin, cs.ma, cs.da)
 			if err != nil {
 				// 记录错误但继续处理其他bucket
 				continue

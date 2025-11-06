@@ -14,36 +14,36 @@ import (
 	"github.com/orcastor/orcas/core"
 )
 
-// 秒传级别设置 对应 Config.RefLevel
+// Instant upload level setting, corresponds to Config.RefLevel
 const (
 	OFF  = iota // OFF
-	FULL        // 整个文件读取
-	FAST        // 头部检查成功再整个文件读取
+	FULL        // Read entire file
+	FAST        // Read entire file after header check succeeds
 )
 
-// 同名冲突解决方式
+// Conflict resolution for same name
 const (
-	COVER  = iota // 合并或覆盖
-	RENAME        // 重命名
-	THROW         // 报错
-	SKIP          // 跳过
+	COVER  = iota // Merge or overwrite
+	RENAME        // Rename
+	THROW         // Throw error
+	SKIP          // Skip
 )
 
 type Config struct {
-	UserName string // 用户名
-	Password string // 密码
-	DataSync bool   // 断电保护策略(Power-off Protection Policy)，强制每次写入数据后刷到磁盘
-	RefLevel uint32 // 秒传级别设置：OFF（默认） / FULL: Ref / FAST: TryRef+Ref
-	PkgThres uint32 // 打包个数限制，不设置默认1000个
-	WiseCmpr uint32 // 智能压缩，根据文件类型决定是否压缩，取值见core.DATA_CMPR_MASK
-	CmprQlty uint32 // 压缩级别，br:[0,11]，gzip:[-3,9]，zstd:[0,10]
-	EndecWay uint32 // 加密方式，取值见core.DATA_ENDEC_MASK
-	EndecKey string // 加密KEY，SM4需要固定为16个字符，AES256需要大于16个字符
-	DontSync string // 不同步的文件名通配符（https://pkg.go.dev/path/filepath#Match），用分号分隔
-	Conflict uint32 // 同名冲突解决方式，COVER：合并或覆盖 / RENAME：重命名 / THROW：报错 / SKIP：跳过
-	NameTmpl string // 重命名尾巴，"%s的副本"
-	WorkersN uint32 // 并发池大小，不小于16
-	// ChkPtDir string // 断点续传记录目录，不设置路径默认不开启
+	UserName string // Username
+	Password string // Password
+	DataSync bool   // Power failure protection policy, force flush to disk after each data write
+	RefLevel uint32 // Instant upload level setting: OFF (default) / FULL: Ref / FAST: TryRef+Ref
+	PkgThres uint32 // Package count limit, default 1000 if not set
+	WiseCmpr uint32 // Smart compression, decide whether to compress based on file type, see core.DATA_CMPR_MASK
+	CmprQlty uint32 // Compression level, br:[0,11], gzip:[-3,9], zstd:[0,10]
+	EndecWay uint32 // Encryption method, see core.DATA_ENDEC_MASK
+	EndecKey string // Encryption KEY, SM4 requires exactly 16 characters, AES256 requires more than 16 characters
+	DontSync string // Filename wildcards to exclude from sync (https://pkg.go.dev/path/filepath#Match), separated by semicolons
+	Conflict uint32 // Conflict resolution for same name, COVER: merge or overwrite / RENAME: rename / THROW: throw error / SKIP: skip
+	NameTmpl string // Rename suffix, "%s的副本"
+	WorkersN uint32 // Concurrent pool size, not less than 16
+	// ChkPtDir string // Checkpoint directory for resume, not enabled if path not set
 }
 
 type OrcasSDK interface {
@@ -163,7 +163,7 @@ func (osi *OrcasSDKImpl) ID2Path(c core.Ctx, bktID, id int64) (rpath string, err
 	return rpath, nil
 }
 
-// 层序遍历
+// Level-order traversal
 type elem struct {
 	id   int64
 	path string
@@ -213,7 +213,7 @@ func (osi *OrcasSDKImpl) Upload(c core.Ctx, bktID, pid int64, lpath string) erro
 		return err
 	}
 
-	// 上传目录
+	// Upload directory
 	o.Type = core.OBJ_TYPE_DIR
 	dirIDs, err := osi.putObjects(c, bktID, []*core.ObjectInfo{o})
 	if err != nil || len(dirIDs) <= 0 || dirIDs[0] <= 0 {
@@ -226,10 +226,10 @@ func (osi *OrcasSDKImpl) Upload(c core.Ctx, bktID, pid int64, lpath string) erro
 	var emptyFiles []*core.ObjectInfo
 	var u []uploadInfo
 
-	// 遍历本地目录
+	// Traverse local directory
 	for len(q) > 0 {
 		if q[0].path == "" {
-			// 路径为空，直接弹出
+			// Path is empty, pop directly
 			q = q[1:]
 			continue
 		}
@@ -242,7 +242,7 @@ func (osi *OrcasSDKImpl) Upload(c core.Ctx, bktID, pid int64, lpath string) erro
 		}
 
 		if len(rawFiles) <= 0 {
-			// 目录为空，直接弹出
+			// Directory is empty, pop directly
 			q = q[1:]
 			continue
 		}
@@ -289,15 +289,15 @@ func (osi *OrcasSDKImpl) Upload(c core.Ctx, bktID, pid int64, lpath string) erro
 			}
 		}
 
-		// 异步获取上一级目录的id
+		// Asynchronously get parent directory id
 		wg := &sync.WaitGroup{}
 		dirElems := make([]elem, len(dirs))
-		if len(dirs) > 0 { // FIXME：处理目录过多问题
-			// 1. 如果是目录， 直接上传
+		if len(dirs) > 0 { // FIXME: handle too many directories issue
+			// 1. If it's a directory, upload directly
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				// 上传目录
+				// Upload directory
 				ids, err := osi.putObjects(c, bktID, dirs)
 				if err != nil {
 					fmt.Println(runtime.Caller(0))
@@ -352,7 +352,7 @@ func (osi *OrcasSDKImpl) Download(c core.Ctx, bktID, id int64, lpath string) err
 		return fmt.Errorf("remote object type error, id:%d type:%d", id, o[0].Type)
 	}
 
-	// 遍历远端目录
+	// Traverse remote directory
 	q := []elem{{id: id, path: filepath.Join(lpath, o[0].Name)}}
 	var delim string
 	for len(q) > 0 {

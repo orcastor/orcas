@@ -15,38 +15,38 @@ import (
 	"time"
 )
 
-// workLocks 用于确保同一个key同一时间只有一个工作在执行
-// key: string, value: chan struct{} (关闭时表示处理完成)
+// workLocks is used to ensure only one work is executing for the same key at a time
+// key: string, value: chan struct{} (closed when processing is complete)
 var workLocks sync.Map
 
-// acquireWorkLock 获取工作锁，确保同一个key同一时间只有一个工作在执行
-// key: 唯一标识符
-// 返回值: acquired表示是否成功获取锁，release是释放锁的函数
-// 如果已有工作在进行，会等待它完成后再尝试获取
+// acquireWorkLock acquires work lock, ensures only one work is executing for the same key at a time
+// key: unique identifier
+// return value: acquired indicates whether lock was successfully acquired, release is the function to release the lock
+// If work is already in progress, waits for it to complete before attempting to acquire
 func acquireWorkLock(key string) (acquired bool, release func()) {
 	lockChan := make(chan struct{})
 	actual, loaded := workLocks.LoadOrStore(key, lockChan)
 	if loaded {
-		// 已经有其他goroutine在处理，等待它完成
+		// Another goroutine is already processing, wait for it to complete
 		existingChan := actual.(chan struct{})
-		<-existingChan // 等待现有处理完成（channel关闭）
-		// 处理完成后，再次尝试获取锁
+		<-existingChan // Wait for existing processing to complete (channel closed)
+		// After processing completes, try to acquire lock again
 		lockChan = make(chan struct{})
 		_, loaded = workLocks.LoadOrStore(key, lockChan)
 		if loaded {
-			// 如果还是被占用，说明又有新的处理开始了，返回失败
+			// If still occupied, new processing has started, return failure
 			return false, nil
 		}
 	}
 
-	// 返回成功，并提供一个释放锁的函数
+	// Return success and provide a function to release the lock
 	return true, func() {
 		workLocks.Delete(key)
 		close(lockChan)
 	}
 }
 
-// ResourceController 资源控制器，用于限制资源密集型操作的使用
+// ResourceController resource controller, used to limit the use of resource-intensive operations
 type ResourceController struct {
 	config          ResourceControlConfig
 	startTime       time.Time
@@ -56,19 +56,19 @@ type ResourceController struct {
 	rateLimitMutex  sync.Mutex
 }
 
-// NewResourceController 创建新的资源控制器
+// NewResourceController creates a new resource controller
 func NewResourceController(config ResourceControlConfig) *ResourceController {
 	rc := &ResourceController{
 		config:          config,
 		startTime:       time.Now(),
 		processedItems:  0,
 		lastCheckTime:   time.Now(),
-		rateLimitTokens: int64(config.MaxItemsPerSecond), // 初始令牌数等于每秒限制
+		rateLimitTokens: int64(config.MaxItemsPerSecond), // Initial token count equals per-second limit
 	}
 	return rc
 }
 
-// ShouldStop 检查是否应该停止处理（超过最大时长）
+// ShouldStop checks if processing should stop (exceeds maximum duration)
 func (rc *ResourceController) ShouldStop() bool {
 	if rc.config.MaxDuration <= 0 {
 		return false
@@ -76,18 +76,18 @@ func (rc *ResourceController) ShouldStop() bool {
 	return time.Since(rc.startTime) >= rc.config.MaxDuration
 }
 
-// WaitIfNeeded 在批次处理之间等待（实现批次间隔和速率限制）
-// itemsProcessed 本次批次处理的项数
+// WaitIfNeeded waits between batch processing (implements batch interval and rate limiting)
+// itemsProcessed: number of items processed in this batch
 func (rc *ResourceController) WaitIfNeeded(itemsProcessed int) {
 	rc.processedItems += int64(itemsProcessed)
 
-	// 速率限制（令牌桶算法）
+	// Rate limiting (token bucket algorithm)
 	if rc.config.MaxItemsPerSecond > 0 {
 		rc.rateLimitMutex.Lock()
 		now := time.Now()
 		elapsed := now.Sub(rc.lastCheckTime)
 
-		// 每秒补充令牌
+		// Replenish tokens per second
 		if elapsed > 0 {
 			tokensToAdd := int64(rc.config.MaxItemsPerSecond) * int64(elapsed) / int64(time.Second)
 			rc.rateLimitTokens += tokensToAdd
@@ -96,14 +96,14 @@ func (rc *ResourceController) WaitIfNeeded(itemsProcessed int) {
 			}
 		}
 
-		// 消耗令牌
+		// Consume tokens
 		if rc.rateLimitTokens < int64(itemsProcessed) {
-			// 令牌不足，需要等待
+			// Insufficient tokens, need to wait
 			deficit := int64(itemsProcessed) - rc.rateLimitTokens
 			waitTime := time.Duration(deficit) * time.Second / time.Duration(rc.config.MaxItemsPerSecond)
 			if waitTime > 0 {
 				time.Sleep(waitTime)
-				// 等待后补充令牌
+				// Replenish tokens after waiting
 				rc.rateLimitTokens = int64(rc.config.MaxItemsPerSecond)
 			}
 		} else {
@@ -114,15 +114,15 @@ func (rc *ResourceController) WaitIfNeeded(itemsProcessed int) {
 		rc.rateLimitMutex.Unlock()
 	}
 
-	// 批次间隔延迟
+	// Batch interval delay
 	if rc.config.BatchInterval > 0 {
 		delay := rc.config.BatchInterval
 
-		// 自适应延迟：根据已处理项数动态调整延迟
+		// Adaptive delay: dynamically adjust delay based on number of processed items
 		if rc.config.AdaptiveDelay && rc.config.AdaptiveDelayFactor > 0 {
 			adaptiveFactor := 1.0 + float64(rc.processedItems)/float64(rc.config.AdaptiveDelayFactor)
 			delay = time.Duration(float64(delay) * adaptiveFactor)
-			// 限制最大延迟为10倍基础延迟，避免过度延迟
+			// Limit maximum delay to 10x base delay to avoid excessive delay
 			maxDelay := rc.config.BatchInterval * 10
 			if delay > maxDelay {
 				delay = maxDelay
@@ -133,57 +133,57 @@ func (rc *ResourceController) WaitIfNeeded(itemsProcessed int) {
 	}
 }
 
-// GetProcessedItems 获取已处理的项数
+// GetProcessedItems gets the number of processed items
 func (rc *ResourceController) GetProcessedItems() int64 {
 	return rc.processedItems
 }
 
-// GetElapsedTime 获取已运行时间
+// GetElapsedTime gets the elapsed time
 func (rc *ResourceController) GetElapsedTime() time.Duration {
 	return time.Since(rc.startTime)
 }
 
-// delayedDelete 延迟删除数据文件
-// 等待指定时间后检查数据是否仍未被引用，如果未被引用则删除
-// 确保同一个dataID同一时间只有一个删除操作在执行
+// delayedDelete delays deletion of data files
+// Wait for specified time then check if data is still unreferenced, if unreferenced then delete
+// Ensure only one delete operation is executing for the same dataID at a time
 func delayedDelete(c Ctx, bktID, dataID int64, ma MetadataAdapter, da DataAdapter) {
 	go func() {
-		// 生成唯一key，确保同一个dataID同一时间只有一个删除操作
+		// Generate unique key to ensure only one delete operation for the same dataID at a time
 		key := fmt.Sprintf("delayed_delete_%d_%d", bktID, dataID)
 
-		// 获取工作锁
+		// Acquire work lock
 		acquired, release := acquireWorkLock(key)
 		if !acquired {
-			// 无法获取锁，说明已有其他goroutine在处理同一个dataID的删除，直接返回
+			// Cannot acquire lock, another goroutine is already processing deletion for the same dataID, return directly
 			return
 		}
-		// 确保在处理完成后释放锁
+		// Ensure lock is released after processing completes
 		defer release()
 
-		// 等待指定时间
+		// Wait for specified time
 		time.Sleep(time.Duration(DeleteDelaySeconds) * time.Second)
 
-		// 检查数据是否仍未被引用
+		// Check if data is still unreferenced
 		refCounts, err := ma.CountDataRefs(c, bktID, []int64{dataID})
 		if err != nil {
-			return // 查询失败，不删除
+			return // Query failed, don't delete
 		}
 
 		if refCounts[dataID] == 0 {
-			// 没有引用，可以安全删除
-			// 先检查是否是打包数据
+			// No references, safe to delete
+			// First check if it's packaged data
 			dataInfo, err := ma.GetData(c, bktID, dataID)
 			if err == nil && dataInfo != nil {
 				if dataInfo.PkgID > 0 && dataInfo.PkgID != dataID {
-					// 是打包数据（但不是打包文件本身），不删除打包文件本身
-					// 只删除元数据
+					// It's packaged data (but not the package file itself), don't delete the package file itself
+					// Only delete metadata
 					ma.DeleteData(c, bktID, []int64{dataID})
 				} else {
-					// 非打包数据或打包文件本身，删除数据文件和元数据
-					// 对于打包文件，如果它本身没有被引用，说明可以安全删除
-					// 先删除元数据，再删除文件，避免出现有元数据但没有文件的情况
+					// Non-packaged data or package file itself, delete data files and metadata
+					// For package files, if it itself is not referenced, it's safe to delete
+					// Delete metadata first, then delete file, to avoid having metadata but no file
 					if err := ma.DeleteData(c, bktID, []int64{dataID}); err != nil {
-						// 元数据删除失败，不继续删除文件
+						// Metadata deletion failed, don't continue deleting file
 						return
 					}
 
@@ -198,28 +198,28 @@ func delayedDelete(c Ctx, bktID, dataID int64, ma MetadataAdapter, da DataAdapte
 	}()
 }
 
-// asyncApplyVersionRetention 异步应用版本保留策略（后置处理）
-// 在版本创建成功后，统一处理：
-// 1. 时间窗口内的版本合并（删除时间窗口内的旧版本，只保留最新版本）
-// 2. 版本数量限制（删除超出数量的最旧版本）
-// 确保同一个父对象同一时间只有一个版本保留处理在执行
+// asyncApplyVersionRetention asynchronously applies version retention policy (post-processing)
+// After version creation succeeds, uniformly process:
+// 1. Version merging within time window (delete old versions within time window, keep only latest version)
+// 2. Version count limit (delete oldest versions exceeding the limit)
+// Ensure only one version retention processing is executing for the same parent object at a time
 func asyncApplyVersionRetention(c Ctx, bktID, fileID int64, newVersionTime int64, ma MetadataAdapter, da DataAdapter) {
 	go func() {
-		// 获取工作锁
+		// Acquire work lock
 		acquired, release := acquireWorkLock(fmt.Sprintf("version_retention_%d_%d", bktID, fileID))
 		if !acquired {
-			// 无法获取锁，直接返回
+			// Cannot acquire lock, return directly
 			return
 		}
-		// 确保在处理完成后释放锁
+		// Ensure lock is released after processing completes
 		defer release()
-		// 等待一小段时间，确保版本已经创建成功
+		// Wait a short time to ensure version has been created successfully
 		time.Sleep(100 * time.Millisecond)
 
-		// 查询文件的所有版本（包括刚创建的版本）
+		// Query all versions of the file (including the newly created version)
 		versions, err := ma.ListVersions(c, bktID, fileID)
 		if err != nil {
-			// 查询失败，不处理
+			// Query failed, don't process
 			return
 		}
 
@@ -230,32 +230,32 @@ func asyncApplyVersionRetention(c Ctx, bktID, fileID int64, newVersionTime int64
 		var versionsToDelete []*ObjectInfo
 
 		config := GetVersionRetentionConfig()
-		// 1. 处理时间窗口内的版本合并：删除时间窗口内的旧版本
+		// 1. Process version merging within time window: delete old versions within time window
 		if config.MinVersionInterval > 0 && len(versions) > 1 {
-			// 最新版本是刚创建的版本（versions[0]）
-			// 从第二个版本开始检查，如果时间间隔小于最小间隔，标记为删除
+			// Latest version is the newly created version (versions[0])
+			// Start checking from the second version, if time interval is less than minimum interval, mark for deletion
 			for i := 1; i < len(versions); i++ {
 				version := versions[i]
 				timeDiff := newVersionTime - version.MTime
 
-				// 如果时间间隔小于最小间隔，需要删除这个版本（合并）
+				// If time interval is less than minimum interval, need to delete this version (merge)
 				if timeDiff < config.MinVersionInterval {
 					versionsToDelete = append(versionsToDelete, version)
 				} else {
-					// 由于版本是按时间降序排列，如果这个版本不在时间窗口内，后面的版本也不会在
+					// Since versions are sorted by time descending, if this version is not in time window, later versions won't be either
 					break
 				}
 			}
 		}
 
-		// 2. 处理版本数量限制：如果总版本数（减去待删除的版本）仍然超过限制，删除最旧的版本
+		// 2. Process version count limit: if total version count (minus versions to delete) still exceeds limit, delete oldest versions
 		remainingVersions := len(versions) - len(versionsToDelete)
 		if config.MaxVersions > 0 && remainingVersions > int(config.MaxVersions) {
-			// 需要额外删除的版本数
+			// Number of additional versions to delete
 			additionalToDelete := remainingVersions - int(config.MaxVersions)
 
-			// 从后往前删除最旧的版本（ListVersions返回的是按MTime降序，所以最后的是最旧的）
-			// 跳过已经标记为删除的版本
+			// Delete oldest versions from back to front (ListVersions returns sorted by MTime descending, so last is oldest)
+			// Skip versions already marked for deletion
 			alreadyMarked := make(map[int64]bool)
 			for _, v := range versionsToDelete {
 				alreadyMarked[v.ID] = true
@@ -263,7 +263,7 @@ func asyncApplyVersionRetention(c Ctx, bktID, fileID int64, newVersionTime int64
 
 			for i := len(versions) - 1; i >= 0 && additionalToDelete > 0; i-- {
 				version := versions[i]
-				// 如果已经在待删除列表中，跳过
+				// If already in deletion list, skip
 				if alreadyMarked[version.ID] {
 					continue
 				}
@@ -273,15 +273,15 @@ func asyncApplyVersionRetention(c Ctx, bktID, fileID int64, newVersionTime int64
 			}
 		}
 
-		// 3. 执行删除操作
+		// 3. Execute deletion operations
 		for _, versionToDelete := range versionsToDelete {
-			// 删除版本对象（标记为已删除）
+			// Delete version object (mark as deleted)
 			if err := ma.DeleteObj(c, bktID, versionToDelete.ID); err != nil {
-				// 删除失败，记录错误但继续处理其他版本
+				// Deletion failed, record error but continue processing other versions
 				continue
 			}
 
-			// 如果版本有DataID，使用延迟删除处理数据文件
+			// If version has DataID, use delayed delete to handle data files
 			if versionToDelete.DataID > 0 && versionToDelete.DataID != EmptyDataID {
 				delayedDelete(c, bktID, versionToDelete.DataID, ma, da)
 			}
@@ -289,42 +289,42 @@ func asyncApplyVersionRetention(c Ctx, bktID, fileID int64, newVersionTime int64
 	}()
 }
 
-// UpdateFileLatestVersion 循环更新目录的大小和DataID
-// 假设：上传新版本时已经更新了文件的DataID和大小，所以只需要更新目录
-// 循环处理目录，直到大小和DataID稳定（从叶子目录开始向上累加）
+// UpdateFileLatestVersion recursively updates directory size and DataID
+// Assumption: when uploading new version, file's DataID and size have been updated, so only need to update directories
+// Recursively process directories until size and DataID stabilize (accumulate from leaf directories upward)
 func UpdateFileLatestVersion(c Ctx, bktID int64, ma MetadataAdapter) error {
-	// 循环更新目录大小和DataID，直到没有变化
-	maxIterations := 100 // 防止无限循环
+	// Recursively update directory size and DataID until no changes
+	maxIterations := 100 // Prevent infinite loop
 	for iteration := 0; iteration < maxIterations; iteration++ {
 		hasChange := false
 
-		// 查询所有目录对象
+		// Query all directory objects
 		dirs, err := ma.ListObjsByType(c, bktID, OBJ_TYPE_DIR)
 		if err != nil {
 			break
 		}
 
-		// 计算每个目录的大小和DataID
+		// Calculate size and DataID for each directory
 		for _, dir := range dirs {
 			var totalSize int64
-			var maxDataID int64 = dir.DataID // 默认为目录自己的DataID
+			var maxDataID int64 = dir.DataID // Default to directory's own DataID
 
-			// 查询该目录下的所有子对象（未删除的）
+			// Query all child objects under this directory (not deleted)
 			children, err := ma.ListChildren(c, bktID, dir.ID)
 			if err != nil {
 				continue
 			}
 
-			// 累加子对象的大小，并找到最大的DataID
+			// Accumulate child object sizes and find maximum DataID
 			for _, child := range children {
 				totalSize += child.Size
-				// 目录的DataID应该是所有子对象中最大的DataID
+				// Directory's DataID should be the maximum DataID among all child objects
 				if child.DataID > maxDataID {
 					maxDataID = child.DataID
 				}
 			}
 
-			// 如果有变化，更新目录
+			// If there are changes, update directory
 			if totalSize != dir.Size || maxDataID != dir.DataID {
 				updateObj := &ObjectInfo{
 					ID:     dir.ID,
@@ -338,7 +338,7 @@ func UpdateFileLatestVersion(c Ctx, bktID int64, ma MetadataAdapter) error {
 			}
 		}
 
-		// 如果没有变化，退出循环
+		// If no changes, exit loop
 		if !hasChange {
 			break
 		}
@@ -347,25 +347,25 @@ func UpdateFileLatestVersion(c Ctx, bktID int64, ma MetadataAdapter) error {
 	return nil
 }
 
-// DeleteObject 标记对象为已删除（递归删除子对象）
+// DeleteObject marks object as deleted (recursively delete child objects)
 func DeleteObject(c Ctx, bktID, id int64, ma MetadataAdapter) error {
-	// 获取对象信息
+	// Get object information
 	objs, err := ma.GetObj(c, bktID, []int64{id})
 	if err != nil || len(objs) == 0 {
 		return err
 	}
 	obj := objs[0]
 
-	// 如果是目录，递归删除所有子对象
+	// If it's a directory, recursively delete all child objects
 	if obj.Type == OBJ_TYPE_DIR {
-		// 获取所有子对象（包括已删除的，使用原始SQL查询）
+		// Get all child objects (including deleted ones, using raw SQL query)
 		children, err := listChildrenDirectly(c, bktID, id, ma)
 		if err != nil {
 			return err
 		}
-		// 递归删除子对象
+		// Recursively delete child objects
 		for _, child := range children {
-			// 只删除未删除的对象（PID >= 0）
+			// Only delete non-deleted objects (PID >= 0)
 			if child.PID >= 0 {
 				if err := DeleteObject(c, bktID, child.ID, ma); err != nil {
 					return err
@@ -374,40 +374,40 @@ func DeleteObject(c Ctx, bktID, id int64, ma MetadataAdapter) error {
 		}
 	}
 
-	// 标记当前对象为已删除
+	// Mark current object as deleted
 	return ma.DeleteObj(c, bktID, id)
 }
 
-// PermanentlyDeleteObject 彻底删除对象（物理删除对象和数据文件）
-// 确保同一个对象ID同一时间只有一个删除操作在执行
+// PermanentlyDeleteObject permanently deletes object (physically delete object and data files)
+// Ensure only one delete operation is executing for the same object ID at a time
 func PermanentlyDeleteObject(c Ctx, bktID, id int64, h Handler, ma MetadataAdapter, da DataAdapter) error {
-	// 生成唯一key，确保同一个对象ID同一时间只有一个删除操作
+	// Generate unique key to ensure only one delete operation for the same object ID at a time
 	key := fmt.Sprintf("permanently_delete_object_%d_%d", bktID, id)
 
-	// 获取工作锁
+	// Acquire work lock
 	acquired, release := acquireWorkLock(key)
 	if !acquired {
-		// 无法获取锁，说明已有其他goroutine在处理，返回错误
+		// Cannot acquire lock, another goroutine is already processing, return error
 		return fmt.Errorf("permanently delete object operation already in progress for object %d", id)
 	}
-	// 确保在处理完成后释放锁
+	// Ensure lock is released after processing completes
 	defer release()
 
-	// 获取对象信息
+	// Get object information
 	objs, err := ma.GetObj(c, bktID, []int64{id})
 	if err != nil || len(objs) == 0 {
 		return err
 	}
 	obj := objs[0]
 
-	// 如果是目录，递归删除所有子对象
+	// If it's a directory, recursively delete all child objects
 	if obj.Type == OBJ_TYPE_DIR {
-		// 获取所有子对象（包括已删除的）
+		// Get all child objects (including deleted ones)
 		children, err := listChildrenDirectly(c, bktID, id, ma)
 		if err != nil {
 			return err
 		}
-		// 递归删除子对象（只删除未删除的对象）
+		// Recursively delete child objects (only delete non-deleted objects)
 		for _, child := range children {
 			if child.PID >= 0 {
 				if err := PermanentlyDeleteObject(c, bktID, child.ID, h, ma, da); err != nil {
@@ -417,139 +417,139 @@ func PermanentlyDeleteObject(c Ctx, bktID, id int64, h Handler, ma MetadataAdapt
 		}
 	}
 
-	// 减少逻辑使用量（对象的原始大小）
+	// Decrease logical usage (object's original size)
 	if obj.Type == OBJ_TYPE_FILE && obj.Size > 0 {
 		if err := ma.DecBktUsed(c, bktID, obj.Size); err != nil {
-			// 如果减少逻辑使用量失败，记录错误但继续删除
+			// If decreasing logical usage fails, record error but continue deletion
 		}
-		// 同时减少逻辑占用（对象已删除，不再是有效对象）
+		// Also decrease logical occupancy (object is deleted, no longer a valid object)
 		if err := ma.DecBktLogicalUsed(c, bktID, obj.Size); err != nil {
-			// 如果减少逻辑占用失败，记录错误但继续删除
+			// If decreasing logical occupancy fails, record error but continue deletion
 		}
 
-		// 检查是否是秒传对象：如果DataID被其他对象引用，说明删除后需要减少秒传节省空间
+		// Check if it's an instant upload object: if DataID is referenced by other objects, need to decrease instant upload savings after deletion
 		if obj.DataID > 0 && obj.DataID != EmptyDataID {
-			// 查询DataID的引用计数（不包括当前要删除的对象，因为CountDataRefs只统计pid >= 0的对象）
-			// 但删除时对象还未被标记删除，所以引用计数会包含当前对象
-			// 如果引用计数 > 1，说明还有其他对象引用，删除后需要减少秒传节省空间
+			// Query DataID's reference count (excluding current object to delete, because CountDataRefs only counts objects with pid >= 0)
+			// But when deleting, object hasn't been marked as deleted yet, so reference count will include current object
+			// If reference count > 1, there are other objects referencing it, need to decrease instant upload savings after deletion
 			refCounts, err := ma.CountDataRefs(c, bktID, []int64{obj.DataID})
 			if err == nil {
 				refCount := refCounts[obj.DataID]
-				// 如果引用计数 > 1，说明还有其他对象引用这个DataID，删除当前对象后需要减少秒传节省空间
+				// If reference count > 1, there are other objects referencing this DataID, need to decrease instant upload savings after deleting current object
 				if refCount > 1 {
-					// 减少秒传节省空间（因为删除后，这个DataID的秒传节省会减少）
+					// Decrease instant upload savings (because after deletion, this DataID's instant upload savings will decrease)
 					if err := ma.DecBktDedupSavings(c, bktID, obj.Size); err != nil {
-						// 如果减少秒传节省空间失败，记录错误但继续删除
+						// If decreasing instant upload savings fails, record error but continue deletion
 					}
 				}
 			}
 		}
 	}
 
-	// 处理当前对象的数据文件
+	// Handle current object's data files
 	if obj.DataID > 0 && obj.DataID != EmptyDataID {
-		// 检查数据的引用计数（在删除对象之前统计，所以会包含当前对象）
+		// Check data's reference count (counted before deleting object, so will include current object)
 		refCounts, err := ma.CountDataRefs(c, bktID, []int64{obj.DataID})
 		if err != nil {
-			// 如果查询失败，跳过数据清理（避免误删）
+			// If query fails, skip data cleanup (avoid accidental deletion)
 			refCounts = make(map[int64]int64)
 		}
 
-		// CountDataRefs 只统计 pid >= 0 的对象，所以会包含当前对象
-		// 如果 refCount == 1，说明只有当前对象在引用这个数据，可以安全删除
-		// 如果 refCount > 1，说明还有其他对象在引用，不能删除数据文件
+		// CountDataRefs only counts objects with pid >= 0, so will include current object
+		// If refCount == 1, only current object is referencing this data, safe to delete
+		// If refCount > 1, there are other objects referencing it, cannot delete data files
 		refCount := refCounts[obj.DataID]
 		if refCount == 1 {
-			// 只有当前对象引用，检查是否是打包数据
+			// Only current object references it, check if it's packaged data
 			dataInfo, err := ma.GetData(c, bktID, obj.DataID)
 			if err == nil && dataInfo != nil && dataInfo.PkgID > 0 {
-				// 是打包数据，用idgen生成新的负数dataID，更新DataInfo的ID标记删除
+				// It's packaged data, use idgen to generate new negative dataID, update DataInfo's ID to mark deletion
 				newDataID := h.NewID()
 				if newDataID > 0 {
 					negativeDataID := -newDataID
-					// 只更新当前DataInfo的ID为负数（标记删除）
+					// Only update current DataInfo's ID to negative (mark deletion)
 					dataInfo.ID = negativeDataID
 					ma.PutData(c, bktID, []*DataInfo{dataInfo})
 				}
-				// 不删除打包文件本身，也不减少RealUsed
-				// 碎片整理时会清理相同pkgID和pkgOffset的数据块
+				// Don't delete package file itself, don't decrease RealUsed
+				// Defragmentation will clean up data blocks with same pkgID and pkgOffset
 			} else {
-				// 非打包数据，计算数据文件总大小并减少实际使用量
+				// Non-packaged data, calculate total data file size and decrease actual usage
 				dataSize := calculateDataSize(ORCAS_DATA, bktID, obj.DataID)
 				if dataSize > 0 {
-					// 减少桶的实际使用量
+					// Decrease bucket's actual usage
 					if err := ma.DecBktRealUsed(c, bktID, dataSize); err != nil {
-						// 如果减少使用量失败，仍然删除文件（避免数据泄露）
-						// 但记录错误
+						// If decreasing usage fails, still delete file (avoid data leak)
+						// But record error
 					}
 				}
-				// 删除数据文件
+				// Delete data files
 				deleteDataFiles(ORCAS_DATA, bktID, obj.DataID, ma, c)
 			}
 		}
-		// 如果 refCount == 0，可能是异常情况，为安全起见不删除数据文件
+		// If refCount == 0, may be abnormal situation, for safety don't delete data files
 	}
 
-	// 从数据库中物理删除对象
+	// Physically delete object from database
 	return deleteObjFromDB(c, bktID, id)
 }
 
-// CleanRecycleBin 清理回收站中已标记删除的对象（物理删除未被引用的数据文件和元数据）
-// targetID 为 0 表示清理所有符合条件的对象，否则只清理指定对象
-// 确保同一个bktID同一时间只有一个清理操作在执行
+// CleanRecycleBin cleans up objects marked as deleted in recycle bin (physically delete unreferenced data files and metadata)
+// targetID of 0 means clean all eligible objects, otherwise only clean specified object
+// Ensure only one cleanup operation is executing for the same bktID at a time
 func CleanRecycleBin(c Ctx, bktID int64, h Handler, ma MetadataAdapter, da DataAdapter, targetID int64) error {
-	// 生成唯一key，确保同一个bktID同一时间只有一个清理操作
+	// Generate unique key to ensure only one cleanup operation for the same bktID at a time
 	key := fmt.Sprintf("clean_recycle_bin_%d", bktID)
 
-	// 获取工作锁
+	// Acquire work lock
 	acquired, release := acquireWorkLock(key)
 	if !acquired {
-		// 无法获取锁，说明已有其他goroutine在处理，返回错误
+		// Cannot acquire lock, another goroutine is already processing, return error
 		return fmt.Errorf("clean recycle bin operation already in progress for bucket %d", bktID)
 	}
-	// 确保在处理完成后释放锁
+	// Ensure lock is released after processing completes
 	defer release()
 
 	var deletedObjs []*ObjectInfo
 	var err error
 
 	if targetID > 0 {
-		// 只清理指定对象
+		// Only clean specified object
 		objs, err := ma.GetObj(c, bktID, []int64{targetID})
 		if err != nil {
 			return err
 		}
 		if len(objs) == 0 {
-			return nil // 对象不存在
+			return nil // Object doesn't exist
 		}
-		// 检查是否已删除（PID < 0 表示已删除）
+		// Check if already deleted (PID < 0 means deleted)
 		if objs[0].PID < 0 {
 			deletedObjs = objs
 		} else {
-			return nil // 对象未删除
+			return nil // Object not deleted
 		}
 	} else {
-		// 清理所有已删除超过一定时间的对象（留出窗口时间，默认7天）
-		// 使用分页处理，避免一次性加载大量数据
-		windowTime := time.Now().Unix() - 7*24*3600 // 7天前
-		pageSize := DefaultListPageSize             // 每页处理对象数
+		// Clean all objects deleted more than a certain time ago (leave window time, default 7 days)
+		// Use pagination to avoid loading large amounts of data at once
+		windowTime := Now() - 7*24*3600 // 7 days ago
+		pageSize := DefaultListPageSize // Objects processed per page
 
-		// 收集所有需要检查的DataID和要删除的对象ID
+		// Collect all DataIDs to check and object IDs to delete
 		dataIDs := make(map[int64]bool)
 		objIDsToDelete := make([]int64, 0)
 
 		for {
-			// 分页获取已删除的对象
+			// Get deleted objects by page
 			pageObjs, err := ma.ListDeletedObjs(c, bktID, windowTime, pageSize)
 			if err != nil {
 				return err
 			}
 
 			if len(pageObjs) == 0 {
-				break // 没有更多数据
+				break // No more data
 			}
 
-			// 收集当前页的DataID和对象ID
+			// Collect DataIDs and object IDs from current page
 			for _, obj := range pageObjs {
 				if obj.DataID > 0 && obj.DataID != EmptyDataID {
 					dataIDs[obj.DataID] = true
@@ -557,7 +557,7 @@ func CleanRecycleBin(c Ctx, bktID int64, h Handler, ma MetadataAdapter, da DataA
 				objIDsToDelete = append(objIDsToDelete, obj.ID)
 			}
 
-			// 如果返回的数据少于pageSize，说明已经是最后一页
+			// If returned data is less than pageSize, it's the last page
 			if len(pageObjs) < pageSize {
 				break
 			}
@@ -567,47 +567,47 @@ func CleanRecycleBin(c Ctx, bktID int64, h Handler, ma MetadataAdapter, da DataA
 			return nil
 		}
 
-		// 转换为切片
+		// Convert to slice
 		dataIDList := make([]int64, 0, len(dataIDs))
 		for dataID := range dataIDs {
 			dataIDList = append(dataIDList, dataID)
 		}
 
-		// 统计DataID的引用计数（排除已删除的对象）
+		// Count DataID reference counts (excluding deleted objects)
 		refCounts, err := ma.CountDataRefs(c, bktID, dataIDList)
 		if err != nil {
-			// 如果查询失败，跳过数据清理，只删除元数据
+			// If query fails, skip data cleanup, only delete metadata
 			refCounts = make(map[int64]int64)
 		}
 
-		// 删除未被引用的数据文件
+		// Delete unreferenced data files
 		for _, dataID := range dataIDList {
 			if refCounts[dataID] == 0 {
-				// 检查是否是打包数据
+				// Check if it's packaged data
 				dataInfo, err := ma.GetData(c, bktID, dataID)
 				if err == nil && dataInfo != nil && dataInfo.PkgID > 0 {
-					// 不删除打包文件本身，也不减少RealUsed
-					// 碎片整理时会清理相同pkgID和pkgOffset的数据块
+					// Don't delete package file itself, don't decrease RealUsed
+					// Defragmentation will clean up data blocks with same pkgID and pkgOffset
 				} else {
-					// 非打包数据，计算数据文件总大小并减少实际使用量
+					// Non-packaged data, calculate total data file size and decrease actual usage
 					dataSize := calculateDataSize(ORCAS_DATA, bktID, dataID)
 					if dataSize > 0 {
-						// 减少桶的实际使用量
+						// Decrease bucket's actual usage
 						if err := ma.DecBktRealUsed(c, bktID, dataSize); err != nil {
-							// 如果减少使用量失败，仍然删除文件（避免数据泄露）
+							// If decreasing usage fails, still delete file (avoid data leak)
 						}
 					}
-					// 数据未被引用，可以安全删除文件
+					// Data is unreferenced, safe to delete file
 					deleteDataFiles(ORCAS_DATA, bktID, dataID, ma, c)
 				}
 			}
 		}
 
-		// 从数据库中删除已回收的对象元数据
-		// 批量删除
+		// Delete recycled object metadata from database
+		// Batch delete
 		for _, objID := range objIDsToDelete {
 			if err := deleteObjFromDB(c, bktID, objID); err != nil {
-				// 记录错误但继续处理其他对象
+				// Record error but continue processing other objects
 				continue
 			}
 		}
@@ -619,7 +619,7 @@ func CleanRecycleBin(c Ctx, bktID int64, h Handler, ma MetadataAdapter, da DataA
 		return nil
 	}
 
-	// 收集所有需要检查的DataID
+	// Collect all DataIDs to check
 	dataIDs := make(map[int64]bool)
 	for _, obj := range deletedObjs {
 		if obj.DataID > 0 && obj.DataID != EmptyDataID {
@@ -631,40 +631,40 @@ func CleanRecycleBin(c Ctx, bktID int64, h Handler, ma MetadataAdapter, da DataA
 		return nil
 	}
 
-	// 转换为切片
+	// Convert to slice
 	dataIDList := make([]int64, 0, len(dataIDs))
 	for dataID := range dataIDs {
 		dataIDList = append(dataIDList, dataID)
 	}
 
-	// 统计DataID的引用计数（排除已删除的对象）
+	// Count DataID reference counts (excluding deleted objects)
 	refCounts, err := ma.CountDataRefs(c, bktID, dataIDList)
 	if err != nil {
-		// 如果查询失败，跳过数据清理，只删除元数据
+		// If query fails, skip data cleanup, only delete metadata
 		refCounts = make(map[int64]int64)
 	}
 
-	// 删除未被引用的数据文件
+	// Delete unreferenced data files
 	for _, dataID := range dataIDList {
 		if refCounts[dataID] == 0 {
-			// 计算数据文件总大小并减少实际使用量
+			// Calculate total data file size and decrease actual usage
 			dataSize := calculateDataSize(ORCAS_DATA, bktID, dataID)
 			if dataSize > 0 {
-				// 减少桶的实际使用量
+				// Decrease bucket's actual usage
 				if err := ma.DecBktRealUsed(c, bktID, dataSize); err != nil {
-					// 如果减少使用量失败，仍然删除文件（避免数据泄露）
+					// If decreasing usage fails, still delete file (avoid data leak)
 				}
 			}
-			// 数据未被引用，可以安全删除文件
+			// Data is unreferenced, safe to delete file
 			deleteDataFiles(ORCAS_DATA, bktID, dataID, ma, c)
 		}
 	}
 
-	// 从数据库中删除已回收的对象元数据
-	// 这里可以批量删除，但为了简化，暂时一个个删除
+	// Delete recycled object metadata from database
+	// Can batch delete here, but for simplicity, delete one by one for now
 	for _, obj := range deletedObjs {
 		if err := deleteObjFromDB(c, bktID, obj.ID); err != nil {
-			// 记录错误但继续处理其他对象
+			// Record error but continue processing other objects
 			continue
 		}
 	}
@@ -672,7 +672,7 @@ func CleanRecycleBin(c Ctx, bktID int64, h Handler, ma MetadataAdapter, da DataA
 	return nil
 }
 
-// listChildrenDirectly 直接查询子对象（包括已删除的）
+// listChildrenDirectly directly queries child objects (including deleted ones)
 func listChildrenDirectly(c Ctx, bktID, pid int64, ma MetadataAdapter) ([]*ObjectInfo, error) {
 	db, err := GetDB(c, bktID)
 	if err != nil {
@@ -681,7 +681,7 @@ func listChildrenDirectly(c Ctx, bktID, pid int64, ma MetadataAdapter) ([]*Objec
 	defer db.Close()
 
 	var children []*ObjectInfo
-	// 直接查询所有子对象，不排除已删除的
+	// Directly query all child objects, don't exclude deleted ones
 	query := "SELECT * FROM obj WHERE pid = ?"
 	rows, err := db.Query(query, pid)
 	if err != nil {
@@ -700,7 +700,7 @@ func listChildrenDirectly(c Ctx, bktID, pid int64, ma MetadataAdapter) ([]*Objec
 	return children, nil
 }
 
-// deleteObjFromDB 从数据库中删除对象（物理删除）
+// deleteObjFromDB deletes object from database (physical deletion)
 func deleteObjFromDB(c Ctx, bktID, id int64) error {
 	db, err := GetDB(c, bktID)
 	if err != nil {
@@ -708,13 +708,13 @@ func deleteObjFromDB(c Ctx, bktID, id int64) error {
 	}
 	defer db.Close()
 
-	// 使用原生SQL删除
+	// Use raw SQL to delete
 	_, err = db.Exec("DELETE FROM obj WHERE id = ?", id)
 	return err
 }
 
-// deleteDataFiles 删除数据文件
-// calculateDataSize 计算某个dataID的所有分片文件的总大小
+// deleteDataFiles deletes data files
+// calculateDataSize calculates total size of all chunk files for a dataID
 func calculateDataSize(basePath string, bktID, dataID int64) int64 {
 	chunks := scanChunks(basePath, bktID, dataID, 0, DEFAULT_CHUNK_SIZE)
 	var totalSize int64
@@ -724,22 +724,22 @@ func calculateDataSize(basePath string, bktID, dataID int64) int64 {
 	return totalSize
 }
 
-// deleteDataFiles 删除数据文件
-// 如果是打包数据（PkgID > 0），则不删除打包文件本身，打包文件中的区域会在碎片整理时处理
-// 如果不是打包数据，则删除所有分片文件
+// deleteDataFiles deletes data files
+// If it's packaged data (PkgID > 0), don't delete package file itself, package file regions will be handled during defragmentation
+// If it's not packaged data, delete all chunk files
 func deleteDataFiles(basePath string, bktID, dataID int64, ma MetadataAdapter, c Ctx) {
-	// 如果提供了 MetadataAdapter 和 Ctx，查询 DataInfo 判断是否是打包数据
+	// If MetadataAdapter and Ctx are provided, query DataInfo to determine if it's packaged data
 	if ma != nil && c != nil {
 		dataInfo, err := ma.GetData(c, bktID, dataID)
 		if err == nil && dataInfo != nil && dataInfo.PkgID > 0 {
-			// 是打包数据，不删除打包文件本身
-			// 打包文件中的区域会在碎片整理（Defragment）时处理
-			// 这里只删除元数据即可（由调用者负责删除元数据）
+			// It's packaged data, don't delete package file itself
+			// Package file regions will be handled during defragmentation (Defragment)
+			// Only delete metadata here (caller is responsible for deleting metadata)
 			return
 		}
 	}
 
-	// 非打包数据：删除所有分片文件（sn从0开始，直到找不到文件为止）
+	// Non-packaged data: delete all chunk files (sn starts from 0, until file not found)
 	sn := 0
 	firstFile := true
 	for {
@@ -748,22 +748,22 @@ func deleteDataFiles(basePath string, bktID, dataID int64, ma MetadataAdapter, c
 		path := filepath.Join(basePath, fmt.Sprint(bktID), hash[21:24], hash[8:24], fileName)
 
 		if _, err := os.Stat(path); os.IsNotExist(err) {
-			break // 文件不存在，说明已经删完了
+			break // File doesn't exist, deletion complete
 		}
 
-		// 在删除第一个文件前等待窗口时间，防止有人在访问
+		// Wait for window time before deleting first file to prevent access conflicts
 		if firstFile {
 			time.Sleep(time.Duration(DeleteDelaySeconds) * time.Second)
 			firstFile = false
 		}
 
-		// 尝试删除文件（忽略错误，可能已经被删除）
+		// Try to delete file (ignore errors, may have been deleted already)
 		os.Remove(path)
 		sn++
 	}
 }
 
-// ScrubData 审计数据完整性，检查元数据和数据文件的一致性
+// ScrubData audits data integrity, checks consistency between metadata and data files
 func ScrubData(c Ctx, bktID int64, ma MetadataAdapter, da DataAdapter) (*ScrubResult, error) {
 	result := &ScrubResult{
 		CorruptedData:      []int64{},
@@ -771,20 +771,20 @@ func ScrubData(c Ctx, bktID int64, ma MetadataAdapter, da DataAdapter) (*ScrubRe
 		MismatchedChecksum: []int64{},
 	}
 
-	// 初始化资源控制器
+	// Initialize resource controller
 	rc := NewResourceController(GetResourceControlConfig())
 
-	// 分页大小
+	// Page size
 	pageSize := DefaultListPageSize
 	offset := 0
 
-	// 用于存储所有数据ID的映射（用于孤立文件检测）
+	// Map to store all data IDs (for orphaned file detection)
 	dataMap := make(map[int64]*DataInfo)
 	totalData := int64(0)
 
-	// 1. 分页获取所有元数据中的数据
+	// 1. Get all data in metadata by page
 	for {
-		// 检查是否应该停止
+		// Check if should stop
 		if rc.ShouldStop() {
 			break
 		}
@@ -794,35 +794,35 @@ func ScrubData(c Ctx, bktID int64, ma MetadataAdapter, da DataAdapter) (*ScrubRe
 			return nil, err
 		}
 
-		// 第一次获取时设置总数
+		// Set total count on first fetch
 		if totalData == 0 {
 			totalData = total
 			result.TotalData = int(total)
 		}
 
-		// 2. 构建数据ID到DataInfo的映射
+		// 2. Build mapping from data ID to DataInfo
 		for _, d := range pageData {
 			dataMap[d.ID] = d
 		}
 
-		// 3. 检查每个元数据中的数据文件是否存在
+		// 3. Check if data files exist for each metadata entry
 		for _, dataInfo := range pageData {
 			if dataInfo.ID == EmptyDataID {
-				continue // 跳过空数据
+				continue // Skip empty data
 			}
 
-			// 如果是打包数据，检查打包文件
+			// If it's packaged data, check package file
 			if dataInfo.PkgID > 0 {
-				// 检查打包文件是否存在
+				// Check if package file exists
 				if !dataFileExists(ORCAS_DATA, bktID, dataInfo.PkgID, 0) {
 					result.CorruptedData = append(result.CorruptedData, dataInfo.ID)
 					continue
 				}
 			} else {
-				// 检查分片数据文件（sn从0开始，直到找不到文件为止）
-				// 获取桶的分片大小配置
+				// Check chunk data files (sn starts from 0, until file not found)
+				// Get bucket's chunk size configuration
 				chunkSize := getChunkSize(c, bktID, ma)
-				// 收集所有存在的分片（传入Size和chunkSize用于计算预期的最大sn）
+				// Collect all existing chunks (pass Size and chunkSize to calculate expected max sn)
 				chunks := scanChunks(ORCAS_DATA, bktID, dataInfo.ID, dataInfo.Size, chunkSize)
 
 				if len(chunks) == 0 {
@@ -830,7 +830,7 @@ func ScrubData(c Ctx, bktID int64, ma MetadataAdapter, da DataAdapter) (*ScrubRe
 					continue
 				}
 
-				// 检查分片是否连续（从0开始，连续递增）
+				// Check if chunks are continuous (starting from 0, continuously increasing)
 				maxSN := -1
 				for sn := range chunks {
 					if sn > maxSN {
@@ -838,7 +838,7 @@ func ScrubData(c Ctx, bktID int64, ma MetadataAdapter, da DataAdapter) (*ScrubRe
 					}
 				}
 
-				// 检查分片是否连续
+				// Check if chunks are continuous
 				isContinuous := true
 				for i := 0; i <= maxSN; i++ {
 					if _, exists := chunks[i]; !exists {
@@ -848,24 +848,24 @@ func ScrubData(c Ctx, bktID int64, ma MetadataAdapter, da DataAdapter) (*ScrubRe
 				}
 
 				if !isContinuous {
-					// 分片不连续，标记为损坏数据
+					// Chunks not continuous, mark as corrupted data
 					result.CorruptedData = append(result.CorruptedData, dataInfo.ID)
 					continue
 				}
 
-				// 计算实际总大小
+				// Calculate actual total size
 				var actualSize int64
 				for _, size := range chunks {
 					actualSize += size
 				}
 
-				// 如果实际大小与元数据中的大小不匹配，标记为损坏
+				// If actual size doesn't match size in metadata, mark as corrupted
 				if actualSize != dataInfo.Size {
 					result.CorruptedData = append(result.CorruptedData, dataInfo.ID)
 					continue
 				}
 
-				// 如果数据大小大于0且有校验和，验证校验和
+				// If data size > 0 and has checksum, verify checksum
 				if dataInfo.Size > 0 && (dataInfo.Cksum > 0 || dataInfo.CRC32 > 0) {
 					if !verifyChecksum(c, bktID, dataInfo, da, maxSN) {
 						result.MismatchedChecksum = append(result.MismatchedChecksum, dataInfo.ID)
@@ -874,41 +874,41 @@ func ScrubData(c Ctx, bktID int64, ma MetadataAdapter, da DataAdapter) (*ScrubRe
 			}
 		}
 
-		// 如果返回的数据少于pageSize，说明已经是最后一页
+		// If returned data is less than pageSize, it's the last page
 		if len(pageData) < pageSize {
-			// 最后一页处理完后等待
+			// Wait after processing last page
 			rc.WaitIfNeeded(len(pageData))
 			break
 		}
 
-		// 批次处理间隔和速率限制
+		// Batch processing interval and rate limiting
 		rc.WaitIfNeeded(len(pageData))
 		offset += pageSize
 	}
 
-	// 4. 扫描文件系统中的所有数据文件，找出没有元数据引用的孤立文件
+	// 4. Scan all data files in filesystem, find orphaned files without metadata references
 	bucketDataPath := filepath.Join(ORCAS_DATA, fmt.Sprint(bktID))
 	if _, err := os.Stat(bucketDataPath); err == nil {
-		// 使用队列进行层序遍历（BFS）
+		// Use queue for level-order traversal (BFS)
 		queue := []string{bucketDataPath}
-		seenDataIDs := make(map[int64]bool) // 用于去重
-		processedDirs := 0                  // 处理的目录数，用于资源控制
+		seenDataIDs := make(map[int64]bool) // For deduplication
+		processedDirs := 0                  // Number of processed directories, for resource control
 
 		for len(queue) > 0 {
-			// 检查是否应该停止
+			// Check if should stop
 			if rc.ShouldStop() {
 				break
 			}
 
-			// 从队列头部取出目录
+			// Pop directory from queue head
 			dir := queue[0]
 			queue = queue[1:]
 			processedDirs++
 
-			// 读取目录内容
+			// Read directory contents
 			entries, err := os.ReadDir(dir)
 			if err != nil {
-				continue // 忽略无法访问的目录
+				continue // Ignore inaccessible directories
 			}
 
 			filesInDir := 0
@@ -916,26 +916,26 @@ func ScrubData(c Ctx, bktID int64, ma MetadataAdapter, da DataAdapter) (*ScrubRe
 				fullPath := filepath.Join(dir, entry.Name())
 
 				if entry.IsDir() {
-					// 如果是目录，加入队列继续遍历
+					// If it's a directory, add to queue to continue traversal
 					queue = append(queue, fullPath)
 				} else {
-					// 如果是文件，处理它
-					// 解析文件名：<dataID>_<sn>
+					// If it's a file, process it
+					// Parse filename: <dataID>_<sn>
 					fileName := entry.Name()
 					parts := strings.Split(fileName, "_")
 					if len(parts) != 2 {
-						continue // 格式不对，跳过
+						continue // Wrong format, skip
 					}
 
 					dataID, err1 := strconv.ParseInt(parts[0], 10, 64)
 					_, err2 := strconv.Atoi(parts[1])
 					if err1 != nil || err2 != nil {
-						continue // 解析失败，跳过
+						continue // Parse failed, skip
 					}
 
-					// 检查是否有元数据引用（去重）
+					// Check if there's metadata reference (deduplication)
 					if _, exists := dataMap[dataID]; !exists {
-						// 避免重复添加相同的dataID
+						// Avoid adding duplicate dataID
 						if !seenDataIDs[dataID] {
 							seenDataIDs[dataID] = true
 							result.OrphanedData = append(result.OrphanedData, dataID)
@@ -945,7 +945,7 @@ func ScrubData(c Ctx, bktID int64, ma MetadataAdapter, da DataAdapter) (*ScrubRe
 				}
 			}
 
-			// 每处理一定数量的目录后，应用资源控制
+			// Apply resource control after processing certain number of directories
 			if processedDirs%100 == 0 {
 				rc.WaitIfNeeded(filesInDir)
 			}
@@ -955,26 +955,26 @@ func ScrubData(c Ctx, bktID int64, ma MetadataAdapter, da DataAdapter) (*ScrubRe
 	return result, nil
 }
 
-// ScanDirtyData 扫描脏数据（机器断电、上传失败导致的不完整数据）
-// 主要检测：
-// 1. 分片不完整的数据（有部分分片缺失）
-// 2. 无法读取的数据文件（文件存在但读取失败）
+// ScanDirtyData scans dirty data (incomplete data caused by power failure, upload failure)
+// Main detection:
+// 1. Incomplete chunk data (some chunks missing)
+// 2. Unreadable data files (file exists but read fails)
 func ScanDirtyData(c Ctx, bktID int64, ma MetadataAdapter, da DataAdapter) (*DirtyDataResult, error) {
 	result := &DirtyDataResult{
 		IncompleteChunks: []int64{},
 		UnreadableData:   []int64{},
 	}
 
-	// 初始化资源控制器
+	// Initialize resource controller
 	rc := NewResourceController(GetResourceControlConfig())
 
-	// 分页大小
+	// Page size
 	pageSize := DefaultListPageSize
 	offset := 0
 
-	// 分页获取所有元数据中的数据
+	// Get all data in metadata by page
 	for {
-		// 检查是否应该停止
+		// Check if should stop
 		if rc.ShouldStop() {
 			break
 		}
@@ -986,16 +986,16 @@ func ScanDirtyData(c Ctx, bktID int64, ma MetadataAdapter, da DataAdapter) (*Dir
 
 		for _, dataInfo := range pageData {
 			if dataInfo.ID == EmptyDataID {
-				continue // 跳过空数据
+				continue // Skip empty data
 			}
 
-			// 如果是打包数据，检查打包文件是否可读
+			// If it's packaged data, check if package file is readable
 			if dataInfo.PkgID > 0 {
 				if !dataFileExists(ORCAS_DATA, bktID, dataInfo.PkgID, 0) {
 					result.UnreadableData = append(result.UnreadableData, dataInfo.ID)
 					continue
 				}
-				// 尝试读取打包数据的片段
+				// Try to read package data fragment
 				pkgReader, _, err := createPkgDataReader(ORCAS_DATA, bktID, dataInfo.PkgID, int(dataInfo.PkgOffset), int(dataInfo.Size))
 				if err != nil {
 					result.UnreadableData = append(result.UnreadableData, dataInfo.ID)
@@ -1003,17 +1003,17 @@ func ScanDirtyData(c Ctx, bktID int64, ma MetadataAdapter, da DataAdapter) (*Dir
 				}
 				pkgReader.Close()
 			} else {
-				// 获取桶的分片大小配置
+				// Get bucket's chunk size configuration
 				chunkSize := getChunkSize(c, bktID, ma)
-				// 扫描所有分片（传入Size和chunkSize用于计算预期的最大sn）
+				// Scan all chunks (pass Size and chunkSize to calculate expected max sn)
 				chunks := scanChunks(ORCAS_DATA, bktID, dataInfo.ID, dataInfo.Size, chunkSize)
 
 				if len(chunks) == 0 {
-					// 没有分片文件，跳过（这应该由ScrubData检测）
+					// No chunk files, skip (this should be detected by ScrubData)
 					continue
 				}
 
-				// 找出最大sn
+				// Find maximum sn
 				maxSN := -1
 				for sn := range chunks {
 					if sn > maxSN {
@@ -1021,7 +1021,7 @@ func ScanDirtyData(c Ctx, bktID int64, ma MetadataAdapter, da DataAdapter) (*Dir
 					}
 				}
 
-				// 检查分片是否连续（从0到maxSN都应该存在）
+				// Check if chunks are continuous (from 0 to maxSN should all exist)
 				isContinuous := true
 				for i := 0; i <= maxSN; i++ {
 					if _, exists := chunks[i]; !exists {
@@ -1031,24 +1031,24 @@ func ScanDirtyData(c Ctx, bktID int64, ma MetadataAdapter, da DataAdapter) (*Dir
 				}
 
 				if !isContinuous {
-					// 分片不连续，标记为不完整
+					// Chunks not continuous, mark as incomplete
 					result.IncompleteChunks = append(result.IncompleteChunks, dataInfo.ID)
 					continue
 				}
 
-				// 计算实际总大小
+				// Calculate actual total size
 				var actualSize int64
 				for _, size := range chunks {
 					actualSize += size
 				}
 
-				// 如果实际大小与元数据中的大小不匹配，标记为不完整
+				// If actual size doesn't match size in metadata, mark as incomplete
 				if actualSize != dataInfo.Size {
 					result.IncompleteChunks = append(result.IncompleteChunks, dataInfo.ID)
 					continue
 				}
 
-				// 尝试读取所有分片，检查是否可读
+				// Try to read all chunks, check if readable
 				for sn := 0; sn <= maxSN; sn++ {
 					_, err := da.Read(c, bktID, dataInfo.ID, sn)
 					if err != nil {
@@ -1059,14 +1059,14 @@ func ScanDirtyData(c Ctx, bktID int64, ma MetadataAdapter, da DataAdapter) (*Dir
 			}
 		}
 
-		// 如果返回的数据少于pageSize，说明已经是最后一页
+		// If returned data is less than pageSize, it's the last page
 		if len(pageData) < pageSize {
-			// 最后一页处理完后等待
+			// Wait after processing last page
 			rc.WaitIfNeeded(len(pageData))
 			break
 		}
 
-		// 批次处理间隔和速率限制
+		// Batch processing interval and rate limiting
 		rc.WaitIfNeeded(len(pageData))
 		offset += pageSize
 	}
@@ -1074,14 +1074,14 @@ func ScanDirtyData(c Ctx, bktID int64, ma MetadataAdapter, da DataAdapter) (*Dir
 	return result, nil
 }
 
-// FixScrubIssues 修复 ScrubData 检测到的问题
-// 根据 ScrubResult 的结果，可以选择性地修复不同类型的问题
+// FixScrubIssues fixes issues detected by ScrubData
+// Based on ScrubResult, can selectively fix different types of issues
 // options:
-//   - FixCorrupted: 是否修复损坏数据（删除没有文件的元数据），默认false
-//   - FixOrphaned: 是否修复孤立数据（删除没有引用的文件），默认false
-//   - FixMismatchedChecksum: 是否修复校验和不匹配的数据（删除损坏的数据），默认false
+//   - FixCorrupted: whether to fix corrupted data (delete metadata without files), default false
+//   - FixOrphaned: whether to fix orphaned data (delete files without references), default false
+//   - FixMismatchedChecksum: whether to fix mismatched checksum data (delete corrupted data), default false
 //
-// 返回修复统计信息
+// Returns fix statistics
 func FixScrubIssues(c Ctx, bktID int64, result *ScrubResult, ma MetadataAdapter, da DataAdapter, options struct {
 	FixCorrupted          bool
 	FixOrphaned           bool
@@ -1096,10 +1096,10 @@ func FixScrubIssues(c Ctx, bktID int64, result *ScrubResult, ma MetadataAdapter,
 		Errors:                  []string{},
 	}
 
-	// 1. 修复损坏数据（有元数据但没有文件）
+	// 1. Fix corrupted data (has metadata but no files)
 	if options.FixCorrupted && len(result.CorruptedData) > 0 {
 		for _, dataID := range result.CorruptedData {
-			// 检查是否有对象引用这个数据
+			// Check if there are objects referencing this data
 			refCounts, err := ma.CountDataRefs(c, bktID, []int64{dataID})
 			if err != nil {
 				fixResult.Errors = append(fixResult.Errors, fmt.Sprintf("failed to check refs for corrupted data %d: %v", dataID, err))
@@ -1107,18 +1107,18 @@ func FixScrubIssues(c Ctx, bktID int64, result *ScrubResult, ma MetadataAdapter,
 			}
 
 			if refCounts[dataID] == 0 {
-				// 没有引用，可以安全删除元数据
-				// 检查是否是打包数据
+				// No references, safe to delete metadata
+				// Check if it's packaged data
 				dataInfo, err := ma.GetData(c, bktID, dataID)
 				if err == nil && dataInfo != nil && dataInfo.PkgID > 0 && dataInfo.PkgID != dataID {
-					// 是打包数据，只删除元数据，不删除打包文件本身
+					// It's packaged data, only delete metadata, don't delete package file itself
 					if err := ma.DeleteData(c, bktID, []int64{dataID}); err != nil {
 						fixResult.Errors = append(fixResult.Errors, fmt.Sprintf("failed to delete corrupted data metadata %d: %v", dataID, err))
 					} else {
 						fixResult.FixedCorrupted++
 					}
 				} else {
-					// 非打包数据，删除元数据
+					// Non-packaged data, delete metadata
 					if err := ma.DeleteData(c, bktID, []int64{dataID}); err != nil {
 						fixResult.Errors = append(fixResult.Errors, fmt.Sprintf("failed to delete corrupted data metadata %d: %v", dataID, err))
 					} else {
@@ -1126,35 +1126,35 @@ func FixScrubIssues(c Ctx, bktID int64, result *ScrubResult, ma MetadataAdapter,
 					}
 				}
 			} else {
-				// 有引用，不能删除，记录警告
+				// Has references, cannot delete, record warning
 				fixResult.Errors = append(fixResult.Errors, fmt.Sprintf("corrupted data %d still has %d references, cannot delete", dataID, refCounts[dataID]))
 			}
 		}
 	}
 
-	// 2. 修复孤立数据（有文件但没有元数据引用）
+	// 2. Fix orphaned data (has files but no metadata references)
 	if options.FixOrphaned && len(result.OrphanedData) > 0 {
 		for _, dataID := range result.OrphanedData {
-			// 孤立数据没有元数据引用，可以直接删除文件
+			// Orphaned data has no metadata references, can directly delete files
 			dataSize := calculateDataSize(ORCAS_DATA, bktID, dataID)
 			if dataSize > 0 {
-				// 减少实际使用量
+				// Decrease actual usage
 				if err := ma.DecBktRealUsed(c, bktID, dataSize); err != nil {
 					fixResult.Errors = append(fixResult.Errors, fmt.Sprintf("failed to decrease real used for orphaned data %d: %v", dataID, err))
 				}
 				fixResult.FreedSize += dataSize
 			}
 
-			// 删除文件
+			// Delete files
 			deleteDataFiles(ORCAS_DATA, bktID, dataID, nil, nil)
 			fixResult.FixedOrphaned++
 		}
 	}
 
-	// 3. 修复校验和不匹配的数据（数据可能已损坏）
+	// 3. Fix mismatched checksum data (data may be corrupted)
 	if options.FixMismatchedChecksum && len(result.MismatchedChecksum) > 0 {
 		for _, dataID := range result.MismatchedChecksum {
-			// 检查是否有对象引用这个数据
+			// Check if there are objects referencing this data
 			refCounts, err := ma.CountDataRefs(c, bktID, []int64{dataID})
 			if err != nil {
 				fixResult.Errors = append(fixResult.Errors, fmt.Sprintf("failed to check refs for mismatched checksum data %d: %v", dataID, err))
@@ -1162,22 +1162,22 @@ func FixScrubIssues(c Ctx, bktID int64, result *ScrubResult, ma MetadataAdapter,
 			}
 
 			if refCounts[dataID] == 0 {
-				// 没有引用，可以安全删除
-				// 检查是否是打包数据
+				// No references, safe to delete
+				// Check if it's packaged data
 				dataInfo, err := ma.GetData(c, bktID, dataID)
 				if err == nil && dataInfo != nil && dataInfo.PkgID > 0 && dataInfo.PkgID != dataID {
-					// 是打包数据，只删除元数据
+					// It's packaged data, only delete metadata
 					if err := ma.DeleteData(c, bktID, []int64{dataID}); err != nil {
 						fixResult.Errors = append(fixResult.Errors, fmt.Sprintf("failed to delete mismatched checksum data metadata %d: %v", dataID, err))
 					} else {
 						fixResult.FixedMismatchedChecksum++
 					}
 				} else {
-					// 非打包数据，删除文件和元数据
-					// 先删除元数据，再删除文件，避免出现有元数据但没有文件的情况
+					// Non-packaged data, delete files and metadata
+					// Delete metadata first, then delete files, to avoid having metadata but no files
 					if err := ma.DeleteData(c, bktID, []int64{dataID}); err != nil {
 						fixResult.Errors = append(fixResult.Errors, fmt.Sprintf("failed to delete mismatched checksum data metadata %d: %v", dataID, err))
-						continue // 元数据删除失败，不继续删除文件
+						continue // Metadata deletion failed, don't continue deleting files
 					}
 
 					dataSize := calculateDataSize(ORCAS_DATA, bktID, dataID)
@@ -1191,7 +1191,7 @@ func FixScrubIssues(c Ctx, bktID int64, result *ScrubResult, ma MetadataAdapter,
 					fixResult.FixedMismatchedChecksum++
 				}
 			} else {
-				// 有引用，不能删除，记录警告
+				// Has references, cannot delete, record warning
 				fixResult.Errors = append(fixResult.Errors, fmt.Sprintf("mismatched checksum data %d still has %d references, cannot delete", dataID, refCounts[dataID]))
 			}
 		}
@@ -1200,7 +1200,7 @@ func FixScrubIssues(c Ctx, bktID int64, result *ScrubResult, ma MetadataAdapter,
 	return fixResult, nil
 }
 
-// dataFileExists 检查数据文件是否存在
+// dataFileExists checks if data file exists
 func dataFileExists(basePath string, bktID, dataID int64, sn int) bool {
 	fileName := fmt.Sprintf("%d_%d", dataID, sn)
 	hash := fmt.Sprintf("%X", md5.Sum([]byte(fileName)))
@@ -1209,10 +1209,10 @@ func dataFileExists(basePath string, bktID, dataID int64, sn int) bool {
 	return err == nil
 }
 
-// 默认分片大小
+// Default chunk size
 const DEFAULT_CHUNK_SIZE = 4 * 1024 * 1024 // 4MB
 
-// getChunkSize 获取桶的分片大小（从桶配置中获取，如果未设置则使用默认值）
+// getChunkSize gets bucket's chunk size (from bucket configuration, use default if not set)
 func getChunkSize(c Ctx, bktID int64, ma MetadataAdapter) int64 {
 	buckets, err := ma.GetBkt(c, []int64{bktID})
 	if err != nil || len(buckets) == 0 {
@@ -1225,25 +1225,25 @@ func getChunkSize(c Ctx, bktID int64, ma MetadataAdapter) int64 {
 	return chunkSize
 }
 
-// scanChunks 扫描某个dataID的所有分片文件，返回 sn -> size 的映射
-// dataSize 为0表示未知大小，否则用于计算预期的最大sn（防止无限循环）
-// chunkSize 为分片大小，用于计算预期的最大sn
+// scanChunks scans all chunk files for a dataID, returns mapping of sn -> size
+// dataSize of 0 means unknown size, otherwise used to calculate expected max sn (prevent infinite loop)
+// chunkSize is chunk size, used to calculate expected max sn
 func scanChunks(basePath string, bktID, dataID int64, dataSize int64, chunkSize int64) map[int]int64 {
 	chunks := make(map[int]int64)
 
-	// 根据数据大小计算预期的最大sn
+	// Calculate expected max sn based on data size
 	if dataSize > 0 && chunkSize > 0 {
-		// 计算预期分片数：向上取整
-		// 例如：如果 dataSize = 10MB，chunkSize = 4MB
-		//   分片数 = ceil(10/4) = 3，分片索引为 0, 1, 2
-		//   最大sn = 3 - 1 = 2
-		expectedChunkCount := (dataSize + chunkSize - 1) / chunkSize // 向上取整
-		maxAllowedSN := int(expectedChunkCount) + 1                  // 允许一些容差，防止计算误差
+		// Calculate expected chunk count: round up
+		// Example: if dataSize = 10MB, chunkSize = 4MB
+		//   chunk count = ceil(10/4) = 3, chunk indices are 0, 1, 2
+		//   max sn = 3 - 1 = 2
+		expectedChunkCount := (dataSize + chunkSize - 1) / chunkSize // Round up
+		maxAllowedSN := int(expectedChunkCount) + 1                  // Allow some tolerance to prevent calculation errors
 		if maxAllowedSN > 100000 {
-			maxAllowedSN = 100000 // 设置一个绝对上限，防止异常情况
+			maxAllowedSN = 100000 // Set an absolute upper limit to prevent abnormal situations
 		}
 
-		// 从0开始扫描，直到找不到文件或超过预期最大sn
+		// Scan from 0 until file not found or exceed expected max sn
 		sn := 0
 		for {
 			fileName := fmt.Sprintf("%d_%d", dataID, sn)
@@ -1252,21 +1252,21 @@ func scanChunks(basePath string, bktID, dataID int64, dataSize int64, chunkSize 
 
 			info, err := os.Stat(path)
 			if err != nil {
-				// 文件不存在，停止扫描
+				// File doesn't exist, stop scanning
 				break
 			}
 
-			// 记录分片大小
+			// Record chunk size
 			chunks[sn] = info.Size()
 			sn++
 
-			// 如果已知数据大小，当超过预期的最大sn时停止（允许一些容差）
+			// If data size is known, stop when exceed expected max sn (allow some tolerance)
 			if sn > maxAllowedSN {
 				break
 			}
 		}
 	} else {
-		// 如果不知道数据大小，使用原来的逻辑（直到找不到文件或超过安全上限）
+		// If data size is unknown, use original logic (until file not found or exceed safety limit)
 		sn := 0
 		for {
 			fileName := fmt.Sprintf("%d_%d", dataID, sn)
@@ -1275,15 +1275,15 @@ func scanChunks(basePath string, bktID, dataID int64, dataSize int64, chunkSize 
 
 			info, err := os.Stat(path)
 			if err != nil {
-				// 文件不存在，停止扫描
+				// File doesn't exist, stop scanning
 				break
 			}
 
-			// 记录分片大小
+			// Record chunk size
 			chunks[sn] = info.Size()
 			sn++
 
-			// 防止无限循环（设置一个安全上限）
+			// Prevent infinite loop (set a safety limit)
 			if sn > 100000 {
 				break
 			}
@@ -1293,20 +1293,20 @@ func scanChunks(basePath string, bktID, dataID int64, dataSize int64, chunkSize 
 	return chunks
 }
 
-// MergeDuplicateData 合并秒传重复数据
-// 查找具有相同校验值但不同DataID的重复数据，将它们合并为一个DataID
-// 确保同一个bktID同一时间只有一个合并操作在执行
+// MergeDuplicateData merges duplicate instant upload data
+// Find duplicate data with same checksum value but different DataIDs, merge them into one DataID
+// Ensure only one merge operation is executing for the same bktID at a time
 func MergeDuplicateData(c Ctx, bktID int64, ma MetadataAdapter, da DataAdapter) (*MergeDuplicateResult, error) {
-	// 生成唯一key，确保同一个bktID同一时间只有一个合并操作
+	// Generate unique key to ensure only one merge operation for the same bktID at a time
 	key := fmt.Sprintf("merge_duplicate_%d", bktID)
 
-	// 获取工作锁
+	// Acquire work lock
 	acquired, release := acquireWorkLock(key)
 	if !acquired {
-		// 无法获取锁，说明已有其他goroutine在处理，返回错误
+		// Cannot acquire lock, another goroutine is already processing, return error
 		return nil, fmt.Errorf("merge duplicate data operation already in progress for bucket %d", bktID)
 	}
-	// 确保在处理完成后释放锁
+	// Ensure lock is released after processing completes
 	defer release()
 
 	result := &MergeDuplicateResult{
@@ -1315,17 +1315,17 @@ func MergeDuplicateData(c Ctx, bktID int64, ma MetadataAdapter, da DataAdapter) 
 		FreedSize:    0,
 	}
 
-	// 初始化资源控制器
+	// Initialize resource controller
 	rc := NewResourceController(GetResourceControlConfig())
 
-	// 分页查找重复数据
+	// Find duplicate data by page
 	pageSize := 100
 	offset := 0
 	var totalFreedSize int64
 	allMergedData := make(map[int64]int64) // oldDataID -> masterDataID
 
 	for {
-		// 检查是否应该停止
+		// Check if should stop
 		if rc.ShouldStop() {
 			break
 		}
@@ -1651,7 +1651,18 @@ func (cr *chunkReader) Read(p []byte) (n int, err error) {
 // accessWindow: 访问窗口时间（秒），预留参数。目前只基于引用计数判断数据是否正在使用，
 // 如果数据有引用（refCount > 0），则跳过。将来如果添加了访问时间字段，可以使用此参数。
 // 确保同一个bktID同一时间只有一个碎片整理操作在执行
-func Defragment(c Ctx, bktID int64, h Handler, ma MetadataAdapter, da DataAdapter, maxSize int64, accessWindow int64) (*DefragmentResult, error) {
+func Defragment(c Ctx, bktID int64, a Admin, ma MetadataAdapter, da DataAdapter) (*DefragmentResult, error) {
+	var maxSize int64 = 4 * 1024 * 1024 // 4MB
+	var accessWindow int64 = 3600       // 1小时
+
+	cfg := GetCronJobConfig()
+	if cfg.DefragmentMaxSize > 0 {
+		maxSize = cfg.DefragmentMaxSize
+	}
+	if cfg.DefragmentAccessWindow > 0 {
+		accessWindow = cfg.DefragmentAccessWindow
+	}
+
 	// 生成唯一key，确保同一个bktID同一时间只有一个碎片整理操作
 	key := fmt.Sprintf("defragment_%d", bktID)
 
@@ -1780,7 +1791,7 @@ func Defragment(c Ctx, bktID int64, h Handler, ma MetadataAdapter, da DataAdapte
 			}
 
 			// 创建新的打包数据ID
-			pkgID := h.NewID()
+			pkgID := a.NewID()
 			if pkgID <= 0 {
 				continue
 			}
@@ -1946,7 +1957,7 @@ func Defragment(c Ctx, bktID int64, h Handler, ma MetadataAdapter, da DataAdapte
 					deleteTime := objs[0].MTime
 					if deleteTime > 0 {
 						// 检查删除时间是否超过窗口时间
-						now := time.Now().Unix()
+						now := Now()
 						if now-deleteTime >= accessWindow {
 							// 超过窗口时间，可以删除这个数据块
 							// 不添加到validData中，后续会被清理
@@ -2034,7 +2045,7 @@ func Defragment(c Ctx, bktID int64, h Handler, ma MetadataAdapter, da DataAdapte
 		if int64(len(newPkgBuffer)) < fileSize {
 			// 使用新pkgID方案：创建新的打包文件，更新所有引用，旧数据放入等待队列
 			// 1. 生成新的pkgID（作为新的DataID）
-			newPkgID := h.NewID()
+			newPkgID := a.NewID()
 			if newPkgID <= 0 {
 				continue
 			}
@@ -2051,7 +2062,7 @@ func Defragment(c Ctx, bktID int64, h Handler, ma MetadataAdapter, da DataAdapte
 			for i, dataInfo := range validData {
 				oldDataID := dataInfo.ID
 				// 创建新的DataInfo，使用新的pkgID
-				newDataID := h.NewID()
+				newDataID := a.NewID()
 				if newDataID <= 0 {
 					continue
 				}

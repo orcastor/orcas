@@ -11,25 +11,25 @@ import (
 )
 
 var (
-	configFile = flag.String("config", "", "配置文件路径 (JSON 格式)")
-	action     = flag.String("action", "", "操作类型: upload 或 download")
-	localPath  = flag.String("local", "", "本地文件或目录路径")
-	remotePath = flag.String("remote", "", "远程路径 (相对于 bucket 根目录)")
-	bucketID   = flag.Int64("bucket", 0, "Bucket ID (如果不指定，使用第一个 bucket)")
+	configFile = flag.String("config", "", "Configuration file path (JSON format)")
+	action     = flag.String("action", "", "Operation type: upload or download")
+	localPath  = flag.String("local", "", "Local file or directory path")
+	remotePath = flag.String("remote", "", "Remote path (relative to bucket root directory)")
+	bucketID   = flag.Int64("bucket", 0, "Bucket ID (if not specified, use first bucket)")
 
-	// 配置参数 (可以通过命令行参数或配置文件设置)
-	userName = flag.String("user", "", "用户名")
-	password = flag.String("pass", "", "密码")
-	dataSync = flag.String("datasync", "", "数据同步 (断电保护): true 或 false")
-	refLevel = flag.String("reflevel", "", "秒传级别: OFF, FULL, FAST")
-	wiseCmpr = flag.String("wisecmpr", "", "智能压缩: SNAPPY, ZSTD, GZIP, BR")
-	cmprQlty = flag.Int("cmprqlty", 0, "压缩级别")
-	endecWay = flag.String("endecway", "", "加密方式: AES256, SM4")
-	endecKey = flag.String("endeckey", "", "加密密钥")
-	dontSync = flag.String("dontsync", "", "不同步的文件名通配符 (用分号分隔)")
-	conflict = flag.String("conflict", "", "同名冲突解决方式: COVER, RENAME, THROW, SKIP")
-	nameTmpl = flag.String("nametmpl", "", "重命名模板 (包含 %s)")
-	workersN = flag.Int("workers", 0, "并发池大小 (不小于16)")
+	// Configuration parameters (can be set via command line arguments or configuration file)
+	userName = flag.String("user", "", "Username")
+	password = flag.String("pass", "", "Password")
+	dataSync = flag.String("datasync", "", "Data sync (power failure protection): true or false")
+	refLevel = flag.String("reflevel", "", "Instant upload level: OFF, FULL, FAST")
+	wiseCmpr = flag.String("wisecmpr", "", "Smart compression: SNAPPY, ZSTD, GZIP, BR")
+	cmprQlty = flag.Int("cmprqlty", 0, "Compression level")
+	endecWay = flag.String("endecway", "", "Encryption method: AES256, SM4")
+	endecKey = flag.String("endeckey", "", "Encryption key")
+	dontSync = flag.String("dontsync", "", "Filename wildcards to exclude from sync (separated by semicolons)")
+	conflict = flag.String("conflict", "", "Conflict resolution for same name: COVER, RENAME, THROW, SKIP")
+	nameTmpl = flag.String("nametmpl", "", "Rename template (contains %s)")
+	workersN = flag.Int("workers", 0, "Concurrent pool size (not less than 16)")
 )
 
 type Config struct {
@@ -50,62 +50,62 @@ type Config struct {
 func main() {
 	flag.Parse()
 
-	// 初始化数据库
+	// Initialize database
 	core.InitDB()
 
-	// 加载配置
+	// Load configuration
 	cfg, err := loadConfig()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "加载配置失败: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Failed to load configuration: %v\n", err)
 		os.Exit(1)
 	}
 
-	// 验证必需参数
+	// Validate required parameters
 	if cfg.UserName == "" {
-		fmt.Fprintf(os.Stderr, "错误: 用户名不能为空 (使用 -user 参数或配置文件设置)\n")
+		fmt.Fprintf(os.Stderr, "Error: Username cannot be empty (use -user parameter or configuration file)\n")
 		os.Exit(1)
 	}
 	if cfg.Password == "" {
-		fmt.Fprintf(os.Stderr, "错误: 密码不能为空 (使用 -pass 参数或配置文件设置)\n")
+		fmt.Fprintf(os.Stderr, "Error: Password cannot be empty (use -pass parameter or configuration file)\n")
 		os.Exit(1)
 	}
 	if *action == "" {
-		fmt.Fprintf(os.Stderr, "错误: 必须指定操作类型 (使用 -action upload 或 -action download)\n")
+		fmt.Fprintf(os.Stderr, "Error: Must specify operation type (use -action upload or -action download)\n")
 		flag.Usage()
 		os.Exit(1)
 	}
 	if *localPath == "" {
-		fmt.Fprintf(os.Stderr, "错误: 必须指定本地路径 (使用 -local 参数)\n")
+		fmt.Fprintf(os.Stderr, "Error: Must specify local path (use -local parameter)\n")
 		flag.Usage()
 		os.Exit(1)
 	}
 
-	// 转换配置为 SDK Config
+	// Convert configuration to SDK Config
 	sdkCfg := convertToSDKConfig(cfg)
 
-	// 创建 SDK 实例
+	// Create SDK instance
 	handler := core.NewLocalHandler()
 	sdkInstance := sdk.New(handler)
 	defer sdkInstance.Close()
 
-	// 登录
+	// Login
 	ctx, userInfo, buckets, err := sdkInstance.Login(sdkCfg)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "登录失败: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Login failed: %v\n", err)
 		os.Exit(1)
 	}
 
-	fmt.Printf("登录成功: 用户 %s (ID: %d)\n", userInfo.Name, userInfo.ID)
+	fmt.Printf("Login successful: User %s (ID: %d)\n", userInfo.Name, userInfo.ID)
 	if len(buckets) == 0 {
-		fmt.Fprintf(os.Stderr, "错误: 没有可用的 bucket\n")
+		fmt.Fprintf(os.Stderr, "Error: No available bucket\n")
 		os.Exit(1)
 	}
 
-	// 选择 bucket
+	// Select bucket
 	var selectedBktID int64
 	if *bucketID > 0 {
 		selectedBktID = *bucketID
-		// 验证 bucket 是否存在
+		// Verify bucket exists
 		found := false
 		for _, b := range buckets {
 			if b.ID == selectedBktID {
@@ -114,58 +114,58 @@ func main() {
 			}
 		}
 		if !found {
-			fmt.Fprintf(os.Stderr, "错误: Bucket ID %d 不存在\n", *bucketID)
+			fmt.Fprintf(os.Stderr, "Error: Bucket ID %d does not exist\n", *bucketID)
 			os.Exit(1)
 		}
 	} else {
 		selectedBktID = buckets[0].ID
-		fmt.Printf("使用 Bucket: %s (ID: %d)\n", buckets[0].Name, buckets[0].ID)
+		fmt.Printf("Using Bucket: %s (ID: %d)\n", buckets[0].Name, buckets[0].ID)
 	}
 
-	// 执行操作
+	// Execute operation
 	var pid int64 = core.ROOT_OID
 	if *action == "upload" {
-		// 如果指定了远程路径，需要找到父目录 ID
+		// If remote path is specified, need to find parent directory ID
 		remotePathStr := *remotePath
 		if *remotePath != "" && *remotePath != "/" {
 			pid, err = sdkInstance.Path2ID(ctx, selectedBktID, core.ROOT_OID, *remotePath)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "错误: 无法找到远程路径 %s: %v\n", *remotePath, err)
+				fmt.Fprintf(os.Stderr, "Error: Cannot find remote path %s: %v\n", *remotePath, err)
 				os.Exit(1)
 			}
 		} else {
 			remotePathStr = "/"
 		}
 
-		fmt.Printf("开始上传: %s -> %s\n", *localPath, remotePathStr)
+		fmt.Printf("Starting upload: %s -> %s\n", *localPath, remotePathStr)
 		err = sdkInstance.Upload(ctx, selectedBktID, pid, *localPath)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "上传失败: %v\n", err)
+			fmt.Fprintf(os.Stderr, "Upload failed: %v\n", err)
 			os.Exit(1)
 		}
-		fmt.Println("上传完成!")
+		fmt.Println("Upload completed!")
 	} else if *action == "download" {
-		// 下载需要先通过路径找到 ID
+		// Download needs to find ID through path first
 		if *remotePath == "" {
-			fmt.Fprintf(os.Stderr, "错误: 下载操作必须指定远程路径 (使用 -remote 参数)\n")
+			fmt.Fprintf(os.Stderr, "Error: Download operation must specify remote path (use -remote parameter)\n")
 			os.Exit(1)
 		}
 
 		pid, err = sdkInstance.Path2ID(ctx, selectedBktID, core.ROOT_OID, *remotePath)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "错误: 无法找到远程路径 %s: %v\n", *remotePath, err)
+			fmt.Fprintf(os.Stderr, "Error: Cannot find remote path %s: %v\n", *remotePath, err)
 			os.Exit(1)
 		}
 
-		fmt.Printf("开始下载: /%s -> %s\n", *remotePath, *localPath)
+		fmt.Printf("Starting download: /%s -> %s\n", *remotePath, *localPath)
 		err = sdkInstance.Download(ctx, selectedBktID, pid, *localPath)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "下载失败: %v\n", err)
+			fmt.Fprintf(os.Stderr, "Download failed: %v\n", err)
 			os.Exit(1)
 		}
-		fmt.Println("下载完成!")
+		fmt.Println("Download completed!")
 	} else {
-		fmt.Fprintf(os.Stderr, "错误: 未知的操作类型 %s (支持: upload, download)\n", *action)
+		fmt.Fprintf(os.Stderr, "Error: Unknown operation type %s (supported: upload, download)\n", *action)
 		os.Exit(1)
 	}
 }
@@ -173,21 +173,21 @@ func main() {
 func loadConfig() (*Config, error) {
 	cfg := &Config{}
 
-	// 如果指定了配置文件，先加载配置文件
+	// If configuration file is specified, load it first
 	if *configFile != "" {
 		if err := loadJSONConfig(*configFile, cfg); err != nil {
-			return nil, fmt.Errorf("加载配置文件失败: %v", err)
+			return nil, fmt.Errorf("failed to load configuration file: %v", err)
 		}
 	}
 
-	// 命令行参数覆盖配置文件中的值
+	// Command line arguments override values in configuration file
 	if *userName != "" {
 		cfg.UserName = *userName
 	}
 	if *password != "" {
 		cfg.Password = *password
 	}
-	// datasync 是布尔值，如果命令行提供了值，则解析并覆盖
+	// datasync is a boolean value, if command line provides a value, parse and override
 	if *dataSync != "" {
 		if *dataSync == "true" || *dataSync == "1" {
 			cfg.DataSync = true
@@ -201,7 +201,7 @@ func loadConfig() (*Config, error) {
 	if *wiseCmpr != "" {
 		cfg.WiseCmpr = *wiseCmpr
 	}
-	// cmprqlty 默认值为 0，如果命令行设置了值且大于 0，则使用
+	// cmprqlty default value is 0, if command line sets a value greater than 0, use it
 	if *cmprQlty > 0 {
 		cfg.CmprQlty = *cmprQlty
 	}
@@ -220,7 +220,7 @@ func loadConfig() (*Config, error) {
 	if *nameTmpl != "" {
 		cfg.NameTmpl = *nameTmpl
 	}
-	// workers 默认值为 0，如果命令行设置了值且大于 0，则使用
+	// workers default value is 0, if command line sets a value greater than 0, use it
 	if *workersN > 0 {
 		cfg.WorkersN = *workersN
 	}
@@ -245,7 +245,7 @@ func convertToSDKConfig(cfg *Config) sdk.Config {
 		NameTmpl: cfg.NameTmpl,
 	}
 
-	// 转换 RefLevel
+	// Convert RefLevel
 	switch cfg.RefLevel {
 	case "FULL":
 		sdkCfg.RefLevel = sdk.FULL
@@ -255,7 +255,7 @@ func convertToSDKConfig(cfg *Config) sdk.Config {
 		sdkCfg.RefLevel = sdk.OFF
 	}
 
-	// 转换 WiseCmpr
+	// Convert WiseCmpr
 	switch cfg.WiseCmpr {
 	case "SNAPPY":
 		sdkCfg.WiseCmpr = core.DATA_CMPR_SNAPPY
@@ -271,7 +271,7 @@ func convertToSDKConfig(cfg *Config) sdk.Config {
 		sdkCfg.CmprQlty = uint32(cfg.CmprQlty)
 	}
 
-	// 转换 EndecWay
+	// Convert EndecWay
 	switch cfg.EndecWay {
 	case "AES256":
 		sdkCfg.EndecWay = core.DATA_ENDEC_AES256
@@ -281,7 +281,7 @@ func convertToSDKConfig(cfg *Config) sdk.Config {
 		sdkCfg.EndecKey = cfg.EndecKey
 	}
 
-	// 转换 Conflict
+	// Convert Conflict
 	switch cfg.Conflict {
 	case "RENAME":
 		sdkCfg.Conflict = sdk.RENAME

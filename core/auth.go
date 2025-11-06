@@ -10,21 +10,24 @@ import (
 
 const (
 	NA  = 1 << iota
-	DR  // 数据读取
-	DW  // 数据写入
-	DD  // 数据删除
-	MDR // 元数据读取
-	MDW // 元数据写入
-	MDD // 元数据删除
+	DR  // Data Read
+	DW  // Data Write
+	DD  // Data Delete
+	MDR // Metadata Read
+	MDW // Metadata Write
+	MDD // Metadata Delete
 
-	DRW  = DR | DW               // 数据读写
-	MDRW = MDR | MDW             // 元数据读写
-	ALL  = DRW | DD | MDRW | MDD // 数据、元数据读写删
+	DRW    = DR | DW               // Data Read/Write
+	MDRW   = MDR | MDW             // Metadata Read/Write
+	READ   = DR | MDR              // Data and Metadata Read
+	WRITE  = DW | MDW              // Data and Metadata Write
+	DELETE = DD | MDD              // Data and Metadata Delete
+	ALL    = READ | WRITE | DELETE // Data and Metadata Read/Write/Delete
 )
 
 const (
-	USER  = iota // 普通用户
-	ADMIN        // 管理员
+	USER  = iota // Regular User
+	ADMIN        // Administrator
 )
 
 type AccessCtrlMgr interface {
@@ -32,6 +35,7 @@ type AccessCtrlMgr interface {
 
 	CheckPermission(c Ctx, action int, bktID int64) error
 	CheckRole(c Ctx, role uint32) error
+	CheckOwn(c Ctx, bktID int64) error
 }
 
 var cache = ecache.NewLRUCache(16, 256, 30*time.Second)
@@ -95,6 +99,34 @@ func (dacm *DefaultAccessCtrlMgr) CheckRole(c Ctx, role uint32) error {
 		}
 	}
 	return ERR_NO_ROLE
+}
+
+// CheckOwn Check if the user is the owner of the bucket
+func (dacm *DefaultAccessCtrlMgr) CheckOwn(c Ctx, bktID int64) error {
+	uid := getUID(c)
+	if uid <= 0 {
+		return ERR_NEED_LOGIN
+	}
+	bk := fmt.Sprintf("bkt:%d", bktID)
+	if u, ok := cache.GetInt64(bk); ok {
+		if u == uid {
+			return nil
+		} else {
+			return ERR_NO_PERM
+		}
+	}
+	b, err := dacm.ma.GetBkt(c, []int64{bktID})
+	if err != nil {
+		return err
+	}
+	// Check if user is the owner of the bucket
+	if len(b) > 0 {
+		cache.PutInt64(bk, b[0].UID)
+		if b[0].UID == uid {
+			return nil
+		}
+	}
+	return ERR_NO_PERM
 }
 
 func UserInfo2Ctx(c Ctx, u *UserInfo) Ctx {

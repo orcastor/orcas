@@ -90,7 +90,7 @@ func runPerformanceTest(t *testing.T, name string, dataSize, chunkSize int64, wr
 		Type:  core.OBJ_TYPE_FILE,
 		Name:  fmt.Sprintf("perf_%s.txt", name),
 		Size:  0,
-		MTime: time.Now().Unix(),
+		MTime: core.Now(),
 	}
 	_, err = dma.PutObj(testCtx, testBktID, []*core.ObjectInfo{fileObj})
 	if err != nil {
@@ -441,7 +441,7 @@ func runSequentialWriteTest(t *testing.T, name string, totalSize, chunkSize int6
 		Type:  core.OBJ_TYPE_FILE,
 		Name:  fmt.Sprintf("perf_%s.txt", name),
 		Size:  0,
-		MTime: time.Now().Unix(),
+		MTime: core.Now(),
 	}
 	_, err = dma.PutObj(testCtx, testBktID, []*core.ObjectInfo{fileObj})
 	if err != nil {
@@ -585,7 +585,7 @@ func runRandomWriteTest(t *testing.T, name string, totalSize, chunkSize int64, s
 		Type:  core.OBJ_TYPE_FILE,
 		Name:  fmt.Sprintf("perf_%s.txt", name),
 		Size:  0,
-		MTime: time.Now().Unix(),
+		MTime: core.Now(),
 	}
 	_, err = dma.PutObj(testCtx, testBktID, []*core.ObjectInfo{fileObj})
 	if err != nil {
@@ -732,7 +732,7 @@ func runRandomWriteOverlappingTest(t *testing.T, name string, totalSize, chunkSi
 		Type:  core.OBJ_TYPE_FILE,
 		Name:  fmt.Sprintf("perf_%s.txt", name),
 		Size:  0,
-		MTime: time.Now().Unix(),
+		MTime: core.Now(),
 	}
 	_, err = dma.PutObj(testCtx, testBktID, []*core.ObjectInfo{fileObj})
 	if err != nil {
@@ -869,7 +869,7 @@ func runRandomWriteSmallChunksTest(t *testing.T, name string, totalSize, chunkSi
 		Type:  core.OBJ_TYPE_FILE,
 		Name:  fmt.Sprintf("perf_%s.txt", name),
 		Size:  0,
-		MTime: time.Now().Unix(),
+		MTime: core.Now(),
 	}
 	_, err = dma.PutObj(testCtx, testBktID, []*core.ObjectInfo{fileObj})
 	if err != nil {

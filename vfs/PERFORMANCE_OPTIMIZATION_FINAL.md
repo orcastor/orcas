@@ -13,7 +13,7 @@ Based on real performance test data (continuously updated)
 - **CPU**: Apple Silicon M4 Pro
 - **Go Version**: Go 1.18+
 - **Test Cases**: 14 core scenarios (8 basic scenarios + 2 sequential write optimizations + 4 random write scenarios)
-- **Total Execution Time**: **0.45 seconds** (after optimization, including batch write and time calibrator optimization)
+- **Total Execution Time**: **0.49 seconds** (after optimization, including batch write and time calibrator optimization)
 - **All Tests Passed** ✅
 
 ### Test Scenario Details (After Optimization - Including Batch Write Optimization)
@@ -21,43 +21,43 @@ Based on real performance test data (continuously updated)
 | Test Scenario | Data Size | Operations | Concurrency | Execution Time | Throughput | Ops/sec | Peak Memory | GC Count | Total Data |
 |--------------|-----------|------------|-------------|----------------|-----------|---------|--------------|----------|------------|
 | **Basic Scenarios** |||||||||||
-| Small Data Single Thread ⭐ | 4.0 KB | **200** | 1 | 5ms | **163.06 MB/s** | **41742.76** ⭐⭐⭐ | 8.09 MB | 0 | 0.78 MB |
-| Medium Data Single Thread ⭐ | 256.0 KB | **100** | 1 | 12ms | **2147.39 MB/s** ⭐⭐ | **8589.56** ⭐⭐ | 8.16 MB | 0 | 25.00 MB |
-| Small Data Concurrent 3 | 4.0 KB | **60** | 3 | 21ms | **11.32 MB/s** | **2897.79** ⭐ | 36.69 MB | 5 | 0.23 MB |
-| Encrypted Single Thread | 256.0 KB | **20** | 1 | 18ms | 275.88 MB/s | 1103.53 | 9.79 MB | 1 | 5.00 MB |
-| Compressed Single Thread | 256.0 KB | **20** | 1 | 5ms | 1007.39 MB/s | 4029.55 | 8.91 MB | 0 | 5.00 MB |
-| Compressed+Encrypted | 256.0 KB | **20** | 1 | 5ms | 1036.38 MB/s | 4145.51 | 9.44 MB | 0 | 5.00 MB |
-| Large File Single Thread | **100.0 MB** | 1 | 1 | 37ms | **2675.82 MB/s** ⭐⭐⭐ | 26.76 | 8.42 MB | 0 | 100.00 MB |
-| Large File+Compressed+Encrypted | **100.0 MB** | 1 | 1 | 45ms | **2243.58 MB/s** ⭐⭐ | 22.44 | 33.35 MB | 0 | 100.00 MB |
+| Small Data Single Thread ⭐ | 4.0 KB | **200** | 1 | 4ms | **191.52 MB/s** | **49029.13** ⭐⭐⭐ | 8.08 MB | 0 | 0.78 MB |
+| Medium Data Single Thread ⭐ | 256.0 KB | **100** | 1 | 15ms | **1643.61 MB/s** ⭐⭐ | **6574.46** ⭐⭐ | 8.15 MB | 0 | 25.00 MB |
+| Small Data Concurrent 3 | 4.0 KB | **60** | 3 | 23ms | **10.36 MB/s** | **2651.23** ⭐ | 41.01 MB | 4 | 0.23 MB |
+| Encrypted Single Thread | 256.0 KB | **20** | 1 | 21ms | 239.95 MB/s | 959.79 | 9.79 MB | 1 | 5.00 MB |
+| Compressed Single Thread | 256.0 KB | **20** | 1 | 4ms | 1164.56 MB/s | 4658.25 | 8.90 MB | 0 | 5.00 MB |
+| Compressed+Encrypted | 256.0 KB | **20** | 1 | 4ms | 1133.03 MB/s | 4532.11 | 9.43 MB | 0 | 5.00 MB |
+| Large File Single Thread | **100.0 MB** | 1 | 1 | 44ms | **2276.30 MB/s** ⭐⭐⭐ | 22.76 | 8.40 MB | 0 | 100.00 MB |
+| Large File+Compressed+Encrypted | **100.0 MB** | 1 | 1 | 46ms | **2173.43 MB/s** ⭐⭐ | 21.73 | 33.34 MB | 0 | 100.00 MB |
 | **Sequential Write Optimization Scenarios** ⭐⭐⭐ |||||||||||
-| Sequential Write Optimization | 10.0 MB | 10 | 1 | 10ms | **974.20 MB/s** ⭐⭐ | 974.20 | 18.10 MB | 0 | 100.00 MB |
-| Sequential Write+Compressed+Encrypted | 10.0 MB | 10 | 1 | 10ms | **972.92 MB/s** ⭐⭐ | 972.92 | 20.67 MB | 0 | 100.00 MB |
+| Sequential Write Optimization | 10.0 MB | 10 | 1 | 10ms | **990.81 MB/s** ⭐⭐ | 990.81 | 18.10 MB | 0 | 100.00 MB |
+| Sequential Write+Compressed+Encrypted | 10.0 MB | 10 | 1 | 9ms | **1057.74 MB/s** ⭐⭐ | 1057.74 | 20.66 MB | 0 | 100.00 MB |
 | **Random Write Scenarios** |||||||||||
-| Random Write (Non-contiguous) | 10.0 MB | 20 | 1 | 29ms | 346.27 MB/s | 692.54 | 38.56 MB | 2 | 200.00 MB |
-| Random Write+Compressed+Encrypted | 10.0 MB | 20 | 1 | 47ms | 211.32 MB/s | 422.63 | 63.87 MB | 1 | 200.00 MB |
-| Random Write (Overlapping) | 15.0 MB | 15 | 1 | 30ms | 493.78 MB/s | 493.78 | 99.41 MB | 1 | 225.00 MB |
-| Random Write (Small Chunks) | 6.2 MB | 100 | 1 | 12ms | **513.90 MB/s** | **8222.44** ⭐⭐ | 33.75 MB | 0 | 625.00 MB |
+| Random Write (Non-contiguous) | 10.0 MB | 20 | 1 | 31ms | 320.09 MB/s | 640.19 | 35.57 MB | 2 | 200.00 MB |
+| Random Write+Compressed+Encrypted | 10.0 MB | 20 | 1 | 46ms | 218.17 MB/s | 436.33 | 50.12 MB | 1 | 200.00 MB |
+| Random Write (Overlapping) | 15.0 MB | 15 | 1 | 29ms | 518.38 MB/s | 518.38 | 88.64 MB | 1 | 225.00 MB |
+| Random Write (Small Chunks) | 6.2 MB | 100 | 1 | 13ms | **489.84 MB/s** | **7837.50** ⭐⭐ | 29.75 MB | 0 | 625.00 MB |
 
 **Note**: ⭐ marks indicate data volume increase after batch write optimization (small data blocks: 10→200, medium data blocks: 5→100, concurrent tests: 15→60, encryption/compression tests: 5→20)
 
 ### Performance Analysis (After Optimization)
 
 **Single Thread Performance:**
-- Average Throughput: **1004.76 MB/s** ⭐ (20.7% improvement)
-- Average Operation Speed: **5495.28 ops/sec** ⭐ (83.8% improvement)
-- Average Memory Usage: 27.73 MB
+- Average Throughput: **955.19 MB/s** ⭐
+- Average Operation Speed: **5944.55 ops/sec** ⭐
+- Average Memory Usage: 25.30 MB
 - Average GC Count: 0.4
 
 **Concurrent Performance (3 goroutines):**
-- Average Throughput: **11.32 MB/s** ⭐ (21.3% improvement)
-- Average Operation Speed: **2897.79 ops/sec** ⭐ (21.3% improvement)
-- Average Memory Usage: 36.69 MB
-- Average GC Count: 5.0
+- Average Throughput: **10.36 MB/s** ⭐
+- Average Operation Speed: **2651.23 ops/sec** ⭐
+- Average Memory Usage: 41.01 MB
+- Average GC Count: 4.0
 
 **Encryption/Compression Performance:**
-- Average Throughput: **957.91 MB/s** ⭐ (23.4% improvement)
-- Average Operation Speed: **1782.76 ops/sec** ⭐ (105.2% improvement)
-- Average Memory Usage: 24.34 MB
+- Average Throughput: **997.81 MB/s** ⭐
+- Average Operation Speed: **1944.32 ops/sec** ⭐
+- Average Memory Usage: 22.04 MB
 - Average GC Count: 0.3
 
 ## Implemented Optimizations
@@ -132,9 +132,9 @@ This optimization significantly improved performance through:
 6. **Streaming Processing**: Support processing very large files, reduce memory peaks
 
 **Latest Optimization Results:**
-- ✅ All tests complete in **0.47 seconds** (after optimization, including batch write and time calibrator optimization)
+- ✅ All tests complete in **0.49 seconds** (after optimization, including batch write and time calibrator optimization)
 - ✅ All functional tests pass (14 performance test scenarios + 18 functional tests)
-- ✅ Concurrent performance: **2897.79 ops/sec** (stable high performance, lower GC pressure) ⭐
-- ✅ Single thread performance: **5495.28 ops/sec** (excellent, 83.8% improvement ⭐⭐⭐)
-- ✅ Small data block performance: **41742.76 ops/sec** (after batch write optimization, 15.8x improvement ⭐⭐⭐)
+- ✅ Concurrent performance: **2651.23 ops/sec** (stable high performance, lower GC pressure) ⭐
+- ✅ Single thread performance: **5944.55 ops/sec** (excellent performance ⭐⭐⭐)
+- ✅ Small data block performance: **49029.13 ops/sec** (after batch write optimization ⭐⭐⭐)
 

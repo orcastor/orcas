@@ -248,7 +248,7 @@ func TestDeleteAndRecycle(t *testing.T) {
 				Type:   OBJ_TYPE_FILE,
 				Name:   "test_file.txt",
 				Size:   int64(len(testData)),
-				MTime:  time.Now().Unix(),
+				MTime:  Now(),
 			}
 			_, err := dma.PutObj(c, testBktID, []*ObjectInfo{obj})
 			So(err, ShouldBeNil)
@@ -278,7 +278,7 @@ func TestDeleteAndRecycle(t *testing.T) {
 				Type:  OBJ_TYPE_DIR,
 				Name:  "test_dir",
 				Size:  0,
-				MTime: time.Now().Unix(),
+				MTime: Now(),
 			}
 			_, err := dma.PutObj(c, testBktID, []*ObjectInfo{dir})
 			So(err, ShouldBeNil)
@@ -295,7 +295,7 @@ func TestDeleteAndRecycle(t *testing.T) {
 				Type:   OBJ_TYPE_FILE,
 				Name:   "child.txt",
 				Size:   int64(len(testData)),
-				MTime:  time.Now().Unix(),
+				MTime:  Now(),
 			}
 			_, err = dma.PutObj(c, testBktID, []*ObjectInfo{file})
 			So(err, ShouldBeNil)
@@ -337,7 +337,7 @@ func TestDeleteAndRecycle(t *testing.T) {
 					Type:  OBJ_TYPE_FILE,
 					Name:  fmt.Sprintf("file_%d.txt", i),
 					Size:  100,
-					MTime: time.Now().Unix(),
+					MTime: Now(),
 				}
 				_, err := dma.PutObj(c, testBktID, []*ObjectInfo{obj})
 				So(err, ShouldBeNil)
@@ -373,7 +373,7 @@ func TestDeleteAndRecycle(t *testing.T) {
 				Type:   OBJ_TYPE_FILE,
 				Name:   "to_clean.txt",
 				Size:   int64(len(testData)),
-				MTime:  time.Now().Unix(),
+				MTime:  Now(),
 			}
 			_, err := dma.PutObj(c, testBktID, []*ObjectInfo{obj})
 			So(err, ShouldBeNil)
@@ -413,7 +413,7 @@ func TestDeleteAndRecycle(t *testing.T) {
 				Type:   OBJ_TYPE_FILE,
 				Name:   "file1.txt",
 				Size:   int64(len(testData)),
-				MTime:  time.Now().Unix(),
+				MTime:  Now(),
 			}
 			_, err := dma.PutObj(c, testBktID, []*ObjectInfo{obj1})
 			So(err, ShouldBeNil)
@@ -426,7 +426,7 @@ func TestDeleteAndRecycle(t *testing.T) {
 				Type:   OBJ_TYPE_FILE,
 				Name:   "file2.txt",
 				Size:   int64(len(testData)),
-				MTime:  time.Now().Unix(),
+				MTime:  Now(),
 			}
 			_, err = dma.PutObj(c, testBktID, []*ObjectInfo{obj2})
 			So(err, ShouldBeNil)
@@ -466,7 +466,7 @@ func TestDeleteAndRecycle(t *testing.T) {
 				Type:  OBJ_TYPE_DIR,
 				Name:  "conflict_dir",
 				Size:  0,
-				MTime: time.Now().Unix(),
+				MTime: Now(),
 			}
 			_, err := dma.PutObj(c, testBktID, []*ObjectInfo{dir})
 			So(err, ShouldBeNil)
@@ -479,7 +479,7 @@ func TestDeleteAndRecycle(t *testing.T) {
 				Type:  OBJ_TYPE_FILE,
 				Name:  "conflict.txt",
 				Size:  100,
-				MTime: time.Now().Unix(),
+				MTime: Now(),
 			}
 			_, err = dma.PutObj(c, testBktID, []*ObjectInfo{obj1})
 			So(err, ShouldBeNil)
@@ -498,7 +498,7 @@ func TestDeleteAndRecycle(t *testing.T) {
 				Type:  OBJ_TYPE_FILE,
 				Name:  "conflict.txt",
 				Size:  200,
-				MTime: time.Now().Unix(),
+				MTime: Now(),
 			}
 			_, err = dma.PutObj(c, testBktID, []*ObjectInfo{obj2})
 			So(err, ShouldBeNil)
@@ -544,7 +544,7 @@ func TestDeleteAndRecycle(t *testing.T) {
 				Type:  OBJ_TYPE_DIR,
 				Name:  "dir1",
 				Size:  0,
-				MTime: time.Now().Unix(),
+				MTime: Now(),
 			}
 			_, err := dma.PutObj(c, testBktID, []*ObjectInfo{dir1})
 			So(err, ShouldBeNil)
@@ -556,7 +556,7 @@ func TestDeleteAndRecycle(t *testing.T) {
 				Type:  OBJ_TYPE_DIR,
 				Name:  "dir2",
 				Size:  0,
-				MTime: time.Now().Unix(),
+				MTime: Now(),
 			}
 			_, err = dma.PutObj(c, testBktID, []*ObjectInfo{dir2})
 			So(err, ShouldBeNil)
@@ -573,7 +573,7 @@ func TestDeleteAndRecycle(t *testing.T) {
 				Type:   OBJ_TYPE_FILE,
 				Name:   "nested.txt",
 				Size:   int64(len(testData)),
-				MTime:  time.Now().Unix(),
+				MTime:  Now(),
 			}
 			_, err = dma.PutObj(c, testBktID, []*ObjectInfo{file})
 			So(err, ShouldBeNil)
@@ -627,7 +627,7 @@ func TestDeleteAndRecycle(t *testing.T) {
 					Type:   OBJ_TYPE_FILE,
 					Name:   fmt.Sprintf("file_%d.txt", i),
 					Size:   int64(len(testData)),
-					MTime:  time.Now().Unix(),
+					MTime:  Now(),
 				}
 				_, err := dma.PutObj(c, testBktID, []*ObjectInfo{obj})
 				So(err, ShouldBeNil)
@@ -665,7 +665,7 @@ func TestDeleteAndRecycle(t *testing.T) {
 				Type:   OBJ_TYPE_FILE,
 				Name:   "time_test.txt",
 				Size:   int64(len(testData)),
-				MTime:  time.Now().Unix(),
+				MTime:  Now(),
 			}
 			_, err := dma.PutObj(c, testBktID, []*ObjectInfo{obj})
 			So(err, ShouldBeNil)
@@ -712,7 +712,7 @@ func TestDeleteAndRecycle(t *testing.T) {
 					Type:  OBJ_TYPE_FILE,
 					Name:  fmt.Sprintf("filter_%d.txt", i),
 					Size:  100,
-					MTime: time.Now().Unix(),
+					MTime: Now(),
 				}
 				_, err := dma.PutObj(c, testBktID, []*ObjectInfo{obj})
 				So(err, ShouldBeNil)
@@ -895,7 +895,7 @@ func TestPermanentlyDelete(t *testing.T) {
 				Type:   OBJ_TYPE_FILE,
 				Name:   "permanent_delete.txt",
 				Size:   int64(len(testData)),
-				MTime:  time.Now().Unix(),
+				MTime:  Now(),
 			}
 			_, err := dma.PutObj(c, testBktID, []*ObjectInfo{obj})
 			So(err, ShouldBeNil)
@@ -935,7 +935,7 @@ func TestPermanentlyDelete(t *testing.T) {
 				Type:  OBJ_TYPE_DIR,
 				Name:  "permanent_dir",
 				Size:  0,
-				MTime: time.Now().Unix(),
+				MTime: Now(),
 			}
 			_, err := dma.PutObj(c, testBktID, []*ObjectInfo{dir})
 			So(err, ShouldBeNil)
@@ -952,7 +952,7 @@ func TestPermanentlyDelete(t *testing.T) {
 				Type:   OBJ_TYPE_FILE,
 				Name:   "child.txt",
 				Size:   int64(len(testData)),
-				MTime:  time.Now().Unix(),
+				MTime:  Now(),
 			}
 			_, err = dma.PutObj(c, testBktID, []*ObjectInfo{file})
 			So(err, ShouldBeNil)
@@ -993,7 +993,7 @@ func TestPermanentlyDelete(t *testing.T) {
 				Type:   OBJ_TYPE_FILE,
 				Name:   "file1.txt",
 				Size:   int64(len(testData)),
-				MTime:  time.Now().Unix(),
+				MTime:  Now(),
 			}
 			_, err := dma.PutObj(c, testBktID, []*ObjectInfo{obj1})
 			So(err, ShouldBeNil)
@@ -1006,7 +1006,7 @@ func TestPermanentlyDelete(t *testing.T) {
 				Type:   OBJ_TYPE_FILE,
 				Name:   "file2.txt",
 				Size:   int64(len(testData)),
-				MTime:  time.Now().Unix(),
+				MTime:  Now(),
 			}
 			_, err = dma.PutObj(c, testBktID, []*ObjectInfo{obj2})
 			So(err, ShouldBeNil)
@@ -1085,7 +1085,7 @@ func TestQuotaAndUsed(t *testing.T) {
 				Type:   OBJ_TYPE_FILE,
 				Name:   "test_file.txt",
 				Size:   dataSize,
-				MTime:  time.Now().Unix(),
+				MTime:  Now(),
 			}
 			_, err = lh.Put(c, testBktID, []*ObjectInfo{obj})
 			So(err, ShouldBeNil)
@@ -1166,7 +1166,7 @@ func TestQuotaAndUsed(t *testing.T) {
 				Type:   OBJ_TYPE_FILE,
 				Name:   "file1.txt",
 				Size:   dataSize,
-				MTime:  time.Now().Unix(),
+				MTime:  Now(),
 			}
 			_, err = lh.Put(c, testBktID, []*ObjectInfo{obj1})
 			So(err, ShouldBeNil)
@@ -1185,7 +1185,7 @@ func TestQuotaAndUsed(t *testing.T) {
 				Type:   OBJ_TYPE_FILE,
 				Name:   "file2.txt",
 				Size:   dataSize,
-				MTime:  time.Now().Unix(),
+				MTime:  Now(),
 			}
 			_, err = lh.Put(c, testBktID, []*ObjectInfo{obj2})
 			So(err, ShouldBeNil)
@@ -1215,7 +1215,7 @@ func TestQuotaAndUsed(t *testing.T) {
 				Type:   OBJ_TYPE_FILE,
 				Name:   "file_to_delete.txt",
 				Size:   dataSize,
-				MTime:  time.Now().Unix(),
+				MTime:  Now(),
 			}
 			_, err = lh.Put(c, testBktID, []*ObjectInfo{obj})
 			So(err, ShouldBeNil)
@@ -1239,20 +1239,23 @@ func TestQuotaAndUsed(t *testing.T) {
 		})
 
 		Convey("SetQuota interface", func() {
-			// 设置配额
-			err := lh.SetQuota(c, testBktID, 2000)
+			// Create Admin instance for SetQuota
+			admin := NewLocalAdmin()
+
+			// Set quota
+			err := admin.SetQuota(c, testBktID, 2000)
 			So(err, ShouldBeNil)
 
-			// 验证配额已更新
+			// Verify quota has been updated
 			buckets, err := dma.GetBkt(c, []int64{testBktID})
 			So(err, ShouldBeNil)
 			So(buckets[0].Quota, ShouldEqual, 2000)
 
-			// 设置配额为不限制
-			err = lh.SetQuota(c, testBktID, -1)
+			// Set quota to unlimited
+			err = admin.SetQuota(c, testBktID, -1)
 			So(err, ShouldBeNil)
 
-			// 验证配额已更新为-1
+			// Verify quota has been updated to -1
 			buckets, err = dma.GetBkt(c, []int64{testBktID})
 			So(err, ShouldBeNil)
 			So(buckets[0].Quota, ShouldEqual, -1)
@@ -1272,7 +1275,7 @@ func TestQuotaAndUsed(t *testing.T) {
 				Type:  OBJ_TYPE_DIR,
 				Name:  "test_dir",
 				Size:  0,
-				MTime: time.Now().Unix(),
+				MTime: Now(),
 			}
 			_, err = lh.Put(c, testBktID, []*ObjectInfo{dir})
 			So(err, ShouldBeNil)

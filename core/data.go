@@ -86,7 +86,7 @@ func (dda *DefaultDataAdapter) Close() {
 	}
 }
 
-// path/<文件名hash的最后三个字节>/hash/<dataID>_<sn>
+// path/<last 3 bytes of filename hash>/hash/<dataID>_<sn>
 func toFilePath(path string, bcktID, dataID int64, sn int) string {
 	fileName := fmt.Sprintf("%d_%d", dataID, sn)
 	hash := fmt.Sprintf("%X", md5.Sum([]byte(fileName)))
@@ -95,10 +95,10 @@ func toFilePath(path string, bcktID, dataID int64, sn int) string {
 
 func (dda *DefaultDataAdapter) Write(c Ctx, bktID, dataID int64, sn int, buf []byte) error {
 	path := toFilePath(ORCAS_DATA, bktID, dataID, sn)
-	// 不用判断是否存在，以及是否创建成功，如果失败，下面写入文件之前会报错
-	os.MkdirAll(filepath.Dir(path), 0766)
+	// No need to check if it exists or if creation succeeds; if it fails, an error will be reported before writing the file below
+	os.MkdirAll(filepath.Dir(path), 0o766)
 
-	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0666)
+	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o666)
 	if err != nil {
 		return ERR_OPEN_FILE
 	}

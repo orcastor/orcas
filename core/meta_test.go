@@ -246,7 +246,7 @@ func TestPutObj(t *testing.T) {
 			d := &ObjectInfo{
 				ID:     id,
 				PID:    pid,
-				MTime:  time.Now().Unix(),
+				MTime:  Now(),
 				DataID: did,
 				Type:   OBJ_TYPE_DIR,
 				Name:   "test",
@@ -262,7 +262,7 @@ func TestPutObj(t *testing.T) {
 			d1 := &ObjectInfo{
 				ID:     id1,
 				PID:    pid,
-				MTime:  time.Now().Unix(),
+				MTime:  Now(),
 				DataID: did,
 				Type:   OBJ_TYPE_DIR,
 				Name:   "test",
@@ -293,7 +293,7 @@ func TestGetObj(t *testing.T) {
 			d := &ObjectInfo{
 				ID:     id,
 				PID:    pid,
-				MTime:  time.Now().Unix(),
+				MTime:  Now(),
 				DataID: did,
 				Type:   OBJ_TYPE_DIR,
 				Name:   "test",
@@ -325,7 +325,7 @@ func TestSetObj(t *testing.T) {
 		d := &ObjectInfo{
 			ID:     id,
 			PID:    pid,
-			MTime:  time.Now().Unix(),
+			MTime:  Now(),
 			DataID: did,
 			Type:   OBJ_TYPE_DIR,
 			Name:   "test",
@@ -336,7 +336,7 @@ func TestSetObj(t *testing.T) {
 		d1 := &ObjectInfo{
 			ID:     id1,
 			PID:    pid,
-			MTime:  time.Now().Unix(),
+			MTime:  Now(),
 			DataID: did,
 			Type:   OBJ_TYPE_DIR,
 			Name:   "test2",

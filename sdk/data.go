@@ -30,9 +30,9 @@ const (
 
 const (
 	PKG_ALIGN     = 4096
-	PKG_SIZE      = 4194304 // 默认分片大小，如果配置未设置则使用此值
+	PKG_SIZE      = 4194304 // Default chunk size, used if configuration is not set
 	HDR_SIZE      = 102400
-	DEFAULT_CHUNK = 4 * 1024 * 1024 // 默认4MB
+	DEFAULT_CHUNK = 4 * 1024 * 1024 // Default 4MB
 )
 
 type listener struct {
@@ -45,10 +45,10 @@ type listener struct {
 	sn, cnt   int
 	cmprBuf   bytes.Buffer
 	cmpr      archiver.Compressor
-	chunkSize int64 // 从桶配置中获取的分片大小
+	chunkSize int64 // Chunk size obtained from bucket configuration
 }
 
-// getChunkSize 获取分片大小（从桶配置中获取，如果未设置则使用默认值）
+// getChunkSize gets chunk size (obtained from bucket configuration, uses default value if not set)
 func (l *listener) getChunkSize() int64 {
 	if l.chunkSize > 0 {
 		return l.chunkSize
@@ -70,13 +70,13 @@ func (l *listener) Once() *listener {
 }
 
 func (l *listener) encode(src []byte) (dst []byte, err error) {
-	// 加密
+	// Encryption
 	if l.d.Kind&core.DATA_ENDEC_AES256 != 0 {
-		// AES256加密
+		// AES256 encryption
 		dst, err = aes256.Encrypt(l.cfg.EndecKey, src)
 	} else if l.d.Kind&core.DATA_ENDEC_SM4 != 0 {
-		// SM4加密
-		dst, err = sm4.Sm4Cbc([]byte(l.cfg.EndecKey), src, true) // sm4Cbc模式PKSC7填充加密
+		// SM4 encryption
+		dst, err = sm4.Sm4Cbc([]byte(l.cfg.EndecKey), src, true) // sm4Cbc mode PKCS7 padding encryption
 	} else {
 		dst = src
 	}
@@ -95,10 +95,10 @@ func (l *listener) OnData(c core.Ctx, h core.Handler, dp *dataPkger, buf []byte)
 				l.d.HdrCRC32 = crc32.ChecksumIEEE(buf)
 			}
 		}
-		// 如果开启智能压缩的，检查文件类型确定是否要压缩
+		// If smart compression is enabled, check file type to determine whether to compress
 		if l.cfg.WiseCmpr > 0 {
 			kind, _ := filetype.Match(buf)
-			if kind == filetype.Unknown { // 多媒体、存档、应用
+			if kind == filetype.Unknown { // Multimedia, archive, application
 				l.d.Kind |= l.cfg.WiseCmpr
 				if l.cfg.WiseCmpr&core.DATA_CMPR_SNAPPY != 0 {
 					l.cmpr = &archiver.Snappy{}
@@ -110,7 +110,7 @@ func (l *listener) OnData(c core.Ctx, h core.Handler, dp *dataPkger, buf []byte)
 					l.cmpr = &archiver.Brotli{Quality: int(l.cfg.CmprQlty)}
 				}
 			}
-			// 如果是黑名单类型，不压缩
+			// If it's a blacklisted type, don't compress
 			// fmt.Println(kind.MIME.Value)
 		}
 		if l.cfg.EndecWay > 0 {
@@ -125,26 +125,26 @@ func (l *listener) OnData(c core.Ctx, h core.Handler, dp *dataPkger, buf []byte)
 		l.md5Hash.Write(buf)
 	}
 
-	// 上传数据
-	// 重要：先切块（buf已经是chunk大小的数据），再对每个chunk独立压缩加密
+	// Upload data
+	// Important: chunk first (buf is already chunk-sized data), then independently compress and encrypt each chunk
 	if l.action&UPLOAD_DATA != 0 {
-		// 对当前chunk进行处理
+		// Process current chunk
 		var processedChunk []byte
 
-		// 1. 先压缩（如果启用）
+		// 1. Compress first (if enabled)
 		if l.d.Kind&core.DATA_CMPR_MASK != 0 && l.cmpr != nil {
 			l.cmprBuf.Reset()
 			err := l.cmpr.Compress(bytes.NewBuffer(buf), &l.cmprBuf)
 			if err != nil {
-				// 压缩失败，使用原始数据，移除压缩标记
-				// 注意：这个逻辑只在第一个chunk时执行，因为一旦决定压缩，后续chunk都应该保持一致
+				// Compression failed, use original data, remove compression flag
+				// Note: This logic only executes on first chunk, because once compression is decided, subsequent chunks should remain consistent
 				if isFirstChunk {
 					l.d.Kind &= ^core.DATA_CMPR_MASK
 				}
 				processedChunk = buf
 			} else {
-				// 如果压缩后更大或相等，使用原始数据，移除压缩标记
-				// 注意：这个逻辑只在第一个chunk时执行，因为一旦决定压缩，后续chunk都应该保持一致
+				// If compressed size is larger or equal, use original data, remove compression flag
+				// Note: This logic only executes on first chunk, because once compression is decided, subsequent chunks should remain consistent
 				if isFirstChunk && l.cmprBuf.Len() >= len(buf) {
 					l.d.Kind &= ^core.DATA_CMPR_MASK
 					processedChunk = buf
@@ -156,26 +156,26 @@ func (l *listener) OnData(c core.Ctx, h core.Handler, dp *dataPkger, buf []byte)
 			processedChunk = buf
 		}
 
-		// 2. 再加密（如果启用）
+		// 2. Encrypt next (if enabled)
 		encodedBuf, encodeErr := l.encode(processedChunk)
 		if encodeErr != nil {
-			encodedBuf = processedChunk // 加密失败，使用未加密的数据
+			encodedBuf = processedChunk // Encryption failed, use unencrypted data
 		}
 
-		// 3. 更新校验和和大小
+		// 3. Update checksum and size
 		if l.d.Kind&core.DATA_CMPR_MASK != 0 || l.d.Kind&core.DATA_ENDEC_MASK != 0 {
 			l.d.Cksum = crc32.Update(l.d.Cksum, crc32.IEEETable, encodedBuf)
 			l.d.Size += int64(len(encodedBuf))
 		}
 
-		// 4. 上传数据块
+		// 4. Upload data block
 		chunkSize := l.getChunkSize()
 		if l.d.OrigSize < chunkSize {
-			// 小文件，检查是否要打包
+			// Small file, check if should package
 			var pushOk bool
 			if pushOk, err = dp.Push(c, h, l.bktID, encodedBuf, l.d); err == nil {
 				if pushOk {
-					encodedBuf = nil // 打包成功，不再上传
+					encodedBuf = nil // Packaging successful, no longer upload
 				}
 			} else {
 				return l.once, err
@@ -196,10 +196,10 @@ func (l *listener) OnFinish(c core.Ctx, h core.Handler) error {
 	if l.action&CRC32_MD5 != 0 {
 		l.d.MD5 = int64(binary.BigEndian.Uint64(l.md5Hash.Sum(nil)[4:12]))
 	}
-	// 注意：现在每个chunk都在OnData中立即处理并上传，不需要在这里处理残留数据
-	// 如果压缩后产生了残留数据（理论上不应该，因为每个chunk独立压缩），这里处理
+	// Note: Now each chunk is immediately processed and uploaded in OnData, no need to handle residual data here
+	// If compression produced residual data (theoretically shouldn't, because each chunk is independently compressed), handle here
 	if l.cmprBuf.Len() > 0 {
-		// 对残留数据进行加密（如果启用）
+		// Encrypt residual data (if enabled)
 		encodedBuf, err := l.encode(l.cmprBuf.Bytes())
 		if err != nil {
 			return err
@@ -212,7 +212,7 @@ func (l *listener) OnFinish(c core.Ctx, h core.Handler) error {
 		l.d.Cksum = crc32.Update(l.d.Cksum, crc32.IEEETable, encodedBuf)
 		l.d.Size += int64(len(encodedBuf))
 	}
-	// 如果既没有压缩也没有加密，使用原始数据的CRC32和大小
+	// If neither compressed nor encrypted, use original data's CRC32 and size
 	if l.d.Kind&core.DATA_CMPR_MASK == 0 && l.d.Kind&core.DATA_ENDEC_MASK == 0 {
 		l.d.Cksum = l.d.CRC32
 		l.d.Size = l.d.OrigSize
@@ -280,7 +280,7 @@ func (osi *OrcasSDKImpl) putObjects(c core.Ctx, bktID int64, o []*core.ObjectInf
 	}
 
 	switch osi.cfg.Conflict {
-	case COVER: // 合并或覆盖
+	case COVER: // Merge or overwrite
 		var vers []*core.ObjectInfo
 		for i := range ids {
 			if ids[i] <= 0 {
@@ -289,7 +289,7 @@ func (osi *OrcasSDKImpl) putObjects(c core.Ctx, bktID int64, o []*core.ObjectInf
 				if pathErr != nil {
 					err = pathErr
 				}
-				// 如果是文件，需要新建一个版本，版本更新的逻辑需要jobs来完成
+				// If it's a file, need to create a new version, version update logic needs jobs to complete
 				if o[i].Type == core.OBJ_TYPE_FILE {
 					vers = append(vers, &core.ObjectInfo{
 						PID:   ids[i],
@@ -307,15 +307,15 @@ func (osi *OrcasSDKImpl) putObjects(c core.Ctx, bktID int64, o []*core.ObjectInf
 				fmt.Println(err)
 				return nil, err
 			}
-			// 需要定时任务把首版本的DataID更新掉
+			// Need scheduled task to update first version's DataID
 		}
-	case RENAME: // 重命名
+	case RENAME: // Rename
 		m := make(map[int]int)
 		var rename []*core.ObjectInfo
 		for i := range ids {
-			// 需要重命名重新创建
+			// Need to rename and recreate
 			if ids[i] <= 0 {
-				// 先直接用NameTmpl创建，覆盖大部分场景
+				// First directly create with NameTmpl, covers most scenarios
 				m[len(rename)] = i
 				rename = append(rename, osi.getRename(o[i], 0))
 			}
@@ -330,26 +330,26 @@ func (osi *OrcasSDKImpl) putObjects(c core.Ctx, bktID int64, o []*core.ObjectInf
 					ids[m[i]] = ids2[i]
 					continue
 				}
-				// 还是失败，用NameTmpl找有多少个目录，然后往后一个一个尝试
+				// Still failed, use NameTmpl to find how many directories, then try one by one
 				_, cnt, _, err3 := osi.h.List(c, bktID, rename[i].PID, core.ListOptions{
 					Word: rename[i].Name + "*",
 				})
 				if err3 != nil {
 					return ids, err3
 				}
-				// 假设有 test、test的副本、test的副本2，cnt为2
+				// Assume there are test, test的副本, test的副本2, cnt is 2
 				for j := 0; j <= int(cnt/2)+1; j++ {
-					// 先试试个数后面一个，正常顺序查找，最大概率命中的分支
+					// First try the number after count, normal sequential search, branch with highest probability of hit
 					if ids[m[i]], err3 = osi.putOne(c, bktID,
 						osi.getRename(o[i], int(cnt)+j)); err3 == nil {
 						break
 					}
-					// 从最前面往后找
+					// Search from front to back
 					if ids[m[i]], err3 = osi.putOne(c, bktID,
 						osi.getRename(o[i], j)); err3 == nil {
 						break
 					}
-					// 从cnt个开始往前找
+					// Search from cnt backwards
 					if ids[m[i]], err3 = osi.putOne(c, bktID,
 						osi.getRename(o[i], int(cnt)-1-j)); err3 == nil {
 						break
@@ -357,13 +357,13 @@ func (osi *OrcasSDKImpl) putObjects(c core.Ctx, bktID int64, o []*core.ObjectInf
 				}
 			}
 		}
-	case THROW: // 报错
+	case THROW: // Throw error
 		for i := range ids {
 			if ids[i] <= 0 {
 				return ids, fmt.Errorf("remote object exists, pid:%d, name:%s", o[i].PID, o[i].Name)
 			}
 		}
-	case SKIP: // 跳过
+	case SKIP: // Skip
 		break
 	}
 	return ids, nil
@@ -383,7 +383,7 @@ func (osi *OrcasSDKImpl) uploadFiles(c core.Ctx, bktID int64, u []uploadInfo,
 	}
 
 	if len(d) <= 0 {
-		// 先按文件大小排序一下，尽量让它们可以打包
+		// Sort by file size first, try to make them packageable
 		sort.Sort(sizeSort(u))
 		d = make([]*core.DataInfo, len(u))
 		for i := range u {
@@ -394,11 +394,11 @@ func (osi *OrcasSDKImpl) uploadFiles(c core.Ctx, bktID int64, u []uploadInfo,
 		}
 	}
 
-	// 从桶配置中获取chunkSize
+	// Get chunkSize from bucket configuration
 	var chunkSize int64 = DEFAULT_CHUNK
-	buckets, err := osi.h.GetBkt(c, []int64{bktID})
-	if err == nil && len(buckets) > 0 && buckets[0].ChunkSize > 0 {
-		chunkSize = buckets[0].ChunkSize
+	bucket, err := osi.h.GetBktInfo(c, bktID)
+	if err == nil && bucket != nil && bucket.ChunkSize > 0 {
+		chunkSize = bucket.ChunkSize
 	}
 	if dp == nil {
 		dp = newDataPkger(osi.cfg.PkgThres, chunkSize)
@@ -407,11 +407,11 @@ func (osi *OrcasSDKImpl) uploadFiles(c core.Ctx, bktID int64, u []uploadInfo,
 	var u1, u2 []uploadInfo
 	var d1, d2 []*core.DataInfo
 
-	// 如果是文件，先看是否要秒传
+	// If it's a file, first check if instant upload is needed
 	switch level {
 	case FAST:
-		// 如果要预先秒传的，先读取hdrCRC32，排队检查
-		// 使用从桶配置中获取的chunkSize
+		// If pre-instant upload is needed, read hdrCRC32 first, queue for check
+		// Use chunkSize obtained from bucket configuration
 		for i, fi := range u {
 			if fi.o.Size > chunkSize {
 				u1 = append(u1, fi)
@@ -456,7 +456,7 @@ func (osi *OrcasSDKImpl) uploadFiles(c core.Ctx, bktID int64, u []uploadInfo,
 			return err
 		}
 	case FULL:
-		// 如果不需要预先秒传或者预先秒传失败的，整个读取crc32和md5以后尝试秒传
+		// If pre-instant upload is not needed or pre-instant upload failed, read entire crc32 and md5 then try instant upload
 		for i, fi := range u {
 			if err := osi.readFile(c, filepath.Join(fi.path, fi.o.Name), dp,
 				newListener(bktID, d[i], osi.cfg, (HDR_CRC32|CRC32_MD5)&^doneAction, chunkSize)); err != nil {
@@ -472,14 +472,14 @@ func (osi *OrcasSDKImpl) uploadFiles(c core.Ctx, bktID int64, u []uploadInfo,
 		var f []*core.ObjectInfo
 		var gap int64
 		for i, id := range ids {
-			// 设置DataID，如果是有的，说明秒传成功，不再需要上传数据了
+			// Set DataID, if it exists, instant upload succeeded, no longer need to upload data
 			if id > 0 {
 				u[i].o.DataID = id
 				f = append(f, u[i].o)
 				gap++
 			} else {
-				if id < 0 { // 小于0说明是引用的数据
-					d[i].ID = id + gap // 有人走了，那需要补充空隙
+				if id < 0 { // Less than 0 means referenced data
+					d[i].ID = id + gap // Someone left, need to fill the gap
 				}
 				u1 = append(u1, u[i])
 				d1 = append(d1, d[i])
@@ -490,17 +490,17 @@ func (osi *OrcasSDKImpl) uploadFiles(c core.Ctx, bktID int64, u []uploadInfo,
 			fmt.Println(err)
 			return err
 		}
-		// 秒传失败的（包括超过大小或者预先秒传失败），普通上传
-		// 注意：这里递归调用 uploadFiles，chunkSize 已经在上层获取并传递给了 dp
+		// Instant upload failed (including exceeding size or pre-instant upload failed), normal upload
+		// Note: Here recursively calls uploadFiles, chunkSize has been obtained at upper level and passed to dp
 		if err := osi.uploadFiles(c, bktID, u1, d1, dp, OFF, doneAction|HDR_CRC32|CRC32_MD5); err != nil {
 			fmt.Println(runtime.Caller(0))
 			fmt.Println(err)
 			return err
 		}
 	case OFF:
-		// 直接上传的对象
+		// Objects uploaded directly
 		for i, fi := range u {
-			// 如果是引用别人的，也就是<0的，不用再传了就
+			// If referencing others, i.e., <0, no longer need to upload
 			if d[i].ID >= 0 {
 				if err := osi.readFile(c, filepath.Join(fi.path, fi.o.Name), dp,
 					newListener(bktID, d[i], osi.cfg, (UPLOAD_DATA|HDR_CRC32|CRC32_MD5)&^doneAction, chunkSize)); err != nil {
@@ -509,7 +509,7 @@ func (osi *OrcasSDKImpl) uploadFiles(c core.Ctx, bktID int64, u []uploadInfo,
 				}
 			}
 		}
-		// 刷新一下打包数据
+		// Flush packaged data
 		if err := dp.Flush(c, osi.h, bktID); err != nil {
 			return err
 		}
@@ -520,9 +520,9 @@ func (osi *OrcasSDKImpl) uploadFiles(c core.Ctx, bktID int64, u []uploadInfo,
 			return err
 		}
 		var f []*core.ObjectInfo
-		// 处理打包上传的对象
+		// Handle packaged uploaded objects
 		for i, id := range ids {
-			if u[i].o.DataID != id { // 包括小于0的
+			if u[i].o.DataID != id { // Including less than 0
 				u[i].o.DataID = id
 			}
 			f = append(f, u[i].o)
@@ -579,7 +579,7 @@ func (dr *dataReader) Read(p []byte) (n int, err error) {
 		return dr.buf.Read(p)
 	}
 	if dr.remain > 0 {
-		// GetData 的 offsetOrSize 参数：只传一个参数说明是sn，传两个参数说明是sn+offset，传三个参数说明是sn+offset+size
+		// GetData's offsetOrSize parameter: one parameter means sn, two parameters mean sn+offset, three parameters mean sn+offset+size
 		buf, err := dr.h.GetData(dr.c, dr.bktID, dr.dataID, dr.sn, int(dr.offset), dr.getSize)
 		if err != nil {
 			fmt.Println(runtime.Caller(0))
@@ -589,15 +589,15 @@ func (dr *dataReader) Read(p []byte) (n int, err error) {
 		dr.remain -= len(buf)
 		dr.sn++
 
-		// 重要：先解密，再解压缩（因为每个chunk是独立压缩加密的）
-		// 1. 先解密（如果启用）
+		// Important: decrypt first, then decompress (because each chunk is independently compressed and encrypted)
+		// 1. Decrypt first (if enabled)
 		decodeBuf := buf
 		if dr.kind&core.DATA_ENDEC_AES256 != 0 {
-			// AES256解密
+			// AES256 decryption
 			decodeBuf, err = aes256.Decrypt(dr.endecKey, buf)
 		} else if dr.kind&core.DATA_ENDEC_SM4 != 0 {
-			// SM4解密
-			decodeBuf, err = sm4.Sm4Cbc([]byte(dr.endecKey), buf, false) // sm4Cbc模式pksc7填充解密
+			// SM4 decryption
+			decodeBuf, err = sm4.Sm4Cbc([]byte(dr.endecKey), buf, false) // sm4Cbc mode PKCS7 padding decryption
 		}
 		if err != nil {
 			fmt.Println(runtime.Caller(0))
@@ -605,8 +605,8 @@ func (dr *dataReader) Read(p []byte) (n int, err error) {
 			decodeBuf = buf
 		}
 
-		// 2. 再解压缩（如果启用）
-		// 注意：每个chunk是独立压缩的，所以需要为每个chunk创建独立的解压缩器
+		// 2. Decompress next (if enabled)
+		// Note: Each chunk is independently compressed, so need to create independent decompressor for each chunk
 		finalBuf := decodeBuf
 		if dr.kind&core.DATA_CMPR_MASK != 0 {
 			var decompressor archiver.Decompressor
@@ -624,7 +624,7 @@ func (dr *dataReader) Read(p []byte) (n int, err error) {
 				var decompressedBuf bytes.Buffer
 				err := decompressor.Decompress(bytes.NewReader(decodeBuf), &decompressedBuf)
 				if err != nil {
-					// 解压缩失败，使用解密后的数据（可能是压缩数据损坏或格式不对）
+					// Decompression failed, use decrypted data (compressed data may be corrupted or wrong format)
 					fmt.Println(runtime.Caller(0))
 					fmt.Println(err)
 					finalBuf = decodeBuf
@@ -645,7 +645,7 @@ func (osi *OrcasSDKImpl) downloadFile(c core.Ctx, bktID int64, o *core.ObjectInf
 	}
 
 	dataID := o.DataID
-	// 如果不是首版本
+	// If not the first version
 	if dataID == 0 {
 		os, _, _, listErr := osi.h.List(c, bktID, o.ID, core.ListOptions{
 			Type:  core.OBJ_TYPE_VERSION,
@@ -709,7 +709,7 @@ type dataPkger struct {
 	buf       *bytes.Buffer
 	infos     []*core.DataInfo
 	thres     uint32
-	chunkSize int64 // 分片大小
+	chunkSize int64 // Chunk size
 }
 
 func newDataPkger(thres uint32, chunkSize int64) *dataPkger {
@@ -729,7 +729,7 @@ func (dp *dataPkger) SetThres(thres uint32) {
 
 func (dp *dataPkger) Push(c core.Ctx, h core.Handler, bktID int64, b []byte, d *core.DataInfo) (bool, error) {
 	offset := dp.buf.Len()
-	// 使用配置的chunkSize而不是PKG_SIZE常量
+	// Use configured chunkSize instead of PKG_SIZE constant
 	chunkSize := dp.chunkSize
 	if chunkSize <= 0 {
 		chunkSize = DEFAULT_CHUNK
@@ -737,18 +737,18 @@ func (dp *dataPkger) Push(c core.Ctx, h core.Handler, bktID int64, b []byte, d *
 	if offset+ /*offset%PKG_ALIGN+*/ len(b) > int(chunkSize) || len(dp.infos) >= int(dp.thres) || len(b) >= int(chunkSize) {
 		return false, dp.Flush(c, h, bktID)
 	}
-	// 写入前再处理对齐，最后一块就不用补齐了，PS：需要测试一下读性能差多少
+	// Handle alignment before writing, last chunk doesn't need padding, PS: need to test how much read performance differs
 	/*if offset%PKG_ALIGN > 0 {
 		if padding := PKG_ALIGN - offset%PKG_ALIGN; padding > 0 {
 			dp.buf = append(dp.buf, make([]byte, padding)...)
 			offset = len(dp.buf)
 		}
 	}*/
-	// 填充内容
+	// Fill content
 	dp.buf.Write(b)
-	// 记录偏移
+	// Record offset
 	d.PkgOffset = uint32(offset)
-	// 记录下来要设置打包数据的数据信息
+	// Record data info to set packaged data
 	dp.infos = append(dp.infos, d)
 	return true, nil
 }
@@ -757,7 +757,7 @@ func (dp *dataPkger) Flush(c core.Ctx, h core.Handler, bktID int64) error {
 	if dp.buf.Len() <= 0 {
 		return nil
 	}
-	// 上传打包的数据包
+	// Upload packaged data packet
 	pkgID, err := h.PutData(c, bktID, 0, 0, dp.buf.Bytes())
 	if err != nil {
 		fmt.Println(runtime.Caller(0))

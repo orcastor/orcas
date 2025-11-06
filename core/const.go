@@ -4,109 +4,108 @@ import (
 	"context"
 	"os"
 	"strconv"
-	"sync"
 	"sync/atomic"
 	"time"
 )
 
 /*
-环境变量配置清单
+Environment Variable Configuration List
 
-以下是 ORCAS 系统支持的所有环境变量配置项：
+The following are all environment variable configuration items supported by the ORCAS system:
 
-1. 基础路径配置
-   - ORCAS_BASE: 基础路径，用于存储元数据等基础文件（字符串）
-   - ORCAS_DATA: 数据路径，用于存储数据文件（字符串）
+1. Basic Path Configuration
+   - ORCAS_BASE: Base path for storing metadata and other basic files (string)
+   - ORCAS_DATA: Data path for storing data files (string)
 
-2. 删除延迟配置
-   - ORCAS_DELETE_DELAY: 删除延迟时间（秒），等待指定时间后删除数据文件
-     默认值: 5
-     示例: export ORCAS_DELETE_DELAY=10
+2. Delete Delay Configuration
+   - ORCAS_DELETE_DELAY: Delete delay time (seconds), wait for the specified time before deleting data files
+     Default: 5
+     Example: export ORCAS_DELETE_DELAY=10
 
-3. 资源控制配置
-   - ORCAS_BATCH_INTERVAL_MS: 批次间隔时间（毫秒），每批处理之间的延迟
-     默认值: 100
-     示例: export ORCAS_BATCH_INTERVAL_MS=200
+3. Resource Control Configuration
+   - ORCAS_BATCH_INTERVAL_MS: Batch interval time (milliseconds), delay between each batch processing
+     Default: 100
+     Example: export ORCAS_BATCH_INTERVAL_MS=200
 
-   - ORCAS_MAX_DURATION_SEC: 最大运行时长（秒），超过此时间后停止处理
-     默认值: 0（不限制）
-     示例: export ORCAS_MAX_DURATION_SEC=3600
+   - ORCAS_MAX_DURATION_SEC: Maximum running duration (seconds), stop processing after this time
+     Default: 0 (no limit)
+     Example: export ORCAS_MAX_DURATION_SEC=3600
 
-   - ORCAS_MAX_ITEMS_PER_SEC: 每秒最大处理项数，用于速率限制
-     默认值: 0（不限制）
-     示例: export ORCAS_MAX_ITEMS_PER_SEC=1000
+   - ORCAS_MAX_ITEMS_PER_SEC: Maximum items processed per second, for rate limiting
+     Default: 0 (no limit)
+     Example: export ORCAS_MAX_ITEMS_PER_SEC=1000
 
-   - ORCAS_ADAPTIVE_DELAY: 是否启用自适应延迟（true/false/1/0）
-     默认值: true
-     示例: export ORCAS_ADAPTIVE_DELAY=true
+   - ORCAS_ADAPTIVE_DELAY: Whether to enable adaptive delay (true/false/1/0)
+     Default: true
+     Example: export ORCAS_ADAPTIVE_DELAY=true
 
-   - ORCAS_ADAPTIVE_DELAY_FACTOR: 自适应延迟因子，延迟时间 = BatchInterval * (1 + 已处理项数 / 因子)
-     默认值: 1000
-     示例: export ORCAS_ADAPTIVE_DELAY_FACTOR=2000
+   - ORCAS_ADAPTIVE_DELAY_FACTOR: Adaptive delay factor, delay time = BatchInterval * (1 + processed items / factor)
+     Default: 1000
+     Example: export ORCAS_ADAPTIVE_DELAY_FACTOR=2000
 
-4. 版本保留策略配置
-   - ORCAS_MIN_VERSION_INTERVAL_SEC: 最小版本间隔时间（秒），在指定时间内只允许创建一个版本
-     默认值: 0（不限制）
-     示例: export ORCAS_MIN_VERSION_INTERVAL_SEC=300
+4. Version Retention Policy Configuration
+   - ORCAS_MIN_VERSION_INTERVAL_SEC: Minimum version interval time (seconds), only allow creating one version within the specified time
+     Default: 0 (no limit)
+     Example: export ORCAS_MIN_VERSION_INTERVAL_SEC=300
 
-   - ORCAS_MAX_VERSIONS: 最大保留版本数，超过此数量的旧版本会被删除
-     默认值: 0（不限制）
-     示例: export ORCAS_MAX_VERSIONS=10
+   - ORCAS_MAX_VERSIONS: Maximum retained versions, old versions exceeding this number will be deleted
+     Default: 0 (no limit)
+     Example: export ORCAS_MAX_VERSIONS=10
 
-5. 随机写缓冲配置
-   - ORCAS_WRITE_BUFFER_WINDOW_SEC: 缓冲窗口时间（秒），在指定时间内的多次写入会被合并
-     默认值: 10
-     示例: export ORCAS_WRITE_BUFFER_WINDOW_SEC=10
+5. Random Write Buffer Configuration
+   - ORCAS_WRITE_BUFFER_WINDOW_SEC: Buffer window time (seconds), multiple writes within the specified time will be merged
+     Default: 10
+     Example: export ORCAS_WRITE_BUFFER_WINDOW_SEC=10
 
-   - ORCAS_MAX_WRITE_BUFFER_SIZE: 最大缓冲区大小（字节），超过此大小会立即触发写入
-     默认值: 8388608 (8MB)
-     示例: export ORCAS_MAX_WRITE_BUFFER_SIZE=16777216
+   - ORCAS_MAX_WRITE_BUFFER_SIZE: Maximum buffer size (bytes), exceeding this size will trigger immediate write
+     Default: 8388608 (8MB)
+     Example: export ORCAS_MAX_WRITE_BUFFER_SIZE=16777216
 
-   - ORCAS_MAX_WRITE_BUFFER_COUNT: 最大缓冲写入次数，超过此次数会立即触发写入
-     默认值: 200
-     示例: export ORCAS_MAX_WRITE_BUFFER_COUNT=300
+   - ORCAS_MAX_WRITE_BUFFER_COUNT: Maximum buffered write count, exceeding this count will trigger immediate write
+     Default: 200
+     Example: export ORCAS_MAX_WRITE_BUFFER_COUNT=300
 
-6. 定时任务配置（Crontab）
-   - ORCAS_CRON_SCRUB_ENABLED: 是否启用ScrubData定时任务（true/false/1/0）
-     默认值: false
-     示例: export ORCAS_CRON_SCRUB_ENABLED=true
+6. Scheduled Task Configuration (Crontab)
+   - ORCAS_CRON_SCRUB_ENABLED: Whether to enable ScrubData scheduled task (true/false/1/0)
+     Default: false
+     Example: export ORCAS_CRON_SCRUB_ENABLED=true
 
-   - ORCAS_CRON_SCRUB_SCHEDULE: ScrubData的cron表达式（格式：分钟 小时 天 月 星期）
-     默认值: "0 2 * * *" (每天凌晨2点)
-     示例: export ORCAS_CRON_SCRUB_SCHEDULE="0 2 * * *"
+   - ORCAS_CRON_SCRUB_SCHEDULE: Cron expression for ScrubData (format: minute hour day month weekday)
+     Default: "0 2 * * *" (daily at 2 AM)
+     Example: export ORCAS_CRON_SCRUB_SCHEDULE="0 2 * * *"
 
-   - ORCAS_CRON_MERGE_ENABLED: 是否启用MergeDuplicateData定时任务（true/false/1/0）
-     默认值: false
-     示例: export ORCAS_CRON_MERGE_ENABLED=true
+   - ORCAS_CRON_MERGE_ENABLED: Whether to enable MergeDuplicateData scheduled task (true/false/1/0)
+     Default: false
+     Example: export ORCAS_CRON_MERGE_ENABLED=true
 
-   - ORCAS_CRON_MERGE_SCHEDULE: MergeDuplicateData的cron表达式
-     默认值: "0 3 * * *" (每天凌晨3点)
-     示例: export ORCAS_CRON_MERGE_SCHEDULE="0 3 * * *"
+   - ORCAS_CRON_MERGE_SCHEDULE: Cron expression for MergeDuplicateData
+     Default: "0 3 * * *" (daily at 3 AM)
+     Example: export ORCAS_CRON_MERGE_SCHEDULE="0 3 * * *"
 
-   - ORCAS_CRON_DEFRAGMENT_ENABLED: 是否启用Defragment定时任务（true/false/1/0）
-     默认值: false
-     示例: export ORCAS_CRON_DEFRAGMENT_ENABLED=true
+   - ORCAS_CRON_DEFRAGMENT_ENABLED: Whether to enable Defragment scheduled task (true/false/1/0)
+     Default: false
+     Example: export ORCAS_CRON_DEFRAGMENT_ENABLED=true
 
-   - ORCAS_CRON_DEFRAGMENT_SCHEDULE: Defragment的cron表达式
-     默认值: "0 4 * * 0" (每周日凌晨4点)
-     示例: export ORCAS_CRON_DEFRAGMENT_SCHEDULE="0 4 * * 0"
+   - ORCAS_CRON_DEFRAGMENT_SCHEDULE: Cron expression for Defragment
+     Default: "0 4 * * 0" (Sundays at 4 AM)
+     Example: export ORCAS_CRON_DEFRAGMENT_SCHEDULE="0 4 * * 0"
 
-   - ORCAS_CRON_DEFRAGMENT_MAX_SIZE: Defragment的最大文件大小（小于此大小的文件会被打包）
-     默认值: 10485760 (10MB)
-     示例: export ORCAS_CRON_DEFRAGMENT_MAX_SIZE=20971520
+   - ORCAS_CRON_DEFRAGMENT_MAX_SIZE: Maximum file size for Defragment (files smaller than this will be packed)
+     Default: 10485760 (10MB)
+     Example: export ORCAS_CRON_DEFRAGMENT_MAX_SIZE=20971520
 
-   - ORCAS_CRON_DEFRAGMENT_ACCESS_WINDOW: Defragment的访问窗口时间（秒）
-     默认值: 0（不限制）
-     示例: export ORCAS_CRON_DEFRAGMENT_ACCESS_WINDOW=3600
+   - ORCAS_CRON_DEFRAGMENT_ACCESS_WINDOW: Access window time for Defragment (seconds)
+     Default: 0 (no limit)
+     Example: export ORCAS_CRON_DEFRAGMENT_ACCESS_WINDOW=3600
 
-   - ORCAS_CRON_DEFRAGMENT_THRESHOLD: Defragment的空间占用阈值（百分比，0-100）
-     只有当碎片率（(RealUsed - LogicalUsed) / RealUsed * 100）达到此阈值时才执行碎片整理
-     LogicalUsed统计所有有效对象（未删除的）的逻辑占用大小
-     设置为0表示不检查阈值，总是执行
-     默认值: 10（即碎片率>=10%时才执行）
-     示例: export ORCAS_CRON_DEFRAGMENT_THRESHOLD=20
+   - ORCAS_CRON_DEFRAGMENT_THRESHOLD: Space usage threshold for Defragment (percentage, 0-100)
+     Defragmentation will only be performed when fragmentation rate ((RealUsed - LogicalUsed) / RealUsed * 100) reaches this threshold
+     LogicalUsed counts logical usage of all valid objects (not deleted)
+     Set to 0 means no threshold check, always execute
+     Default: 10 (execute when fragmentation rate >= 10%)
+     Example: export ORCAS_CRON_DEFRAGMENT_THRESHOLD=20
 
-使用示例：
+Usage Example:
    export ORCAS_BASE=/var/orcas/base
    export ORCAS_DATA=/var/orcas/data
    export ORCAS_DELETE_DELAY=10
@@ -117,58 +116,58 @@ import (
 
 const (
 	ROOT_OID    int64 = 0
-	DELETED_PID int64 = -1 // 标记已删除的对象的父ID
+	DELETED_PID int64 = -1 // Marks parent ID of deleted objects
 
-	// DefaultListPageSize 默认列表分页大小
-	// 用于 List 操作和分页处理，避免一次性加载大量数据
+	// DefaultListPageSize Default list page size
+	// Used for List operations and pagination, to avoid loading large amounts of data at once
 	DefaultListPageSize = 1000
 )
 
-// DeleteDelaySeconds 删除延迟时间（秒），等待指定时间后删除数据文件
-// 可以通过环境变量 ORCAS_DELETE_DELAY 覆盖，默认5秒
+// DeleteDelaySeconds Delete delay time (seconds), wait for the specified time before deleting data files
+// Can be overridden via environment variable ORCAS_DELETE_DELAY, default is 5 seconds
 var DeleteDelaySeconds = func() int64 {
 	if delay := os.Getenv("ORCAS_DELETE_DELAY"); delay != "" {
 		if d, err := strconv.ParseInt(delay, 10, 64); err == nil && d > 0 {
 			return d
 		}
 	}
-	return 5 // 默认5秒
+	return 5 // Default 5 seconds
 }()
 
-// ResourceControlConfig 资源控制配置
+// ResourceControlConfig Resource control configuration
 type ResourceControlConfig struct {
-	// BatchInterval 批次间隔时间（毫秒），每批处理之间的延迟
-	// 可通过环境变量 ORCAS_BATCH_INTERVAL_MS 配置，默认100ms
+	// BatchInterval Batch interval time (milliseconds), delay between each batch processing
+	// Configurable via environment variable ORCAS_BATCH_INTERVAL_MS, default 100ms
 	BatchInterval time.Duration
 
-	// MaxDuration 最大运行时长（秒），超过此时间后停止处理
-	// 可通过环境变量 ORCAS_MAX_DURATION_SEC 配置，默认0表示不限制
+	// MaxDuration Maximum running duration (seconds), stop processing after this time
+	// Configurable via environment variable ORCAS_MAX_DURATION_SEC, default 0 means no limit
 	MaxDuration time.Duration
 
-	// MaxItemsPerSecond 每秒最大处理项数，用于速率限制
-	// 可通过环境变量 ORCAS_MAX_ITEMS_PER_SEC 配置，默认0表示不限制
+	// MaxItemsPerSecond Maximum items processed per second, for rate limiting
+	// Configurable via environment variable ORCAS_MAX_ITEMS_PER_SEC, default 0 means no limit
 	MaxItemsPerSecond int
 
-	// AdaptiveDelay 是否启用自适应延迟，根据处理的数据量动态调整延迟
-	// 可通过环境变量 ORCAS_ADAPTIVE_DELAY 配置（true/false），默认true
+	// AdaptiveDelay Whether to enable adaptive delay, dynamically adjust delay based on processed data volume
+	// Configurable via environment variable ORCAS_ADAPTIVE_DELAY (true/false), default true
 	AdaptiveDelay bool
 
-	// AdaptiveDelayFactor 自适应延迟因子，延迟时间 = BatchInterval * (1 + 已处理项数 / 因子)
-	// 可通过环境变量 ORCAS_ADAPTIVE_DELAY_FACTOR 配置，默认1000
+	// AdaptiveDelayFactor Adaptive delay factor, delay time = BatchInterval * (1 + processed items / factor)
+	// Configurable via environment variable ORCAS_ADAPTIVE_DELAY_FACTOR, default 1000
 	AdaptiveDelayFactor int64
 }
 
-// GetResourceControlConfig 获取资源控制配置
+// GetResourceControlConfig Get resource control configuration
 func GetResourceControlConfig() ResourceControlConfig {
 	config := ResourceControlConfig{
-		BatchInterval:       100 * time.Millisecond, // 默认100ms
-		MaxDuration:         0,                      // 默认不限制
-		MaxItemsPerSecond:   0,                      // 默认不限制
-		AdaptiveDelay:       true,                   // 默认启用
-		AdaptiveDelayFactor: 1000,                   // 默认因子1000
+		BatchInterval:       100 * time.Millisecond, // Default 100ms
+		MaxDuration:         0,                      // Default no limit
+		MaxItemsPerSecond:   0,                      // Default no limit
+		AdaptiveDelay:       true,                   // Default enabled
+		AdaptiveDelayFactor: 1000,                   // Default factor 1000
 	}
 
-	// 从环境变量读取配置
+	// Read configuration from environment variables
 	if interval := os.Getenv("ORCAS_BATCH_INTERVAL_MS"); interval != "" {
 		if d, err := strconv.ParseInt(interval, 10, 64); err == nil && d > 0 {
 			config.BatchInterval = time.Duration(d) * time.Millisecond
@@ -200,25 +199,25 @@ func GetResourceControlConfig() ResourceControlConfig {
 	return config
 }
 
-// VersionRetentionConfig 版本保留策略配置
+// VersionRetentionConfig Version retention policy configuration
 type VersionRetentionConfig struct {
-	// MinVersionInterval 最小版本间隔时间（秒），在指定时间内只允许创建一个版本
-	// 可通过环境变量 ORCAS_MIN_VERSION_INTERVAL_SEC 配置，默认0表示不限制
+	// MinVersionInterval Minimum version interval time (seconds), only allow creating one version within the specified time
+	// Configurable via environment variable ORCAS_MIN_VERSION_INTERVAL_SEC, default 0 means no limit
 	MinVersionInterval int64
 
-	// MaxVersions 最大保留版本数，超过此数量的旧版本会被删除
-	// 可通过环境变量 ORCAS_MAX_VERSIONS 配置，默认0表示不限制
+	// MaxVersions Maximum retained versions, old versions exceeding this number will be deleted
+	// Configurable via environment variable ORCAS_MAX_VERSIONS, default 0 means no limit
 	MaxVersions int64
 }
 
-// GetVersionRetentionConfig 获取版本保留策略配置
+// GetVersionRetentionConfig Get version retention policy configuration
 func GetVersionRetentionConfig() VersionRetentionConfig {
 	config := VersionRetentionConfig{
-		MinVersionInterval: 0, // 默认不限制
-		MaxVersions:        0, // 默认不限制
+		MinVersionInterval: 0, // Default no limit
+		MaxVersions:        0, // Default no limit
 	}
 
-	// 从环境变量读取配置
+	// Read configuration from environment variables
 	if interval := os.Getenv("ORCAS_MIN_VERSION_INTERVAL_SEC"); interval != "" {
 		if d, err := strconv.ParseInt(interval, 10, 64); err == nil && d >= 0 {
 			config.MinVersionInterval = d
@@ -234,46 +233,46 @@ func GetVersionRetentionConfig() VersionRetentionConfig {
 	return config
 }
 
-// CronJobConfig 定时任务配置
+// CronJobConfig Scheduled task configuration
 type CronJobConfig struct {
-	// ScrubEnabled 是否启用ScrubData定时任务
+	// ScrubEnabled Whether to enable ScrubData scheduled task
 	ScrubEnabled bool
-	// ScrubSchedule ScrubData的cron表达式（格式：分钟 小时 天 月 星期）
+	// ScrubSchedule Cron expression for ScrubData (format: minute hour day month weekday)
 	ScrubSchedule string
 
-	// MergeEnabled 是否启用MergeDuplicateData定时任务
+	// MergeEnabled Whether to enable MergeDuplicateData scheduled task
 	MergeEnabled bool
-	// MergeSchedule MergeDuplicateData的cron表达式
+	// MergeSchedule Cron expression for MergeDuplicateData
 	MergeSchedule string
 
-	// DefragmentEnabled 是否启用Defragment定时任务
+	// DefragmentEnabled Whether to enable Defragment scheduled task
 	DefragmentEnabled bool
-	// DefragmentSchedule Defragment的cron表达式
+	// DefragmentSchedule Cron expression for Defragment
 	DefragmentSchedule string
-	// DefragmentMaxSize Defragment的最大文件大小（小于此大小的文件会被打包）
+	// DefragmentMaxSize Maximum file size for Defragment (files smaller than this will be packed)
 	DefragmentMaxSize int64
-	// DefragmentAccessWindow Defragment的访问窗口时间（秒）
+	// DefragmentAccessWindow Access window time for Defragment (seconds)
 	DefragmentAccessWindow int64
-	// DefragmentThreshold Defragment的空间占用阈值（百分比，0-100）
-	// 只有当碎片率（(Used - RealUsed) / Used * 100）达到此阈值时才执行碎片整理
+	// DefragmentThreshold Space usage threshold for Defragment (percentage, 0-100)
+	// Defragmentation will only be performed when fragmentation rate ((Used - RealUsed) / Used * 100) reaches this threshold
 	DefragmentThreshold int64
 }
 
-// GetCronJobConfig 获取定时任务配置
+// GetCronJobConfig Get scheduled task configuration
 func GetCronJobConfig() CronJobConfig {
 	config := CronJobConfig{
 		ScrubEnabled:           false,
-		ScrubSchedule:          "0 2 * * *", // 每天凌晨2点
+		ScrubSchedule:          "0 2 * * *", // Daily at 2 AM
 		MergeEnabled:           false,
-		MergeSchedule:          "0 3 * * *", // 每天凌晨3点
+		MergeSchedule:          "0 3 * * *", // Daily at 3 AM
 		DefragmentEnabled:      false,
-		DefragmentSchedule:     "0 4 * * 0",      // 每周日凌晨4点
-		DefragmentMaxSize:      10 * 1024 * 1024, // 默认10MB
-		DefragmentAccessWindow: 0,                // 默认不限制
-		DefragmentThreshold:    10,               // 默认10%（碎片率>=10%时才执行）
+		DefragmentSchedule:     "0 4 * * 0",      // Sundays at 4 AM
+		DefragmentMaxSize:      10 * 1024 * 1024, // Default 10MB
+		DefragmentAccessWindow: 0,                // Default no limit
+		DefragmentThreshold:    10,               // Default 10% (execute when fragmentation rate >= 10%)
 	}
 
-	// 从环境变量读取配置
+	// Read configuration from environment variables
 	if scrub := os.Getenv("ORCAS_CRON_SCRUB_ENABLED"); scrub != "" {
 		config.ScrubEnabled = scrub == "true" || scrub == "1"
 	}
@@ -313,30 +312,30 @@ func GetCronJobConfig() CronJobConfig {
 	return config
 }
 
-// WriteBufferConfig 随机写缓冲配置
+// WriteBufferConfig Random write buffer configuration
 type WriteBufferConfig struct {
-	// MaxBufferSize 最大缓冲区大小（字节），超过此大小会立即触发写入
-	// 可通过环境变量 ORCAS_MAX_WRITE_BUFFER_SIZE 配置，默认8MB
+	// MaxBufferSize Maximum buffer size (bytes), exceeding this size will trigger immediate write
+	// Configurable via environment variable ORCAS_MAX_WRITE_BUFFER_SIZE, default 8MB
 	MaxBufferSize int64
 
-	// MaxBufferWrites 最大缓冲写入次数，超过此次数会立即触发写入
-	// 可通过环境变量 ORCAS_MAX_WRITE_BUFFER_COUNT 配置，默认200
+	// MaxBufferWrites Maximum buffered write count, exceeding this count will trigger immediate write
+	// Configurable via environment variable ORCAS_MAX_WRITE_BUFFER_COUNT, default 200
 	MaxBufferWrites int64
 
-	// BufferWindow 缓冲窗口时间（秒），在指定时间内的多次写入会被合并
-	// 可通过环境变量 ORCAS_WRITE_BUFFER_WINDOW_SEC 配置，默认10秒
+	// BufferWindow Buffer window time (seconds), multiple writes within the specified time will be merged
+	// Configurable via environment variable ORCAS_WRITE_BUFFER_WINDOW_SEC, default 10 seconds
 	BufferWindow time.Duration
 }
 
-// GetWriteBufferConfig 获取随机写缓冲配置
+// GetWriteBufferConfig Get random write buffer configuration
 func GetWriteBufferConfig() WriteBufferConfig {
 	config := WriteBufferConfig{
-		MaxBufferSize:   8 * 1024 * 1024,  // 默认8MB
-		MaxBufferWrites: 200,              // 默认200个操作
-		BufferWindow:    10 * time.Second, // 默认10秒
+		MaxBufferSize:   8 * 1024 * 1024,  // Default 8MB
+		MaxBufferWrites: 200,              // Default 200 operations
+		BufferWindow:    10 * time.Second, // Default 10 seconds
 	}
 
-	// 从环境变量读取配置
+	// Read configuration from environment variables
 	if maxSize := os.Getenv("ORCAS_MAX_WRITE_BUFFER_SIZE"); maxSize != "" {
 		if d, err := strconv.ParseInt(maxSize, 10, 64); err == nil && d > 0 {
 			config.MaxBufferSize = d
@@ -389,39 +388,30 @@ const (
 	ERR_QUOTA_EXCEED = Error("quota exceeded")
 )
 
+// Time calibrator: uses custom timestamp to reduce time.Now() calls and GC pressure
+// Inspired by ecache's implementation, periodically update timestamp
 var (
-	// 时间校准器：使用自己的时间戳，减少time.Now()调用和GC压力
-	// 参考ecache的实现方式，定期更新时间戳
-	currentTimeStamp   atomic.Int64 // 当前Unix时间戳（秒）
-	timeCalibratorOnce sync.Once    // 确保只初始化一次
+	clock, p, n = time.Now().UnixNano(), uint16(0), uint16(1)
 )
 
-// initTimeCalibrator 初始化时间校准器
-// 定期更新时间戳（默认每毫秒更新一次），减少time.Now()调用
-func initTimeCalibrator() {
-	timeCalibratorOnce.Do(func() {
-		// 初始化当前时间戳
-		currentTimeStamp.Store(time.Now().Unix())
-
-		// 启动时间校准协程，每毫秒更新一次时间戳
-		// 这个精度对于大多数场景已经足够，同时不会造成太大开销
-		go func() {
-			ticker := time.NewTicker(1 * time.Millisecond)
-			defer ticker.Stop()
-			for {
-				currentTimeStamp.Store(time.Now().Unix())
-				<-ticker.C
+func now() int64 { return atomic.LoadInt64(&clock) }
+func init() {
+	go func() { // internal counter that reduce GC caused by `time.Now()`
+		for {
+			atomic.StoreInt64(&clock, time.Now().UnixNano()) // calibration every second
+			for i := 0; i < 9; i++ {
+				time.Sleep(100 * time.Millisecond)
+				atomic.AddInt64(&clock, int64(100*time.Millisecond))
 			}
-		}()
-	})
+			time.Sleep(100 * time.Millisecond)
+		}
+	}()
 }
 
-// Now 获取当前Unix时间戳（秒）
-// 使用时间校准器的时间戳，避免每次调用time.Now()创建临时对象
-// 这个函数可以在整个项目中复用，减少GC压力
-// 命名类似于time.Now()，但返回Unix时间戳（秒）而不是time.Time对象
+// Now Get current Unix timestamp (seconds)
+// Uses time calibrator's timestamp to avoid creating temporary objects with each time.Now() call
+// This function can be reused throughout the project to reduce GC pressure
+// Named similar to time.Now(), but returns Unix timestamp (seconds) instead of time.Time object
 func Now() int64 {
-	// 确保时间校准器已初始化
-	initTimeCalibrator()
-	return currentTimeStamp.Load()
+	return atomic.LoadInt64(&clock) / 1e9 // Convert nanoseconds to seconds
 }

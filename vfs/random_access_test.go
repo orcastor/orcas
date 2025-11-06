@@ -81,7 +81,7 @@ func TestVFSRandomAccessor(t *testing.T) {
 			Type:  core.OBJ_TYPE_FILE,
 			Name:  "test_file.txt",
 			Size:  0,
-			MTime: time.Now().Unix(),
+			MTime: core.Now(),
 		}
 		_, err = dma.PutObj(testCtx, testBktID, []*core.ObjectInfo{fileObj})
 		So(err, ShouldBeNil)
@@ -262,7 +262,7 @@ func TestVFSRandomAccessorWithSDK(t *testing.T) {
 			Type:  core.OBJ_TYPE_FILE,
 			Name:  "test_file.txt",
 			Size:  0,
-			MTime: time.Now().Unix(),
+			MTime: core.Now(),
 		}
 		_, err = dma.PutObj(testCtx, testBktID, []*core.ObjectInfo{fileObj})
 		So(err, ShouldBeNil)
@@ -414,7 +414,7 @@ func TestVFSRandomAccessorWithSDK(t *testing.T) {
 				Type:  core.OBJ_TYPE_FILE,
 				Name:  "random_test_file.txt",
 				Size:  0,
-				MTime: time.Now().Unix(),
+				MTime: core.Now(),
 			}
 			_, err = dma.PutObj(testCtx, testBktID, []*core.ObjectInfo{fileObj2})
 			So(err, ShouldBeNil)
@@ -522,7 +522,7 @@ func TestVFSRandomAccessorWithSDK(t *testing.T) {
 				Type:  core.OBJ_TYPE_FILE,
 				Name:  "overlap_test_file.txt",
 				Size:  0,
-				MTime: time.Now().Unix(),
+				MTime: core.Now(),
 			}
 			_, err = dma.PutObj(testCtx, testBktID, []*core.ObjectInfo{fileObj3})
 			So(err, ShouldBeNil)
@@ -740,7 +740,7 @@ func TestRandomAccessorReadWithEncryption(t *testing.T) {
 			Name:   "encrypted_file.txt",
 			DataID: dataID,
 			Size:   int64(len(testData)),
-			MTime:  time.Now().Unix(),
+			MTime:  core.Now(),
 		}
 		_, err = dma.PutObj(testCtx, testBktID, []*core.ObjectInfo{fileObj})
 		So(err, ShouldBeNil)
@@ -801,7 +801,7 @@ func TestRandomAccessorReadOptimization(t *testing.T) {
 				Type:  core.OBJ_TYPE_FILE,
 				Name:  "exact_size_test.txt",
 				Size:  0,
-				MTime: time.Now().Unix(),
+				MTime: core.Now(),
 			}
 			_, err = dma.PutObj(testCtx, testBktID, []*core.ObjectInfo{fileObj})
 			So(err, ShouldBeNil)
@@ -852,7 +852,7 @@ func TestRandomAccessorReadOptimization(t *testing.T) {
 				Type:  core.OBJ_TYPE_FILE,
 				Name:  "compressed_size_test.txt",
 				Size:  0,
-				MTime: time.Now().Unix(),
+				MTime: core.Now(),
 			}
 			_, err = dma.PutObj(testCtx, testBktID, []*core.ObjectInfo{fileObj})
 			So(err, ShouldBeNil)
@@ -898,7 +898,7 @@ func TestRandomAccessorReadOptimization(t *testing.T) {
 				Type:  core.OBJ_TYPE_FILE,
 				Name:  "encrypted_size_test.txt",
 				Size:  0,
-				MTime: time.Now().Unix(),
+				MTime: core.Now(),
 			}
 			_, err = dma.PutObj(testCtx, testBktID, []*core.ObjectInfo{fileObj})
 			So(err, ShouldBeNil)
@@ -938,7 +938,7 @@ func TestRandomAccessorReadOptimization(t *testing.T) {
 				Type:  core.OBJ_TYPE_FILE,
 				Name:  "empty_file.txt",
 				Size:  0,
-				MTime: time.Now().Unix(),
+				MTime: core.Now(),
 			}
 			_, err = dma.PutObj(testCtx, testBktID, []*core.ObjectInfo{fileObj})
 			So(err, ShouldBeNil)
@@ -963,7 +963,7 @@ func TestRandomAccessorReadOptimization(t *testing.T) {
 				Type:  core.OBJ_TYPE_FILE,
 				Name:  "buffer_only_test.txt",
 				Size:  0,
-				MTime: time.Now().Unix(),
+				MTime: core.Now(),
 			}
 			_, err = dma.PutObj(testCtx, testBktID, []*core.ObjectInfo{fileObj})
 			So(err, ShouldBeNil)
@@ -999,7 +999,7 @@ func TestRandomAccessorReadOptimization(t *testing.T) {
 				Type:  core.OBJ_TYPE_FILE,
 				Name:  "partial_buffer_test.txt",
 				Size:  0,
-				MTime: time.Now().Unix(),
+				MTime: core.Now(),
 			}
 			_, err = dma.PutObj(testCtx, testBktID, []*core.ObjectInfo{fileObj})
 			So(err, ShouldBeNil)
@@ -1042,7 +1042,7 @@ func TestRandomAccessorReadOptimization(t *testing.T) {
 				Type:  core.OBJ_TYPE_FILE,
 				Name:  "beyond_size_test.txt",
 				Size:  0,
-				MTime: time.Now().Unix(),
+				MTime: core.Now(),
 			}
 			_, err = dma.PutObj(testCtx, testBktID, []*core.ObjectInfo{fileObj})
 			So(err, ShouldBeNil)
@@ -1115,7 +1115,7 @@ func TestSequentialWriteFallbackToRandom(t *testing.T) {
 			Type:  core.OBJ_TYPE_FILE,
 			Name:  "test_file.txt",
 			Size:  0,
-			MTime: time.Now().Unix(),
+			MTime: core.Now(),
 		}
 		_, err = dma.PutObj(testCtx, testBktID, []*core.ObjectInfo{fileObj})
 		So(err, ShouldBeNil)
@@ -1217,7 +1217,7 @@ func TestMultipleFlush(t *testing.T) {
 			Type:  core.OBJ_TYPE_FILE,
 			Name:  "test_file.txt",
 			Size:  0,
-			MTime: time.Now().Unix(),
+			MTime: core.Now(),
 		}
 		_, err = dma.PutObj(testCtx, testBktID, []*core.ObjectInfo{fileObj})
 		So(err, ShouldBeNil)
@@ -1292,7 +1292,7 @@ func TestWriteToExistingFile(t *testing.T) {
 			Type:  core.OBJ_TYPE_FILE,
 			Name:  "test_file.txt",
 			Size:  0,
-			MTime: time.Now().Unix(),
+			MTime: core.Now(),
 		}
 		_, err = dma.PutObj(testCtx, testBktID, []*core.ObjectInfo{fileObj})
 		So(err, ShouldBeNil)
@@ -1308,7 +1308,7 @@ func TestWriteToExistingFile(t *testing.T) {
 				Type:  core.OBJ_TYPE_FILE,
 				Name:  "test_file1.txt",
 				Size:  0,
-				MTime: time.Now().Unix(),
+				MTime: core.Now(),
 			}
 			_, err = dma.PutObj(testCtx, testBktID, []*core.ObjectInfo{fileObj1})
 			So(err, ShouldBeNil)
@@ -1345,7 +1345,7 @@ func TestWriteToExistingFile(t *testing.T) {
 				Type:  core.OBJ_TYPE_FILE,
 				Name:  "test_file2.txt",
 				Size:  0,
-				MTime: time.Now().Unix(),
+				MTime: core.Now(),
 			}
 			_, err = dma.PutObj(testCtx, testBktID, []*core.ObjectInfo{fileObj2})
 			So(err, ShouldBeNil)
@@ -1423,7 +1423,7 @@ func TestDifferentCompressionAlgorithms(t *testing.T) {
 					Type:  core.OBJ_TYPE_FILE,
 					Name:  fmt.Sprintf("test_%s.txt", algo.name),
 					Size:  0,
-					MTime: time.Now().Unix(),
+					MTime: core.Now(),
 				}
 				_, err = dma.PutObj(testCtx, testBktID, []*core.ObjectInfo{fileObj})
 				So(err, ShouldBeNil)
@@ -1505,7 +1505,7 @@ func TestDifferentEncryptionMethods(t *testing.T) {
 					Type:  core.OBJ_TYPE_FILE,
 					Name:  fmt.Sprintf("test_%s.txt", method.name),
 					Size:  0,
-					MTime: time.Now().Unix(),
+					MTime: core.Now(),
 				}
 				_, err = dma.PutObj(testCtx, testBktID, []*core.ObjectInfo{fileObj})
 				So(err, ShouldBeNil)
@@ -1575,7 +1575,7 @@ func TestLargeFileOperations(t *testing.T) {
 			Type:  core.OBJ_TYPE_FILE,
 			Name:  "large_file.txt",
 			Size:  0,
-			MTime: time.Now().Unix(),
+			MTime: core.Now(),
 		}
 		_, err = dma.PutObj(testCtx, testBktID, []*core.ObjectInfo{fileObj})
 		So(err, ShouldBeNil)
@@ -1658,7 +1658,7 @@ func TestConcurrentReadWrite(t *testing.T) {
 			Type:  core.OBJ_TYPE_FILE,
 			Name:  "test_file.txt",
 			Size:  0,
-			MTime: time.Now().Unix(),
+			MTime: core.Now(),
 		}
 		_, err = dma.PutObj(testCtx, testBktID, []*core.ObjectInfo{fileObj})
 		So(err, ShouldBeNil)
@@ -1748,7 +1748,7 @@ func TestEmptyWrite(t *testing.T) {
 			Type:  core.OBJ_TYPE_FILE,
 			Name:  "test_file.txt",
 			Size:  0,
-			MTime: time.Now().Unix(),
+			MTime: core.Now(),
 		}
 		_, err = dma.PutObj(testCtx, testBktID, []*core.ObjectInfo{fileObj})
 		So(err, ShouldBeNil)
@@ -1814,7 +1814,7 @@ func TestReadAfterClose(t *testing.T) {
 			Type:  core.OBJ_TYPE_FILE,
 			Name:  "test_file.txt",
 			Size:  0,
-			MTime: time.Now().Unix(),
+			MTime: core.Now(),
 		}
 		_, err = dma.PutObj(testCtx, testBktID, []*core.ObjectInfo{fileObj})
 		So(err, ShouldBeNil)

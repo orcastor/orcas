@@ -1047,7 +1047,7 @@ func (ra *RandomAccessor) getFileObj() (*core.ObjectInfo, error) {
 	if len(objs) == 0 {
 		return nil, fmt.Errorf("file %d not found", ra.fileID)
 	}
-	// 更新缓存（使用预计算的key）
+	// Update cache (using pre-computed key)
 	fileObjCache.Put(ra.fileObjKey, objs[0])
 	ra.fileObj.Store(objs[0])
 	return objs[0], nil
@@ -1419,14 +1419,14 @@ func (ra *RandomAccessor) applyRandomWritesWithSDK(fileObj *core.ObjectInfo, wri
 		return newVersionID, err
 	}
 
-	// 对于未压缩未加密的数据，可以按chunk流式读取和处理
+	// For uncompressed unencrypted data, can stream read and process by chunk
 	newVersionID, err := ra.applyWritesStreamingUncompressed(fileObj, oldDataInfo, writes, dataInfo, chunkSizeInt, newSize)
 	if err != nil {
 		return 0, err
 	}
 
-	// 优化：使用时间校准器获取时间戳，减少time.Now()调用和GC压力
-	// 创建新版本对象
+	// Optimization: use time calibrator to get timestamp, reduce time.Now() calls and GC pressure
+	// Create new version object
 	mTime := core.Now()
 	newVersion := &core.ObjectInfo{
 		ID:     newVersionID,
@@ -1437,9 +1437,9 @@ func (ra *RandomAccessor) applyRandomWritesWithSDK(fileObj *core.ObjectInfo, wri
 		MTime:  mTime,
 	}
 
-	// 优化：批量写入元数据（将版本对象和文件对象更新一起写入）
+	// Optimization: batch write metadata (write version object and file object update together)
 	objectsToPut := []*core.ObjectInfo{newVersion}
-	// 同时更新文件对象（如果文件对象本身需要更新）
+	// Also update file object (if file object itself needs update)
 	updateFileObj := &core.ObjectInfo{
 		ID:     ra.fileID,
 		DataID: newDataID,
@@ -1447,12 +1447,12 @@ func (ra *RandomAccessor) applyRandomWritesWithSDK(fileObj *core.ObjectInfo, wri
 	}
 	objectsToPut = append(objectsToPut, updateFileObj)
 
-	// 使用Put方法批量创建版本和更新文件对象（会自动应用版本保留策略）
+	// Use Put method to batch create version and update file object (will automatically apply version retention policy)
 	_, err = lh.Put(ra.fs.c, ra.fs.bktID, objectsToPut)
 
-	// 更新缓存的文件对象信息
+	// Update cached file object information
 	if err == nil {
-		// 优化：使用预计算的key（避免重复转换）
+		// Optimization: use pre-computed key (avoid repeated conversion)
 		fileObjCache.Put(ra.fileObjKey, updateFileObj)
 		ra.fileObj.Store(updateFileObj)
 	}
@@ -1460,13 +1460,13 @@ func (ra *RandomAccessor) applyRandomWritesWithSDK(fileObj *core.ObjectInfo, wri
 	return newVersionID, err
 }
 
-// applyWritesStreamingCompressed 处理已压缩或加密的数据
-// 流式处理：按chunk读取原数据，应用写入操作，立即处理并写入新对象
+// applyWritesStreamingCompressed handles compressed or encrypted data
+// Streaming processing: read original data by chunk, apply write operations, process and write to new object immediately
 func (ra *RandomAccessor) applyWritesStreamingCompressed(oldDataInfo *core.DataInfo, writes []WriteOperation,
 	dataInfo *core.DataInfo, chunkSize int64, newSize int64,
 ) (int64, error) {
-	// 现在每个chunk是独立压缩加密的，可以按chunk流式处理
-	// 直接按chunk读取、解密、解压，不使用DataReader
+	// Now each chunk is independently compressed and encrypted, can process by chunk in streaming
+	// Directly read by chunk, decrypt, decompress, don't use DataReader
 
 	var endecKey string
 	if ra.fs.sdkCfg != nil {
