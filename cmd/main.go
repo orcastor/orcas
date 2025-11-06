@@ -1,22 +1,31 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"os"
+	"os/exec"
+	"runtime"
+	"strconv"
+	"strings"
 
 	"github.com/orcastor/orcas/core"
 	"github.com/orcastor/orcas/sdk"
 )
 
 var (
-	configFile = flag.String("config", "", "Configuration file path (JSON format)")
-	action     = flag.String("action", "", "Operation type: upload, download, add-user, update-user, delete-user, list-users")
-	localPath  = flag.String("local", "", "Local file or directory path")
-	remotePath = flag.String("remote", "", "Remote path (relative to bucket root directory)")
-	bucketID   = flag.Int64("bucket", 0, "Bucket ID (if not specified, use first bucket)")
+	configFile  = flag.String("config", "", "Configuration file path (JSON format)")
+	action      = flag.String("action", "", "Operation type: upload, download, add-user, update-user, delete-user, list-users, create-bucket, delete-bucket, list-buckets")
+	localPath   = flag.String("local", "", "Local file or directory path")
+	remotePath  = flag.String("remote", "", "Remote path (relative to bucket root directory)")
+	bucketID    = flag.Int64("bucket", 0, "Bucket ID (if not specified, use first bucket)")
+	bucketName  = flag.String("bucketname", "", "Bucket name (for create-bucket)")
+	bucketQuota = flag.Int64("quota", -1, "Bucket quota in bytes (-1 for unlimited, for create-bucket)")
+	bucketOwner = flag.String("owner", "", "Bucket owner username or user ID (for create-bucket, default is current user)")
 
 	// Configuration parameters (can be set via command line arguments or configuration file)
 	userName = flag.String("user", "", "Username")
@@ -61,9 +70,13 @@ func main() {
 	// Initialize database
 	core.InitDB()
 
-	// Handle user management commands
+	// Handle user management and bucket management commands
 	if *action == "add-user" || *action == "update-user" || *action == "delete-user" || *action == "list-users" {
 		handleUserManagement()
+		return
+	}
+	if *action == "create-bucket" || *action == "delete-bucket" || *action == "list-buckets" {
+		handleBucketManagement()
 		return
 	}
 
@@ -200,6 +213,13 @@ func loadConfig() (*Config, error) {
 	}
 	if *password != "" {
 		cfg.Password = *password
+	} else if cfg.Password == "" {
+		// If password is not provided via command line or config file, try to read from stdin
+		// This supports both interactive input (hidden) and pipe input
+		pwd, err := readPassword("Password: ")
+		if err == nil && pwd != "" {
+			cfg.Password = pwd
+		}
 	}
 	// datasync is a boolean value, if command line provides a value, parse and override
 	if *dataSync != "" {
@@ -248,6 +268,85 @@ func loadJSONConfig(path string, cfg *Config) error {
 		return err
 	}
 	return json.Unmarshal(data, cfg)
+}
+
+// readPassword reads password from stdin with hidden input
+func readPassword(prompt string) (string, error) {
+	fmt.Fprint(os.Stderr, prompt)
+
+	// Use platform-specific method to read password without echoing
+	var password string
+	var err error
+
+	if runtime.GOOS == "windows" {
+		// Check if stdin is a terminal (interactive) or pipe
+		// For pipe input, read directly; for terminal, use PowerShell
+		stat, _ := os.Stdin.Stat()
+		isPipe := (stat.Mode() & os.ModeCharDevice) == 0
+
+		if isPipe {
+			// Pipe mode: read directly from stdin
+			reader := bufio.NewReader(os.Stdin)
+			line, err := reader.ReadString('\n')
+			if err != nil && err != io.EOF {
+				return "", err
+			}
+			password = strings.TrimRight(line, "\r\n")
+		} else {
+			// Interactive mode: use PowerShell to read password without echoing
+			cmd := exec.Command("powershell", "-Command", "$pwd = Read-Host -AsSecureString; $BSTR = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($pwd); [System.Runtime.InteropServices.Marshal]::PtrToStringAuto($BSTR)")
+			cmd.Stdin = os.Stdin
+			output, err := cmd.Output()
+			if err != nil {
+				return "", err
+			}
+			password = strings.TrimSpace(string(output))
+		}
+	} else {
+		// Unix/Linux: check if stdin is a terminal or pipe
+		stat, _ := os.Stdin.Stat()
+		isPipe := (stat.Mode() & os.ModeCharDevice) == 0
+
+		if isPipe {
+			// Pipe mode: read directly from stdin
+			reader := bufio.NewReader(os.Stdin)
+			line, err := reader.ReadString('\n')
+			if err != nil && err != io.EOF {
+				return "", err
+			}
+			password = strings.TrimRight(line, "\r\n")
+		} else {
+			// Interactive mode: use stty to disable echo, then read password
+			cmd := exec.Command("stty", "-echo")
+			cmd.Stdin = os.Stdin
+			cmd.Stderr = os.Stderr
+			_ = cmd.Run()
+
+			// Read password
+			var b []byte = make([]byte, 1)
+			var pwd strings.Builder
+			for {
+				n, err := os.Stdin.Read(b)
+				if err != nil || n == 0 {
+					break
+				}
+				if b[0] == '\n' || b[0] == '\r' {
+					break
+				}
+				pwd.WriteByte(b[0])
+			}
+			password = pwd.String()
+
+			// Restore terminal settings
+			cmd = exec.Command("stty", "echo")
+			cmd.Stdin = os.Stdin
+			cmd.Stderr = os.Stderr
+			_ = cmd.Run()
+		}
+	}
+
+	fmt.Fprintln(os.Stderr) // Print newline after password input
+	return password, err
 }
 
 func convertToSDKConfig(cfg *Config) sdk.Config {
@@ -358,8 +457,13 @@ func handleUserManagement() {
 			os.Exit(1)
 		}
 		if *newPass == "" {
-			fmt.Fprintf(os.Stderr, "Error: Must specify password with -newpass parameter\n")
-			os.Exit(1)
+			// Try to read password from stdin
+			pwd, err := readPassword("New user password: ")
+			if err != nil || pwd == "" {
+				fmt.Fprintf(os.Stderr, "Error: Must specify password with -newpass parameter or provide via stdin\n")
+				os.Exit(1)
+			}
+			*newPass = pwd
 		}
 		role := uint32(core.USER)
 		if *userRole == "ADMIN" {
@@ -389,6 +493,9 @@ func handleUserManagement() {
 			fmt.Fprintf(os.Stderr, "Error: Must specify user ID with -userid parameter\n")
 			os.Exit(1)
 		}
+		// If newPass is specified but empty, try to read from stdin
+		// Note: We only read if -newpass was explicitly provided but empty, or if we need to update password
+		// For now, we only read if -newpass was set to empty string (user wants to update password)
 		var role *uint32
 		if *userRole != "" {
 			r := uint32(core.USER)
@@ -397,7 +504,13 @@ func handleUserManagement() {
 			}
 			role = &r
 		}
-		err := admin.UpdateUser(ctx, *userID, *newUser, *newPass, *userName_, role)
+		// If newPass is needed but not provided, try to read from stdin
+		// Note: UpdateUser accepts empty string for newPass if password shouldn't be updated
+		// So we only prompt if user explicitly wants to update password
+		updatePass := *newPass
+		// If password is not provided and user wants to update password, try to read from stdin
+		// For safety, we don't auto-prompt. User must explicitly provide -newpass or pipe
+		err := admin.UpdateUser(ctx, *userID, *newUser, updatePass, *userName_, role)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Failed to update user: %v\n", err)
 			os.Exit(1)
@@ -441,6 +554,191 @@ func handleUserManagement() {
 
 	default:
 		fmt.Fprintf(os.Stderr, "Error: Unknown user management action: %s\n", *action)
+		os.Exit(1)
+	}
+}
+
+func handleBucketManagement() {
+	// Load configuration for admin login
+	cfg, err := loadConfig()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to load configuration: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Validate admin credentials
+	if cfg.UserName == "" {
+		fmt.Fprintf(os.Stderr, "Error: Admin username cannot be empty (use -user parameter or configuration file)\n")
+		os.Exit(1)
+	}
+	if cfg.Password == "" {
+		fmt.Fprintf(os.Stderr, "Error: Admin password cannot be empty (use -pass parameter or configuration file)\n")
+		os.Exit(1)
+	}
+
+	// Create handler and login as admin
+	handler := core.NewLocalHandler()
+	ctx, userInfo, _, err := handler.Login(context.Background(), cfg.UserName, cfg.Password)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Login failed: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Check if user is admin
+	if userInfo.Role != core.ADMIN {
+		fmt.Fprintf(os.Stderr, "Error: User %s is not an administrator\n", cfg.UserName)
+		os.Exit(1)
+	}
+
+	// Create admin instance
+	admin := core.NewLocalAdmin()
+	defer admin.Close()
+
+	// Execute bucket management command
+	switch *action {
+	case "create-bucket":
+		if *bucketName == "" {
+			fmt.Fprintf(os.Stderr, "Error: Must specify bucket name with -bucketname parameter\n")
+			os.Exit(1)
+		}
+
+		// Determine bucket owner
+		var ownerID int64
+		var ownerName string
+		if *bucketOwner != "" {
+			// Get all users to find the owner
+			allUsers, err := admin.ListUsers(ctx)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error: Failed to list users: %v\n", err)
+				os.Exit(1)
+			}
+
+			// Try to parse as user ID first
+			if parsedID, err := strconv.ParseInt(*bucketOwner, 10, 64); err == nil && parsedID > 0 {
+				// It's a user ID
+				found := false
+				for _, u := range allUsers {
+					if u.ID == parsedID {
+						ownerID = u.ID
+						ownerName = u.Name
+						found = true
+						break
+					}
+				}
+				if !found {
+					fmt.Fprintf(os.Stderr, "Error: User with ID %d not found\n", parsedID)
+					os.Exit(1)
+				}
+			} else {
+				// It's a username
+				found := false
+				for _, u := range allUsers {
+					if u.Usr == *bucketOwner {
+						ownerID = u.ID
+						ownerName = u.Name
+						found = true
+						break
+					}
+				}
+				if !found {
+					fmt.Fprintf(os.Stderr, "Error: User with username %s not found\n", *bucketOwner)
+					os.Exit(1)
+				}
+			}
+		} else {
+			// Use current user as owner
+			ownerID = userInfo.ID
+			ownerName = userInfo.Name
+		}
+
+		// Generate new bucket ID
+		bktID := admin.NewID()
+		if bktID <= 0 {
+			fmt.Fprintf(os.Stderr, "Error: Failed to generate bucket ID\n")
+			os.Exit(1)
+		}
+
+		// Create bucket
+		bucket := &core.BucketInfo{
+			ID:           bktID,
+			Name:         *bucketName,
+			UID:          ownerID,
+			Type:         1, // Normal bucket
+			Quota:        *bucketQuota,
+			Used:         0,
+			RealUsed:     0,
+			LogicalUsed:  0,
+			DedupSavings: 0,
+			ChunkSize:    0, // Use default chunk size
+		}
+
+		err := admin.PutBkt(ctx, []*core.BucketInfo{bucket})
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to create bucket: %v\n", err)
+			os.Exit(1)
+		}
+
+		fmt.Printf("Bucket created successfully:\n")
+		fmt.Printf("  ID: %d\n", bucket.ID)
+		fmt.Printf("  Name: %s\n", bucket.Name)
+		if bucket.Quota < 0 {
+			fmt.Printf("  Quota: Unlimited\n")
+		} else {
+			fmt.Printf("  Quota: %d bytes (%.2f GB)\n", bucket.Quota, float64(bucket.Quota)/(1024*1024*1024))
+		}
+		fmt.Printf("  Owner: %s (ID: %d)\n", ownerName, ownerID)
+
+	case "delete-bucket":
+		if *bucketID == 0 {
+			fmt.Fprintf(os.Stderr, "Error: Must specify bucket ID with -bucket parameter\n")
+			os.Exit(1)
+		}
+
+		// Verify bucket exists
+		buckets, err := handler.GetBktInfo(ctx, *bucketID)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: Bucket %d not found: %v\n", *bucketID, err)
+			os.Exit(1)
+		}
+
+		// Delete bucket
+		err = admin.DeleteBkt(ctx, *bucketID)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to delete bucket: %v\n", err)
+			os.Exit(1)
+		}
+
+		fmt.Printf("Bucket %d (%s) deleted successfully\n", *bucketID, buckets.Name)
+
+	case "list-buckets":
+		// Get all buckets for the user
+		_, _, bucketList, err := handler.Login(context.Background(), cfg.UserName, cfg.Password)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to get buckets: %v\n", err)
+			os.Exit(1)
+		}
+
+		if len(bucketList) == 0 {
+			fmt.Println("No buckets found")
+			return
+		}
+
+		fmt.Printf("Total buckets: %d\n\n", len(bucketList))
+		for _, bkt := range bucketList {
+			fmt.Printf("ID: %d\n", bkt.ID)
+			fmt.Printf("  Name: %s\n", bkt.Name)
+			if bkt.Quota < 0 {
+				fmt.Printf("  Quota: Unlimited\n")
+			} else {
+				fmt.Printf("  Quota: %d bytes (%.2f GB)\n", bkt.Quota, float64(bkt.Quota)/(1024*1024*1024))
+			}
+			fmt.Printf("  Used: %d bytes (%.2f GB)\n", bkt.Used, float64(bkt.Used)/(1024*1024*1024))
+			fmt.Printf("  Real Used: %d bytes (%.2f GB)\n", bkt.RealUsed, float64(bkt.RealUsed)/(1024*1024*1024))
+			fmt.Println()
+		}
+
+	default:
+		fmt.Fprintf(os.Stderr, "Error: Unknown bucket management action: %s\n", *action)
 		os.Exit(1)
 	}
 }

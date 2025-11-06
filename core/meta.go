@@ -127,6 +127,7 @@ type UserMetadataAdapter interface {
 
 type BucketMetadataAdapter interface {
 	PutBkt(c Ctx, o []*BucketInfo) error
+	DeleteBkt(c Ctx, bktID int64) error
 	GetBkt(c Ctx, ids []int64) ([]*BucketInfo, error)
 	ListBkt(c Ctx, uid int64) ([]*BucketInfo, error)
 	ListAllBuckets(c Ctx) ([]*BucketInfo, error) // 获取所有bucket（用于定时任务）
@@ -254,7 +255,44 @@ func InitDB() error {
 	db.Exec(`CREATE INDEX ix_uid on bkt (uid)`)
 	db.Exec(`CREATE UNIQUE INDEX uk_name on bkt (name)`)
 	db.Exec(`CREATE UNIQUE INDEX uk_usr on usr (usr)`)
+
+	// Create default admin user if no admin exists
+	initDefaultAdmin(db)
+
 	return nil
+}
+
+// initDefaultAdmin creates a default admin user if no admin user exists
+func initDefaultAdmin(db *sql.DB) {
+	// Check if any admin user exists
+	var count int
+	err := db.QueryRow(`SELECT COUNT(*) FROM usr WHERE role = ?`, ADMIN).Scan(&count)
+	if err != nil {
+		return // If query fails, skip creating default admin
+	}
+
+	// If no admin exists, create default admin user
+	if count == 0 {
+		// Default admin credentials: username "orcas", password "orcas"
+		hashedPwd, err := HashPassword("orcas")
+		if err != nil {
+			return // If password hashing fails, skip creating default admin
+		}
+
+		// Generate a new ID for the admin user
+		adminID := NewID()
+		if adminID <= 0 {
+			return // If ID generation fails, skip creating default admin
+		}
+
+		// Create default admin user
+		_, err = db.Exec(`INSERT INTO usr (id, role, usr, pwd, name, avatar, key) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+			adminID, ADMIN, "orcas", hashedPwd, "Administrator", "", "")
+		if err != nil {
+			// If insert fails (e.g., user already exists), ignore the error
+			return
+		}
+	}
 }
 
 func InitBucketDB(c Ctx, bktID int64) error {
@@ -819,7 +857,23 @@ func (dma *DefaultMetadataAdapter) ListUsers(c Ctx) (o []*UserInfo, err error) {
 	}
 	defer db.Close()
 
-	if _, err = b.TableContext(c, db, USR_TBL).Select(&o); err != nil {
+	// Use raw SQL query directly to avoid borm issues
+	query := "SELECT id, role, usr, pwd, name, avatar, key FROM " + USR_TBL
+	rows, err := db.Query(query)
+	if err != nil {
+		return nil, ERR_QUERY_DB
+	}
+	defer rows.Close()
+
+	o = []*UserInfo{}
+	for rows.Next() {
+		u := &UserInfo{}
+		if err = rows.Scan(&u.ID, &u.Role, &u.Usr, &u.Pwd, &u.Name, &u.Avatar, &u.Key); err != nil {
+			continue
+		}
+		o = append(o, u)
+	}
+	if err != nil && err != rows.Err() {
 		return nil, ERR_QUERY_DB
 	}
 	// 清除敏感信息
@@ -896,6 +950,19 @@ func (dma *DefaultMetadataAdapter) ListAllBuckets(c Ctx) (o []*BucketInfo, err e
 		return nil, ERR_QUERY_DB
 	}
 	return
+}
+
+func (dma *DefaultMetadataAdapter) DeleteBkt(c Ctx, bktID int64) error {
+	db, err := GetDB()
+	if err != nil {
+		return ERR_OPEN_DB
+	}
+	defer db.Close()
+
+	if _, err = b.TableContext(c, db, BKT_TBL).Delete(b.Where(b.Eq("id", bktID))); err != nil {
+		return ERR_EXEC_DB
+	}
+	return nil
 }
 
 func (dma *DefaultMetadataAdapter) UpdateBktQuota(c Ctx, bktID int64, quota int64) error {

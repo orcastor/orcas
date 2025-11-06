@@ -154,6 +154,7 @@ type Admin interface {
 	NewID() int64
 
 	PutBkt(c Ctx, o []*BucketInfo) error
+	DeleteBkt(c Ctx, bktID int64) error
 	// SetQuota Set bucket quota
 	SetQuota(c Ctx, bktID int64, quota int64) error
 	// 审计数据完整性：检查元数据和数据文件的一致性
@@ -607,6 +608,13 @@ func (la *LocalAdmin) PutBkt(c Ctx, o []*BucketInfo) error {
 		return err
 	}
 	return la.ma.PutBkt(c, o)
+}
+
+func (la *LocalAdmin) DeleteBkt(c Ctx, bktID int64) error {
+	if err := la.acm.CheckRole(c, ADMIN); err != nil {
+		return err
+	}
+	return la.ma.DeleteBkt(c, bktID)
 }
 
 func (la *LocalAdmin) SetQuota(c Ctx, bktID int64, quota int64) error {
