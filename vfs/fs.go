@@ -7,9 +7,8 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"sync"
+	"sync/atomic"
 	"syscall"
-	"time"
 
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
@@ -30,8 +29,6 @@ func (ofs *OrcasFS) Mount(mountPoint string, opts *fuse.MountOptions) (*fuse.Ser
 		ofs.root = &OrcasNode{
 			fs:     ofs,
 			objID:  core.ROOT_OID,
-			obj:    nil,
-			objMu:  sync.RWMutex{},
 			isRoot: true,
 		}
 	}
@@ -63,11 +60,9 @@ type OrcasNode struct {
 	fs.Inode
 	fs     *OrcasFS
 	objID  int64
-	obj    *core.ObjectInfo
-	objMu  sync.RWMutex
+	obj    atomic.Value // *core.ObjectInfo
 	isRoot bool
-	ra     *RandomAccessor
-	raMu   sync.Mutex
+	ra     atomic.Value // *RandomAccessor
 }
 
 var (
@@ -86,14 +81,14 @@ var (
 )
 
 // getObj 获取对象信息（带缓存）
+// 优化：使用原子操作，完全无锁
 func (n *OrcasNode) getObj() (*core.ObjectInfo, error) {
-	n.objMu.RLock()
-	if n.obj != nil {
-		obj := n.obj
-		n.objMu.RUnlock()
-		return obj, nil
+	// 第一次检查：原子读取
+	if val := n.obj.Load(); val != nil {
+		if obj, ok := val.(*core.ObjectInfo); ok && obj != nil {
+			return obj, nil
+		}
 	}
-	n.objMu.RUnlock()
 
 	// 如果是根节点，返回虚拟对象
 	if n.isRoot {
@@ -105,7 +100,7 @@ func (n *OrcasNode) getObj() (*core.ObjectInfo, error) {
 		}, nil
 	}
 
-	// 查询对象
+	// 查询对象（在锁外执行）
 	objs, err := n.fs.h.Get(n.fs.c, n.fs.bktID, []int64{n.objID})
 	if err != nil {
 		return nil, err
@@ -114,19 +109,22 @@ func (n *OrcasNode) getObj() (*core.ObjectInfo, error) {
 		return nil, syscall.ENOENT
 	}
 
-	// 缓存对象
-	n.objMu.Lock()
-	n.obj = objs[0]
-	n.objMu.Unlock()
+	// 双重检查：再次检查缓存（可能被其他goroutine更新了）
+	if val := n.obj.Load(); val != nil {
+		if obj, ok := val.(*core.ObjectInfo); ok && obj != nil {
+			return obj, nil
+		}
+	}
+
+	// 更新缓存（原子操作）
+	n.obj.Store(objs[0])
 
 	return objs[0], nil
 }
 
 // invalidateObj 使对象缓存失效
 func (n *OrcasNode) invalidateObj() {
-	n.objMu.Lock()
-	n.obj = nil
-	n.objMu.Unlock()
+	n.obj.Store((*core.ObjectInfo)(nil))
 }
 
 // Getattr 获取文件/目录属性
@@ -171,7 +169,7 @@ func (n *OrcasNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut)
 
 	// 列出目录内容
 	children, _, _, err := n.fs.h.List(n.fs.c, n.fs.bktID, obj.ID, core.ListOptions{
-		Count: 1000,
+		Count: core.DefaultListPageSize,
 	})
 	if err != nil {
 		return nil, syscall.EIO
@@ -184,9 +182,8 @@ func (n *OrcasNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut)
 			childNode := &OrcasNode{
 				fs:    n.fs,
 				objID: child.ID,
-				obj:   child,
-				objMu: sync.RWMutex{},
 			}
+			childNode.obj.Store(child)
 
 			// 根据类型创建Inode
 			var stableAttr fs.StableAttr
@@ -232,7 +229,7 @@ func (n *OrcasNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
 
 	// 列出目录内容
 	children, _, _, err := n.fs.h.List(n.fs.c, n.fs.bktID, obj.ID, core.ListOptions{
-		Count: 1000,
+		Count: core.DefaultListPageSize,
 	})
 	if err != nil {
 		return nil, syscall.EIO
@@ -283,7 +280,7 @@ func (n *OrcasNode) Create(ctx context.Context, name string, flags uint32, mode 
 		Type:  core.OBJ_TYPE_FILE,
 		Name:  name,
 		Size:  0,
-		MTime: time.Now().Unix(),
+		MTime: core.Now(),
 	}
 
 	ids, err := n.fs.h.Put(n.fs.c, n.fs.bktID, []*core.ObjectInfo{fileObj})
@@ -297,9 +294,8 @@ func (n *OrcasNode) Create(ctx context.Context, name string, flags uint32, mode 
 	fileNode := &OrcasNode{
 		fs:    n.fs,
 		objID: fileObj.ID,
-		obj:   fileObj,
-		objMu: sync.RWMutex{},
 	}
+	fileNode.obj.Store(fileObj)
 
 	stableAttr := fs.StableAttr{
 		Mode: syscall.S_IFREG,
@@ -340,7 +336,7 @@ func (n *OrcasNode) Mkdir(ctx context.Context, name string, mode uint32, out *fu
 		Type:  core.OBJ_TYPE_DIR,
 		Name:  name,
 		Size:  0,
-		MTime: time.Now().Unix(),
+		MTime: core.Now(),
 	}
 
 	ids, err := n.fs.h.Put(n.fs.c, n.fs.bktID, []*core.ObjectInfo{dirObj})
@@ -354,9 +350,8 @@ func (n *OrcasNode) Mkdir(ctx context.Context, name string, mode uint32, out *fu
 	dirNode := &OrcasNode{
 		fs:    n.fs,
 		objID: dirObj.ID,
-		obj:   dirObj,
-		objMu: sync.RWMutex{},
 	}
+	dirNode.obj.Store(dirObj)
 
 	stableAttr := fs.StableAttr{
 		Mode: syscall.S_IFDIR,
@@ -392,7 +387,7 @@ func (n *OrcasNode) Unlink(ctx context.Context, name string) syscall.Errno {
 
 	// 查找子对象
 	children, _, _, err := n.fs.h.List(n.fs.c, n.fs.bktID, obj.ID, core.ListOptions{
-		Count: 1000,
+		Count: core.DefaultListPageSize,
 	})
 	if err != nil {
 		return syscall.EIO
@@ -435,7 +430,7 @@ func (n *OrcasNode) Rmdir(ctx context.Context, name string) syscall.Errno {
 
 	// 查找子目录
 	children, _, _, err := n.fs.h.List(n.fs.c, n.fs.bktID, obj.ID, core.ListOptions{
-		Count: 1000,
+		Count: core.DefaultListPageSize,
 	})
 	if err != nil {
 		return syscall.EIO
@@ -489,7 +484,7 @@ func (n *OrcasNode) Rename(ctx context.Context, name string, newParent fs.InodeE
 
 	// 查找源对象
 	children, _, _, err := n.fs.h.List(n.fs.c, n.fs.bktID, obj.ID, core.ListOptions{
-		Count: 1000,
+		Count: core.DefaultListPageSize,
 	})
 	if err != nil {
 		return syscall.EIO
@@ -627,6 +622,7 @@ func (n *OrcasNode) getDataReader() (io.Reader, syscall.Errno) {
 }
 
 // Write 写入文件内容
+// 优化：减少锁持有时间，ra.Write本身是线程安全的
 func (n *OrcasNode) Write(ctx context.Context, data []byte, off int64) (written uint32, errno syscall.Errno) {
 	obj, err := n.getObj()
 	if err != nil {
@@ -637,38 +633,47 @@ func (n *OrcasNode) Write(ctx context.Context, data []byte, off int64) (written 
 		return 0, syscall.EISDIR
 	}
 
-	// 获取或创建RandomAccessor
+	// 获取或创建RandomAccessor（内部有锁，但会尽快释放）
 	ra, err := n.getRandomAccessor()
 	if err != nil {
 		return 0, syscall.EIO
 	}
 
 	// 写入数据（不立即刷新）
+	// ra.Write本身是线程安全的，不需要持有raMu锁
 	err = ra.Write(off, data)
 	if err != nil {
 		return 0, syscall.EIO
 	}
 
 	// 使对象缓存失效（下次读取时会获取最新的大小）
+	// 这个操作很快，但可以优化为异步
 	n.invalidateObj()
 
 	return uint32(len(data)), 0
 }
 
 // Flush 刷新文件
+// 优化：使用原子操作，完全无锁
 func (n *OrcasNode) Flush(ctx context.Context) syscall.Errno {
-	n.raMu.Lock()
-	defer n.raMu.Unlock()
-
-	// 如果有RandomAccessor，刷新它
-	if n.ra != nil {
-		_, err := n.ra.Flush()
-		if err != nil {
-			return syscall.EIO
-		}
-		// 刷新后使对象缓存失效
-		n.invalidateObj()
+	// 原子读取ra
+	val := n.ra.Load()
+	if val == nil {
+		return 0
 	}
+
+	ra, ok := val.(*RandomAccessor)
+	if !ok || ra == nil {
+		return 0
+	}
+
+	// 执行Flush（ra.Flush是线程安全的）
+	_, err := ra.Flush()
+	if err != nil {
+		return syscall.EIO
+	}
+	// 刷新后使对象缓存失效
+	n.invalidateObj()
 
 	return 0
 }
@@ -754,19 +759,24 @@ func (n *OrcasNode) truncateFile(newSize int64) syscall.Errno {
 	// 如果新大小小于旧大小，需要截断（删除超出部分）
 	if newSize < oldSize {
 		// 如果有RandomAccessor，需要清理缓冲区中超出新大小的写入操作
-		n.raMu.Lock()
-		if n.ra != nil {
+		val := n.ra.Load()
+		var ra *RandomAccessor
+		if val != nil {
+			if r, ok := val.(*RandomAccessor); ok && r != nil {
+				ra = r
+			}
+		}
+		if ra != nil {
 			// 清理缓冲区中超出新大小的部分
 			// 注意：RandomAccessor的buffer是私有的，我们需要通过其他方式处理
 			// 这里我们先刷新缓冲区，然后处理截断
-			_, _ = n.ra.Flush() // 先刷新已有数据
+			_, _ = ra.Flush() // 先刷新已有数据
 
 			// 如果文件有数据，需要读取并重写（只保留新大小范围内的数据）
 			if obj.DataID > 0 && obj.DataID != core.EmptyDataID {
 				// 读取需要保留的数据（0到newSize）
 				data, err := n.fs.h.GetData(n.fs.c, n.fs.bktID, obj.DataID, 0, 0, int(newSize))
 				if err != nil {
-					n.raMu.Unlock()
 					return syscall.EIO
 				}
 
@@ -775,20 +785,17 @@ func (n *OrcasNode) truncateFile(newSize int64) syscall.Errno {
 					// 通过写入空数据来截断
 					// 实际上，我们需要创建一个新的空版本或删除数据
 					// 这里简化处理：写入0字节数据
-					n.raMu.Unlock()
 					return 0 // 大小更新将在Setattr中完成
 				}
 
 				// 写入保留的数据（从0开始，覆盖原数据）
-				if err := n.ra.Write(0, data); err != nil {
-					n.raMu.Unlock()
+				if err := ra.Write(0, data); err != nil {
 					return syscall.EIO
 				}
 
 				// 刷新以确保数据写入
-				_, err = n.ra.Flush()
+				_, err = ra.Flush()
 				if err != nil {
-					n.raMu.Unlock()
 					return syscall.EIO
 				}
 			}
@@ -799,21 +806,18 @@ func (n *OrcasNode) truncateFile(newSize int64) syscall.Errno {
 				// 读取需要保留的数据
 				data, err := n.fs.h.GetData(n.fs.c, n.fs.bktID, obj.DataID, 0, 0, int(newSize))
 				if err != nil {
-					n.raMu.Unlock()
 					return syscall.EIO
 				}
 
 				// 创建RandomAccessor来重写数据
 				ra, err := NewRandomAccessor(n.fs, obj.ID)
 				if err != nil {
-					n.raMu.Unlock()
 					return syscall.EIO
 				}
 
 				// 写入保留的数据
 				if err := ra.Write(0, data); err != nil {
 					ra.Close()
-					n.raMu.Unlock()
 					return syscall.EIO
 				}
 
@@ -821,7 +825,6 @@ func (n *OrcasNode) truncateFile(newSize int64) syscall.Errno {
 				_, err = ra.Flush()
 				if err != nil {
 					ra.Close()
-					n.raMu.Unlock()
 					return syscall.EIO
 				}
 				ra.Close()
@@ -831,7 +834,6 @@ func (n *OrcasNode) truncateFile(newSize int64) syscall.Errno {
 				// 实际读取时会返回空数据
 			}
 		}
-		n.raMu.Unlock()
 	} else {
 		// 新大小大于旧大小，扩展文件（用0填充）
 		// 注意：在POSIX中，扩展文件通常用0填充，但也可以不填充（稀疏文件）
@@ -843,15 +845,16 @@ func (n *OrcasNode) truncateFile(newSize int64) syscall.Errno {
 }
 
 // getRandomAccessor 获取或创建RandomAccessor（懒加载）
+// 优化：使用原子操作，完全无锁
 func (n *OrcasNode) getRandomAccessor() (*RandomAccessor, error) {
-	n.raMu.Lock()
-	defer n.raMu.Unlock()
-
-	// 如果已存在，直接返回
-	if n.ra != nil {
-		return n.ra, nil
+	// 第一次检查：原子读取（快速路径）
+	if val := n.ra.Load(); val != nil {
+		if ra, ok := val.(*RandomAccessor); ok && ra != nil {
+			return ra, nil
+		}
 	}
 
+	// 需要创建，使用CompareAndSwap确保只有一个goroutine创建
 	// 创建新的RandomAccessor
 	obj, err := n.getObj()
 	if err != nil {
@@ -862,35 +865,51 @@ func (n *OrcasNode) getRandomAccessor() (*RandomAccessor, error) {
 		return nil, fmt.Errorf("object is not a file")
 	}
 
-	ra, err := NewRandomAccessor(n.fs, obj.ID)
+	newRA, err := NewRandomAccessor(n.fs, obj.ID)
 	if err != nil {
 		return nil, err
 	}
 
-	n.ra = ra
-	return ra, nil
+	// 尝试原子地设置ra（如果已经被其他goroutine设置了，使用已存在的）
+	if !n.ra.CompareAndSwap(nil, newRA) {
+		// 其他goroutine已经创建了，关闭我们创建的，使用已存在的
+		newRA.Close()
+		if val := n.ra.Load(); val != nil {
+			if ra, ok := val.(*RandomAccessor); ok && ra != nil {
+				return ra, nil
+			}
+		}
+	}
+
+	return newRA, nil
 }
 
 // Release 释放文件句柄（关闭文件）
+// 优化：使用原子操作，完全无锁
 func (n *OrcasNode) Release(ctx context.Context) syscall.Errno {
-	n.raMu.Lock()
-	defer n.raMu.Unlock()
-
-	// 如果有RandomAccessor，先刷新再关闭
-	if n.ra != nil {
-		// 刷新缓冲区
-		_, err := n.ra.Flush()
-		if err != nil {
-			// 记录错误但不阻止关闭
-		}
-
-		// 关闭RandomAccessor
-		n.ra.Close()
-		n.ra = nil
-
-		// 刷新后使对象缓存失效
-		n.invalidateObj()
+	// 原子地获取并清空ra
+	val := n.ra.Swap(nil)
+	if val == nil {
+		return 0
 	}
+
+	ra, ok := val.(*RandomAccessor)
+	if !ok || ra == nil {
+		return 0
+	}
+
+	// 执行Flush和Close（这些操作可能需要时间）
+	// 刷新缓冲区
+	_, err := ra.Flush()
+	if err != nil {
+		// 记录错误但不阻止关闭
+	}
+
+	// 关闭RandomAccessor
+	ra.Close()
+
+	// 刷新后使对象缓存失效
+	n.invalidateObj()
 
 	return 0
 }

@@ -532,7 +532,7 @@ func CleanRecycleBin(c Ctx, bktID int64, h Handler, ma MetadataAdapter, da DataA
 		// 清理所有已删除超过一定时间的对象（留出窗口时间，默认7天）
 		// 使用分页处理，避免一次性加载大量数据
 		windowTime := time.Now().Unix() - 7*24*3600 // 7天前
-		pageSize := 1000                            // 每页处理1000个对象
+		pageSize := DefaultListPageSize             // 每页处理对象数
 
 		// 收集所有需要检查的DataID和要删除的对象ID
 		dataIDs := make(map[int64]bool)
@@ -775,7 +775,7 @@ func ScrubData(c Ctx, bktID int64, ma MetadataAdapter, da DataAdapter) (*ScrubRe
 	rc := NewResourceController(GetResourceControlConfig())
 
 	// 分页大小
-	const pageSize = 1000
+	pageSize := DefaultListPageSize
 	offset := 0
 
 	// 用于存储所有数据ID的映射（用于孤立文件检测）
@@ -969,7 +969,7 @@ func ScanDirtyData(c Ctx, bktID int64, ma MetadataAdapter, da DataAdapter) (*Dir
 	rc := NewResourceController(GetResourceControlConfig())
 
 	// 分页大小
-	const pageSize = 1000
+	pageSize := DefaultListPageSize
 	offset := 0
 
 	// 分页获取所有元数据中的数据
@@ -1086,7 +1086,8 @@ func FixScrubIssues(c Ctx, bktID int64, result *ScrubResult, ma MetadataAdapter,
 	FixCorrupted          bool
 	FixOrphaned           bool
 	FixMismatchedChecksum bool
-}) (*FixScrubIssuesResult, error) {
+},
+) (*FixScrubIssuesResult, error) {
 	fixResult := &FixScrubIssuesResult{
 		FixedCorrupted:          0,
 		FixedOrphaned:           0,

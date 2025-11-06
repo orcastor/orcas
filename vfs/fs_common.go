@@ -2,6 +2,8 @@
 package vfs
 
 import (
+	"sync"
+
 	"github.com/orcastor/orcas/core"
 	"github.com/orcastor/orcas/sdk"
 )
@@ -9,13 +11,15 @@ import (
 // OrcasFS 实现ORCAS文件系统，将ORCAS对象存储映射为文件系统
 // 这个结构体在所有平台上都可用
 type OrcasFS struct {
-	h         core.Handler
-	c         core.Ctx
-	bktID     int64
-	root      *OrcasNode
-	sdk       sdk.OrcasSDK
-	sdkCfg    *sdk.Config
-	chunkSize int64
+	h                 core.Handler
+	c                 core.Ctx
+	bktID             int64
+	root              *OrcasNode
+	sdk               sdk.OrcasSDK
+	sdkCfg            *sdk.Config
+	chunkSize         int64
+	batchWriteMgr     *BatchWriteManager // 每个桶一个批量写入管理器
+	batchWriteMgrOnce sync.Once          // 保护批量写入管理器的初始化
 }
 
 // NewOrcasFS 创建新的ORCAS文件系统
@@ -25,7 +29,7 @@ func NewOrcasFS(h core.Handler, c core.Ctx, bktID int64, sdkCfg *sdk.Config) *Or
 	sdkInstance := sdk.New(h)
 
 	// 获取桶的chunkSize
-	var chunkSize int64 = 4 * 1024 * 1024 // 默认4MB
+	var chunkSize int64 = 4 << 20 // 默认4MB
 	buckets, err := h.GetBkt(c, []int64{bktID})
 	if err == nil && len(buckets) > 0 && buckets[0].ChunkSize > 0 {
 		chunkSize = buckets[0].ChunkSize

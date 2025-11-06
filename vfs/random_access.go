@@ -23,7 +23,7 @@ var (
 	// 对象池：重用字节缓冲区，减少内存分配
 	chunkDataPool = sync.Pool{
 		New: func() interface{} {
-			return make([]byte, 0, 4*1024*1024) // 预分配4MB容量
+			return make([]byte, 0, 4<<20) // 预分配4MB容量
 		},
 	}
 
@@ -41,7 +41,572 @@ var (
 	// ecache缓存：缓存文件对象信息，减少数据库查询
 	// key: "<bktID>_<fileID>", value: *core.ObjectInfo
 	fileObjCache = ecache.NewLRUCache(16, 512, 30*time.Second)
+
+	// 批量写入缓冲区对象池：复用缓冲区，减少内存分配
+	// 注意：buffer是长期使用的，只有在BatchWriteManager不再使用时才归还
+	// 对象池使用默认4MB大小，如果chunkSize不同会重新分配
+	batchBufferPool = sync.Pool{
+		New: func() interface{} {
+			// 创建默认4MB缓冲区
+			return make([]byte, 4<<20)
+		},
+	}
 )
+
+// BatchWriteManager 批量写入管理器，支持将多个小文件的数据块打包到同一个数据块
+// 使用无锁方式管理缓冲区，通过原子操作获取写入位置
+type BatchWriteManager struct {
+	// 文件系统（所有文件共享同一个桶）
+	fs *OrcasFS
+
+	// 共享缓冲区（无锁）
+	buffer      []byte       // 共享缓冲区（大小为chunkSize）
+	writeOffset atomic.Int64 // 当前写入位置（原子操作）
+	bufferSize  int64        // 缓冲区大小（等于chunkSize）
+
+	// 文件信息列表（无锁，使用原子操作管理）
+	fileInfos     []*BatchFileInfo // 文件信息列表（固定大小，预分配）
+	fileInfoIndex atomic.Int64     // 当前文件信息索引（原子操作）
+	maxFileInfos  int64            // 最大文件信息数量
+
+	// 刷新控制
+	flushWindow    time.Duration
+	maxPackageSize int64 // 最大打包数据块大小（默认4MB）
+}
+
+// BatchFileInfo 批量写入文件信息（无锁）
+type BatchFileInfo struct {
+	FileID   int64
+	Offset   int64  // 在缓冲区中的偏移位置
+	Size     int64  // 处理后的数据大小（压缩加密后）
+	OrigSize int64  // 原始数据大小
+	Kind     uint32 // 压缩/加密标记
+}
+
+// PackagedDataBlock 打包数据块信息
+type PackagedDataBlock struct {
+	PkgID     int64               // 打包数据块的ID
+	Data      []byte              // 打包后的数据
+	FileInfos []*PackagedFileInfo // 文件信息列表
+}
+
+// PackagedFileInfo 打包文件信息
+type PackagedFileInfo struct {
+	FileID    int64  // 文件ID
+	DataID    int64  // 数据ID
+	PkgOffset uint32 // 在打包数据块中的偏移位置
+	Size      int64  // 数据大小（压缩加密后）
+	OrigSize  int64  // 原始数据大小
+	Kind      uint32 // 数据状态（压缩/加密等）
+}
+
+// getBatchWriteManager 获取指定桶的批量写入管理器（线程安全）
+func (fs *OrcasFS) getBatchWriteManager() *BatchWriteManager {
+	fs.batchWriteMgrOnce.Do(func() {
+		config := core.GetWriteBufferConfig()
+		// 使用chunkSize作为缓冲区大小
+		chunkSize := fs.chunkSize
+		if chunkSize <= 0 {
+			chunkSize = 4 << 20 // 默认4MB
+		}
+
+		// 从对象池获取缓冲区（如果池中没有，会创建新的）
+		buffer := batchBufferPool.Get().([]byte)
+		// 确保缓冲区大小正确（如果chunkSize与对象池中的不同，重新分配）
+		if int64(cap(buffer)) < chunkSize {
+			buffer = make([]byte, chunkSize)
+		} else {
+			buffer = buffer[:chunkSize]
+		}
+		// 注意：不需要清零缓冲区，因为我们总是从 writeOffset 开始写入
+		// flush 时会原子地重置 writeOffset，旧数据不会影响新数据
+
+		fs.batchWriteMgr = &BatchWriteManager{
+			fs:             fs,
+			buffer:         buffer,
+			bufferSize:     chunkSize,
+			fileInfos:      make([]*BatchFileInfo, 1<<10), // 预分配1024个文件信息
+			maxFileInfos:   1 << 10,
+			flushWindow:    config.BufferWindow,
+			maxPackageSize: chunkSize, // 使用chunkSize作为最大打包大小
+		}
+		// 启动定期刷新协程
+		go fs.batchWriteMgr.flushLoop()
+	})
+	return fs.batchWriteMgr
+}
+
+// flushLoop 定期刷新循环
+func (bwm *BatchWriteManager) flushLoop() {
+	ticker := time.NewTicker(bwm.flushWindow)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		// 定期刷新（每flushWindow秒）
+		bwm.flush()
+	}
+}
+
+// flushAll 刷新所有待写入数据
+func (bwm *BatchWriteManager) flushAll() {
+	bwm.flush()
+}
+
+// flush 刷新所有待写入数据（无锁方式）
+// 原子地获取当前写入位置和文件信息，然后打包并写入
+func (bwm *BatchWriteManager) flush() {
+	startTime := time.Now()
+
+	// 原子地交换写入位置为0（重置并获取旧值）
+	oldOffset := bwm.writeOffset.Swap(0)
+
+	// 原子地交换文件索引为0（重置并获取旧值）
+	oldIndex := bwm.fileInfoIndex.Swap(0)
+
+	if oldOffset == 0 || oldIndex == 0 {
+		return // 没有待写入数据
+	}
+
+	var copyTime, packageTime, flushPkgTime time.Duration
+
+	// 注意：不需要清零已使用的缓冲区部分，因为：
+	// 1. 新数据会从 writeOffset=0 开始写入，覆盖旧数据
+	// 2. 我们只读取 fileInfo.Offset 到 fileInfo.Offset+fileInfo.Size 的数据
+	// 3. 旧数据不会影响新数据的正确性
+
+	// 复制当前的文件信息（避免在打包时被修改）
+	copyStart := time.Now()
+	fileInfos := make([]*BatchFileInfo, oldIndex)
+	for i := int64(0); i < oldIndex; i++ {
+		if bwm.fileInfos[i] != nil {
+			// 浅拷贝文件信息（数据本身在buffer中，不需要深拷贝）
+			fileInfos[i] = bwm.fileInfos[i]
+		}
+	}
+	copyTime = time.Since(copyStart)
+
+	if len(fileInfos) == 0 {
+		return
+	}
+
+	// 打包数据块
+	packageStart := time.Now()
+	packages := bwm.packageDataBlocks(fileInfos)
+	packageTime = time.Since(packageStart)
+
+	// 批量写入打包数据块、DataInfo和ObjectInfo
+	flushPkgStart := time.Now()
+	for _, pkg := range packages {
+		bwm.flushPackage(pkg)
+	}
+	flushPkgTime = time.Since(flushPkgStart)
+
+	totalTime := time.Since(startTime)
+	if totalTime > 1*time.Millisecond {
+		fmt.Printf("[PERF] flush: offset=%d, index=%d, files=%d, packages=%d, total=%v, copy=%v, package=%v, flushPkg=%v\n",
+			oldOffset, oldIndex, len(fileInfos), len(packages), totalTime, copyTime, packageTime, flushPkgTime)
+	}
+}
+
+// packageDataBlocks 打包数据块（使用已处理的数据）
+// 从共享缓冲区读取数据并打包
+func (bwm *BatchWriteManager) packageDataBlocks(fileInfos []*BatchFileInfo) []*PackagedDataBlock {
+	var packages []*PackagedDataBlock
+	var currentPkg *PackagedDataBlock
+	var currentPkgOffset uint32
+
+	for _, fileInfo := range fileInfos {
+		if fileInfo == nil || fileInfo.Size == 0 {
+			continue
+		}
+
+		// 从共享缓冲区读取数据
+		data := bwm.buffer[fileInfo.Offset : fileInfo.Offset+fileInfo.Size]
+
+		// 如果当前打包块为空或数据太大，创建新的打包块
+		if currentPkg == nil || int64(len(currentPkg.Data))+fileInfo.Size > bwm.maxPackageSize {
+			// 如果当前打包块不为空，先保存它
+			if currentPkg != nil {
+				packages = append(packages, currentPkg)
+			}
+
+			// 创建新的打包块
+			currentPkg = &PackagedDataBlock{
+				Data:      make([]byte, 0, bwm.maxPackageSize),
+				FileInfos: make([]*PackagedFileInfo, 0),
+			}
+			currentPkgOffset = 0
+		}
+
+		// 将处理后的数据添加到当前打包块
+		pkgFileInfo := &PackagedFileInfo{
+			FileID:    fileInfo.FileID,
+			PkgOffset: currentPkgOffset,
+			Size:      fileInfo.Size,     // 压缩加密后的大小
+			OrigSize:  fileInfo.OrigSize, // 原始数据大小
+			Kind:      fileInfo.Kind,     // 压缩和加密标记
+		}
+
+		// 复制数据到打包块
+		dataCopy := make([]byte, len(data))
+		copy(dataCopy, data)
+		currentPkg.Data = append(currentPkg.Data, dataCopy...)
+		currentPkg.FileInfos = append(currentPkg.FileInfos, pkgFileInfo)
+
+		// 更新偏移量
+		currentPkgOffset += uint32(len(data))
+	}
+
+	// 保存最后一个打包块
+	if currentPkg != nil {
+		packages = append(packages, currentPkg)
+	}
+
+	return packages
+}
+
+// processFileData 根据配置处理文件数据（压缩和加密）
+// 返回：处理后的数据、Kind标记、原始大小
+func (bwm *BatchWriteManager) processFileData(fs *OrcasFS, originalData []byte) ([]byte, uint32, int64) {
+	origSize := int64(len(originalData))
+	kind := uint32(0)
+	cfg := fs.sdkCfg
+
+	// 设置压缩和加密标记
+	if cfg != nil {
+		if cfg.WiseCmpr > 0 {
+			kind |= cfg.WiseCmpr
+		}
+		if cfg.EndecWay > 0 {
+			kind |= cfg.EndecWay
+		}
+	}
+
+	if kind == 0 {
+		// 无压缩无加密，直接返回原始数据
+		return originalData, kind, origSize
+	}
+
+	data := originalData
+	compressedData := originalData // 保存压缩后的数据（如果压缩成功）
+	var err error
+
+	// 1. 压缩（如果启用）
+	hasCmpr := kind&core.DATA_CMPR_MASK != 0
+	if hasCmpr && cfg != nil && cfg.WiseCmpr > 0 {
+		var cmpr archiver.Compressor
+		if cfg.WiseCmpr&core.DATA_CMPR_SNAPPY != 0 {
+			cmpr = &archiver.Snappy{}
+		} else if cfg.WiseCmpr&core.DATA_CMPR_ZSTD != 0 {
+			cmpr = &archiver.Zstd{EncoderOptions: []zstd.EOption{zstd.WithEncoderLevel(zstd.EncoderLevelFromZstd(int(cfg.CmprQlty)))}}
+		} else if cfg.WiseCmpr&core.DATA_CMPR_GZIP != 0 {
+			cmpr = &archiver.Gz{CompressionLevel: int(cfg.CmprQlty)}
+		} else if cfg.WiseCmpr&core.DATA_CMPR_BR != 0 {
+			cmpr = &archiver.Brotli{Quality: int(cfg.CmprQlty)}
+		}
+
+		if cmpr != nil {
+			var cmprBuf bytes.Buffer
+			err := cmpr.Compress(bytes.NewBuffer(data), &cmprBuf)
+			if err == nil && cmprBuf.Len() < len(data) {
+				// 压缩成功且压缩后更小
+				compressedData = cmprBuf.Bytes()
+				data = compressedData
+			} else {
+				// 压缩失败或压缩后更大，移除压缩标记
+				kind &= ^core.DATA_CMPR_MASK
+				compressedData = originalData
+				data = originalData
+			}
+		}
+	}
+
+	// 2. 加密（如果启用）
+	hasEnc := kind&core.DATA_ENDEC_MASK != 0
+	if hasEnc && cfg != nil {
+		if kind&core.DATA_ENDEC_AES256 != 0 {
+			data, err = aes256.Encrypt(cfg.EndecKey, data)
+			if err != nil {
+				// 加密失败，移除加密标记，使用压缩后的数据（如果有压缩）或原始数据
+				kind &= ^core.DATA_ENDEC_MASK
+				data = compressedData
+			}
+		} else if kind&core.DATA_ENDEC_SM4 != 0 {
+			data, err = sm4.Sm4Cbc([]byte(cfg.EndecKey), data, true)
+			if err != nil {
+				// 加密失败，移除加密标记，使用压缩后的数据（如果有压缩）或原始数据
+				kind &= ^core.DATA_ENDEC_MASK
+				data = compressedData
+			}
+		}
+	}
+
+	return data, kind, origSize
+}
+
+// flushPackage 刷新单个打包数据块（批量写入数据块、DataInfo和ObjectInfo）
+func (bwm *BatchWriteManager) flushPackage(pkg *PackagedDataBlock) error {
+	if len(pkg.FileInfos) == 0 || len(pkg.Data) == 0 {
+		return nil
+	}
+
+	startTime := time.Now()
+	var newIDTime, putDataTime, putDataInfoTime, putObjTime time.Duration
+
+	// 从BatchWriteManager获取fs和handler
+	if bwm.fs == nil {
+		return fmt.Errorf("invalid batch write manager: fs is nil")
+	}
+
+	fs := bwm.fs
+	lh := fs.h
+	bktID := fs.bktID
+	ctx := fs.c
+
+	// 1. 生成打包数据块的ID
+	newIDStart := time.Now()
+	pkgID := lh.NewID()
+	newIDTime = time.Since(newIDStart)
+	if pkgID <= 0 {
+		return fmt.Errorf("failed to generate package ID")
+	}
+	pkg.PkgID = pkgID
+
+	// 2. 写入打包数据块
+	putDataStart := time.Now()
+	_, err := lh.PutData(ctx, bktID, pkgID, 0, pkg.Data)
+	putDataTime = time.Since(putDataStart)
+	if err != nil {
+		return fmt.Errorf("failed to write package data: %v", err)
+	}
+
+	// 3. 为每个文件创建DataInfo（使用PkgID和PkgOffset）
+	var dataInfos []*core.DataInfo
+	var objectInfos []*core.ObjectInfo
+	var newIDLoopTime, getObjTime time.Duration
+
+	loopStart := time.Now()
+	for _, fileInfo := range pkg.FileInfos {
+		// 生成DataID
+		newIDLoopStart := time.Now()
+		dataID := lh.NewID()
+		newIDLoopTime += time.Since(newIDLoopStart)
+		if dataID <= 0 {
+			continue
+		}
+		fileInfo.DataID = dataID
+
+		// 创建DataInfo
+		dataInfo := &core.DataInfo{
+			ID:        dataID,
+			Size:      fileInfo.Size,
+			OrigSize:  fileInfo.OrigSize,
+			Kind:      fileInfo.Kind,
+			PkgID:     pkgID,
+			PkgOffset: fileInfo.PkgOffset,
+		}
+		dataInfos = append(dataInfos, dataInfo)
+
+		// 获取文件对象，更新DataID和Size
+		// 注意：文件大小应该使用原始大小（OrigSize），而不是压缩加密后的大小
+		// 优化：先尝试从缓存获取，避免数据库查询
+		getObjStart := time.Now()
+		cacheKey := formatCacheKey(bktID, fileInfo.FileID)
+		var fileObj *core.ObjectInfo
+		if cached, ok := fileObjCache.Get(cacheKey); ok {
+			if obj, ok := cached.(*core.ObjectInfo); ok && obj != nil {
+				fileObj = obj
+			}
+		}
+		if fileObj == nil {
+			// 缓存未命中，从数据库查询
+			fileObjs, err := lh.Get(ctx, bktID, []int64{fileInfo.FileID})
+			getObjTime += time.Since(getObjStart)
+			if err != nil || len(fileObjs) == 0 {
+				fileObj = nil
+			} else {
+				fileObj = fileObjs[0]
+				// 更新缓存
+				fileObjCache.Put(cacheKey, fileObj)
+			}
+		} else {
+			getObjTime += time.Since(getObjStart)
+		}
+
+		if fileObj == nil {
+			// 文件对象不存在，创建新的
+			objectInfo := &core.ObjectInfo{
+				ID:     fileInfo.FileID,
+				DataID: dataID,
+				Size:   fileInfo.OrigSize, // 使用原始大小
+				MTime:  core.Now(),
+				Type:   core.OBJ_TYPE_FILE,
+			}
+			objectInfos = append(objectInfos, objectInfo)
+		} else {
+			// 更新已有的文件对象
+			objectInfo := &core.ObjectInfo{
+				ID:     fileObj.ID,
+				PID:    fileObj.PID,
+				DataID: dataID,
+				Size:   fileInfo.OrigSize, // 使用原始大小
+				MTime:  core.Now(),
+				Type:   fileObj.Type,
+				Name:   fileObj.Name,
+			}
+			objectInfos = append(objectInfos, objectInfo)
+		}
+	}
+	loopTime := time.Since(loopStart)
+
+	// 4. 批量写入DataInfo
+	putDataInfoStart := time.Now()
+	if len(dataInfos) > 0 {
+		_, err = lh.PutDataInfo(ctx, bktID, dataInfos)
+		putDataInfoTime = time.Since(putDataInfoStart)
+		if err != nil {
+			return fmt.Errorf("failed to write data infos: %v", err)
+		}
+	} else {
+		putDataInfoTime = time.Since(putDataInfoStart)
+	}
+
+	// 5. 批量写入ObjectInfo
+	putObjStart := time.Now()
+	if len(objectInfos) > 0 {
+		_, err = lh.Put(ctx, bktID, objectInfos)
+		putObjTime = time.Since(putObjStart)
+		if err != nil {
+			return fmt.Errorf("failed to write object infos: %v", err)
+		}
+	} else {
+		putObjTime = time.Since(putObjStart)
+	}
+
+	totalTime := time.Since(startTime)
+	if totalTime > 1*time.Millisecond {
+		fmt.Printf("[PERF] flushPackage: pkgID=%d, dataSize=%d, files=%d, total=%v, newID=%v, putData=%v, loop=%v(newIDLoop=%v,getObj=%v), putDataInfo=%v, putObj=%v\n",
+			pkgID, len(pkg.Data), len(pkg.FileInfos), totalTime, newIDTime, putDataTime, loopTime, newIDLoopTime, getObjTime, putDataInfoTime, putObjTime)
+	}
+
+	return nil
+}
+
+// addFile 无锁方式添加文件数据到批量写入缓冲区
+// 如果空间不够，会先刷新已有数据，然后继续写入
+func (bwm *BatchWriteManager) addFile(ra *RandomAccessor, data []byte) (bool, error) {
+	if len(data) == 0 {
+		return true, nil
+	}
+
+	// 性能分析：记录开始时间
+	startTime := time.Now()
+	var processTime, flushTime, copyTime, retryTime time.Duration
+	var retryCount int
+
+	// 根据配置处理压缩和加密
+	processStart := time.Now()
+	processedData, kind, origSize := bwm.processFileData(ra.fs, data)
+	processTime = time.Since(processStart)
+	if len(processedData) == 0 {
+		return false, fmt.Errorf("failed to process file data")
+	}
+
+	processedSize := int64(len(processedData))
+
+	// 尝试写入，可能需要重试（如果空间不够会先刷新）
+	maxRetries := 10
+	for retry := 0; retry < maxRetries; retry++ {
+		retryStart := time.Now()
+		retryCount++
+		// 先检查当前空间（Load是原子的，但检查后可能被其他goroutine修改）
+		currentOffset := bwm.writeOffset.Load()
+		if currentOffset+processedSize > bwm.bufferSize {
+			// 空间不够，先刷新已有数据
+			if retry == 0 {
+				flushStart := time.Now()
+				bwm.flush()
+				flushTime += time.Since(flushStart)
+			} else {
+				// 如果刷新后还是不够，说明数据太大，返回false让调用者fallback
+				retryTime += time.Since(retryStart)
+				return false, nil
+			}
+			// 刷新后继续重试
+			retryTime += time.Since(retryStart)
+			continue
+		}
+
+		// 使用Add直接占位（原子操作）
+		newOffset := bwm.writeOffset.Add(processedSize)
+		oldOffset := newOffset - processedSize
+
+		// 再次检查是否超过缓冲区大小（因为占位时可能被其他goroutine修改）
+		if newOffset > bwm.bufferSize {
+			// 占位后发现空间不够，回退占位
+			bwm.writeOffset.Add(-processedSize)
+			if retry == 0 {
+				flushStart := time.Now()
+				bwm.flush()
+				flushTime += time.Since(flushStart)
+			} else {
+				retryTime += time.Since(retryStart)
+				return false, nil
+			}
+			// 刷新后继续重试
+			retryTime += time.Since(retryStart)
+			continue
+		}
+
+		// 写入数据到缓冲区
+		// 注意：通过Add已经占位，所以oldOffset到newOffset这个位置是安全的
+		copyStart := time.Now()
+		copy(bwm.buffer[oldOffset:newOffset], processedData)
+		copyTime += time.Since(copyStart)
+
+		// 获取文件信息索引（原子操作）
+		fileIndex := bwm.fileInfoIndex.Add(1) - 1
+		if fileIndex >= bwm.maxFileInfos {
+			// 文件信息列表满了，回退并刷新
+			bwm.writeOffset.Add(-processedSize)
+			bwm.fileInfoIndex.Add(-1)
+			if retry == 0 {
+				flushStart := time.Now()
+				bwm.flush()
+				flushTime += time.Since(flushStart)
+			} else {
+				retryTime += time.Since(retryStart)
+				return false, nil
+			}
+			// 刷新后继续重试
+			retryTime += time.Since(retryStart)
+			continue
+		}
+
+		// 创建文件信息（无锁，因为我们已经通过Add获得了写入位置）
+		bwm.fileInfos[fileIndex] = &BatchFileInfo{
+			FileID:   ra.fileID,
+			Offset:   oldOffset,
+			Size:     processedSize,
+			OrigSize: origSize,
+			Kind:     kind,
+		}
+
+		retryTime += time.Since(retryStart)
+		totalTime := time.Since(startTime)
+
+		// 性能分析：只在并发场景下输出（通过goroutine ID判断）
+		if totalTime > 100*time.Microsecond || retryCount > 1 {
+			fmt.Printf("[PERF] addFile: fileID=%d, size=%d, total=%v, process=%v, flush=%v, copy=%v, retry=%v, retries=%d\n",
+				ra.fileID, len(data), totalTime, processTime, flushTime, copyTime, retryTime, retryCount)
+		}
+
+		return true, nil
+	}
+
+	// 重试次数过多，返回错误（避免无限循环）
+	return false, fmt.Errorf("failed to add file after %d retries: buffer may be too small", maxRetries)
+}
 
 // formatCacheKey 格式化缓存key（优化：直接内存拷贝，最高性能）
 func formatCacheKey(bktID, id int64) string {
@@ -84,12 +649,14 @@ type SequentialWriteBuffer struct {
 
 // RandomAccessor VFS中的随机访问对象，支持压缩和加密
 type RandomAccessor struct {
-	fs         *OrcasFS
-	fileID     int64
-	buffer     *WriteBuffer           // 随机写缓冲区
-	seqBuffer  *SequentialWriteBuffer // 顺序写缓冲区（优化）
-	fileObj    atomic.Value
-	fileObjKey string // 预计算的file_obj缓存key（优化：避免重复转换）
+	fs           *OrcasFS
+	fileID       int64
+	buffer       *WriteBuffer           // 随机写缓冲区
+	seqBuffer    *SequentialWriteBuffer // 顺序写缓冲区（优化）
+	fileObj      atomic.Value
+	fileObjKey   string      // 预计算的file_obj缓存key（优化：避免重复转换）
+	pendingFlush *time.Timer // 延迟刷新定时器
+	pendingMu    sync.Mutex  // 保护pendingFlush
 }
 
 // NewRandomAccessor 创建随机访问对象
@@ -153,7 +720,8 @@ func (ra *RandomAccessor) Write(offset int64, data []byte) error {
 	// 随机写模式：使用原有的缓冲区逻辑
 	// 优化：减少数据复制，只有在必要时才复制
 	// 检查是否超出容量（优化：提前检查，避免越界）
-	if atomic.LoadInt64(&ra.buffer.writeIndex)+1 >= int64(len(ra.buffer.operations)) || atomic.LoadInt64(&ra.buffer.totalSize) >= core.GetWriteBufferConfig().MaxBufferSize {
+	config := core.GetWriteBufferConfig()
+	if atomic.LoadInt64(&ra.buffer.writeIndex)+1 >= int64(len(ra.buffer.operations)) || atomic.LoadInt64(&ra.buffer.totalSize) >= config.MaxBufferSize {
 		// 超出容量，需要强制刷新
 		// 先回退writeIndex（因为已经超出了）
 		atomic.AddInt64(&ra.buffer.writeIndex, -1)
@@ -174,7 +742,38 @@ func (ra *RandomAccessor) Write(offset int64, data []byte) error {
 	ra.buffer.operations[writeIndex].Offset = offset
 	ra.buffer.operations[writeIndex].Data = make([]byte, len(data))
 	copy(ra.buffer.operations[writeIndex].Data, data)
+
+	// 优化：对于小文件写入，使用批量写入管理器
+	// 如果数据量小且未达到强制刷新条件，添加到批量写入管理器
+	// 注意：批量写入只适用于小文件，且需要确保数据完整性
+	// 这里先使用延迟刷新，批量写入的逻辑在Flush时处理
+	if int64(len(data)) < config.MaxBufferSize/10 && atomic.LoadInt64(&ra.buffer.totalSize) < config.MaxBufferSize {
+		ra.scheduleDelayedFlush(config.BufferWindow)
+	}
+
 	return nil
+}
+
+// scheduleDelayedFlush 安排延迟刷新
+func (ra *RandomAccessor) scheduleDelayedFlush(window time.Duration) {
+	ra.pendingMu.Lock()
+	defer ra.pendingMu.Unlock()
+
+	// 取消之前的定时器
+	if ra.pendingFlush != nil {
+		ra.pendingFlush.Stop()
+	}
+
+	// 创建新的延迟刷新定时器
+	ra.pendingFlush = time.AfterFunc(window, func() {
+		ra.pendingMu.Lock()
+		defer ra.pendingMu.Unlock()
+		ra.pendingFlush = nil
+		// 异步刷新，不阻塞
+		go func() {
+			_, _ = ra.Flush()
+		}()
+	})
 }
 
 // initSequentialBuffer 初始化顺序写缓冲区
@@ -191,7 +790,7 @@ func (ra *RandomAccessor) initSequentialBuffer() error {
 
 	chunkSize := ra.fs.chunkSize
 	if chunkSize <= 0 {
-		chunkSize = 4 * 1024 * 1024 // 默认4MB
+		chunkSize = 4 << 20 // 默认4MB
 	}
 
 	// 创建新的数据对象
@@ -641,6 +1240,55 @@ func (ra *RandomAccessor) Flush() (int64, error) {
 		return 0, nil
 	}
 
+	// 检查是否是小文件，适合批量写入
+	totalSize := atomic.LoadInt64(&ra.buffer.totalSize)
+	fileObj, err := ra.getFileObj()
+	if err == nil && totalSize > 0 && totalSize < 1<<20 { // 1MB阈值
+		// 小文件，合并所有写入操作后添加到批量写入管理器
+		operations := make([]WriteOperation, writeIndex)
+		copy(operations, ra.buffer.operations[:writeIndex])
+		mergedOps := mergeWriteOperations(operations)
+
+		// 计算合并后的数据总大小
+		var mergedDataSize int64
+		for _, op := range mergedOps {
+			if op.Offset+int64(len(op.Data)) > mergedDataSize {
+				mergedDataSize = op.Offset + int64(len(op.Data))
+			}
+		}
+
+		// 如果数据是连续的或可以合并成连续数据，使用批量写入
+		if mergedDataSize < 1<<20 && len(mergedOps) <= 10 { // 小文件且写入操作不多
+			// 将所有数据合并成一个连续的数据块
+			mergedData := make([]byte, mergedDataSize)
+			for _, op := range mergedOps {
+				copy(mergedData[op.Offset:], op.Data)
+			}
+
+			// 添加到批量写入管理器（无锁方式）
+			batchMgr := ra.fs.getBatchWriteManager()
+			added, err := batchMgr.addFile(ra, mergedData)
+			if err != nil {
+				// 处理失败，fallback到普通写入
+			} else if !added {
+				// 缓冲区满了，立即刷新
+				batchMgr.flushAll()
+				// 重试添加
+				added, err = batchMgr.addFile(ra, mergedData)
+				if !added {
+					// 重试后还是失败，fallback到普通写入
+				}
+			}
+
+			if added {
+				// 成功添加到批量写入管理器，重置缓冲区
+				atomic.StoreInt64(&ra.buffer.totalSize, 0)
+				return 0, nil
+			}
+			// 如果添加失败，继续使用普通写入流程
+		}
+	}
+
 	// 复制实际使用的部分（避免在flush期间被修改）
 	operations := make([]WriteOperation, writeIndex)
 	copy(operations, ra.buffer.operations[:writeIndex])
@@ -653,7 +1301,8 @@ func (ra *RandomAccessor) Flush() (int64, error) {
 
 	// 获取文件对象信息（更新缓存）
 	// 优化：使用更高效的key生成（函数内部已使用对象池）
-	fileObj, err := ra.getFileObj()
+	// 注意：fileObj在上面已经获取过了，这里重新获取以确保是最新的
+	fileObj, err = ra.getFileObj()
 	if err != nil {
 		return 0, err
 	}
@@ -686,7 +1335,7 @@ func (ra *RandomAccessor) applyRandomWritesWithSDK(fileObj *core.ObjectInfo, wri
 	// 获取chunk大小
 	chunkSize := ra.fs.chunkSize
 	if chunkSize <= 0 {
-		chunkSize = 4 * 1024 * 1024 // 默认4MB
+		chunkSize = 4 << 20 // 默认4MB
 	}
 	chunkSizeInt := int(chunkSize)
 
@@ -735,9 +1384,9 @@ func (ra *RandomAccessor) applyRandomWritesWithSDK(fileObj *core.ObjectInfo, wri
 			return 0, err
 		}
 
-		// 优化：延迟获取时间，减少time.Now()调用
+		// 优化：使用时间校准器获取时间戳，减少time.Now()调用和GC压力
 		// 创建新版本对象
-		mTime := time.Now().Unix()
+		mTime := core.Now()
 		newVersion := &core.ObjectInfo{
 			ID:     newVersionID,
 			PID:    ra.fileID,
@@ -747,17 +1396,21 @@ func (ra *RandomAccessor) applyRandomWritesWithSDK(fileObj *core.ObjectInfo, wri
 			MTime:  mTime,
 		}
 
-		// 使用Put方法创建版本（会自动应用版本保留策略）
-		_, err = lh.Put(ra.fs.c, ra.fs.bktID, []*core.ObjectInfo{newVersion})
+		// 优化：批量写入元数据（将版本对象和文件对象更新一起写入）
+		objectsToPut := []*core.ObjectInfo{newVersion}
+		// 同时更新文件对象（如果文件对象本身需要更新）
+		updateFileObj := &core.ObjectInfo{
+			ID:     ra.fileID,
+			DataID: newDataID,
+			Size:   newSize,
+		}
+		objectsToPut = append(objectsToPut, updateFileObj)
+
+		// 使用Put方法批量创建版本和更新文件对象（会自动应用版本保留策略）
+		_, err = lh.Put(ra.fs.c, ra.fs.bktID, objectsToPut)
 
 		// 更新缓存的文件对象信息
 		if err == nil {
-			// 优化：使用更高效的key生成（函数内部已使用对象池）
-			updateFileObj := &core.ObjectInfo{
-				ID:     ra.fileID,
-				DataID: newDataID,
-				Size:   newSize,
-			}
 			// 优化：使用预计算的key（避免重复转换）
 			fileObjCache.Put(ra.fileObjKey, updateFileObj)
 			ra.fileObj.Store(updateFileObj)
@@ -772,9 +1425,9 @@ func (ra *RandomAccessor) applyRandomWritesWithSDK(fileObj *core.ObjectInfo, wri
 		return 0, err
 	}
 
-	// 优化：延迟获取时间，减少time.Now()调用
+	// 优化：使用时间校准器获取时间戳，减少time.Now()调用和GC压力
 	// 创建新版本对象
-	mTime := time.Now().Unix()
+	mTime := core.Now()
 	newVersion := &core.ObjectInfo{
 		ID:     newVersionID,
 		PID:    ra.fileID,
@@ -784,17 +1437,21 @@ func (ra *RandomAccessor) applyRandomWritesWithSDK(fileObj *core.ObjectInfo, wri
 		MTime:  mTime,
 	}
 
-	// 使用Put方法创建版本（会自动应用版本保留策略）
-	_, err = lh.Put(ra.fs.c, ra.fs.bktID, []*core.ObjectInfo{newVersion})
+	// 优化：批量写入元数据（将版本对象和文件对象更新一起写入）
+	objectsToPut := []*core.ObjectInfo{newVersion}
+	// 同时更新文件对象（如果文件对象本身需要更新）
+	updateFileObj := &core.ObjectInfo{
+		ID:     ra.fileID,
+		DataID: newDataID,
+		Size:   newSize,
+	}
+	objectsToPut = append(objectsToPut, updateFileObj)
+
+	// 使用Put方法批量创建版本和更新文件对象（会自动应用版本保留策略）
+	_, err = lh.Put(ra.fs.c, ra.fs.bktID, objectsToPut)
 
 	// 更新缓存的文件对象信息
 	if err == nil {
-		// 优化：使用更高效的key生成（函数内部已使用对象池）
-		updateFileObj := &core.ObjectInfo{
-			ID:     ra.fileID,
-			DataID: newDataID,
-			Size:   newSize,
-		}
 		// 优化：使用预计算的key（避免重复转换）
 		fileObjCache.Put(ra.fileObjKey, updateFileObj)
 		ra.fileObj.Store(updateFileObj)
@@ -821,7 +1478,7 @@ func (ra *RandomAccessor) applyWritesStreamingCompressed(oldDataInfo *core.DataI
 
 	chunkSizeInt := int(chunkSize)
 	if chunkSizeInt <= 0 {
-		chunkSizeInt = 4 * 1024 * 1024 // 默认4MB
+		chunkSizeInt = 4 << 20 // 默认4MB
 	}
 
 	// 预先计算每个chunk相关的写入操作索引
@@ -1365,7 +2022,7 @@ type plainDataReader struct {
 
 func newPlainDataReader(c core.Ctx, h core.Handler, bktID, dataID int64, chunkSize int64) *plainDataReader {
 	if chunkSize <= 0 {
-		chunkSize = 4 * 1024 * 1024 // 默认4MB
+		chunkSize = 4 << 20 // 默认4MB
 	}
 	return &plainDataReader{
 		c:         c,
@@ -1531,8 +2188,25 @@ func (dr *decodingChunkReader) Read(p []byte) (n int, err error) {
 
 // Close 关闭随机访问对象，自动刷新所有待处理的写入
 func (ra *RandomAccessor) Close() error {
+	// 取消延迟刷新定时器，确保同步刷新
+	ra.pendingMu.Lock()
+	if ra.pendingFlush != nil {
+		ra.pendingFlush.Stop()
+		ra.pendingFlush = nil
+	}
+	ra.pendingMu.Unlock()
+
+	// 同步刷新所有待写入数据
 	_, err := ra.Flush()
-	return err
+	if err != nil {
+		return err
+	}
+
+	// 确保批量写入的数据也被刷新（flush会刷新所有数据）
+	batchMgr := ra.fs.getBatchWriteManager()
+	batchMgr.flushAll()
+
+	return nil
 }
 
 // mergeWriteOperations 合并重叠的写入操作

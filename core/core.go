@@ -483,7 +483,7 @@ func (lh *LocalHandler) ListRecycleBin(c Ctx, bktID int64, opt ListOptions) ([]*
 		return nil, 0, "", err
 	}
 	if opt.Count == 0 {
-		opt.Count = 1000
+		opt.Count = DefaultListPageSize
 	}
 	return lh.ma.ListRecycleBin(c, bktID, opt)
 }

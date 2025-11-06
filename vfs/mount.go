@@ -50,7 +50,7 @@ func Mount(h core.Handler, c core.Ctx, bktID int64, opts *MountOptions) (*fuse.S
 	if err != nil {
 		if os.IsNotExist(err) {
 			// 创建挂载点目录
-			if err := os.MkdirAll(mountPoint, 0755); err != nil {
+			if err := os.MkdirAll(mountPoint, 0o755); err != nil {
 				return nil, fmt.Errorf("failed to create mount point: %w", err)
 			}
 		} else {

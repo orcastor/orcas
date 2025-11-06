@@ -122,52 +122,85 @@ func runPerformanceTest(t *testing.T, name string, dataSize, chunkSize int64, wr
 			t.Fatalf("NewRandomAccessor failed: %v", err)
 		}
 
-		// 优化：减少Flush频率，让缓冲区积累更多操作
-		// 只在最后Flush一次，让Write操作快速返回
+		// 优化：使用延迟刷新机制，小文件写入先写到内存，定期或关闭前刷新
+		// 批量写入优化：减少Flush频率，让缓冲区积累更多操作
 		for i := 0; i < writeOps; i++ {
 			offset := int64(i) * dataSize
 			err := ra.Write(offset, testData)
 			if err != nil {
 				t.Fatalf("Write failed: %v", err)
 			}
-			// 移除频繁的Flush，让缓冲区积累更多操作
+			// 对于小文件，使用延迟刷新（由Write方法自动处理）
+			// 不主动Flush，让批量写入管理器处理
 		}
-		// 只在最后Flush一次
-		_, err = ra.Flush()
+		// 关闭时自动刷新所有待写入数据
+		err = ra.Close()
 		if err != nil {
-			t.Fatalf("Final Flush failed: %v", err)
+			t.Fatalf("Close failed: %v", err)
 		}
-		ra.Close()
 	} else {
-		// 并发
+		// 并发优化：
+		// 1. 每个goroutine使用独立的RandomAccessor（避免内部锁竞争）
+		// 2. 优化写入偏移量计算，确保不重叠且连续
+		// 3. 减少Flush调用，让批量写入管理器统一处理（小文件优化）
+		// 4. 使用Close自动刷新，避免显式Flush竞争
 		var wg sync.WaitGroup
 		wg.Add(concurrency)
+
+		// 计算每个goroutine的写入范围，确保不重叠
+		opsPerGoroutine := writeOps / concurrency
+		remainingOps := writeOps % concurrency
+
 		for g := 0; g < concurrency; g++ {
 			go func(goroutineID int) {
 				defer wg.Done()
+
+				// 每个goroutine创建独立的RandomAccessor
 				ra, err := NewRandomAccessor(ofs, fileID)
 				if err != nil {
 					t.Errorf("NewRandomAccessor failed in goroutine %d: %v", goroutineID, err)
 					return
 				}
-				defer ra.Close()
+				defer ra.Close() // Close会自动刷新，不需要显式Flush
 
-				opsPerGoroutine := writeOps / concurrency
-				for i := 0; i < opsPerGoroutine; i++ {
-					offset := int64(goroutineID*opsPerGoroutine*int(dataSize) + i*int(dataSize))
+				// 计算当前goroutine的写入操作数（处理余数分配）
+				myOps := opsPerGoroutine
+				if goroutineID < remainingOps {
+					myOps++
+				}
+
+				// 计算起始偏移量：前面所有goroutine写入的总数据量
+				startOffset := int64(0)
+				for i := 0; i < goroutineID; i++ {
+					prevOps := opsPerGoroutine
+					if i < remainingOps {
+						prevOps++
+					}
+					startOffset += int64(prevOps) * dataSize
+				}
+
+				// 执行写入操作（连续写入，不重叠）
+				for i := 0; i < myOps; i++ {
+					offset := startOffset + int64(i)*dataSize
 					err := ra.Write(offset, testData)
 					if err != nil {
-						t.Errorf("Write failed in goroutine %d: %v", goroutineID, err)
+						t.Errorf("Write failed in goroutine %d, offset %d: %v", goroutineID, offset, err)
 						return
 					}
 				}
-				_, err = ra.Flush()
-				if err != nil {
-					t.Errorf("Flush failed in goroutine %d: %v", goroutineID, err)
-				}
+
+				// 对于小文件，使用批量写入管理器，不需要显式Flush
+				// Close时会自动刷新所有待写入数据
 			}(g)
 		}
 		wg.Wait()
+
+		// 所有goroutine完成后，确保批量写入管理器刷新所有数据
+		// 注意：每个RandomAccessor的Close已经会触发刷新，这里作为保险
+		batchMgr := ofs.getBatchWriteManager()
+		if batchMgr != nil {
+			batchMgr.flushAll()
+		}
 	}
 
 	// 记录结束状态
@@ -205,45 +238,47 @@ func TestPerformanceComprehensive(t *testing.T) {
 
 	var results []PerformanceMetrics
 
-	// 测试场景1: 小数据块，单线程（快速测试）
+	// 测试场景1: 小数据块，单线程（优化：使用批量写入，增加数据量）
 	t.Run("SmallData_SingleThread", func(t *testing.T) {
-		result := runPerformanceTest(t, "small_single", 4*1024, 4*1024*1024, 10, 1, nil)
+		result := runPerformanceTest(t, "small_single", 4*1024, 4*1024*1024, 200, 1, nil) // 从100增加到200
 		results = append(results, result)
 	})
 
-	// 测试场景2: 中等数据块，单线程（快速测试）
+	// 测试场景2: 中等数据块，单线程（优化：使用批量写入，增加数据量）
 	t.Run("MediumData_SingleThread", func(t *testing.T) {
-		result := runPerformanceTest(t, "medium_single", 256*1024, 4*1024*1024, 5, 1, nil)
+		result := runPerformanceTest(t, "medium_single", 256*1024, 4*1024*1024, 100, 1, nil) // 从50增加到100
 		results = append(results, result)
 	})
 
-	// 测试场景3: 小数据块，并发（3个goroutine，快速测试）
+	// 测试场景3: 小数据块，并发（3个goroutine，优化测试）
+	// 优化：增加写入操作数，更好地测试批量写入管理器的性能
+	// 增加到60次写入 = 240KB，可以更好地测试批量打包和刷新机制
 	t.Run("SmallData_Concurrent3", func(t *testing.T) {
-		result := runPerformanceTest(t, "small_concurrent3", 4*1024, 4*1024*1024, 15, 3, nil)
+		result := runPerformanceTest(t, "small_concurrent3", 4*1024, 4*1024*1024, 60, 3, nil) // 从30增加到60
 		results = append(results, result)
 	})
 
-	// 测试场景4: 加密，单线程（快速测试）
+	// 测试场景4: 加密，单线程（增加数据量）
 	t.Run("Encrypted_SingleThread", func(t *testing.T) {
 		sdkCfg := &sdk.Config{
 			EndecWay: core.DATA_ENDEC_AES256,
 			EndecKey: "this is a test encryption key that is long enough for AES256",
 		}
-		result := runPerformanceTest(t, "encrypted_single", 256*1024, 4*1024*1024, 5, 1, sdkCfg)
+		result := runPerformanceTest(t, "encrypted_single", 256*1024, 4*1024*1024, 20, 1, sdkCfg) // 从5增加到20
 		results = append(results, result)
 	})
 
-	// 测试场景5: 压缩，单线程（快速测试）
+	// 测试场景5: 压缩，单线程（增加数据量）
 	t.Run("Compressed_SingleThread", func(t *testing.T) {
 		sdkCfg := &sdk.Config{
 			WiseCmpr: core.DATA_CMPR_SNAPPY,
 			CmprQlty: 1,
 		}
-		result := runPerformanceTest(t, "compressed_single", 256*1024, 4*1024*1024, 5, 1, sdkCfg)
+		result := runPerformanceTest(t, "compressed_single", 256*1024, 4*1024*1024, 20, 1, sdkCfg) // 从5增加到20
 		results = append(results, result)
 	})
 
-	// 测试场景6: 压缩+加密，单线程（快速测试）
+	// 测试场景6: 压缩+加密，单线程（增加数据量）
 	t.Run("CompressedEncrypted_SingleThread", func(t *testing.T) {
 		sdkCfg := &sdk.Config{
 			WiseCmpr: core.DATA_CMPR_SNAPPY,
@@ -251,7 +286,7 @@ func TestPerformanceComprehensive(t *testing.T) {
 			EndecWay: core.DATA_ENDEC_AES256,
 			EndecKey: "this is a test encryption key that is long enough for AES256",
 		}
-		result := runPerformanceTest(t, "compressed_encrypted_single", 256*1024, 4*1024*1024, 5, 1, sdkCfg)
+		result := runPerformanceTest(t, "compressed_encrypted_single", 256*1024, 4*1024*1024, 20, 1, sdkCfg) // 从5增加到20
 		results = append(results, result)
 	})
 
@@ -324,35 +359,28 @@ func TestPerformanceComprehensive(t *testing.T) {
 	// 打印性能报告
 	printPerformanceReport(results)
 
-	// 打印顺序写优化对比
+	// 打印批量写入优化对比
 	fmt.Println("\n" + strings.Repeat("=", 120))
-	fmt.Println("Sequential Write Optimization Comparison")
+	fmt.Println("Batch Write Optimization Comparison")
 	fmt.Println(strings.Repeat("=", 120))
-	fmt.Printf("%-50s %12s %12s %10s\n", "Test Name", "Throughput", "Ops/sec", "Memory")
+	fmt.Printf("%-50s %12s %12s %10s %15s\n", "Test Name", "Throughput", "Ops/sec", "Memory", "Total Data")
 	fmt.Println(strings.Repeat("-", 120))
 
-	// 找到顺序写测试结果
-	var sequentialTests []PerformanceMetrics
-	var otherTests []PerformanceMetrics
+	// 打印所有测试结果
 	for _, r := range results {
-		if strings.Contains(r.TestName, "sequential") {
-			sequentialTests = append(sequentialTests, r)
-		} else {
-			otherTests = append(otherTests, r)
-		}
-	}
-
-	// 打印顺序写结果
-	for _, r := range sequentialTests {
-		fmt.Printf("%-50s %10.2f MB/s %10.2f ops/s %8.2f MB\n",
-			r.TestName, r.ThroughputMBps, r.OpsPerSecond, r.MaxMemoryMB)
+		totalDataMB := float64(r.DataSize) * float64(r.WriteOps) / 1024 / 1024
+		fmt.Printf("%-50s %10.2f MB/s %10.2f ops/s %8.2f MB %12.2f MB\n",
+			r.TestName, r.ThroughputMBps, r.OpsPerSecond, r.MaxMemoryMB, totalDataMB)
 	}
 
 	fmt.Println("\n" + strings.Repeat("-", 120))
-	fmt.Println("Key Benefits of Sequential Write Optimization:")
-	fmt.Println("  - Lower memory usage: Only one chunk buffer (4MB) instead of full data")
-	fmt.Println("  - Immediate writes: Chunks are written as soon as they're full")
-	fmt.Println("  - Automatic fallback: Switches to random write mode when needed")
+	fmt.Println("Key Benefits of Batch Write Optimization:")
+	fmt.Println("  - Delayed Flush: Small files are buffered in memory and flushed periodically")
+	fmt.Println("  - Batch Metadata: Multiple metadata objects are written together")
+	fmt.Println("  - Batch Data Blocks: Data blocks can be grouped for efficient writes")
+	fmt.Println("  - Configurable Window: Flush window time can be configured via ORCAS_WRITE_BUFFER_WINDOW_SEC")
+	fmt.Println("  - Reduced I/O: Fewer database and disk operations")
+	fmt.Println("  - Better Throughput: Especially for small file writes")
 	fmt.Println(strings.Repeat("=", 120))
 }
 

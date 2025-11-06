@@ -4,6 +4,8 @@ import (
 	"context"
 	"os"
 	"strconv"
+	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -116,6 +118,10 @@ import (
 const (
 	ROOT_OID    int64 = 0
 	DELETED_PID int64 = -1 // 标记已删除的对象的父ID
+
+	// DefaultListPageSize 默认列表分页大小
+	// 用于 List 操作和分页处理，避免一次性加载大量数据
+	DefaultListPageSize = 1000
 )
 
 // DeleteDelaySeconds 删除延迟时间（秒），等待指定时间后删除数据文件
@@ -352,8 +358,10 @@ func GetWriteBufferConfig() WriteBufferConfig {
 	return config
 }
 
-var ORCAS_BASE = os.Getenv("ORCAS_BASE")
-var ORCAS_DATA = os.Getenv("ORCAS_DATA")
+var (
+	ORCAS_BASE = os.Getenv("ORCAS_BASE")
+	ORCAS_DATA = os.Getenv("ORCAS_DATA")
+)
 
 type Ctx context.Context
 
@@ -380,3 +388,40 @@ const (
 	ERR_DUP_KEY      = Error("object with same name already exists")
 	ERR_QUOTA_EXCEED = Error("quota exceeded")
 )
+
+var (
+	// 时间校准器：使用自己的时间戳，减少time.Now()调用和GC压力
+	// 参考ecache的实现方式，定期更新时间戳
+	currentTimeStamp   atomic.Int64 // 当前Unix时间戳（秒）
+	timeCalibratorOnce sync.Once    // 确保只初始化一次
+)
+
+// initTimeCalibrator 初始化时间校准器
+// 定期更新时间戳（默认每毫秒更新一次），减少time.Now()调用
+func initTimeCalibrator() {
+	timeCalibratorOnce.Do(func() {
+		// 初始化当前时间戳
+		currentTimeStamp.Store(time.Now().Unix())
+
+		// 启动时间校准协程，每毫秒更新一次时间戳
+		// 这个精度对于大多数场景已经足够，同时不会造成太大开销
+		go func() {
+			ticker := time.NewTicker(1 * time.Millisecond)
+			defer ticker.Stop()
+			for {
+				currentTimeStamp.Store(time.Now().Unix())
+				<-ticker.C
+			}
+		}()
+	})
+}
+
+// Now 获取当前Unix时间戳（秒）
+// 使用时间校准器的时间戳，避免每次调用time.Now()创建临时对象
+// 这个函数可以在整个项目中复用，减少GC压力
+// 命名类似于time.Now()，但返回Unix时间戳（秒）而不是time.Time对象
+func Now() int64 {
+	// 确保时间校准器已初始化
+	initTimeCalibrator()
+	return currentTimeStamp.Load()
+}
