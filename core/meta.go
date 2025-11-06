@@ -121,6 +121,8 @@ type UserMetadataAdapter interface {
 	GetUsr(c Ctx, ids []int64) ([]*UserInfo, error)
 	GetUsr2(c Ctx, usr string) (*UserInfo, error)
 	SetUsr(c Ctx, fields []string, u *UserInfo) error
+	ListUsers(c Ctx) ([]*UserInfo, error)
+	DeleteUser(c Ctx, userID int64) error
 }
 
 type BucketMetadataAdapter interface {
@@ -251,8 +253,7 @@ func InitDB() error {
 
 	db.Exec(`CREATE INDEX ix_uid on bkt (uid)`)
 	db.Exec(`CREATE UNIQUE INDEX uk_name on bkt (name)`)
-	db.Exec(`CREATE UNIQUE INDEX uk_usr on bkt (usr)`)
-	db.Exec(`INSERT OR IGNORE INTO usr VALUES (1, 1, 'orcas', '1000:Zd54dfEjoftaY8NiAINGag==:q1yB510yT5tGIGNewItVSg==', 'orcas', '', '')`)
+	db.Exec(`CREATE UNIQUE INDEX uk_usr on usr (usr)`)
 	return nil
 }
 
@@ -806,6 +807,37 @@ func (dma *DefaultMetadataAdapter) SetUsr(c Ctx, fields []string, u *UserInfo) e
 
 	if _, err = b.TableContext(c, db, USR_TBL).Update(&u,
 		b.Fields(fields...), b.Where(b.Eq("id", u.ID))); err != nil {
+		return ERR_EXEC_DB
+	}
+	return nil
+}
+
+func (dma *DefaultMetadataAdapter) ListUsers(c Ctx) (o []*UserInfo, err error) {
+	db, err := GetDB()
+	if err != nil {
+		return nil, ERR_OPEN_DB
+	}
+	defer db.Close()
+
+	if _, err = b.TableContext(c, db, USR_TBL).Select(&o); err != nil {
+		return nil, ERR_QUERY_DB
+	}
+	// 清除敏感信息
+	for i := range o {
+		o[i].Pwd = ""
+		o[i].Key = ""
+	}
+	return
+}
+
+func (dma *DefaultMetadataAdapter) DeleteUser(c Ctx, userID int64) error {
+	db, err := GetDB()
+	if err != nil {
+		return ERR_OPEN_DB
+	}
+	defer db.Close()
+
+	if _, err = b.TableContext(c, db, USR_TBL).Delete(b.Where(b.Eq("id", userID))); err != nil {
 		return ERR_EXEC_DB
 	}
 	return nil

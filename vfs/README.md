@@ -111,8 +111,6 @@ func main() {
   - Support random writes (can write data at any position)
   - Write buffer, delayed flush for better performance
   - Automatic version management (create new version on each Flush)
-  - **Note**: Random writes currently don't support SDK compression and encryption (compression algorithms need to see the complete file)
-  - If compression and encryption are needed, recommend using full file upload (via SDK's Upload method)
 
 ### Caching Mechanism
 

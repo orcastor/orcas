@@ -767,71 +767,23 @@ func (n *OrcasNode) truncateFile(newSize int64) syscall.Errno {
 			}
 		}
 		if ra != nil {
-			// Clean part in buffer that exceeds new size
-			// Note: RandomAccessor's buffer is private, we need to handle through other means
-			// Here we flush buffer first, then handle truncate
-			_, _ = ra.Flush() // Flush existing data first
-
-			// If file has data, need to read and rewrite (only keep data within new size range)
-			if obj.DataID > 0 && obj.DataID != core.EmptyDataID {
-				// Read data to keep (0 to newSize)
-				data, err := n.fs.h.GetData(n.fs.c, n.fs.bktID, obj.DataID, 0, 0, int(newSize))
-				if err != nil {
-					return syscall.EIO
-				}
-
-				// If new size is 0, delete all data
-				if newSize == 0 {
-					// Truncate by writing empty data
-					// Actually, we need to create a new empty version or delete data
-					// Here simplified handling: write 0-byte data
-					return 0 // Size update will be completed in Setattr
-				}
-
-				// Write kept data (from 0, overwrite original data)
-				if err := ra.Write(0, data); err != nil {
-					return syscall.EIO
-				}
-
-				// Flush to ensure data is written
-				_, err = ra.Flush()
-				if err != nil {
-					return syscall.EIO
-				}
+			// Use RandomAccessor's Truncate method
+			// This will reference previous data block but with new size, and create new version
+			_, err := ra.Truncate(newSize)
+			if err != nil {
+				return syscall.EIO
 			}
 		} else {
-			// No RandomAccessor, directly operate data
-			// If file has data, need to read and rewrite
-			if obj.DataID > 0 && obj.DataID != core.EmptyDataID && newSize > 0 {
-				// Read data to keep
-				data, err := n.fs.h.GetData(n.fs.c, n.fs.bktID, obj.DataID, 0, 0, int(newSize))
-				if err != nil {
-					return syscall.EIO
-				}
+			// No RandomAccessor, create one and use Truncate method
+			ra, err := NewRandomAccessor(n.fs, obj.ID)
+			if err != nil {
+				return syscall.EIO
+			}
+			defer ra.Close()
 
-				// Create RandomAccessor to rewrite data
-				ra, err := NewRandomAccessor(n.fs, obj.ID)
-				if err != nil {
-					return syscall.EIO
-				}
-
-				// Write kept data
-				if err := ra.Write(0, data); err != nil {
-					ra.Close()
-					return syscall.EIO
-				}
-
-				// Flush and close
-				_, err = ra.Flush()
-				if err != nil {
-					ra.Close()
-					return syscall.EIO
-				}
-				ra.Close()
-			} else if newSize == 0 {
-				// New size is 0, delete data
-				// Here simplified handling: keep DataID unchanged, but set size to 0
-				// Actual read will return empty data
+			_, err = ra.Truncate(newSize)
+			if err != nil {
+				return syscall.EIO
 			}
 		}
 	} else {

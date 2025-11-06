@@ -1,14 +1,52 @@
 package core
 
 import (
+	"crypto/rand"
 	"crypto/sha1"
 	"encoding/base64"
+	"encoding/binary"
+	"fmt"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/orca-zhang/idgen"
 	"golang.org/x/crypto/pbkdf2"
 )
+
+// Global ID generator instance
+var (
+	globalIDGen     *idgen.IDGen
+	globalIDGenOnce sync.Once
+)
+
+// InitIDGen initializes the global ID generator
+// If not initialized, a default ID generator will be created on first use
+func InitIDGen(ig *idgen.IDGen) {
+	globalIDGenOnce.Do(func() {
+		if ig != nil {
+			globalIDGen = ig
+		} else {
+			globalIDGen = idgen.NewIDGen(nil, 0)
+		}
+	})
+}
+
+// getIDGen returns the global ID generator, initializing it if necessary
+func getIDGen() *idgen.IDGen {
+	globalIDGenOnce.Do(func() {
+		if globalIDGen == nil {
+			globalIDGen = idgen.NewIDGen(nil, 0)
+		}
+	})
+	return globalIDGen
+}
+
+// NewID generates a new ID using the global ID generator
+func NewID() int64 {
+	id, _ := getIDGen().New()
+	return id
+}
 
 type ListOptions struct {
 	Word  string `json:"w,omitempty"` // 过滤词，支持通配符*和?
@@ -55,7 +93,8 @@ type FixScrubIssuesResult struct {
 }
 
 type Options struct {
-	Sync bool
+	Sync            bool  // Force flush to disk after each data write
+	DirectSeekWrite *bool // Direct write to file with seek+offset (nil = default true). Set to false to use memory buffer if filesystem doesn't support seek
 }
 
 type Handler interface {
@@ -126,13 +165,18 @@ type Admin interface {
 	MergeDuplicateData(c Ctx, bktID int64) (*MergeDuplicateResult, error)
 	// 碎片整理：小文件离线归并打包，打包中被删除的数据块前移
 	Defragment(c Ctx, bktID int64) (*DefragmentResult, error)
+
+	// 用户管理
+	CreateUser(c Ctx, username, password, name string, role uint32) (*UserInfo, error)
+	UpdateUser(c Ctx, userID int64, username, password, name string, role *uint32) error
+	DeleteUser(c Ctx, userID int64) error
+	ListUsers(c Ctx) ([]*UserInfo, error)
 }
 
 type LocalHandler struct {
 	ma  MetadataAdapter
 	da  DataAdapter
 	acm AccessCtrlMgr
-	ig  *idgen.IDGen
 	opt Options
 }
 
@@ -142,7 +186,6 @@ func NewLocalHandler() Handler {
 		ma:  dma,
 		da:  &DefaultDataAdapter{},
 		acm: &DefaultAccessCtrlMgr{ma: dma},
-		ig:  idgen.NewIDGen(nil, 0), // 需要改成配置
 	}
 }
 
@@ -202,9 +245,31 @@ func (lh *LocalHandler) Login(c Ctx, usr, pwd string) (Ctx, *UserInfo, []*Bucket
 	return c, u, b, nil
 }
 
+// HashPassword 使用 PBKDF2 加密密码
+// 返回格式: iter:salt:hash
+// iter 是随机生成的迭代次数（1000-10000之间），增加密码哈希的多样性
+func HashPassword(password string) (string, error) {
+	// 生成随机迭代次数（1000-10000之间）
+	iterBytes := make([]byte, 2)
+	if _, err := rand.Read(iterBytes); err != nil {
+		return "", err
+	}
+	// 将2字节转换为uint16，然后映射到1000-10000范围
+	iterRand := binary.BigEndian.Uint16(iterBytes)
+	iter := 1000 + int(iterRand)%9001 // 1000 + (0-9000) = 1000-10000
+
+	salt := make([]byte, 16)
+	if _, err := rand.Read(salt); err != nil {
+		return "", err
+	}
+	dk := pbkdf2.Key([]byte(password), salt, iter, 16, sha1.New)
+	saltStr := base64.URLEncoding.EncodeToString(salt)
+	hashStr := base64.URLEncoding.EncodeToString(dk)
+	return fmt.Sprintf("%d:%s:%s", iter, saltStr, hashStr), nil
+}
+
 func (lh *LocalHandler) NewID() int64 {
-	id, _ := lh.ig.New()
-	return id
+	return NewID()
 }
 
 // 只有文件长度、HdrCRC32是预Ref，如果成功返回新DataID，失败返回0
@@ -253,7 +318,7 @@ func (lh *LocalHandler) PutData(c Ctx, bktID, dataID int64, sn int, buf []byte) 
 		if len(buf) <= 0 {
 			dataID = EmptyDataID
 		} else {
-			dataID, _ = lh.ig.New()
+			dataID = NewID()
 		}
 	}
 	return dataID, lh.da.Write(c, bktID, dataID, sn, buf)
@@ -268,7 +333,7 @@ func (lh *LocalHandler) PutDataInfo(c Ctx, bktID int64, d []*DataInfo) (ids []in
 	var n []*DataInfo
 	for _, x := range d {
 		if x.ID == 0 {
-			x.ID, _ = lh.ig.New()
+			x.ID = NewID()
 		}
 		ids = append(ids, x.ID)
 		if x.ID > 0 {
@@ -325,7 +390,7 @@ func (lh *LocalHandler) Put(c Ctx, bktID int64, o []*ObjectInfo) ([]int64, error
 
 	for _, x := range o {
 		if x.ID == 0 {
-			x.ID, _ = lh.ig.New()
+			x.ID = NewID()
 		}
 		if x.Name == "" {
 			x.Name = strconv.FormatInt(x.ID, 10)
@@ -514,7 +579,6 @@ type LocalAdmin struct {
 	ma  MetadataAdapter
 	da  DataAdapter
 	acm AccessCtrlMgr
-	ig  *idgen.IDGen
 }
 
 func NewLocalAdmin() Admin {
@@ -523,7 +587,6 @@ func NewLocalAdmin() Admin {
 		ma:  dma,
 		da:  &DefaultDataAdapter{},
 		acm: &DefaultAccessCtrlMgr{ma: dma},
-		ig:  idgen.NewIDGen(nil, 0), // 需要改成配置
 	}
 }
 
@@ -537,8 +600,7 @@ func (la *LocalAdmin) Close() {
 }
 
 func (la *LocalAdmin) NewID() int64 {
-	id, _ := la.ig.New()
-	return id
+	return NewID()
 }
 
 func (la *LocalAdmin) PutBkt(c Ctx, o []*BucketInfo) error {
@@ -581,4 +643,106 @@ func (la *LocalAdmin) Defragment(c Ctx, bktID int64) (*DefragmentResult, error) 
 		return nil, err
 	}
 	return Defragment(c, bktID, la, la.ma, la.da)
+}
+
+func (la *LocalAdmin) CreateUser(c Ctx, username, password, name string, role uint32) (*UserInfo, error) {
+	if err := la.acm.CheckRole(c, ADMIN); err != nil {
+		return nil, err
+	}
+
+	// 检查用户名是否已存在
+	existingUser, err := la.ma.GetUsr2(c, username)
+	if err == nil && existingUser != nil && existingUser.ID > 0 {
+		return nil, fmt.Errorf("user %s already exists", username)
+	}
+
+	// 加密密码
+	hashedPwd, err := HashPassword(password)
+	if err != nil {
+		return nil, fmt.Errorf("failed to hash password: %v", err)
+	}
+
+	// 创建用户
+	user := &UserInfo{
+		ID:     la.NewID(),
+		Usr:    username,
+		Pwd:    hashedPwd,
+		Name:   name,
+		Role:   role,
+		Key:    "",
+		Avatar: "",
+	}
+
+	if err := la.ma.PutUsr(c, user); err != nil {
+		return nil, err
+	}
+
+	// 清除敏感信息后返回
+	user.Pwd = ""
+	user.Key = ""
+	return user, nil
+}
+
+func (la *LocalAdmin) UpdateUser(c Ctx, userID int64, username, password, name string, role *uint32) error {
+	if err := la.acm.CheckRole(c, ADMIN); err != nil {
+		return err
+	}
+
+	// 获取现有用户
+	users, err := la.ma.GetUsr(c, []int64{userID})
+	if err != nil {
+		return err
+	}
+	if len(users) == 0 {
+		return fmt.Errorf("user with ID %d not found", userID)
+	}
+	user := users[0]
+
+	// 更新字段
+	fields := []string{}
+	if username != "" {
+		// 检查新用户名是否已被其他用户使用
+		existingUser, err := la.ma.GetUsr2(c, username)
+		if err == nil && existingUser != nil && existingUser.ID > 0 && existingUser.ID != userID {
+			return fmt.Errorf("username %s already exists", username)
+		}
+		user.Usr = username
+		fields = append(fields, "usr")
+	}
+	if password != "" {
+		hashedPwd, err := HashPassword(password)
+		if err != nil {
+			return fmt.Errorf("failed to hash password: %v", err)
+		}
+		user.Pwd = hashedPwd
+		fields = append(fields, "pwd")
+	}
+	if name != "" {
+		user.Name = name
+		fields = append(fields, "name")
+	}
+	if role != nil {
+		user.Role = *role
+		fields = append(fields, "role")
+	}
+
+	if len(fields) == 0 {
+		return nil // 没有需要更新的字段
+	}
+
+	return la.ma.SetUsr(c, fields, user)
+}
+
+func (la *LocalAdmin) DeleteUser(c Ctx, userID int64) error {
+	if err := la.acm.CheckRole(c, ADMIN); err != nil {
+		return err
+	}
+	return la.ma.DeleteUser(c, userID)
+}
+
+func (la *LocalAdmin) ListUsers(c Ctx) ([]*UserInfo, error) {
+	if err := la.acm.CheckRole(c, ADMIN); err != nil {
+		return nil, err
+	}
+	return la.ma.ListUsers(c)
 }

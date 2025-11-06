@@ -1846,3 +1846,602 @@ func TestReadAfterClose(t *testing.T) {
 		})
 	})
 }
+
+// TestTruncate 测试文件截断功能
+func TestTruncate(t *testing.T) {
+	Convey("Truncate file operations", t, func() {
+		ig := idgen.NewIDGen(nil, 0)
+		testBktID, _ := ig.New()
+		err := core.InitBucketDB(c, testBktID)
+		So(err, ShouldBeNil)
+
+		dma := &core.DefaultMetadataAdapter{}
+		dda := &core.DefaultDataAdapter{}
+		dda.SetOptions(core.Options{Sync: true})
+
+		lh := core.NewLocalHandler().(*core.LocalHandler)
+		lh.SetAdapter(dma, dda)
+
+		testCtx, userInfo, _, err := lh.Login(c, "orcas", "orcas")
+		So(err, ShouldBeNil)
+
+		bucket := &core.BucketInfo{
+			ID:       testBktID,
+			Name:     "test_bucket",
+			UID:      userInfo.ID,
+			Type:     1,
+			Quota:    1000000,
+			Used:     0,
+			RealUsed: 0,
+		}
+		So(dma.PutBkt(testCtx, []*core.BucketInfo{bucket}), ShouldBeNil)
+
+		ofs := NewOrcasFS(lh, testCtx, testBktID, nil)
+
+		Convey("test truncate to smaller size", func() {
+			fileID, _ := ig.New()
+			fileObj := &core.ObjectInfo{
+				ID:    fileID,
+				PID:   core.ROOT_OID,
+				Type:  core.OBJ_TYPE_FILE,
+				Name:  "truncate_test1.txt",
+				Size:  0,
+				MTime: core.Now(),
+			}
+			_, err = dma.PutObj(testCtx, testBktID, []*core.ObjectInfo{fileObj})
+			So(err, ShouldBeNil)
+
+			ra, err := NewRandomAccessor(ofs, fileID)
+			So(err, ShouldBeNil)
+			defer ra.Close()
+
+			// 写入数据
+			err = ra.Write(0, []byte("Hello, World!"))
+			So(err, ShouldBeNil)
+			_, err = ra.Flush()
+			So(err, ShouldBeNil)
+
+			// 截断到5字节
+			versionID, err := ra.Truncate(5)
+			So(err, ShouldBeNil)
+			So(versionID, ShouldBeGreaterThan, 0)
+
+			// 读取验证（应该只有前5个字节）
+			data, err := ra.Read(0, 10)
+			So(err, ShouldBeNil)
+			So(string(data), ShouldEqual, "Hello")
+			So(len(data), ShouldEqual, 5)
+
+			// 验证文件大小
+			fileObj2, err := ra.getFileObj()
+			So(err, ShouldBeNil)
+			So(fileObj2.Size, ShouldEqual, 5)
+		})
+
+		Convey("test truncate to zero", func() {
+			fileID, _ := ig.New()
+			fileObj := &core.ObjectInfo{
+				ID:    fileID,
+				PID:   core.ROOT_OID,
+				Type:  core.OBJ_TYPE_FILE,
+				Name:  "truncate_test2.txt",
+				Size:  0,
+				MTime: core.Now(),
+			}
+			_, err = dma.PutObj(testCtx, testBktID, []*core.ObjectInfo{fileObj})
+			So(err, ShouldBeNil)
+
+			ra, err := NewRandomAccessor(ofs, fileID)
+			So(err, ShouldBeNil)
+			defer ra.Close()
+
+			// 写入数据
+			err = ra.Write(0, []byte("Hello, World!"))
+			So(err, ShouldBeNil)
+			_, err = ra.Flush()
+			So(err, ShouldBeNil)
+
+			// 截断到0
+			versionID, err := ra.Truncate(0)
+			So(err, ShouldBeNil)
+			So(versionID, ShouldBeGreaterThan, 0)
+
+			// 读取验证（应该为空）
+			data, err := ra.Read(0, 10)
+			So(err, ShouldBeNil)
+			So(len(data), ShouldEqual, 0)
+
+			// 验证文件大小
+			fileObj2, err := ra.getFileObj()
+			So(err, ShouldBeNil)
+			So(fileObj2.Size, ShouldEqual, 0)
+			So(fileObj2.DataID, ShouldEqual, core.EmptyDataID)
+		})
+
+		Convey("test truncate to same size", func() {
+			fileID, _ := ig.New()
+			fileObj := &core.ObjectInfo{
+				ID:    fileID,
+				PID:   core.ROOT_OID,
+				Type:  core.OBJ_TYPE_FILE,
+				Name:  "truncate_test3.txt",
+				Size:  0,
+				MTime: core.Now(),
+			}
+			_, err = dma.PutObj(testCtx, testBktID, []*core.ObjectInfo{fileObj})
+			So(err, ShouldBeNil)
+
+			ra, err := NewRandomAccessor(ofs, fileID)
+			So(err, ShouldBeNil)
+			defer ra.Close()
+
+			// 写入数据
+			err = ra.Write(0, []byte("Hello"))
+			So(err, ShouldBeNil)
+			_, err = ra.Flush()
+			So(err, ShouldBeNil)
+
+			// 截断到相同大小（应该不执行任何操作）
+			versionID, err := ra.Truncate(5)
+			So(err, ShouldBeNil)
+			So(versionID, ShouldEqual, 0) // 相同大小应该返回0
+
+			// 读取验证（数据应该不变）
+			data, err := ra.Read(0, 10)
+			So(err, ShouldBeNil)
+			So(string(data), ShouldEqual, "Hello")
+		})
+
+		Convey("test truncate with package data", func() {
+			fileID, _ := ig.New()
+			fileObj := &core.ObjectInfo{
+				ID:    fileID,
+				PID:   core.ROOT_OID,
+				Type:  core.OBJ_TYPE_FILE,
+				Name:  "truncate_test4.txt",
+				Size:  0,
+				MTime: core.Now(),
+			}
+			_, err = dma.PutObj(testCtx, testBktID, []*core.ObjectInfo{fileObj})
+			So(err, ShouldBeNil)
+
+			ra, err := NewRandomAccessor(ofs, fileID)
+			So(err, ShouldBeNil)
+			defer ra.Close()
+
+			// 写入小文件（可能使用BatchWriteManager，产生PkgID）
+			smallData := make([]byte, 100)
+			for i := range smallData {
+				smallData[i] = byte('A' + (i % 26))
+			}
+			err = ra.Write(0, smallData)
+			So(err, ShouldBeNil)
+			_, err = ra.Flush()
+			So(err, ShouldBeNil)
+
+			// 截断到50字节
+			versionID, err := ra.Truncate(50)
+			So(err, ShouldBeNil)
+			So(versionID, ShouldBeGreaterThan, 0)
+
+			// 读取验证
+			data, err := ra.Read(0, 100)
+			So(err, ShouldBeNil)
+			So(len(data), ShouldEqual, 50)
+
+			// 验证文件大小
+			fileObj2, err := ra.getFileObj()
+			So(err, ShouldBeNil)
+			So(fileObj2.Size, ShouldEqual, 50)
+		})
+
+		Convey("test truncate empty file", func() {
+			fileID, _ := ig.New()
+			fileObj := &core.ObjectInfo{
+				ID:    fileID,
+				PID:   core.ROOT_OID,
+				Type:  core.OBJ_TYPE_FILE,
+				Name:  "truncate_test5.txt",
+				Size:  0,
+				MTime: core.Now(),
+			}
+			_, err = dma.PutObj(testCtx, testBktID, []*core.ObjectInfo{fileObj})
+			So(err, ShouldBeNil)
+
+			ra, err := NewRandomAccessor(ofs, fileID)
+			So(err, ShouldBeNil)
+			defer ra.Close()
+
+			// 截断空文件到0（应该不执行任何操作）
+			versionID, err := ra.Truncate(0)
+			So(err, ShouldBeNil)
+			So(versionID, ShouldEqual, 0)
+
+			// 验证文件大小
+			fileObj2, err := ra.getFileObj()
+			So(err, ShouldBeNil)
+			So(fileObj2.Size, ShouldEqual, 0)
+		})
+	})
+}
+
+// TestTruncateAndWrite 测试截断后继续写入
+func TestTruncateAndWrite(t *testing.T) {
+	Convey("Truncate and write operations", t, func() {
+		ig := idgen.NewIDGen(nil, 0)
+		testBktID, _ := ig.New()
+		err := core.InitBucketDB(c, testBktID)
+		So(err, ShouldBeNil)
+
+		dma := &core.DefaultMetadataAdapter{}
+		dda := &core.DefaultDataAdapter{}
+		dda.SetOptions(core.Options{Sync: true})
+
+		lh := core.NewLocalHandler().(*core.LocalHandler)
+		lh.SetAdapter(dma, dda)
+
+		testCtx, userInfo, _, err := lh.Login(c, "orcas", "orcas")
+		So(err, ShouldBeNil)
+
+		bucket := &core.BucketInfo{
+			ID:       testBktID,
+			Name:     "test_bucket",
+			UID:      userInfo.ID,
+			Type:     1,
+			Quota:    1000000,
+			Used:     0,
+			RealUsed: 0,
+		}
+		So(dma.PutBkt(testCtx, []*core.BucketInfo{bucket}), ShouldBeNil)
+
+		ofs := NewOrcasFS(lh, testCtx, testBktID, nil)
+
+		Convey("test truncate then write", func() {
+			fileID, _ := ig.New()
+			fileObj := &core.ObjectInfo{
+				ID:    fileID,
+				PID:   core.ROOT_OID,
+				Type:  core.OBJ_TYPE_FILE,
+				Name:  "truncate_write_test.txt",
+				Size:  0,
+				MTime: core.Now(),
+			}
+			_, err = dma.PutObj(testCtx, testBktID, []*core.ObjectInfo{fileObj})
+			So(err, ShouldBeNil)
+
+			ra, err := NewRandomAccessor(ofs, fileID)
+			So(err, ShouldBeNil)
+			defer ra.Close()
+
+			// 写入数据
+			err = ra.Write(0, []byte("Hello, World!"))
+			So(err, ShouldBeNil)
+			_, err = ra.Flush()
+			So(err, ShouldBeNil)
+
+			// 截断到5字节
+			_, err = ra.Truncate(5)
+			So(err, ShouldBeNil)
+
+			// 在截断后继续写入
+			err = ra.Write(5, []byte(" New"))
+			So(err, ShouldBeNil)
+			_, err = ra.Flush()
+			So(err, ShouldBeNil)
+
+			// 读取验证
+			data, err := ra.Read(0, 20)
+			So(err, ShouldBeNil)
+			So(string(data), ShouldEqual, "Hello New")
+		})
+	})
+}
+
+// TestTruncateWithCompression 测试压缩文件的截断
+func TestTruncateWithCompression(t *testing.T) {
+	Convey("Truncate with compression", t, func() {
+		ig := idgen.NewIDGen(nil, 0)
+		testBktID, _ := ig.New()
+		err := core.InitBucketDB(c, testBktID)
+		So(err, ShouldBeNil)
+
+		dma := &core.DefaultMetadataAdapter{}
+		dda := &core.DefaultDataAdapter{}
+		dda.SetOptions(core.Options{Sync: true})
+
+		lh := core.NewLocalHandler().(*core.LocalHandler)
+		lh.SetAdapter(dma, dda)
+
+		testCtx, userInfo, _, err := lh.Login(c, "orcas", "orcas")
+		So(err, ShouldBeNil)
+
+		bucket := &core.BucketInfo{
+			ID:       testBktID,
+			Name:     "test_bucket",
+			UID:      userInfo.ID,
+			Type:     1,
+			Quota:    1000000,
+			Used:     0,
+			RealUsed: 0,
+		}
+		So(dma.PutBkt(testCtx, []*core.BucketInfo{bucket}), ShouldBeNil)
+
+		// 使用压缩配置
+		sdkCfg := &sdk.Config{
+			WiseCmpr: core.DATA_CMPR_SNAPPY,
+		}
+		ofs := NewOrcasFS(lh, testCtx, testBktID, sdkCfg)
+
+		Convey("test truncate compressed file", func() {
+			fileID, _ := ig.New()
+			fileObj := &core.ObjectInfo{
+				ID:    fileID,
+				PID:   core.ROOT_OID,
+				Type:  core.OBJ_TYPE_FILE,
+				Name:  "truncate_compressed_test.txt",
+				Size:  0,
+				MTime: core.Now(),
+			}
+			_, err = dma.PutObj(testCtx, testBktID, []*core.ObjectInfo{fileObj})
+			So(err, ShouldBeNil)
+
+			ra, err := NewRandomAccessor(ofs, fileID)
+			So(err, ShouldBeNil)
+			defer ra.Close()
+
+			// 写入数据（会被压缩）
+			data := make([]byte, 1000)
+			for i := range data {
+				data[i] = byte('A' + (i % 26))
+			}
+			err = ra.Write(0, data)
+			So(err, ShouldBeNil)
+			_, err = ra.Flush()
+			So(err, ShouldBeNil)
+
+			// 截断到500字节
+			_, err = ra.Truncate(500)
+			So(err, ShouldBeNil)
+
+			// 读取验证
+			readData, err := ra.Read(0, 1000)
+			So(err, ShouldBeNil)
+			So(len(readData), ShouldEqual, 500)
+
+			// 验证文件大小
+			fileObj2, err := ra.getFileObj()
+			So(err, ShouldBeNil)
+			So(fileObj2.Size, ShouldEqual, 500)
+		})
+	})
+}
+
+// TestBatchWriteManagerSmallFile 测试BatchWriteManager对小文件的处理
+func TestBatchWriteManagerSmallFile(t *testing.T) {
+	Convey("BatchWriteManager small file operations", t, func() {
+		ig := idgen.NewIDGen(nil, 0)
+		testBktID, _ := ig.New()
+		err := core.InitBucketDB(c, testBktID)
+		So(err, ShouldBeNil)
+
+		dma := &core.DefaultMetadataAdapter{}
+		dda := &core.DefaultDataAdapter{}
+		dda.SetOptions(core.Options{Sync: true})
+
+		lh := core.NewLocalHandler().(*core.LocalHandler)
+		lh.SetAdapter(dma, dda)
+
+		testCtx, userInfo, _, err := lh.Login(c, "orcas", "orcas")
+		So(err, ShouldBeNil)
+
+		bucket := &core.BucketInfo{
+			ID:       testBktID,
+			Name:     "test_bucket",
+			UID:      userInfo.ID,
+			Type:     1,
+			Quota:    1000000,
+			Used:     0,
+			RealUsed: 0,
+		}
+		So(dma.PutBkt(testCtx, []*core.BucketInfo{bucket}), ShouldBeNil)
+
+		ofs := NewOrcasFS(lh, testCtx, testBktID, nil)
+
+		Convey("test small file uses BatchWriteManager", func() {
+			fileID, _ := ig.New()
+			fileObj := &core.ObjectInfo{
+				ID:    fileID,
+				PID:   core.ROOT_OID,
+				Type:  core.OBJ_TYPE_FILE,
+				Name:  "small_file_test.txt",
+				Size:  0,
+				MTime: core.Now(),
+			}
+			_, err = dma.PutObj(testCtx, testBktID, []*core.ObjectInfo{fileObj})
+			So(err, ShouldBeNil)
+
+			ra, err := NewRandomAccessor(ofs, fileID)
+			So(err, ShouldBeNil)
+			defer ra.Close()
+
+			// 写入小文件（应该使用BatchWriteManager）
+			smallData := make([]byte, 100)
+			for i := range smallData {
+				smallData[i] = byte('A' + (i % 26))
+			}
+			err = ra.Write(0, smallData)
+			So(err, ShouldBeNil)
+			_, err = ra.Flush()
+			So(err, ShouldBeNil)
+
+			// 读取验证
+			data, err := ra.Read(0, 200)
+			So(err, ShouldBeNil)
+			So(len(data), ShouldEqual, 100)
+
+			// 验证DataID已生成
+			fileObj2, err := ra.getFileObj()
+			So(err, ShouldBeNil)
+			So(fileObj2.DataID, ShouldBeGreaterThan, 0)
+			So(fileObj2.DataID, ShouldNotEqual, core.EmptyDataID)
+		})
+	})
+}
+
+// TestSequentialWriteLargeFile 测试顺序写大文件（不使用BatchWriteManager）
+func TestSequentialWriteLargeFile(t *testing.T) {
+	Convey("Sequential write large file", t, func() {
+		ig := idgen.NewIDGen(nil, 0)
+		testBktID, _ := ig.New()
+		err := core.InitBucketDB(c, testBktID)
+		So(err, ShouldBeNil)
+
+		dma := &core.DefaultMetadataAdapter{}
+		dda := &core.DefaultDataAdapter{}
+		dda.SetOptions(core.Options{Sync: true})
+
+		lh := core.NewLocalHandler().(*core.LocalHandler)
+		lh.SetAdapter(dma, dda)
+
+		testCtx, userInfo, _, err := lh.Login(c, "orcas", "orcas")
+		So(err, ShouldBeNil)
+
+		bucket := &core.BucketInfo{
+			ID:       testBktID,
+			Name:     "test_bucket",
+			UID:      userInfo.ID,
+			Type:     1,
+			Quota:    10000000, // 增加配额以支持大文件测试
+			Used:     0,
+			RealUsed: 0,
+		}
+		So(dma.PutBkt(testCtx, []*core.BucketInfo{bucket}), ShouldBeNil)
+
+		ofs := NewOrcasFS(lh, testCtx, testBktID, nil)
+
+		Convey("test sequential write that exceeds chunk size", func() {
+			fileID, _ := ig.New()
+			fileObj := &core.ObjectInfo{
+				ID:    fileID,
+				PID:   core.ROOT_OID,
+				Type:  core.OBJ_TYPE_FILE,
+				Name:  "large_sequential_test.txt",
+				Size:  0,
+				MTime: core.Now(),
+			}
+			_, err = dma.PutObj(testCtx, testBktID, []*core.ObjectInfo{fileObj})
+			So(err, ShouldBeNil)
+
+			ra, err := NewRandomAccessor(ofs, fileID)
+			So(err, ShouldBeNil)
+			defer ra.Close()
+
+			// 写入大于chunk size的数据（会触发多个chunk写入，sn > 0）
+			// 默认chunk size是4MB，我们写入5MB
+			largeData := make([]byte, 5*1024*1024)
+			for i := range largeData {
+				largeData[i] = byte('A' + (i % 26))
+			}
+
+			// 分块写入（模拟顺序写）
+			chunkSize := 1024 * 1024 // 1MB chunks
+			for offset := int64(0); offset < int64(len(largeData)); offset += int64(chunkSize) {
+				end := offset + int64(chunkSize)
+				if end > int64(len(largeData)) {
+					end = int64(len(largeData))
+				}
+				err = ra.Write(offset, largeData[offset:end])
+				So(err, ShouldBeNil)
+			}
+
+			// Flush（应该不使用BatchWriteManager，因为sn > 0）
+			_, err = ra.Flush()
+			So(err, ShouldBeNil)
+
+			// 读取验证
+			data, err := ra.Read(0, len(largeData))
+			So(err, ShouldBeNil)
+			So(len(data), ShouldEqual, len(largeData))
+
+			// 验证文件大小
+			fileObj2, err := ra.getFileObj()
+			So(err, ShouldBeNil)
+			So(fileObj2.Size, ShouldEqual, int64(len(largeData)))
+		})
+	})
+}
+
+// TestTruncateReferenceDataBlock 测试截断时引用数据块
+func TestTruncateReferenceDataBlock(t *testing.T) {
+	Convey("Truncate with data block reference", t, func() {
+		ig := idgen.NewIDGen(nil, 0)
+		testBktID, _ := ig.New()
+		err := core.InitBucketDB(c, testBktID)
+		So(err, ShouldBeNil)
+
+		dma := &core.DefaultMetadataAdapter{}
+		dda := &core.DefaultDataAdapter{}
+		dda.SetOptions(core.Options{Sync: true})
+
+		lh := core.NewLocalHandler().(*core.LocalHandler)
+		lh.SetAdapter(dma, dda)
+
+		testCtx, userInfo, _, err := lh.Login(c, "orcas", "orcas")
+		So(err, ShouldBeNil)
+
+		bucket := &core.BucketInfo{
+			ID:       testBktID,
+			Name:     "test_bucket",
+			UID:      userInfo.ID,
+			Type:     1,
+			Quota:    1000000,
+			Used:     0,
+			RealUsed: 0,
+		}
+		So(dma.PutBkt(testCtx, []*core.BucketInfo{bucket}), ShouldBeNil)
+
+		ofs := NewOrcasFS(lh, testCtx, testBktID, nil)
+
+		Convey("test truncate references previous data block", func() {
+			fileID, _ := ig.New()
+			fileObj := &core.ObjectInfo{
+				ID:    fileID,
+				PID:   core.ROOT_OID,
+				Type:  core.OBJ_TYPE_FILE,
+				Name:  "truncate_ref_test.txt",
+				Size:  0,
+				MTime: core.Now(),
+			}
+			_, err = dma.PutObj(testCtx, testBktID, []*core.ObjectInfo{fileObj})
+			So(err, ShouldBeNil)
+
+			ra, err := NewRandomAccessor(ofs, fileID)
+			So(err, ShouldBeNil)
+			defer ra.Close()
+
+			// 写入数据
+			err = ra.Write(0, []byte("Hello, World!"))
+			So(err, ShouldBeNil)
+			_, err = ra.Flush()
+			So(err, ShouldBeNil)
+
+			// 截断到10字节（应该引用之前的数据块）
+			versionID, err := ra.Truncate(10)
+			So(err, ShouldBeNil)
+			So(versionID, ShouldBeGreaterThan, 0)
+
+			// 读取验证
+			data, err := ra.Read(0, 20)
+			So(err, ShouldBeNil)
+			So(string(data), ShouldEqual, "Hello, Wor")
+			So(len(data), ShouldEqual, 10)
+
+			// 验证创建了新版本
+			fileObj2, err := ra.getFileObj()
+			So(err, ShouldBeNil)
+			So(fileObj2.Size, ShouldEqual, 10)
+			// 新DataID应该已创建（可能引用旧数据块，也可能重新写入）
+			So(fileObj2.DataID, ShouldBeGreaterThan, 0)
+		})
+	})
+}

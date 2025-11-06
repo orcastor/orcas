@@ -33,6 +33,34 @@ type PerformanceMetrics struct {
 	HasEncryption  bool
 }
 
+// ensureTestUser 确保测试用户存在，如果不存在则创建
+func ensureTestUser(t *testing.T) {
+	// 先尝试登录，如果成功说明用户已存在
+	handler := core.NewLocalHandler()
+	ctx := context.Background()
+	_, _, _, err := handler.Login(ctx, "orcas", "orcas")
+	if err == nil {
+		// 用户已存在，直接返回
+		return
+	}
+
+	// 用户不存在，需要创建。由于创建用户需要管理员权限，我们直接通过数据库创建
+	// 使用与原来默认用户相同的密码哈希
+	hashedPwd := "1000:Zd54dfEjoftaY8NiAINGag==:q1yB510yT5tGIGNewItVSg=="
+	db, err := core.GetDB()
+	if err != nil {
+		t.Logf("Warning: Failed to get DB: %v", err)
+		return
+	}
+	defer db.Close()
+
+	// 使用 INSERT OR IGNORE 避免重复创建
+	_, err = db.Exec(`INSERT OR IGNORE INTO usr (id, role, usr, pwd, name, avatar, key) VALUES (1, 1, 'orcas', ?, 'orcas', '', '')`, hashedPwd)
+	if err != nil {
+		t.Logf("Warning: Failed to create test user: %v", err)
+	}
+}
+
 // runPerformanceTest 运行性能测试并返回指标
 func runPerformanceTest(t *testing.T, name string, dataSize, chunkSize int64, writeOps, concurrency int, sdkCfg *sdk.Config) PerformanceMetrics {
 	// 初始化
@@ -49,6 +77,9 @@ func runPerformanceTest(t *testing.T, name string, dataSize, chunkSize int64, wr
 		core.ORCAS_DATA = tmpDir
 	}
 	core.InitDB()
+
+	// 确保测试用户存在
+	ensureTestUser(t)
 
 	ig := idgen.NewIDGen(nil, 0)
 	testBktID, _ := ig.New()
@@ -399,7 +430,14 @@ func runSequentialWriteTest(t *testing.T, name string, totalSize, chunkSize int6
 		os.Setenv("ORCAS_DATA", tmpDir)
 		core.ORCAS_DATA = tmpDir
 	}
+	// 性能测试默认开启批量写入优化
+	if os.Getenv("ORCAS_BATCH_WRITE_ENABLED") == "" {
+		os.Setenv("ORCAS_BATCH_WRITE_ENABLED", "true")
+	}
 	core.InitDB()
+
+	// 确保测试用户存在
+	ensureTestUser(t)
 
 	ig := idgen.NewIDGen(nil, 0)
 	testBktID, _ := ig.New()
@@ -543,7 +581,14 @@ func runRandomWriteTest(t *testing.T, name string, totalSize, chunkSize int64, s
 		os.Setenv("ORCAS_DATA", tmpDir)
 		core.ORCAS_DATA = tmpDir
 	}
+	// 性能测试默认开启批量写入优化
+	if os.Getenv("ORCAS_BATCH_WRITE_ENABLED") == "" {
+		os.Setenv("ORCAS_BATCH_WRITE_ENABLED", "true")
+	}
 	core.InitDB()
+
+	// 确保测试用户存在
+	ensureTestUser(t)
 
 	ig := idgen.NewIDGen(nil, 0)
 	testBktID, _ := ig.New()
@@ -692,6 +737,9 @@ func runRandomWriteOverlappingTest(t *testing.T, name string, totalSize, chunkSi
 	}
 	core.InitDB()
 
+	// 确保测试用户存在
+	ensureTestUser(t)
+
 	ig := idgen.NewIDGen(nil, 0)
 	testBktID, _ := ig.New()
 	err := core.InitBucketDB(context.Background(), testBktID)
@@ -828,6 +876,9 @@ func runRandomWriteSmallChunksTest(t *testing.T, name string, totalSize, chunkSi
 		core.ORCAS_DATA = tmpDir
 	}
 	core.InitDB()
+
+	// 确保测试用户存在
+	ensureTestUser(t)
 
 	ig := idgen.NewIDGen(nil, 0)
 	testBktID, _ := ig.New()

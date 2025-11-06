@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -12,7 +13,7 @@ import (
 
 var (
 	configFile = flag.String("config", "", "Configuration file path (JSON format)")
-	action     = flag.String("action", "", "Operation type: upload or download")
+	action     = flag.String("action", "", "Operation type: upload, download, add-user, update-user, delete-user, list-users")
 	localPath  = flag.String("local", "", "Local file or directory path")
 	remotePath = flag.String("remote", "", "Remote path (relative to bucket root directory)")
 	bucketID   = flag.Int64("bucket", 0, "Bucket ID (if not specified, use first bucket)")
@@ -30,6 +31,13 @@ var (
 	conflict = flag.String("conflict", "", "Conflict resolution for same name: COVER, RENAME, THROW, SKIP")
 	nameTmpl = flag.String("nametmpl", "", "Rename template (contains %s)")
 	workersN = flag.Int("workers", 0, "Concurrent pool size (not less than 16)")
+
+	// User management parameters
+	userID    = flag.Int64("userid", 0, "User ID (for update-user and delete-user)")
+	newUser   = flag.String("newuser", "", "New username (for add-user and update-user)")
+	newPass   = flag.String("newpass", "", "New password (for add-user and update-user)")
+	userName_ = flag.String("username", "", "User display name (for add-user and update-user)")
+	userRole  = flag.String("role", "", "User role: USER or ADMIN (for add-user and update-user)")
 )
 
 type Config struct {
@@ -53,7 +61,13 @@ func main() {
 	// Initialize database
 	core.InitDB()
 
-	// Load configuration
+	// Handle user management commands
+	if *action == "add-user" || *action == "update-user" || *action == "delete-user" || *action == "list-users" {
+		handleUserManagement()
+		return
+	}
+
+	// Load configuration for upload/download operations
 	cfg, err := loadConfig()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to load configuration: %v\n", err)
@@ -298,4 +312,135 @@ func convertToSDKConfig(cfg *Config) sdk.Config {
 	}
 
 	return sdkCfg
+}
+
+func handleUserManagement() {
+	// Load configuration for admin login
+	cfg, err := loadConfig()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to load configuration: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Validate admin credentials
+	if cfg.UserName == "" {
+		fmt.Fprintf(os.Stderr, "Error: Admin username cannot be empty (use -user parameter or configuration file)\n")
+		os.Exit(1)
+	}
+	if cfg.Password == "" {
+		fmt.Fprintf(os.Stderr, "Error: Admin password cannot be empty (use -pass parameter or configuration file)\n")
+		os.Exit(1)
+	}
+
+	// Create handler and login as admin
+	handler := core.NewLocalHandler()
+	ctx, userInfo, _, err := handler.Login(context.Background(), cfg.UserName, cfg.Password)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Login failed: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Check if user is admin
+	if userInfo.Role != core.ADMIN {
+		fmt.Fprintf(os.Stderr, "Error: User %s is not an administrator\n", cfg.UserName)
+		os.Exit(1)
+	}
+
+	// Create admin instance
+	admin := core.NewLocalAdmin()
+	defer admin.Close()
+
+	// Execute user management command
+	switch *action {
+	case "add-user":
+		if *newUser == "" {
+			fmt.Fprintf(os.Stderr, "Error: Must specify username with -newuser parameter\n")
+			os.Exit(1)
+		}
+		if *newPass == "" {
+			fmt.Fprintf(os.Stderr, "Error: Must specify password with -newpass parameter\n")
+			os.Exit(1)
+		}
+		role := uint32(core.USER)
+		if *userRole == "ADMIN" {
+			role = uint32(core.ADMIN)
+		}
+		name := *userName_
+		if name == "" {
+			name = *newUser
+		}
+		user, err := admin.CreateUser(ctx, *newUser, *newPass, name, role)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to create user: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("User created successfully:\n")
+		fmt.Printf("  ID: %d\n", user.ID)
+		fmt.Printf("  Username: %s\n", user.Usr)
+		fmt.Printf("  Name: %s\n", user.Name)
+		if user.Role == core.ADMIN {
+			fmt.Printf("  Role: ADMIN\n")
+		} else {
+			fmt.Printf("  Role: USER\n")
+		}
+
+	case "update-user":
+		if *userID == 0 {
+			fmt.Fprintf(os.Stderr, "Error: Must specify user ID with -userid parameter\n")
+			os.Exit(1)
+		}
+		var role *uint32
+		if *userRole != "" {
+			r := uint32(core.USER)
+			if *userRole == "ADMIN" {
+				r = uint32(core.ADMIN)
+			}
+			role = &r
+		}
+		err := admin.UpdateUser(ctx, *userID, *newUser, *newPass, *userName_, role)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to update user: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("User %d updated successfully\n", *userID)
+
+	case "delete-user":
+		if *userID == 0 {
+			fmt.Fprintf(os.Stderr, "Error: Must specify user ID with -userid parameter\n")
+			os.Exit(1)
+		}
+		err := admin.DeleteUser(ctx, *userID)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to delete user: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("User %d deleted successfully\n", *userID)
+
+	case "list-users":
+		users, err := admin.ListUsers(ctx)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to list users: %v\n", err)
+			os.Exit(1)
+		}
+		if len(users) == 0 {
+			fmt.Println("No users found")
+			return
+		}
+		fmt.Printf("Total users: %d\n\n", len(users))
+		for _, u := range users {
+			roleStr := "USER"
+			if u.Role == core.ADMIN {
+				roleStr = "ADMIN"
+			}
+			fmt.Printf("ID: %d\n", u.ID)
+			fmt.Printf("  Username: %s\n", u.Usr)
+			fmt.Printf("  Name: %s\n", u.Name)
+			fmt.Printf("  Role: %s\n", roleStr)
+			fmt.Println()
+		}
+
+	default:
+		fmt.Fprintf(os.Stderr, "Error: Unknown user management action: %s\n", *action)
+		os.Exit(1)
+	}
 }

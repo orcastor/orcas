@@ -77,6 +77,7 @@ type BatchWriteManager struct {
 // BatchFileInfo file info for batch writes (lock-free)
 type BatchFileInfo struct {
 	FileID   int64
+	DataID   int64  // Data ID (generated when adding file)
 	Offset   int64  // Offset position in buffer
 	Size     int64  // Processed data size (after compression/encryption)
 	OrigSize int64  // Original data size
@@ -101,9 +102,17 @@ type PackagedFileInfo struct {
 }
 
 // getBatchWriteManager gets the batch write manager for the specified bucket (thread-safe)
+// Returns nil if batch write is disabled
 func (fs *OrcasFS) getBatchWriteManager() *BatchWriteManager {
 	fs.batchWriteMgrOnce.Do(func() {
 		config := core.GetWriteBufferConfig()
+
+		// Check if batch write is enabled
+		if !config.BatchWriteEnabled {
+			fs.batchWriteMgr = nil
+			return
+		}
+
 		// Use chunkSize as buffer size
 		chunkSize := fs.chunkSize
 		if chunkSize <= 0 {
@@ -155,8 +164,6 @@ func (bwm *BatchWriteManager) flushAll() {
 // flush flushes all pending write data (lock-free)
 // Atomically gets current write position and file info, then packages and writes
 func (bwm *BatchWriteManager) flush() {
-	startTime := time.Now()
-
 	// Atomically swap write position to 0 (reset and get old value)
 	oldOffset := bwm.writeOffset.Swap(0)
 
@@ -167,44 +174,31 @@ func (bwm *BatchWriteManager) flush() {
 		return // No pending write data
 	}
 
-	var copyTime, packageTime, flushPkgTime time.Duration
-
 	// Note: No need to zero used buffer portion because:
 	// 1. New data will write from writeOffset=0, overwriting old data
 	// 2. We only read data from fileInfo.Offset to fileInfo.Offset+fileInfo.Size
 	// 3. Old data won't affect correctness of new data
 
 	// Copy current file infos (avoid modification during packaging)
-	copyStart := time.Now()
-	fileInfos := make([]*BatchFileInfo, oldIndex)
+	// Only collect non-nil file infos (skip failed operations)
+	fileInfos := make([]*BatchFileInfo, 0, oldIndex)
 	for i := int64(0); i < oldIndex; i++ {
 		if bwm.fileInfos[i] != nil {
 			// Shallow copy file info (data itself is in buffer, no need for deep copy)
-			fileInfos[i] = bwm.fileInfos[i]
+			fileInfos = append(fileInfos, bwm.fileInfos[i])
 		}
 	}
-	copyTime = time.Since(copyStart)
 
 	if len(fileInfos) == 0 {
 		return
 	}
 
 	// Package data blocks
-	packageStart := time.Now()
 	packages := bwm.packageDataBlocks(fileInfos)
-	packageTime = time.Since(packageStart)
 
 	// Batch write packaged data blocks, DataInfo and ObjectInfo
-	flushPkgStart := time.Now()
 	for _, pkg := range packages {
 		bwm.flushPackage(pkg)
-	}
-	flushPkgTime = time.Since(flushPkgStart)
-
-	totalTime := time.Since(startTime)
-	if totalTime > 1*time.Millisecond {
-		fmt.Printf("[PERF] flush: offset=%d, index=%d, files=%d, packages=%d, total=%v, copy=%v, package=%v, flushPkg=%v\n",
-			oldOffset, oldIndex, len(fileInfos), len(packages), totalTime, copyTime, packageTime, flushPkgTime)
 	}
 }
 
@@ -241,6 +235,7 @@ func (bwm *BatchWriteManager) packageDataBlocks(fileInfos []*BatchFileInfo) []*P
 		// Add processed data to current package
 		pkgFileInfo := &PackagedFileInfo{
 			FileID:    fileInfo.FileID,
+			DataID:    fileInfo.DataID, // Use pre-generated DataID
 			PkgOffset: currentPkgOffset,
 			Size:      fileInfo.Size,     // Size after compression/encryption
 			OrigSize:  fileInfo.OrigSize, // Original data size
@@ -350,9 +345,6 @@ func (bwm *BatchWriteManager) flushPackage(pkg *PackagedDataBlock) error {
 		return nil
 	}
 
-	startTime := time.Now()
-	var newIDTime, putDataTime, putDataInfoTime, putObjTime time.Duration
-
 	// Get fs and handler from BatchWriteManager
 	if bwm.fs == nil {
 		return fmt.Errorf("invalid batch write manager: fs is nil")
@@ -364,18 +356,14 @@ func (bwm *BatchWriteManager) flushPackage(pkg *PackagedDataBlock) error {
 	ctx := fs.c
 
 	// 1. Generate packaged data block ID
-	newIDStart := time.Now()
 	pkgID := lh.NewID()
-	newIDTime = time.Since(newIDStart)
 	if pkgID <= 0 {
 		return fmt.Errorf("failed to generate package ID")
 	}
 	pkg.PkgID = pkgID
 
 	// 2. Write packaged data block
-	putDataStart := time.Now()
 	_, err := lh.PutData(ctx, bktID, pkgID, 0, pkg.Data)
-	putDataTime = time.Since(putDataStart)
 	if err != nil {
 		return fmt.Errorf("failed to write package data: %v", err)
 	}
@@ -383,18 +371,18 @@ func (bwm *BatchWriteManager) flushPackage(pkg *PackagedDataBlock) error {
 	// 3. Create DataInfo for each file (using PkgID and PkgOffset)
 	var dataInfos []*core.DataInfo
 	var objectInfos []*core.ObjectInfo
-	var newIDLoopTime, getObjTime time.Duration
 
-	loopStart := time.Now()
 	for _, fileInfo := range pkg.FileInfos {
-		// Generate DataID
-		newIDLoopStart := time.Now()
-		dataID := lh.NewID()
-		newIDLoopTime += time.Since(newIDLoopStart)
+		// Use pre-generated DataID (generated in addFile)
+		dataID := fileInfo.DataID
 		if dataID <= 0 {
-			continue
+			// If DataID is not set (should not happen), generate one
+			dataID = lh.NewID()
+			if dataID <= 0 {
+				continue
+			}
+			fileInfo.DataID = dataID
 		}
-		fileInfo.DataID = dataID
 
 		// Create DataInfo
 		dataInfo := &core.DataInfo{
@@ -410,7 +398,6 @@ func (bwm *BatchWriteManager) flushPackage(pkg *PackagedDataBlock) error {
 		// Get file object, update DataID and Size
 		// Note: File size should use original size (OrigSize), not compressed/encrypted size
 		// Optimization: Try to get from cache first to avoid database query
-		getObjStart := time.Now()
 		cacheKey := formatCacheKey(bktID, fileInfo.FileID)
 		var fileObj *core.ObjectInfo
 		if cached, ok := fileObjCache.Get(cacheKey); ok {
@@ -421,7 +408,6 @@ func (bwm *BatchWriteManager) flushPackage(pkg *PackagedDataBlock) error {
 		if fileObj == nil {
 			// Cache miss, query from database
 			fileObjs, err := lh.Get(ctx, bktID, []int64{fileInfo.FileID})
-			getObjTime += time.Since(getObjStart)
 			if err != nil || len(fileObjs) == 0 {
 				fileObj = nil
 			} else {
@@ -429,8 +415,6 @@ func (bwm *BatchWriteManager) flushPackage(pkg *PackagedDataBlock) error {
 				// Update cache
 				fileObjCache.Put(cacheKey, fileObj)
 			}
-		} else {
-			getObjTime += time.Since(getObjStart)
 		}
 
 		if fileObj == nil {
@@ -457,36 +441,31 @@ func (bwm *BatchWriteManager) flushPackage(pkg *PackagedDataBlock) error {
 			objectInfos = append(objectInfos, objectInfo)
 		}
 	}
-	loopTime := time.Since(loopStart)
 
 	// 4. Batch write DataInfo
-	putDataInfoStart := time.Now()
 	if len(dataInfos) > 0 {
 		_, err = lh.PutDataInfo(ctx, bktID, dataInfos)
-		putDataInfoTime = time.Since(putDataInfoStart)
 		if err != nil {
 			return fmt.Errorf("failed to write data infos: %v", err)
 		}
-	} else {
-		putDataInfoTime = time.Since(putDataInfoStart)
 	}
 
 	// 5. Batch write ObjectInfo
-	putObjStart := time.Now()
 	if len(objectInfos) > 0 {
 		_, err = lh.Put(ctx, bktID, objectInfos)
-		putObjTime = time.Since(putObjStart)
 		if err != nil {
 			return fmt.Errorf("failed to write object infos: %v", err)
 		}
-	} else {
-		putObjTime = time.Since(putObjStart)
-	}
 
-	totalTime := time.Since(startTime)
-	if totalTime > 1*time.Millisecond {
-		fmt.Printf("[PERF] flushPackage: pkgID=%d, dataSize=%d, files=%d, total=%v, newID=%v, putData=%v, loop=%v(newIDLoop=%v,getObj=%v), putDataInfo=%v, putObj=%v\n",
-			pkgID, len(pkg.Data), len(pkg.FileInfos), totalTime, newIDTime, putDataTime, loopTime, newIDLoopTime, getObjTime, putDataInfoTime, putObjTime)
+		// Update fileObj cache for each file to ensure reads can access latest data
+		for _, objInfo := range objectInfos {
+			if objInfo != nil && objInfo.ID > 0 {
+				cacheKey := formatCacheKey(bktID, objInfo.ID)
+				fileObjCache.Put(cacheKey, objInfo)
+				// Note: We can't update RandomAccessor's atomic value here as we don't have access to it
+				// But cache update is sufficient for getFileObj to work correctly
+			}
+		}
 	}
 
 	return nil
@@ -499,15 +478,8 @@ func (bwm *BatchWriteManager) addFile(ra *RandomAccessor, data []byte) (bool, er
 		return true, nil
 	}
 
-	// Performance analysis: record start time
-	startTime := time.Now()
-	var processTime, flushTime, copyTime, retryTime time.Duration
-	var retryCount int
-
 	// Process compression and encryption according to configuration
-	processStart := time.Now()
 	processedData, kind, origSize := bwm.processFileData(ra.fs, data)
-	processTime = time.Since(processStart)
 	if len(processedData) == 0 {
 		return false, fmt.Errorf("failed to process file data")
 	}
@@ -517,23 +489,17 @@ func (bwm *BatchWriteManager) addFile(ra *RandomAccessor, data []byte) (bool, er
 	// Try to write, may need retry (if space is insufficient, flush first)
 	maxRetries := 10
 	for retry := 0; retry < maxRetries; retry++ {
-		retryStart := time.Now()
-		retryCount++
 		// Check current space first (Load is atomic, but may be modified by other goroutines after check)
 		currentOffset := bwm.writeOffset.Load()
 		if currentOffset+processedSize > bwm.bufferSize {
 			// Space insufficient, flush existing data first
 			if retry == 0 {
-				flushStart := time.Now()
 				bwm.flush()
-				flushTime += time.Since(flushStart)
 			} else {
 				// If still insufficient after flush, data is too large, return false for caller to fallback
-				retryTime += time.Since(retryStart)
 				return false, nil
 			}
 			// Continue retry after flush
-			retryTime += time.Since(retryStart)
 			continue
 		}
 
@@ -543,62 +509,75 @@ func (bwm *BatchWriteManager) addFile(ra *RandomAccessor, data []byte) (bool, er
 
 		// Check again if exceeds buffer size (may be modified by other goroutines during reservation)
 		if newOffset > bwm.bufferSize {
-			// Space insufficient after reservation, rollback reservation
-			bwm.writeOffset.Add(-processedSize)
+			// Space insufficient after reservation, don't rollback (space is already allocated)
+			// Get file info index anyway (already allocated)
+			fileIndex := bwm.fileInfoIndex.Add(1) - 1
+			// Mark as nil to skip during flush
+			if fileIndex < bwm.maxFileInfos {
+				bwm.fileInfos[fileIndex] = nil
+			}
 			if retry == 0 {
-				flushStart := time.Now()
 				bwm.flush()
-				flushTime += time.Since(flushStart)
 			} else {
-				retryTime += time.Since(retryStart)
 				return false, nil
 			}
 			// Continue retry after flush
-			retryTime += time.Since(retryStart)
 			continue
 		}
 
 		// Write data to buffer
 		// Note: Space is already reserved via Add, so oldOffset to newOffset is safe
-		copyStart := time.Now()
 		copy(bwm.buffer[oldOffset:newOffset], processedData)
-		copyTime += time.Since(copyStart)
 
 		// Get file info index (atomic operation)
 		fileIndex := bwm.fileInfoIndex.Add(1) - 1
 		if fileIndex >= bwm.maxFileInfos {
-			// File info list is full, rollback and flush
-			bwm.writeOffset.Add(-processedSize)
-			bwm.fileInfoIndex.Add(-1)
+			// File info list is full, don't rollback (index is already allocated)
+			// Mark as nil to skip during flush
+			bwm.fileInfos[fileIndex] = nil
 			if retry == 0 {
-				flushStart := time.Now()
 				bwm.flush()
-				flushTime += time.Since(flushStart)
 			} else {
-				retryTime += time.Since(retryStart)
 				return false, nil
 			}
 			// Continue retry after flush
-			retryTime += time.Since(retryStart)
 			continue
+		}
+
+		// Generate DataID before adding to buffer (ensures DataID is available immediately)
+		dataID := ra.fs.h.NewID()
+		if dataID <= 0 {
+			return false, fmt.Errorf("failed to generate DataID")
 		}
 
 		// Create file info (lock-free, as we've already acquired write position via Add)
 		bwm.fileInfos[fileIndex] = &BatchFileInfo{
 			FileID:   ra.fileID,
+			DataID:   dataID,
 			Offset:   oldOffset,
 			Size:     processedSize,
 			OrigSize: origSize,
 			Kind:     kind,
 		}
 
-		retryTime += time.Since(retryStart)
-		totalTime := time.Since(startTime)
-
-		// Performance analysis: only output in concurrent scenarios (judged by goroutine ID)
-		if totalTime > 100*time.Microsecond || retryCount > 1 {
-			fmt.Printf("[PERF] addFile: fileID=%d, size=%d, total=%v, process=%v, flush=%v, copy=%v, retry=%v, retries=%d\n",
-				ra.fileID, len(data), totalTime, processTime, flushTime, copyTime, retryTime, retryCount)
+		// Immediately update fileObj with DataID so reads can work correctly
+		// This is critical: fileObj must have DataID before flush completes
+		fileObj, err := ra.getFileObj()
+		if err == nil {
+			// Update fileObj with new DataID and size
+			updateFileObj := &core.ObjectInfo{
+				ID:     fileObj.ID,
+				PID:    fileObj.PID,
+				DataID: dataID,
+				Size:   origSize, // Use original size
+				MTime:  core.Now(),
+				Type:   fileObj.Type,
+				Name:   fileObj.Name,
+			}
+			// Update cache and atomic value immediately
+			fileObjCache.Put(ra.fileObjKey, updateFileObj)
+			ra.fileObj.Store(updateFileObj)
+			// Note: Actual database update will happen in flushPackage
 		}
 
 		return true, nil
@@ -654,9 +633,8 @@ type RandomAccessor struct {
 	buffer       *WriteBuffer           // Random write buffer
 	seqBuffer    *SequentialWriteBuffer // Sequential write buffer (optimized)
 	fileObj      atomic.Value
-	fileObjKey   string      // Pre-computed file_obj cache key (optimized: avoid repeated conversion)
-	pendingFlush *time.Timer // Delayed flush timer
-	pendingMu    sync.Mutex  // Protects pendingFlush
+	fileObjKey   string       // Pre-computed file_obj cache key (optimized: avoid repeated conversion)
+	pendingFlush atomic.Value // Delayed flush timer (*time.Timer)
 }
 
 // NewRandomAccessor creates a random access object
@@ -723,8 +701,7 @@ func (ra *RandomAccessor) Write(offset int64, data []byte) error {
 	config := core.GetWriteBufferConfig()
 	if atomic.LoadInt64(&ra.buffer.writeIndex)+1 >= int64(len(ra.buffer.operations)) || atomic.LoadInt64(&ra.buffer.totalSize) >= config.MaxBufferSize {
 		// Exceeds capacity, need to force flush
-		// Rollback writeIndex first (because it already exceeded)
-		atomic.AddInt64(&ra.buffer.writeIndex, -1)
+		// Don't rollback writeIndex (already incremented, space is allocated)
 		// Force flush current buffer (synchronous execution, ensure data is persisted)
 		_, err := ra.Flush()
 		if err != nil {
@@ -756,24 +733,28 @@ func (ra *RandomAccessor) Write(offset int64, data []byte) error {
 
 // scheduleDelayedFlush schedules delayed flush
 func (ra *RandomAccessor) scheduleDelayedFlush(window time.Duration) {
-	ra.pendingMu.Lock()
-	defer ra.pendingMu.Unlock()
-
-	// Cancel previous timer
-	if ra.pendingFlush != nil {
-		ra.pendingFlush.Stop()
+	// Cancel previous timer (atomic load and swap)
+	// Use typed nil pointer (*time.Timer)(nil) instead of nil for atomic.Value
+	oldTimer := ra.pendingFlush.Swap((*time.Timer)(nil))
+	if oldTimer != nil {
+		if timer, ok := oldTimer.(*time.Timer); ok && timer != nil {
+			timer.Stop()
+		}
 	}
 
 	// Create new delayed flush timer
-	ra.pendingFlush = time.AfterFunc(window, func() {
-		ra.pendingMu.Lock()
-		defer ra.pendingMu.Unlock()
-		ra.pendingFlush = nil
+	newTimer := time.AfterFunc(window, func() {
+		// Clear timer atomically
+		// Use typed nil pointer (*time.Timer)(nil) instead of nil for atomic.Value
+		ra.pendingFlush.Store((*time.Timer)(nil))
 		// Async flush, non-blocking
 		go func() {
 			_, _ = ra.Flush()
 		}()
 	})
+
+	// Store new timer atomically
+	ra.pendingFlush.Store(newTimer)
 }
 
 // initSequentialBuffer initializes sequential write buffer
@@ -979,16 +960,51 @@ func (ra *RandomAccessor) flushSequentialBuffer() error {
 		return nil
 	}
 
+	// If no data, return directly
+	if !ra.seqBuffer.hasData {
+		return nil
+	}
+
+	// Check if it's a small file (total size < 1MB) and no chunks have been written yet
+	// If sn > 0, it means at least one chunk (typically 4MB) has been written, so it's not a small file
+	totalSize := ra.seqBuffer.dataInfo.OrigSize
+	if totalSize > 0 && totalSize < 1<<20 && ra.seqBuffer.sn == 0 {
+		// Small file and all data is still in buffer (no chunks written yet)
+		// Use batch write manager
+		allData := ra.seqBuffer.buffer
+
+		// If we have data in buffer, use batch write
+		if len(allData) > 0 {
+			batchMgr := ra.fs.getBatchWriteManager()
+			if batchMgr != nil {
+				added, err := batchMgr.addFile(ra, allData)
+				if err == nil && added {
+					// Successfully added to batch write manager
+					// Clear sequential buffer
+					ra.seqBuffer.hasData = false
+					ra.seqBuffer.buffer = ra.seqBuffer.buffer[:0]
+					return nil
+				}
+				// If batch write failed, fallback to normal write
+				// Retry once after flush
+				if !added {
+					batchMgr.flushAll()
+					added, err = batchMgr.addFile(ra, allData)
+					if err == nil && added {
+						ra.seqBuffer.hasData = false
+						ra.seqBuffer.buffer = ra.seqBuffer.buffer[:0]
+						return nil
+					}
+				}
+			}
+		}
+	}
+
 	// Write last chunk (if there's still data)
 	if len(ra.seqBuffer.buffer) > 0 {
 		if err := ra.flushSequentialChunk(); err != nil {
 			return err
 		}
-	}
-
-	// If no data, return directly
-	if !ra.seqBuffer.hasData {
-		return nil
 	}
 
 	// Update final size of DataInfo
@@ -1062,6 +1078,14 @@ func (ra *RandomAccessor) Read(offset int64, size int) ([]byte, error) {
 		return nil, err
 	}
 
+	// Limit reading size to file size
+	if offset >= fileObj.Size {
+		return []byte{}, nil
+	}
+	if int64(size) > fileObj.Size-offset {
+		size = int(fileObj.Size - offset)
+	}
+
 	// If sequential write buffer has data, read from it first
 	if ra.seqBuffer != nil && ra.seqBuffer.hasData {
 		// Sequential write buffer has data, need to flush before reading
@@ -1074,6 +1098,14 @@ func (ra *RandomAccessor) Read(offset int64, size int) ([]byte, error) {
 			}
 			ra.seqBuffer.closed = true
 			// Re-acquire file object
+			var objErr error
+			fileObj, objErr = ra.getFileObj()
+			if objErr != nil {
+				return nil, objErr
+			}
+		} else {
+			// Sequential write buffer is closed, data has been flushed
+			// Re-acquire file object (may have been updated by flush)
 			var objErr error
 			fileObj, objErr = ra.getFileObj()
 			if objErr != nil {
@@ -1242,51 +1274,73 @@ func (ra *RandomAccessor) Flush() (int64, error) {
 
 	// Check if it's a small file, suitable for batch write
 	totalSize := atomic.LoadInt64(&ra.buffer.totalSize)
-	fileObj, err := ra.getFileObj()
-	if err == nil && totalSize > 0 && totalSize < 1<<20 { // 1MB threshold
+	if totalSize > 0 && totalSize < 1<<20 { // 1MB threshold
 		// Small file, merge all write operations then add to batch write manager
-		operations := make([]WriteOperation, writeIndex)
-		copy(operations, ra.buffer.operations[:writeIndex])
-		mergedOps := mergeWriteOperations(operations)
-
-		// Calculate total size of merged data
-		var mergedDataSize int64
-		for _, op := range mergedOps {
-			if op.Offset+int64(len(op.Data)) > mergedDataSize {
-				mergedDataSize = op.Offset + int64(len(op.Data))
-			}
+		// Get current fileObj BEFORE swapping writeIndex (to read existing data if needed)
+		fileObj, err := ra.getFileObj()
+		if err != nil {
+			return 0, err
 		}
 
-		// If data is continuous or can be merged into continuous data, use batch write
-		if mergedDataSize < 1<<20 && len(mergedOps) <= 10 { // Small file and not many write operations
-			// Merge all data into a continuous data block
-			mergedData := make([]byte, mergedDataSize)
-			for _, op := range mergedOps {
-				copy(mergedData[op.Offset:], op.Data)
-			}
+		// If file has existing data, don't use BatchWriteManager (fallback to normal write)
+		// BatchWriteManager is optimized for new files or complete overwrites
+		// For incremental updates, normal write path handles merging better
+		if fileObj.DataID > 0 && fileObj.DataID != core.EmptyDataID && fileObj.Size > 0 {
+			// File has existing data, skip BatchWriteManager and use normal write path
+			// This ensures proper merging of existing data with new writes
+			// Continue to normal write path below
+		} else {
+			// No existing data, can use BatchWriteManager
+			// Now copy operations (before swapping)
+			operations := make([]WriteOperation, writeIndex)
+			copy(operations, ra.buffer.operations[:writeIndex])
+			mergedOps := mergeWriteOperations(operations)
 
-			// Add to batch write manager (lock-free)
-			batchMgr := ra.fs.getBatchWriteManager()
-			added, err := batchMgr.addFile(ra, mergedData)
-			if err != nil {
-				// Processing failed, fallback to normal write
-			} else if !added {
-				// Buffer full, flush immediately
-				batchMgr.flushAll()
-				// Retry add
-				added, err = batchMgr.addFile(ra, mergedData)
-				if !added {
-					// Still failed after retry, fallback to normal write
+			// Calculate total size of merged data
+			var mergedDataSize int64
+			for _, op := range mergedOps {
+				if op.Offset+int64(len(op.Data)) > mergedDataSize {
+					mergedDataSize = op.Offset + int64(len(op.Data))
 				}
 			}
 
-			if added {
-				// Successfully added to batch write manager, reset buffer
-				atomic.StoreInt64(&ra.buffer.totalSize, 0)
-				return 0, nil
+			// If data is continuous or can be merged into continuous data, use batch write
+			if mergedDataSize < 1<<20 && len(mergedOps) <= 10 { // Small file and not many write operations
+				// Merge all data into a continuous data block
+				mergedData := make([]byte, mergedDataSize)
+				for _, op := range mergedOps {
+					copy(mergedData[op.Offset:], op.Data)
+				}
+
+				// Add to batch write manager (lock-free)
+				batchMgr := ra.fs.getBatchWriteManager()
+				if batchMgr != nil {
+					added, err := batchMgr.addFile(ra, mergedData)
+					if err != nil {
+						// Processing failed, fallback to normal write
+					} else if !added {
+						// Buffer full, flush immediately
+						batchMgr.flushAll()
+						// Retry add
+						added, err = batchMgr.addFile(ra, mergedData)
+						if !added {
+							// Still failed after retry, fallback to normal write
+						}
+					}
+
+					if added {
+						// Successfully added to batch write manager
+						// Immediately flush to ensure data is written (DataID is already set in addFile)
+						batchMgr.flushAll()
+						// Reset buffer
+						atomic.StoreInt64(&ra.buffer.totalSize, 0)
+						// Return new version ID
+						return ra.fs.h.NewID(), nil
+					}
+				}
+				// If batch write is disabled or add failed, continue with normal write flow
 			}
-			// If add failed, continue with normal write flow
-		}
+		} // End of else block for BatchWriteManager
 	}
 
 	// Copy actually used portion (avoid modification during flush)
@@ -1299,15 +1353,16 @@ func (ra *RandomAccessor) Flush() (int64, error) {
 	// Merge overlapping write operations
 	mergedOps := mergeWriteOperations(operations)
 
-	// Get file object information (update cache)
-	// Optimization: use more efficient key generation (function internally uses object pool)
-	// Note: fileObj was already obtained above, re-acquire here to ensure it's latest
-	fileObj, err = ra.getFileObj()
+	// Get file object information
+	// Note: For BatchWriteManager path, fileObj is already updated in addFile
+	// For normal write path, we use getFileObj and will create new DataID to overwrite
+	fileObj, err := ra.getFileObj()
 	if err != nil {
 		return 0, err
 	}
 
 	// Use SDK's listener to handle compression and encryption
+	// This will create new DataID and overwrite existing data
 	return ra.applyRandomWritesWithSDK(fileObj, mergedOps)
 }
 
@@ -1473,15 +1528,15 @@ func (ra *RandomAccessor) applyWritesStreamingCompressed(oldDataInfo *core.DataI
 		endecKey = ra.fs.sdkCfg.EndecKey
 	}
 
-	// 创建一个reader来按chunk读取、解密、解压
+	// Create a reader to read, decrypt, and decompress by chunk
 	reader := newDecodingChunkReader(ra.fs.c, ra.fs.h, ra.fs.bktID, oldDataInfo, endecKey)
 
 	chunkSizeInt := int(chunkSize)
 	if chunkSizeInt <= 0 {
-		chunkSizeInt = 4 << 20 // 默认4MB
+		chunkSizeInt = 4 << 20 // Default 4MB
 	}
 
-	// 预先计算每个chunk相关的写入操作索引
+	// Pre-calculate write operation indices for each chunk
 	chunkCount := int((newSize + chunkSize - 1) / chunkSize)
 	writesByChunk := make([][]int, chunkCount)
 	avgWritesPerChunk := len(writes) / chunkCount
@@ -1507,19 +1562,19 @@ func (ra *RandomAccessor) applyWritesStreamingCompressed(oldDataInfo *core.DataI
 		}
 	}
 
-	// 流式处理：按chunk读取、处理、写入
+	// Stream processing: read, process, and write by chunk
 	return ra.processWritesStreaming(reader, writesByChunk, writes, dataInfo, chunkSizeInt, newSize, chunkCount)
 }
 
-// applyWritesStreamingUncompressed 处理未压缩未加密的数据
-// 可以按chunk流式读取和处理，只读取受影响的数据范围
+// applyWritesStreamingUncompressed handles uncompressed and unencrypted data
+// Can stream read and process by chunk, only reading affected data ranges
 func (ra *RandomAccessor) applyWritesStreamingUncompressed(fileObj *core.ObjectInfo, oldDataInfo *core.DataInfo,
 	writes []WriteOperation, dataInfo *core.DataInfo, chunkSizeInt int, newSize int64,
 ) (int64, error) {
-	// 对于未压缩未加密的数据，可以按chunk流式处理
-	// 优化：预先为每个chunk计算相关的写入操作，减少循环中的重复检查
+	// For uncompressed and unencrypted data, can stream process by chunk
+	// Optimization: pre-calculate write operations for each chunk to reduce repeated checks in loops
 
-	// 如果没有SDK配置，直接流式写入
+	// If no SDK configuration, directly stream write
 	if ra.fs.sdkCfg == nil {
 		dataInfo.Size = newSize
 		dataInfo.OrigSize = newSize
@@ -1527,11 +1582,11 @@ func (ra *RandomAccessor) applyWritesStreamingUncompressed(fileObj *core.ObjectI
 		oldDataID := fileObj.DataID
 		sn := 0
 
-		// 预先计算每个chunk相关的写入操作索引（优化：减少重复检查）
-		// 优化：预估容量，减少slice扩容
+		// Pre-calculate write operation indices for each chunk (optimization: reduce repeated checks)
+		// Optimization: estimate capacity to reduce slice expansion
 		chunkCount := int((newSize + int64(chunkSizeInt) - 1) / int64(chunkSizeInt))
 		writesByChunk := make([][]int, chunkCount)
-		// 预估每个chunk平均有多少写入操作（优化：减少slice扩容）
+		// Estimate average number of write operations per chunk (optimization: reduce slice expansion)
 		avgWritesPerChunk := len(writes) / chunkCount
 		if avgWritesPerChunk < 1 {
 			avgWritesPerChunk = 1
@@ -1555,7 +1610,7 @@ func (ra *RandomAccessor) applyWritesStreamingUncompressed(fileObj *core.ObjectI
 			}
 		}
 
-		// 按chunk处理
+		// Process by chunk
 		for chunkIdx := 0; chunkIdx < chunkCount; chunkIdx++ {
 			pos := int64(chunkIdx * chunkSizeInt)
 			chunkEnd := pos + int64(chunkSizeInt)
@@ -1564,9 +1619,9 @@ func (ra *RandomAccessor) applyWritesStreamingUncompressed(fileObj *core.ObjectI
 			}
 			chunkSize := int(chunkEnd - pos)
 
-			// 读取原始chunk数据（优化：使用对象池重用缓冲区）
+			// Read original chunk data (optimization: use object pool to reuse buffers)
 			chunkData := chunkDataPool.Get().([]byte)
-			// 确保容量足够
+			// Ensure capacity is sufficient
 			if cap(chunkData) < chunkSize {
 				chunkData = make([]byte, chunkSize)
 			} else {
@@ -1578,19 +1633,19 @@ func (ra *RandomAccessor) applyWritesStreamingUncompressed(fileObj *core.ObjectI
 				if readEnd > fileObj.Size {
 					readEnd = fileObj.Size
 				}
-				// 读取原始数据的这一chunk
+				// Read this chunk of original data
 				data, err := ra.fs.h.GetData(ra.fs.c, ra.fs.bktID, oldDataID, 0, int(pos), int(readEnd-pos))
 				if err == nil && len(data) > 0 {
 					copy(chunkData, data)
 				}
 			}
 
-			// 应用写入操作（只处理当前chunk相关的写入，使用预计算的索引）
+			// Apply write operations (only process writes related to current chunk, using pre-calculated indices)
 			for _, writeIdx := range writesByChunk[chunkIdx] {
 				write := writes[writeIdx]
 				writeEnd := write.Offset + int64(len(write.Data))
 
-				// 计算重叠范围（优化：减少重复计算）
+				// Calculate overlap range (optimization: reduce repeated calculations)
 				overlapStart := int64(0)
 				if write.Offset > pos {
 					overlapStart = write.Offset - pos
@@ -1605,16 +1660,16 @@ func (ra *RandomAccessor) applyWritesStreamingUncompressed(fileObj *core.ObjectI
 						writeDataStart = pos - write.Offset
 					}
 					copyLen := overlapEnd - overlapStart
-					// 优化：直接使用slice，避免重复计算长度
+					// Optimization: directly use slice to avoid repeated length calculations
 					copy(chunkData[overlapStart:overlapEnd], write.Data[writeDataStart:writeDataStart+copyLen])
 				}
 			}
 
-			// 写入chunk
-			// 注意：需要复制数据，因为PutData可能会异步处理，而chunkData需要归还到对象池
+			// Write chunk
+			// Note: need to copy data because PutData may process asynchronously, and chunkData needs to be returned to object pool
 			chunkDataCopy := make([]byte, len(chunkData))
 			copy(chunkDataCopy, chunkData)
-			// 写入前归还到对象池（重置长度但保留容量）
+			// Return to object pool before writing (reset length but keep capacity)
 			chunkDataPool.Put(chunkData[:0])
 
 			if _, err := ra.fs.h.PutData(ra.fs.c, ra.fs.bktID, dataInfo.ID, sn, chunkDataCopy); err != nil {
@@ -1623,23 +1678,23 @@ func (ra *RandomAccessor) applyWritesStreamingUncompressed(fileObj *core.ObjectI
 			sn++
 		}
 
-		// 保存数据元数据
+		// Save data metadata
 		_, err := ra.fs.h.PutDataInfo(ra.fs.c, ra.fs.bktID, []*core.DataInfo{dataInfo})
 		if err != nil {
 			return 0, err
 		}
 
-		// 优化：使用更高效的key生成（函数内部已使用对象池）
+		// Optimization: use more efficient key generation (function internally uses object pool)
 		dataInfoCache.Put(formatCacheKey(ra.fs.bktID, dataInfo.ID), dataInfo)
 
 		newVersionID := ra.fs.h.NewID()
 		return newVersionID, nil
 	}
 
-	// 有SDK配置，需要压缩和加密
-	// 流式处理：按chunk读取原数据，应用写入操作，立即处理并写入新对象
+	// Has SDK configuration, needs compression and encryption
+	// Stream processing: read original data by chunk, apply write operations, process and write to new object immediately
 
-	// 预先计算每个chunk相关的写入操作索引
+	// Pre-calculate write operation indices for each chunk
 	chunkCount := int((newSize + int64(chunkSizeInt) - 1) / int64(chunkSizeInt))
 	writesByChunk := make([][]int, chunkCount)
 	avgWritesPerChunk := len(writes) / chunkCount
@@ -1665,21 +1720,21 @@ func (ra *RandomAccessor) applyWritesStreamingUncompressed(fileObj *core.ObjectI
 		}
 	}
 
-	// 对于未压缩未加密的数据，可以直接按chunk读取，不需要先读取全部数据
-	// 创建一个特殊的reader来支持按chunk读取
+	// For uncompressed and unencrypted data, can directly read by chunk without reading all data first
+	// Create a special reader to support reading by chunk
 	var reader io.Reader
 	oldDataID := fileObj.DataID
 	if oldDataID > 0 && oldDataID != core.EmptyDataID {
-		// 创建plainDataReader，支持按chunk读取
+		// Create plainDataReader to support reading by chunk
 		reader = newPlainDataReader(ra.fs.c, ra.fs.h, ra.fs.bktID, oldDataID, int64(chunkSizeInt))
 	}
 
-	// 流式处理：按chunk读取、处理、写入
+	// Stream processing: read, process, and write by chunk
 	return ra.processWritesStreaming(reader, writesByChunk, writes, dataInfo, chunkSizeInt, newSize, chunkCount)
 }
 
-// processWritesStreaming 流式处理写入操作
-// 按chunk读取原数据，应用写入操作，立即处理（压缩/加密）并写入新对象
+// processWritesStreaming streams processing of write operations
+// Read original data by chunk, apply write operations, immediately process (compress/encrypt) and write to new object
 func (ra *RandomAccessor) processWritesStreaming(
 	reader io.Reader,
 	writesByChunk [][]int,
@@ -1691,11 +1746,11 @@ func (ra *RandomAccessor) processWritesStreaming(
 ) (int64, error) {
 	cfg := ra.fs.sdkCfg
 
-	// 初始化压缩器（如果启用智能压缩）
+	// Initialize compressor (if smart compression is enabled)
 	var cmpr archiver.Compressor
 	var hasCmpr bool
 	if cfg != nil && cfg.WiseCmpr > 0 {
-		// 压缩器将在处理第一个chunk时确定（需要检查文件类型）
+		// Compressor will be determined when processing the first chunk (needs to check file type)
 		hasCmpr = true
 		if cfg.WiseCmpr&core.DATA_CMPR_SNAPPY != 0 {
 			cmpr = &archiver.Snappy{}
@@ -1711,12 +1766,12 @@ func (ra *RandomAccessor) processWritesStreaming(
 		}
 	}
 
-	// 如果设置了加密，设置加密标记
+	// If encryption is set, set encryption flag
 	if cfg != nil && cfg.EndecWay > 0 {
 		dataInfo.Kind |= cfg.EndecWay
 	}
 
-	// 计算CRC32（原始数据）
+	// Calculate CRC32 (original data)
 	var crc32Val uint32
 	var dataCRC32 uint32
 
@@ -1724,7 +1779,7 @@ func (ra *RandomAccessor) processWritesStreaming(
 	currentPos := int64(0)
 	firstChunk := true
 
-	// 按chunk流式处理
+	// Stream process by chunk
 	for chunkIdx := 0; chunkIdx < chunkCount; chunkIdx++ {
 		pos := int64(chunkIdx * chunkSizeInt)
 		chunkEnd := pos + int64(chunkSizeInt)
@@ -1733,7 +1788,7 @@ func (ra *RandomAccessor) processWritesStreaming(
 		}
 		actualChunkSize := int(chunkEnd - pos)
 
-		// 从对象池获取chunk缓冲区
+		// Get chunk buffer from object pool
 		chunkData := chunkDataPool.Get().([]byte)
 		if cap(chunkData) < actualChunkSize {
 			chunkData = make([]byte, actualChunkSize)
@@ -1741,13 +1796,13 @@ func (ra *RandomAccessor) processWritesStreaming(
 			chunkData = chunkData[:actualChunkSize]
 		}
 
-		// 1. 从reader读取原数据的这个chunk
-		// 注意：reader是顺序的，需要按顺序读取到当前位置
+		// 1. Read this chunk of original data from reader
+		// Note: reader is sequential, need to read sequentially to current position
 		if reader != nil {
-			// 需要读取到当前chunk的位置
+			// Need to read to current chunk position
 			bytesToSkip := pos - currentPos
 			if bytesToSkip > 0 {
-				// 跳过不需要的数据（读取并丢弃）
+				// Skip unnecessary data (read and discard)
 				skipBuf := make([]byte, bytesToSkip)
 				_, err := io.ReadFull(reader, skipBuf)
 				if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
@@ -1757,33 +1812,33 @@ func (ra *RandomAccessor) processWritesStreaming(
 			}
 			currentPos = pos
 
-			// 读取当前chunk的数据
+			// Read current chunk data
 			n, err := reader.Read(chunkData)
 			if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
 				chunkDataPool.Put(chunkData[:0])
 				return 0, fmt.Errorf("failed to read chunk: %w", err)
 			}
-			// 如果读取的数据少于chunk大小，剩余部分保持为0（新数据）
+			// If read data is less than chunk size, remaining part stays as 0 (new data)
 			if n < actualChunkSize {
-				// 清零剩余部分
+				// Zero remaining part
 				for i := n; i < actualChunkSize; i++ {
 					chunkData[i] = 0
 				}
 			}
 			currentPos = chunkEnd
 		} else {
-			// 没有原数据，初始化为0
+			// No original data, initialize to 0
 			for i := range chunkData {
 				chunkData[i] = 0
 			}
 		}
 
-		// 2. 应用写入操作到当前chunk
+		// 2. Apply write operations to current chunk
 		for _, writeIdx := range writesByChunk[chunkIdx] {
 			write := writes[writeIdx]
 			writeEnd := write.Offset + int64(len(write.Data))
 
-			// 计算重叠范围
+			// Calculate overlap range
 			overlapStart := int64(0)
 			if write.Offset > pos {
 				overlapStart = write.Offset - pos
@@ -1802,11 +1857,11 @@ func (ra *RandomAccessor) processWritesStreaming(
 			}
 		}
 
-		// 3. 如果是第一个chunk，检查文件类型确定是否压缩
+		// 3. If it's the first chunk, check file type to determine if compression is needed
 		if firstChunk && cfg != nil && cfg.WiseCmpr > 0 && len(chunkData) > 0 {
 			kind, _ := filetype.Match(chunkData)
 			if kind != filetype.Unknown {
-				// 不是未知类型，不压缩
+				// Not unknown type, don't compress
 				dataInfo.Kind &= ^core.DATA_CMPR_MASK
 				cmpr = nil
 				hasCmpr = false
@@ -1814,30 +1869,30 @@ func (ra *RandomAccessor) processWritesStreaming(
 			firstChunk = false
 		}
 
-		// 4. 计算原始数据的CRC32
+		// 4. Calculate CRC32 of original data
 		dataCRC32 = crc32.Update(dataCRC32, crc32.IEEETable, chunkData)
 
-		// 5. 压缩（如果启用）
+		// 5. Compress (if enabled)
 		var processedChunk []byte
 		if hasCmpr && cmpr != nil {
 			var cmprBuf bytes.Buffer
 			err := cmpr.Compress(bytes.NewBuffer(chunkData), &cmprBuf)
 			if err != nil {
 				processedChunk = chunkData
-				// 压缩失败，只在第一个chunk时移除压缩标记
+				// Compression failed, only remove compression flag on first chunk
 				if firstChunk {
 					dataInfo.Kind &= ^core.DATA_CMPR_MASK
 					hasCmpr = false
 				}
 			} else {
-				// 如果压缩后更大或相等，使用原始数据，移除压缩标记
-				// 注意：这个逻辑只在第一个chunk时执行，因为一旦决定压缩，后续chunk都应该保持一致
+				// If compressed size is larger or equal, use original data and remove compression flag
+				// Note: this logic only executes on first chunk, because once compression is decided, subsequent chunks should be consistent
 				if firstChunk && cmprBuf.Len() >= len(chunkData) {
 					processedChunk = chunkData
 					dataInfo.Kind &= ^core.DATA_CMPR_MASK
 					hasCmpr = false
 				} else if !firstChunk && cmprBuf.Len() >= len(chunkData) {
-					// 后续chunk如果压缩后更大，仍然使用压缩后的数据（保持一致性）
+					// For subsequent chunks, if compressed size is larger, still use compressed data (maintain consistency)
 					processedChunk = cmprBuf.Bytes()
 				} else {
 					processedChunk = cmprBuf.Bytes()
@@ -1847,7 +1902,7 @@ func (ra *RandomAccessor) processWritesStreaming(
 			processedChunk = chunkData
 		}
 
-		// 6. 加密（如果启用）
+		// 6. Encrypt (if enabled)
 		var encodedChunk []byte
 		var err error
 		if cfg != nil && dataInfo.Kind&core.DATA_ENDEC_AES256 != 0 {
@@ -1861,15 +1916,15 @@ func (ra *RandomAccessor) processWritesStreaming(
 			encodedChunk = processedChunk
 		}
 
-		// 7. 更新最终数据的校验和
+		// 7. Update checksum of final data
 		crc32Val = crc32.Update(crc32Val, crc32.IEEETable, encodedChunk)
 
-		// 8. 更新大小（如果压缩或加密了）
+		// 8. Update size (if compressed or encrypted)
 		if dataInfo.Kind&core.DATA_CMPR_MASK != 0 || dataInfo.Kind&core.DATA_ENDEC_MASK != 0 {
 			dataInfo.Size += int64(len(encodedChunk))
 		}
 
-		// 9. 立即写入新对象（流式写入）
+		// 9. Immediately write to new object (stream write)
 		encodedChunkCopy := make([]byte, len(encodedChunk))
 		copy(encodedChunkCopy, encodedChunk)
 		if _, err := ra.fs.h.PutData(ra.fs.c, ra.fs.bktID, dataInfo.ID, sn, encodedChunkCopy); err != nil {
@@ -1878,11 +1933,11 @@ func (ra *RandomAccessor) processWritesStreaming(
 		}
 		sn++
 
-		// 归还chunkData到对象池
+		// Return chunkData to object pool
 		chunkDataPool.Put(chunkData[:0])
 	}
 
-	// 设置CRC32和校验和
+	// Set CRC32 and checksum
 	dataInfo.CRC32 = dataCRC32
 	if dataInfo.Kind&core.DATA_CMPR_MASK == 0 && dataInfo.Kind&core.DATA_ENDEC_MASK == 0 {
 		dataInfo.Size = dataInfo.OrigSize
@@ -1891,27 +1946,27 @@ func (ra *RandomAccessor) processWritesStreaming(
 		dataInfo.Cksum = crc32Val
 	}
 
-	// 保存数据元数据
+	// Save data metadata
 	_, err := ra.fs.h.PutDataInfo(ra.fs.c, ra.fs.bktID, []*core.DataInfo{dataInfo})
 	if err != nil {
 		return 0, err
 	}
 
-	// 更新缓存
+	// Update cache
 	dataInfoCache.Put(formatCacheKey(ra.fs.bktID, dataInfo.ID), dataInfo)
 
 	newVersionID := ra.fs.h.NewID()
 	return newVersionID, nil
 }
 
-// dataReader 数据读取器接口，统一处理不同格式的数据读取
+// dataReader data reader interface, unified handling of data reading in different formats
 type dataReader interface {
 	io.Reader
 }
 
-// readWithWrites 统一处理读取逻辑：计算读取范围、读取数据、应用写入操作、截取结果
+// readWithWrites unified handling of read logic: calculate read range, read data, apply write operations, extract result
 func (ra *RandomAccessor) readWithWrites(reader dataReader, offset int64, size int) ([]byte, bool) {
-	// 1. 检查缓冲区中的写入操作，确定需要读取的数据范围
+	// 1. Check write operations in buffer to determine required data range
 	writeIndex := atomic.LoadInt64(&ra.buffer.writeIndex)
 	var operations []WriteOperation
 	if writeIndex > 0 {
@@ -1920,7 +1975,7 @@ func (ra *RandomAccessor) readWithWrites(reader dataReader, offset int64, size i
 	}
 	mergedOps := mergeWriteOperations(operations)
 
-	// 2. 计算实际需要读取的数据范围（考虑写入操作的影响）
+	// 2. Calculate actual required data range (considering impact of write operations)
 	readStart := offset
 	readEnd := offset + int64(size)
 	if len(mergedOps) > 0 {
@@ -1937,13 +1992,13 @@ func (ra *RandomAccessor) readWithWrites(reader dataReader, offset int64, size i
 		}
 	}
 
-	// 3. 只读取需要的数据范围
+	// 3. Only read required data range
 	readSize := readEnd - readStart
 	if readSize <= 0 {
 		return []byte{}, true
 	}
 
-	// 跳过readStart之前的数据
+	// Skip data before readStart
 	if readStart > 0 {
 		skipBuf := make([]byte, readStart)
 		_, err := io.ReadFull(reader, skipBuf)
@@ -1952,12 +2007,12 @@ func (ra *RandomAccessor) readWithWrites(reader dataReader, offset int64, size i
 		}
 	}
 
-	// 读取需要的数据范围
+	// Read required data range
 	readData := make([]byte, readSize)
 	n, err := io.ReadFull(reader, readData)
-	// 如果读取失败或读取的数据少于请求的大小，只返回读取到的数据
+	// If read fails or read data is less than requested size, only return read data
 	if err != nil {
-		// io.EOF 或 io.ErrUnexpectedEOF 表示已读取完所有可用数据
+		// io.EOF or io.ErrUnexpectedEOF means all available data has been read
 		if err == io.EOF || err == io.ErrUnexpectedEOF {
 			if n > 0 {
 				readData = readData[:n]
@@ -1965,15 +2020,15 @@ func (ra *RandomAccessor) readWithWrites(reader dataReader, offset int64, size i
 				readData = []byte{}
 			}
 		} else {
-			// 其他错误，返回失败
+			// Other errors, return failure
 			return nil, false
 		}
 	} else if int64(n) < readSize {
-		// 读取的数据少于请求的大小（文件末尾），截取实际读取的数据
+		// Read data is less than requested size (end of file), extract actually read data
 		readData = readData[:n]
 	}
 
-	// 4. 应用写入操作到读取的数据
+	// 4. Apply write operations to read data
 	if len(mergedOps) > 0 {
 		adjustedOps := make([]WriteOperation, 0, len(mergedOps))
 		for _, op := range mergedOps {
@@ -1991,7 +2046,7 @@ func (ra *RandomAccessor) readWithWrites(reader dataReader, offset int64, size i
 		}
 	}
 
-	// 5. 截取请求的范围（offset到offset+size，相对于readStart）
+	// 5. Extract requested range (offset to offset+size, relative to readStart)
 	resultOffset := offset - readStart
 	resultEnd := resultOffset + int64(size)
 	if resultEnd > int64(len(readData)) {
@@ -2007,7 +2062,7 @@ func (ra *RandomAccessor) readWithWrites(reader dataReader, offset int64, size i
 	return readData[resultOffset:resultEnd], true
 }
 
-// plainDataReader 支持按chunk读取未压缩未加密的数据
+// plainDataReader supports reading uncompressed and unencrypted data by chunk
 type plainDataReader struct {
 	c          core.Ctx
 	h          core.Handler
@@ -2022,7 +2077,7 @@ type plainDataReader struct {
 
 func newPlainDataReader(c core.Ctx, h core.Handler, bktID, dataID int64, chunkSize int64) *plainDataReader {
 	if chunkSize <= 0 {
-		chunkSize = 4 << 20 // 默认4MB
+		chunkSize = 4 << 20 // Default 4MB
 	}
 	return &plainDataReader{
 		c:         c,
@@ -2036,12 +2091,12 @@ func newPlainDataReader(c core.Ctx, h core.Handler, bktID, dataID int64, chunkSi
 func (pr *plainDataReader) Read(p []byte) (n int, err error) {
 	totalRead := 0
 	for len(p) > 0 {
-		// 如果缓冲区为空或已读完，读取下一个chunk
+		// If buffer is empty or fully read, read next chunk
 		if pr.buf == nil || pr.bufPos >= len(pr.buf) {
-			// 使用sn来读取chunk（未压缩未加密的数据按chunk存储）
+			// Use sn to read chunk (uncompressed and unencrypted data is stored by chunk)
 			chunkData, err := pr.h.GetData(pr.c, pr.bktID, pr.dataID, pr.sn)
 			if err != nil {
-				// 如果读取失败，可能是chunk不存在（文件末尾）
+				// If read fails, chunk may not exist (end of file)
 				if totalRead == 0 {
 					return 0, io.EOF
 				}
@@ -2058,7 +2113,7 @@ func (pr *plainDataReader) Read(p []byte) (n int, err error) {
 			pr.sn++
 		}
 
-		// 从缓冲区复制数据
+		// Copy data from buffer
 		copyLen := len(p)
 		available := len(pr.buf) - pr.bufPos
 		if copyLen > available {
@@ -2075,7 +2130,7 @@ func (pr *plainDataReader) Read(p []byte) (n int, err error) {
 	return totalRead, nil
 }
 
-// decodingChunkReader 支持按chunk读取、解密、解压的数据（流式读取，边读边处理）
+// decodingChunkReader supports reading, decrypting, and decompressing data by chunk (stream reading, process while reading)
 type decodingChunkReader struct {
 	c          core.Ctx
 	h          core.Handler
@@ -2110,12 +2165,12 @@ func newDecodingChunkReader(c core.Ctx, h core.Handler, bktID int64, dataInfo *c
 func (dr *decodingChunkReader) Read(p []byte) (n int, err error) {
 	totalRead := 0
 	for len(p) > 0 && dr.remain > 0 {
-		// 如果缓冲区为空或已读完，读取下一个chunk
+		// If buffer is empty or fully read, read next chunk
 		if dr.buf == nil || dr.bufPos >= len(dr.buf) {
-			// 读取chunk（压缩加密后的数据）
+			// Read chunk (compressed and encrypted data)
 			encryptedChunk, err := dr.h.GetData(dr.c, dr.bktID, dr.dataID, dr.sn)
 			if err != nil {
-				// 如果读取失败，可能是chunk不存在（文件末尾）
+				// If read fails, chunk may not exist (end of file)
 				if totalRead == 0 {
 					return 0, io.EOF
 				}
@@ -2124,7 +2179,7 @@ func (dr *decodingChunkReader) Read(p []byte) (n int, err error) {
 			dr.remain -= len(encryptedChunk)
 			dr.sn++
 
-			// 1. 先解密（如果启用）
+			// 1. Decrypt first (if enabled)
 			decodedChunk := encryptedChunk
 			if dr.kind&core.DATA_ENDEC_AES256 != 0 {
 				decodedChunk, err = aes256.Decrypt(dr.endecKey, encryptedChunk)
@@ -2132,11 +2187,11 @@ func (dr *decodingChunkReader) Read(p []byte) (n int, err error) {
 				decodedChunk, err = sm4.Sm4Cbc([]byte(dr.endecKey), encryptedChunk, false)
 			}
 			if err != nil {
-				// 解密失败，使用原始数据
+				// Decryption failed, use original data
 				decodedChunk = encryptedChunk
 			}
 
-			// 2. 再解压缩（如果启用）
+			// 2. Decompress next (if enabled)
 			finalChunk := decodedChunk
 			if dr.kind&core.DATA_CMPR_MASK != 0 {
 				var decompressor archiver.Decompressor
@@ -2154,7 +2209,7 @@ func (dr *decodingChunkReader) Read(p []byte) (n int, err error) {
 					var decompressedBuf bytes.Buffer
 					err := decompressor.Decompress(bytes.NewReader(decodedChunk), &decompressedBuf)
 					if err != nil {
-						// 解压缩失败，使用解密后的数据
+						// Decompression failed, use decrypted data
 						finalChunk = decodedChunk
 					} else {
 						finalChunk = decompressedBuf.Bytes()
@@ -2166,7 +2221,7 @@ func (dr *decodingChunkReader) Read(p []byte) (n int, err error) {
 			dr.bufPos = 0
 		}
 
-		// 从缓冲区复制数据
+		// Copy data from buffer
 		copyLen := len(p)
 		available := len(dr.buf) - dr.bufPos
 		if copyLen > available {
@@ -2186,47 +2241,494 @@ func (dr *decodingChunkReader) Read(p []byte) (n int, err error) {
 	return totalRead, nil
 }
 
-// Close 关闭随机访问对象，自动刷新所有待处理的写入
-func (ra *RandomAccessor) Close() error {
-	// 取消延迟刷新定时器，确保同步刷新
-	ra.pendingMu.Lock()
-	if ra.pendingFlush != nil {
-		ra.pendingFlush.Stop()
-		ra.pendingFlush = nil
+// Truncate truncates file to specified size
+// If newSize > 0, references previous data block but with new size, creates new version
+// If newSize == 0, uses empty data block (EmptyDataID)
+func (ra *RandomAccessor) Truncate(newSize int64) (int64, error) {
+	// Flush any pending writes first
+	_, err := ra.Flush()
+	if err != nil {
+		return 0, err
 	}
-	ra.pendingMu.Unlock()
 
-	// 同步刷新所有待写入数据
+	// Invalidate cache to ensure we get fresh fileObj
+	// Use typed nil pointer instead of nil for atomic.Value
+	ra.fileObj.Store((*core.ObjectInfo)(nil))
+
+	// Get current file object
+	fileObj, err := ra.getFileObj()
+	if err != nil {
+		return 0, err
+	}
+
+	oldSize := fileObj.Size
+	if newSize == oldSize {
+		// No change needed
+		return 0, nil
+	}
+
+	// Get LocalHandler
+	lh, ok := ra.fs.h.(*core.LocalHandler)
+	if !ok {
+		return 0, fmt.Errorf("handler is not LocalHandler")
+	}
+
+	// Generate new version ID
+	newVersionID := ra.fs.h.NewID()
+	if newVersionID <= 0 {
+		return 0, fmt.Errorf("failed to generate version ID")
+	}
+
+	var newDataID int64
+	var newDataInfo *core.DataInfo
+
+	if newSize == 0 {
+		// Use empty data block
+		newDataID = core.EmptyDataID
+		newDataInfo = &core.DataInfo{
+			ID:        newDataID,
+			Size:      0,
+			OrigSize:  0,
+			Kind:      core.DATA_NORMAL,
+			PkgID:     0,
+			PkgOffset: 0,
+		}
+	} else {
+		// Reference previous data block but with new size
+		oldDataID := fileObj.DataID
+		if oldDataID > 0 && oldDataID != core.EmptyDataID {
+			// Get old DataInfo
+			oldDataInfo, err := ra.fs.h.GetDataInfo(ra.fs.c, ra.fs.bktID, oldDataID)
+			if err == nil && oldDataInfo != nil {
+				// Generate new DataID
+				newDataID = ra.fs.h.NewID()
+				if newDataID <= 0 {
+					return 0, fmt.Errorf("failed to generate DataID")
+				}
+
+				if oldDataInfo.PkgID > 0 {
+					// If data is in package, we can reference the same package
+					// If newSize > original size, need to read, extend with zeros, and write
+					// If newSize == original size, reference same package with new OrigSize
+					// If newSize < original size, we need to read, process, and write truncated data
+					if newSize > int64(oldDataInfo.OrigSize) {
+						// File is extended, need to read original data and fill with zeros
+						// Use Read method to get decompressed/decrypted data
+						readData, readErr := ra.Read(0, int(oldDataInfo.OrigSize))
+						if readErr != nil {
+							return 0, fmt.Errorf("failed to read data for truncate: %v", readErr)
+						}
+						// Ensure we only use OrigSize bytes
+						if int64(len(readData)) > int64(oldDataInfo.OrigSize) {
+							readData = readData[:oldDataInfo.OrigSize]
+						}
+
+						// Extend with zeros
+						extendedData := make([]byte, newSize)
+						copy(extendedData, readData)
+						// Remaining bytes are already zero (Go zero-initializes slices)
+
+						// Write extended data (will be compressed/encrypted if needed)
+						if err := ra.Write(0, extendedData); err != nil {
+							return 0, fmt.Errorf("failed to write extended data: %v", err)
+						}
+						_, flushErr := ra.Flush()
+						if flushErr != nil {
+							return 0, fmt.Errorf("failed to flush extended data: %v", flushErr)
+						}
+
+						// Get updated fileObj to get new DataID
+						updatedFileObj, err := ra.getFileObj()
+						if err != nil {
+							return 0, fmt.Errorf("failed to get updated file object: %v", err)
+						}
+
+						// Verify size is correct
+						if updatedFileObj.Size != newSize {
+							return 0, fmt.Errorf("truncated file size mismatch: expected %d, got %d", newSize, updatedFileObj.Size)
+						}
+
+						// Return version ID (already created by Flush)
+						versionID := ra.fs.h.NewID()
+						if versionID <= 0 {
+							return 0, fmt.Errorf("failed to generate version ID")
+						}
+
+						// Create version object for this truncate operation
+						mTime := core.Now()
+						newVersion := &core.ObjectInfo{
+							ID:     versionID,
+							PID:    ra.fileID,
+							Type:   core.OBJ_TYPE_VERSION,
+							DataID: updatedFileObj.DataID,
+							Size:   newSize,
+							MTime:  mTime,
+						}
+
+						// Update file object (if not already updated by Flush)
+						updateFileObj := &core.ObjectInfo{
+							ID:     ra.fileID,
+							DataID: updatedFileObj.DataID,
+							Size:   newSize,
+							MTime:  mTime,
+						}
+
+						// Batch write version and update file object
+						objectsToPut := []*core.ObjectInfo{newVersion, updateFileObj}
+						_, err = lh.Put(ra.fs.c, ra.fs.bktID, objectsToPut)
+						if err != nil {
+							return 0, fmt.Errorf("failed to update file object: %v", err)
+						}
+
+						// Update cache
+						fileObjCache.Put(ra.fileObjKey, updateFileObj)
+						ra.fileObj.Store(updateFileObj)
+
+						return versionID, nil
+					} else if newSize == int64(oldDataInfo.OrigSize) {
+						// Same size, reference same package with new OrigSize
+						newDataInfo = &core.DataInfo{
+							ID:        newDataID,
+							Size:      oldDataInfo.Size, // Keep compressed/encrypted size
+							OrigSize:  newSize,          // New original size (same as before)
+							Kind:      oldDataInfo.Kind, // Keep compression/encryption flags
+							PkgID:     oldDataInfo.PkgID,
+							PkgOffset: oldDataInfo.PkgOffset,
+						}
+					} else {
+						// newSize < original size, need to read, decompress/decrypt, truncate, and re-compress/encrypt
+						// Invalidate old DataInfo cache to ensure we get fresh data
+						oldDataInfoCacheKey := formatCacheKey(ra.fs.bktID, oldDataID)
+						dataInfoCache.Del(oldDataInfoCacheKey)
+
+						// Use Read method to get decompressed/decrypted data (only read up to newSize)
+						// Note: Read method should limit reading to requested size, but we'll ensure it
+						readData, readErr := ra.Read(0, int(newSize))
+						if readErr != nil {
+							return 0, fmt.Errorf("failed to read data for truncate: %v", readErr)
+						}
+						// Ensure we only use newSize bytes (Read may return more due to compression/encryption)
+						if int64(len(readData)) > newSize {
+							readData = readData[:newSize]
+						}
+
+						// Write truncated data (will be compressed/encrypted if needed)
+						// Use Write and Flush to handle compression/encryption
+						if err := ra.Write(0, readData); err != nil {
+							return 0, fmt.Errorf("failed to write truncated data: %v", err)
+						}
+						_, flushErr := ra.Flush()
+						if flushErr != nil {
+							return 0, fmt.Errorf("failed to flush truncated data: %v", flushErr)
+						}
+
+						// Flush already created new version and updated fileObj
+						// Invalidate cache to ensure we get fresh fileObj
+						// Use typed nil pointer instead of nil for atomic.Value
+						ra.fileObj.Store((*core.ObjectInfo)(nil))
+
+						// Get updated fileObj to verify
+						updatedFileObj, err := ra.getFileObj()
+						if err != nil {
+							return 0, fmt.Errorf("failed to get updated file object: %v", err)
+						}
+
+						// Verify size is correct
+						if updatedFileObj.Size != newSize {
+							return 0, fmt.Errorf("truncated file size mismatch: expected %d, got %d", newSize, updatedFileObj.Size)
+						}
+
+						// Invalidate old DataInfo cache to ensure fresh reads
+						if oldDataID > 0 && oldDataID != core.EmptyDataID && oldDataID != updatedFileObj.DataID {
+							oldDataInfoCacheKey := formatCacheKey(ra.fs.bktID, oldDataID)
+							dataInfoCache.Del(oldDataInfoCacheKey)
+						}
+
+						// Return version ID (Flush already created it, but we need to return a version ID)
+						// Actually, we should return the version ID from the Flush operation
+						// But Flush returns version ID, so we can use that
+						// However, we already called Flush above, so we need to generate a new version ID
+						// Or we can just return 0 to indicate success (version was created by Flush)
+						// Actually, let's create a version object to track this truncate operation
+						versionID := ra.fs.h.NewID()
+						if versionID <= 0 {
+							return 0, fmt.Errorf("failed to generate version ID")
+						}
+
+						// Create version object for this truncate operation
+						mTime := core.Now()
+						newVersion := &core.ObjectInfo{
+							ID:     versionID,
+							PID:    ra.fileID,
+							Type:   core.OBJ_TYPE_VERSION,
+							DataID: updatedFileObj.DataID,
+							Size:   newSize,
+							MTime:  mTime,
+						}
+
+						// Update file object (if not already updated by Flush)
+						updateFileObj := &core.ObjectInfo{
+							ID:     ra.fileID,
+							DataID: updatedFileObj.DataID,
+							Size:   newSize,
+							MTime:  mTime,
+						}
+
+						// Batch write version and update file object
+						objectsToPut := []*core.ObjectInfo{newVersion, updateFileObj}
+						_, err = lh.Put(ra.fs.c, ra.fs.bktID, objectsToPut)
+						if err != nil {
+							return 0, fmt.Errorf("failed to update file object: %v", err)
+						}
+
+						// Update cache
+						fileObjCache.Put(ra.fileObjKey, updateFileObj)
+						ra.fileObj.Store(updateFileObj)
+
+						return versionID, nil
+					}
+				} else {
+					// Direct data (not in package)
+					if newSize > int64(oldDataInfo.OrigSize) {
+						// File is extended, need to read original data and fill with zeros
+						// Use Read method to get decompressed/decrypted data
+						readData, readErr := ra.Read(0, int(oldDataInfo.OrigSize))
+						if readErr != nil {
+							return 0, fmt.Errorf("failed to read data for truncate: %v", readErr)
+						}
+						// Ensure we only use OrigSize bytes
+						if int64(len(readData)) > int64(oldDataInfo.OrigSize) {
+							readData = readData[:oldDataInfo.OrigSize]
+						}
+
+						// Extend with zeros
+						extendedData := make([]byte, newSize)
+						copy(extendedData, readData)
+						// Remaining bytes are already zero (Go zero-initializes slices)
+
+						// Write extended data (will be compressed/encrypted if needed)
+						if err := ra.Write(0, extendedData); err != nil {
+							return 0, fmt.Errorf("failed to write extended data: %v", err)
+						}
+						_, flushErr := ra.Flush()
+						if flushErr != nil {
+							return 0, fmt.Errorf("failed to flush extended data: %v", flushErr)
+						}
+
+						// Get updated fileObj to get new DataID
+						updatedFileObj, err := ra.getFileObj()
+						if err != nil {
+							return 0, fmt.Errorf("failed to get updated file object: %v", err)
+						}
+
+						// Verify size is correct
+						if updatedFileObj.Size != newSize {
+							return 0, fmt.Errorf("truncated file size mismatch: expected %d, got %d", newSize, updatedFileObj.Size)
+						}
+
+						// Return version ID (already created by Flush)
+						versionID := ra.fs.h.NewID()
+						if versionID <= 0 {
+							return 0, fmt.Errorf("failed to generate version ID")
+						}
+
+						// Create version object for this truncate operation
+						mTime := core.Now()
+						newVersion := &core.ObjectInfo{
+							ID:     versionID,
+							PID:    ra.fileID,
+							Type:   core.OBJ_TYPE_VERSION,
+							DataID: updatedFileObj.DataID,
+							Size:   newSize,
+							MTime:  mTime,
+						}
+
+						// Update file object (if not already updated by Flush)
+						updateFileObj := &core.ObjectInfo{
+							ID:     ra.fileID,
+							DataID: updatedFileObj.DataID,
+							Size:   newSize,
+							MTime:  mTime,
+						}
+
+						// Batch write version and update file object
+						objectsToPut := []*core.ObjectInfo{newVersion, updateFileObj}
+						_, err = lh.Put(ra.fs.c, ra.fs.bktID, objectsToPut)
+						if err != nil {
+							return 0, fmt.Errorf("failed to update file object: %v", err)
+						}
+
+						// Update cache
+						fileObjCache.Put(ra.fileObjKey, updateFileObj)
+						ra.fileObj.Store(updateFileObj)
+
+						return versionID, nil
+					} else if newSize == int64(oldDataInfo.OrigSize) {
+						// Same size, reference same data block with new OrigSize
+						// Read original data
+						data, readErr := ra.fs.h.GetData(ra.fs.c, ra.fs.bktID, oldDataID, 0, 0, int(newSize))
+						if readErr != nil {
+							return 0, fmt.Errorf("failed to read data for truncate: %v", readErr)
+						}
+
+						// Write data to new DataID
+						_, writeErr := ra.fs.h.PutData(ra.fs.c, ra.fs.bktID, newDataID, 0, data)
+						if writeErr != nil {
+							return 0, fmt.Errorf("failed to write data: %v", writeErr)
+						}
+
+						// Create new DataInfo
+						newDataInfo = &core.DataInfo{
+							ID:        newDataID,
+							Size:      int64(len(data)),
+							OrigSize:  int64(len(data)),
+							Kind:      oldDataInfo.Kind,
+							PkgID:     0,
+							PkgOffset: 0,
+						}
+					} else {
+						// newSize < original size, need to read and write truncated data
+						// Read data up to newSize
+						data, readErr := ra.fs.h.GetData(ra.fs.c, ra.fs.bktID, oldDataID, 0, 0, int(newSize))
+						if readErr != nil {
+							return 0, fmt.Errorf("failed to read data for truncate: %v", readErr)
+						}
+
+						// Write truncated data to new DataID
+						_, writeErr := ra.fs.h.PutData(ra.fs.c, ra.fs.bktID, newDataID, 0, data)
+						if writeErr != nil {
+							return 0, fmt.Errorf("failed to write truncated data: %v", writeErr)
+						}
+
+						// Create new DataInfo
+						newDataInfo = &core.DataInfo{
+							ID:        newDataID,
+							Size:      int64(len(data)),
+							OrigSize:  int64(len(data)),
+							Kind:      oldDataInfo.Kind,
+							PkgID:     0,
+							PkgOffset: 0,
+						}
+					}
+				}
+			} else {
+				// No old DataInfo, create new empty data block
+				newDataID = core.EmptyDataID
+				newDataInfo = &core.DataInfo{
+					ID:        newDataID,
+					Size:      0,
+					OrigSize:  0,
+					Kind:      core.DATA_NORMAL,
+					PkgID:     0,
+					PkgOffset: 0,
+				}
+			}
+		} else {
+			// No old data, create new empty data block
+			newDataID = core.EmptyDataID
+			newDataInfo = &core.DataInfo{
+				ID:        newDataID,
+				Size:      0,
+				OrigSize:  0,
+				Kind:      core.DATA_NORMAL,
+				PkgID:     0,
+				PkgOffset: 0,
+			}
+		}
+	}
+
+	// Save new DataInfo
+	if newDataInfo != nil && newDataID != core.EmptyDataID {
+		_, err = ra.fs.h.PutDataInfo(ra.fs.c, ra.fs.bktID, []*core.DataInfo{newDataInfo})
+		if err != nil {
+			return 0, fmt.Errorf("failed to save DataInfo: %v", err)
+		}
+		// Update cache
+		dataInfoCache.Put(formatCacheKey(ra.fs.bktID, newDataID), newDataInfo)
+	}
+
+	// Create new version object
+	mTime := core.Now()
+	newVersion := &core.ObjectInfo{
+		ID:     newVersionID,
+		PID:    ra.fileID,
+		Type:   core.OBJ_TYPE_VERSION,
+		DataID: newDataID,
+		Size:   newSize,
+		MTime:  mTime,
+	}
+
+	// Update file object
+	updateFileObj := &core.ObjectInfo{
+		ID:     ra.fileID,
+		DataID: newDataID,
+		Size:   newSize,
+		MTime:  mTime,
+	}
+
+	// Batch write version and update file object
+	objectsToPut := []*core.ObjectInfo{newVersion, updateFileObj}
+	_, err = lh.Put(ra.fs.c, ra.fs.bktID, objectsToPut)
+	if err != nil {
+		return 0, fmt.Errorf("failed to update file object: %v", err)
+	}
+
+	// Update cache
+	fileObjCache.Put(ra.fileObjKey, updateFileObj)
+	ra.fileObj.Store(updateFileObj)
+
+	// Invalidate old DataInfo cache if DataID changed
+	if fileObj.DataID > 0 && fileObj.DataID != core.EmptyDataID && fileObj.DataID != newDataID {
+		oldDataInfoCacheKey := formatCacheKey(ra.fs.bktID, fileObj.DataID)
+		dataInfoCache.Del(oldDataInfoCacheKey)
+	}
+
+	return newVersionID, nil
+}
+
+func (ra *RandomAccessor) Close() error {
+	// Cancel delayed flush timer to ensure synchronous flush (atomic swap)
+	// Use typed nil pointer (*time.Timer)(nil) instead of nil for atomic.Value
+	oldTimer := ra.pendingFlush.Swap((*time.Timer)(nil))
+	if oldTimer != nil {
+		if timer, ok := oldTimer.(*time.Timer); ok && timer != nil {
+			timer.Stop()
+		}
+	}
+
+	// Synchronously flush all pending write data
 	_, err := ra.Flush()
 	if err != nil {
 		return err
 	}
 
-	// 确保批量写入的数据也被刷新（flush会刷新所有数据）
+	// Ensure batch write data is also flushed (flush will flush all data)
 	batchMgr := ra.fs.getBatchWriteManager()
-	batchMgr.flushAll()
+	if batchMgr != nil {
+		batchMgr.flushAll()
+	}
 
 	return nil
 }
 
-// mergeWriteOperations 合并重叠的写入操作
-// 优化：使用更高效的排序算法（快速排序）
+// mergeWriteOperations merges overlapping write operations
+// Optimization: use more efficient sorting algorithm (quicksort)
 func mergeWriteOperations(operations []WriteOperation) []WriteOperation {
 	if len(operations) == 0 {
 		return nil
 	}
 
-	// 优化：如果operations已经是排序的，可以跳过排序
-	// 但为了安全，还是进行排序（可以使用更高效的算法）
-	// 优化：原地排序，避免额外的内存分配
+	// Optimization: if operations are already sorted, can skip sorting
+	// But for safety, still sort (can use more efficient algorithm)
+	// Optimization: in-place sort to avoid extra memory allocation
 	sorted := operations
 	if len(sorted) > 1 {
-		// 创建新slice用于排序（避免修改原slice）
+		// Create new slice for sorting (avoid modifying original slice)
 		sorted = make([]WriteOperation, len(operations))
 		copy(sorted, operations)
 	}
-	// 使用快速排序（内置sort包）
-	// 但为了不引入新依赖，使用优化的插入排序
+	// Use quicksort (built-in sort package)
+	// But to avoid introducing new dependencies, use optimized insertion sort
 	for i := 1; i < len(sorted); i++ {
 		key := sorted[i]
 		j := i - 1
@@ -2237,10 +2739,10 @@ func mergeWriteOperations(operations []WriteOperation) []WriteOperation {
 		sorted[j+1] = key
 	}
 
-	// 优化：预分配容量，减少扩容
-	// 优化：使用对象池获取初始容量
+	// Optimization: pre-allocate capacity to reduce expansion
+	// Optimization: use object pool to get initial capacity
 	merged := writeOpsPool.Get().([]WriteOperation)
-	merged = merged[:0] // 重置但保留容量
+	merged = merged[:0] // Reset but keep capacity
 	if cap(merged) < len(sorted) {
 		merged = make([]WriteOperation, 0, len(sorted))
 	}
@@ -2255,17 +2757,17 @@ func mergeWriteOperations(operations []WriteOperation) []WriteOperation {
 		lastEnd := last.Offset + int64(len(last.Data))
 		opEnd := op.Offset + int64(len(op.Data))
 
-		// 优化：如果完全重叠且新操作覆盖旧操作，直接替换（避免创建新对象）
+		// Optimization: if completely overlapping and new operation overwrites old, directly replace (avoid creating new object)
 		if op.Offset >= last.Offset && opEnd <= lastEnd {
-			// 新操作完全在旧操作内，直接覆盖（避免创建新的WriteOperation）
+			// New operation is completely within old operation, directly overwrite (avoid creating new WriteOperation)
 			offsetInLast := op.Offset - last.Offset
 			copy(last.Data[offsetInLast:], op.Data)
 			continue
 		}
 
-		// 如果重叠，合并
+		// If overlapping, merge
 		if op.Offset <= lastEnd {
-			// 计算新的范围
+			// Calculate new range
 			startOffset := last.Offset
 			if op.Offset < startOffset {
 				startOffset = op.Offset
@@ -2275,7 +2777,7 @@ func mergeWriteOperations(operations []WriteOperation) []WriteOperation {
 				endOffset = opEnd
 			}
 
-			// 优化：使用对象池获取缓冲区
+			// Optimization: use object pool to get buffer
 			mergedData := chunkDataPool.Get().([]byte)
 			if cap(mergedData) < int(endOffset-startOffset) {
 				mergedData = make([]byte, endOffset-startOffset)
@@ -2283,11 +2785,11 @@ func mergeWriteOperations(operations []WriteOperation) []WriteOperation {
 				mergedData = mergedData[:endOffset-startOffset]
 			}
 
-			// 复制旧数据
+			// Copy old data
 			if last.Offset >= startOffset {
 				copy(mergedData[last.Offset-startOffset:], last.Data)
 			}
-			// 复制新数据（覆盖）
+			// Copy new data (overwrite)
 			if op.Offset >= startOffset {
 				copy(mergedData[op.Offset-startOffset:], op.Data)
 			}
@@ -2295,7 +2797,7 @@ func mergeWriteOperations(operations []WriteOperation) []WriteOperation {
 			last.Offset = startOffset
 			last.Data = mergedData
 		} else {
-			// 不重叠，添加新操作
+			// Not overlapping, add new operation
 			merged = append(merged, op)
 		}
 	}
@@ -2303,14 +2805,14 @@ func mergeWriteOperations(operations []WriteOperation) []WriteOperation {
 	return merged
 }
 
-// applyWritesToData 将写入操作应用到数据
-// 优化：一次性计算所需大小，避免多次扩展
+// applyWritesToData applies write operations to data
+// Optimization: calculate required size at once to avoid multiple expansions
 func applyWritesToData(data []byte, writes []WriteOperation) []byte {
 	if len(writes) == 0 {
 		return data
 	}
 
-	// 计算需要的大小（优化：一次性计算，避免多次扩展）
+	// Calculate required size (optimization: calculate at once to avoid multiple expansions)
 	var maxSize int64 = int64(len(data))
 	for _, write := range writes {
 		writeEnd := write.Offset + int64(len(write.Data))
@@ -2319,13 +2821,13 @@ func applyWritesToData(data []byte, writes []WriteOperation) []byte {
 		}
 	}
 
-	// 优化：一次性分配所需大小，避免多次扩展
+	// Optimization: allocate required size at once to avoid multiple expansions
 	result := make([]byte, maxSize)
 	if len(data) > 0 {
 		copy(result, data)
 	}
 
-	// 应用所有写入操作（优化：移除冗余检查，maxSize已保证容量足够）
+	// Apply all write operations (optimization: remove redundant checks, maxSize already guarantees sufficient capacity)
 	for _, write := range writes {
 		if len(write.Data) > 0 {
 			writeEnd := write.Offset + int64(len(write.Data))

@@ -65,6 +65,11 @@ The following are all environment variable configuration items supported by the 
      Default: 200
      Example: export ORCAS_MAX_WRITE_BUFFER_COUNT=300
 
+   - ORCAS_BATCH_WRITE_ENABLED: Whether to enable batch write optimization (true/false/1/0)
+     When disabled, files are written as individual objects directly
+     Default: true
+     Example: export ORCAS_BATCH_WRITE_ENABLED=false
+
 6. Scheduled Task Configuration (Crontab)
    - ORCAS_CRON_SCRUB_ENABLED: Whether to enable ScrubData scheduled task (true/false/1/0)
      Default: false
@@ -325,14 +330,20 @@ type WriteBufferConfig struct {
 	// BufferWindow Buffer window time (seconds), multiple writes within the specified time will be merged
 	// Configurable via environment variable ORCAS_WRITE_BUFFER_WINDOW_SEC, default 10 seconds
 	BufferWindow time.Duration
+
+	// BatchWriteEnabled Whether to enable batch write optimization
+	// When disabled, files are written as individual objects directly
+	// Configurable via environment variable ORCAS_BATCH_WRITE_ENABLED, default true
+	BatchWriteEnabled bool
 }
 
 // GetWriteBufferConfig Get random write buffer configuration
 func GetWriteBufferConfig() WriteBufferConfig {
 	config := WriteBufferConfig{
-		MaxBufferSize:   8 * 1024 * 1024,  // Default 8MB
-		MaxBufferWrites: 200,              // Default 200 operations
-		BufferWindow:    10 * time.Second, // Default 10 seconds
+		MaxBufferSize:     8 * 1024 * 1024,  // Default 8MB
+		MaxBufferWrites:   200,              // Default 200 operations
+		BufferWindow:      10 * time.Second, // Default 10 seconds
+		BatchWriteEnabled: true,             // Default enabled
 	}
 
 	// Read configuration from environment variables
@@ -352,6 +363,10 @@ func GetWriteBufferConfig() WriteBufferConfig {
 		if d, err := strconv.ParseInt(window, 10, 64); err == nil && d > 0 {
 			config.BufferWindow = time.Duration(d) * time.Second
 		}
+	}
+
+	if enabled := os.Getenv("ORCAS_BATCH_WRITE_ENABLED"); enabled != "" {
+		config.BatchWriteEnabled = enabled == "true" || enabled == "1"
 	}
 
 	return config
