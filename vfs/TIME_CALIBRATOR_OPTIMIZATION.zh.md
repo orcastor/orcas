@@ -15,8 +15,8 @@
 
 ### 优化方案
 参考ecache的实现，使用全局时间校准器：
-- **定期更新**: 后台协程定期更新时间戳（默认每毫秒）
-- **原子操作**: 使用`atomic.Int64`存储时间戳，保证线程安全
+- **定期更新**: 后台协程每秒校准一次，然后每100毫秒递增9次，提供100毫秒精度
+- **原子操作**: 使用`atomic.LoadInt64`和`atomic.StoreInt64`操作时间戳，保证线程安全
 - **无临时对象**: 直接返回int64时间戳，不创建临时对象
 
 ## 实现细节
@@ -24,34 +24,32 @@
 ### 时间校准器实现
 
 ```go
+// Time calibrator: uses custom timestamp to reduce time.Now() calls and GC pressure
+// Inspired by ecache's implementation, periodically update timestamp
 var (
-    // 时间校准器：使用自己的时间戳，减少time.Now()调用和GC压力
-    currentTimeStamp atomic.Int64 // 当前Unix时间戳（秒）
-    timeCalibratorOnce sync.Once  // 确保只初始化一次
+    clock, p, n = time.Now().UnixNano(), uint16(0), uint16(1)
 )
 
-// initTimeCalibrator 初始化时间校准器
-func initTimeCalibrator() {
-    timeCalibratorOnce.Do(func() {
-        // 初始化当前时间戳
-        currentTimeStamp.Store(time.Now().Unix())
-        
-        // 启动时间校准协程，每毫秒更新一次时间戳
-        go func() {
-            ticker := time.NewTicker(1 * time.Millisecond)
-            defer ticker.Stop()
-            for {
-                currentTimeStamp.Store(time.Now().Unix())
-                <-ticker.C
+func now() int64 { return atomic.LoadInt64(&clock) }
+func init() {
+    go func() { // internal counter that reduce GC caused by `time.Now()`
+        for {
+            atomic.StoreInt64(&clock, time.Now().UnixNano()) // calibration every second
+            for i := 0; i < 9; i++ {
+                time.Sleep(100 * time.Millisecond)
+                atomic.AddInt64(&clock, int64(100*time.Millisecond))
             }
-        }()
-    })
+            time.Sleep(100 * time.Millisecond)
+        }
+    }()
 }
 
-// Now 获取当前Unix时间戳（秒）
+// Now Get current Unix timestamp (seconds)
+// Uses time calibrator's timestamp to avoid creating temporary objects with each time.Now() call
+// This function can be reused throughout the project to reduce GC pressure
+// Named similar to time.Now(), but returns Unix timestamp (seconds) instead of time.Time object
 func Now() int64 {
-    initTimeCalibrator()
-    return currentTimeStamp.Load()
+    return atomic.LoadInt64(&clock) / 1e9 // Convert nanoseconds to seconds
 }
 ```
 
@@ -75,9 +73,9 @@ mTime := core.Now()
 3. **提升吞吐量**: 在高并发写入场景下，预计提升5-15%
 
 ### 精度保证
-- **更新频率**: 每毫秒更新一次（1ms精度）
+- **更新频率**: 每秒校准一次，然后每100毫秒递增9次（100ms精度）
 - **时间精度**: 对于大多数场景，1秒精度已经足够
-- **延迟误差**: 最大延迟1毫秒，可忽略不计
+- **延迟误差**: 最大延迟100毫秒，可忽略不计
 
 ## 已优化的位置
 
@@ -92,23 +90,24 @@ mTime := core.Now()
 ## 技术细节
 
 ### 线程安全
-- 使用`atomic.Int64`保证并发安全
-- 使用`sync.Once`确保只初始化一次
+- 使用`atomic.LoadInt64`和`atomic.StoreInt64`保证并发安全
+- 在`init()`函数中自动启动后台协程
 
 ### 内存占用
 - 仅占用一个int64（8字节）存储时间戳
-- 后台协程开销极小（每毫秒一次原子写操作）
+- 后台协程开销极小（每秒校准一次，然后每100毫秒递增9次）
 
 ### 时间精度
-- 更新频率：1毫秒
+- 更新频率：每秒校准一次，然后每100毫秒递增9次
 - 时间精度：Unix时间戳（秒级）
 - 适用场景：文件系统元数据时间戳（MTime）
 
 ## 注意事项
 
 1. **时间精度**: 时间校准器使用秒级精度，如果需要纳秒级精度，需要单独处理
-2. **初始化**: 时间校准器在首次调用时自动初始化，无需手动初始化
+2. **初始化**: 时间校准器在`init()`函数中自动启动，无需手动初始化
 3. **后台协程**: 时间校准器会启动一个后台协程，程序退出时会自动停止
+4. **更新机制**: 每秒校准一次确保时间准确性，然后每100毫秒递增9次提供100毫秒精度
 
 ## 对比测试
 

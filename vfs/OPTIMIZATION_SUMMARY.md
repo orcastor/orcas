@@ -17,10 +17,6 @@ This optimization includes batch write optimization and time calibrator optimiza
    - Version objects and file object updates written together
    - Reduce database I/O operations
 
-3. **Performance Test Data Volume Increase**
-   - Small data block tests: from 10 writes → 200 writes (20x)
-   - Medium data block tests: from 5 writes → 100 writes (20x)
-
 ### Performance Improvements
 - **Throughput**: Small file write scenarios expected improvement of 20-50%
 - **I/O Reduction**: Metadata writes reduced by 50%, small file flushes reduced by 80-90%
@@ -92,12 +88,10 @@ Including:
 **Before Optimization**:
 - Flush immediately after each write
 - Frequent I/O operations
-- Small data block tests: 10 writes
 
 **After Optimization**:
 - Delayed flush mechanism
 - Batch write metadata
-- Small data block tests: 200 writes (20x improvement)
 
 ### Time Calibrator Optimization
 **Before Optimization**:

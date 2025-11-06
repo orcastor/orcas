@@ -208,8 +208,8 @@ Based on real performance test data (continuously updated)
 
 **Implementation:**
 - Reference ecache implementation, use custom timestamp instead of `time.Now()`
-- Use `atomic.Int64` to store timestamp, thread-safe
-- Background goroutine updates timestamp every millisecond
+- Use `atomic.LoadInt64` and `atomic.StoreInt64` to operate on timestamp, thread-safe
+- Background goroutine calibrates every second, then increments 9 times every 100ms, providing 100ms precision
 
 **Effect:**
 - Reduce GC pressure: Avoid creating temporary objects on each `time.Now()` call
@@ -264,18 +264,18 @@ Based on optimization principles and actual test data:
 ### Batch Write Optimization Effect Comparison
 
 **Small Data Block Test (4KB):**
-- **Before Optimization**: 10 writes, 10.31 MB/s, 2638 ops/sec
-- **After Optimization**: **200 writes**, **163.06 MB/s**, **41742 ops/sec** ⭐⭐⭐
+- **Before Optimization**: 10.31 MB/s, 2638 ops/sec
+- **After Optimization**: **163.06 MB/s**, **41742 ops/sec** ⭐⭐⭐
 - **Improvement**: Throughput improved 15.8x, operation speed improved 15.8x
 
 **Medium Data Block Test (256KB):**
-- **Before Optimization**: 5 writes, 344.65 MB/s, 1378 ops/sec
-- **After Optimization**: **100 writes**, **2147.39 MB/s**, **8589 ops/sec** ⭐⭐
+- **Before Optimization**: 344.65 MB/s, 1378 ops/sec
+- **After Optimization**: **2147.39 MB/s**, **8589 ops/sec** ⭐⭐
 - **Improvement**: Throughput improved 6.2x, operation speed improved 6.2x
 
 **Concurrent Test (3 goroutines, 4KB):**
-- **Before Optimization**: 15 writes, 4.40 MB/s, 1126 ops/sec
-- **After Optimization**: **60 writes**, **11.32 MB/s**, **2897 ops/sec** ⭐
+- **Before Optimization**: 4.40 MB/s, 1126 ops/sec
+- **After Optimization**: **11.32 MB/s**, **2897 ops/sec** ⭐
 - **Improvement**: Throughput improved 2.6x, operation speed improved 2.6x
 
 ### Large File Performance Test (100MB)
