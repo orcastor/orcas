@@ -11,6 +11,7 @@ This is an ORCAS file upload/download command line tool implemented based on the
 - Support configuration via command line parameters or configuration file (JSON)
 - Support advanced features like encryption, compression, instant upload, etc.
 - Support user management (requires admin privileges): create, update, delete, and list users
+- Support bucket management (requires admin privileges): create, delete, and list buckets, with support for specifying bucket owner and quota
 
 ## Build
 
