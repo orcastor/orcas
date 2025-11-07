@@ -13,7 +13,7 @@ Based on real performance test data (continuously updated)
 - **CPU**: Apple Silicon M4 Pro
 - **Go Version**: Go 1.18+
 - **Test Cases**: 14 core scenarios (8 basic scenarios + 2 sequential write optimizations + 4 random write scenarios)
-- **Total Execution Time**: **0.49 seconds** (after optimization, including batch write and time calibrator optimization)
+- **Total Execution Time**: **0.48 seconds** (after optimization, including batch write and time calibrator optimization)
 - **All Tests Passed** ✅
 
 ### Test Scenario Details (After Optimization - Including Batch Write Optimization)
@@ -21,72 +21,72 @@ Based on real performance test data (continuously updated)
 | Test Scenario | Data Size | Operations | Concurrency | Execution Time | Throughput | Ops/sec | Peak Memory | GC Count | Total Data |
 |--------------|-----------|------------|-------------|----------------|-----------|---------|--------------|----------|------------|
 | **Basic Scenarios** |||||||||||
-| Small Data Single Thread ⭐ | 4.0 KB | **200** | 1 | 4ms | **191.52 MB/s** | **49029.13** ⭐⭐⭐ | 8.08 MB | 0 | 0.78 MB |
-| Medium Data Single Thread ⭐ | 256.0 KB | **100** | 1 | 15ms | **1643.61 MB/s** ⭐⭐ | **6574.46** ⭐⭐ | 8.15 MB | 0 | 25.00 MB |
-| Small Data Concurrent 3 | 4.0 KB | **60** | 3 | 23ms | **10.36 MB/s** | **2651.23** ⭐ | 41.01 MB | 4 | 0.23 MB |
-| Encrypted Single Thread | 256.0 KB | **20** | 1 | 21ms | 239.95 MB/s | 959.79 | 9.79 MB | 1 | 5.00 MB |
-| Compressed Single Thread | 256.0 KB | **20** | 1 | 4ms | 1164.56 MB/s | 4658.25 | 8.90 MB | 0 | 5.00 MB |
-| Compressed+Encrypted | 256.0 KB | **20** | 1 | 4ms | 1133.03 MB/s | 4532.11 | 9.43 MB | 0 | 5.00 MB |
-| Large File Single Thread | **100.0 MB** | 1 | 1 | 44ms | **2276.30 MB/s** ⭐⭐⭐ | 22.76 | 8.40 MB | 0 | 100.00 MB |
-| Large File+Compressed+Encrypted | **100.0 MB** | 1 | 1 | 46ms | **2173.43 MB/s** ⭐⭐ | 21.73 | 33.34 MB | 0 | 100.00 MB |
+| Small Data Single Thread ⭐ | 4.0 KB | **200** | 1 | 4ms | **213.36 MB/s** | **54621.17** ⭐⭐⭐ | 8.08 MB | 0 | 0.78 MB |
+| Medium Data Single Thread ⭐ | 256.0 KB | **100** | 1 | 15ms | **1671.85 MB/s** ⭐⭐ | **6687.40** ⭐⭐ | 8.15 MB | 0 | 25.00 MB |
+| Small Data Concurrent 3 | 4.0 KB | **60** | 3 | 21ms | **11.34 MB/s** | **2903.14** ⭐ | 41.01 MB | 5 | 0.23 MB |
+| Encrypted Single Thread | 256.0 KB | **20** | 1 | 7ms | 768.25 MB/s | 3072.98 | 18.11 MB | 0 | 5.00 MB |
+| Compressed Single Thread | 256.0 KB | **20** | 1 | 5ms | 1084.61 MB/s | 4338.43 | 8.90 MB | 0 | 5.00 MB |
+| Compressed+Encrypted | 256.0 KB | **20** | 1 | 4ms | 1267.86 MB/s | 5071.42 | 9.43 MB | 0 | 5.00 MB |
+| Large File Single Thread | **100.0 MB** | 1 | 1 | 39ms | **2587.92 MB/s** ⭐⭐⭐ | 25.88 | 8.41 MB | 0 | 100.00 MB |
+| Large File+Compressed+Encrypted | **100.0 MB** | 1 | 1 | 48ms | **2085.86 MB/s** ⭐⭐ | 20.86 | 33.33 MB | 0 | 100.00 MB |
 | **Sequential Write Optimization Scenarios** ⭐⭐⭐ |||||||||||
-| Sequential Write Optimization | 10.0 MB | 10 | 1 | 10ms | **990.81 MB/s** ⭐⭐ | 990.81 | 18.10 MB | 0 | 100.00 MB |
-| Sequential Write+Compressed+Encrypted | 10.0 MB | 10 | 1 | 9ms | **1057.74 MB/s** ⭐⭐ | 1057.74 | 20.66 MB | 0 | 100.00 MB |
+| Sequential Write Optimization | 10.0 MB | 10 | 1 | 9ms | **1067.33 MB/s** ⭐⭐ | 1067.33 | 18.09 MB | 0 | 100.00 MB |
+| Sequential Write+Compressed+Encrypted | 10.0 MB | 10 | 1 | 9ms | **1109.58 MB/s** ⭐⭐ | 1109.58 | 20.66 MB | 0 | 100.00 MB |
 | **Random Write Scenarios** |||||||||||
-| Random Write (Non-contiguous) | 10.0 MB | 20 | 1 | 31ms | 320.09 MB/s | 640.19 | 35.57 MB | 2 | 200.00 MB |
-| Random Write+Compressed+Encrypted | 10.0 MB | 20 | 1 | 46ms | 218.17 MB/s | 436.33 | 50.12 MB | 1 | 200.00 MB |
-| Random Write (Overlapping) | 15.0 MB | 15 | 1 | 29ms | 518.38 MB/s | 518.38 | 88.64 MB | 1 | 225.00 MB |
-| Random Write (Small Chunks) | 6.2 MB | 100 | 1 | 13ms | **489.84 MB/s** | **7837.50** ⭐⭐ | 29.75 MB | 0 | 625.00 MB |
+| Random Write (Non-contiguous) | 10.0 MB | 20 | 1 | 34ms | 294.08 MB/s | 588.15 | 74.12 MB | 1 | 200.00 MB |
+| Random Write+Compressed+Encrypted | 10.0 MB | 20 | 1 | 42ms | 240.50 MB/s | 481.00 | 79.90 MB | 1 | 200.00 MB |
+| Random Write (Overlapping) | 15.0 MB | 15 | 1 | 30ms | 506.50 MB/s | 506.50 | 93.65 MB | 1 | 225.00 MB |
+| Random Write (Small Chunks) | 6.2 MB | 100 | 1 | 11ms | **553.82 MB/s** | **8861.12** ⭐⭐ | 29.75 MB | 0 | 625.00 MB |
 
 **Note**: ⭐ marks indicate performance after batch write optimization
 
 ### Performance Analysis (After Optimization)
 
 **Single Thread Performance:**
-- Average Throughput: **955.19 MB/s** ⭐
-- Average Operation Speed: **5944.55 ops/sec** ⭐
-- Average Memory Usage: 25.30 MB
-- Average GC Count: 0.4
+- Average Throughput: **1034.73 MB/s** ⭐
+- Average Operation Speed: **6650.14 ops/sec** ⭐
+- Average Memory Usage: 31.58 MB
+- Average GC Count: 0.2
 
 **Concurrent Performance (3 goroutines):**
-- Average Throughput: **10.36 MB/s** ⭐
-- Average Operation Speed: **2651.23 ops/sec** ⭐
+- Average Throughput: **11.34 MB/s** ⭐
+- Average Operation Speed: **2903.14 ops/sec** ⭐
 - Average Memory Usage: 41.01 MB
-- Average GC Count: 4.0
+- Average GC Count: 5.0
 
 **Encryption/Compression Performance:**
-- Average Throughput: **997.81 MB/s** ⭐
-- Average Operation Speed: **1944.32 ops/sec** ⭐
-- Average Memory Usage: 22.04 MB
-- Average GC Count: 0.3
+- Average Throughput: **1092.77 MB/s** ⭐
+- Average Operation Speed: **2349.05 ops/sec** ⭐
+- Average Memory Usage: 28.39 MB
+- Average GC Count: 0.2
 
 **Batch Write Optimization Effects:**
-- Small data block test: Throughput **191.52 MB/s**, Operations **49029.13 ops/sec** ⭐⭐⭐
-- Medium data block test: Throughput **1643.61 MB/s**, Operations **6574.46 ops/sec** ⭐⭐
-- Concurrent test optimization: Throughput **10.36 MB/s**, Operations **2651.23 ops/sec** ⭐
+- Small data block test: Throughput **213.36 MB/s**, Operations **54621.17 ops/sec** ⭐⭐⭐
+- Medium data block test: Throughput **1671.85 MB/s**, Operations **6687.40 ops/sec** ⭐⭐
+- Concurrent test optimization: Throughput **11.34 MB/s**, Operations **2903.14 ops/sec** ⭐
 - Encryption/Compression test: Throughput significantly improved
 
 **Large File Performance (100MB):** ⭐⭐⭐
-- Throughput: **2276.30 MB/s** (excellent, further improved)
-- Execution Time: **44ms** (fast)
-- Peak Memory: **8.40 MB** (streaming processing, extremely low memory usage)
+- Throughput: **2587.92 MB/s** (excellent, further improved)
+- Execution Time: **39ms** (fast)
+- Peak Memory: **8.41 MB** (streaming processing, extremely low memory usage)
 - GC Count: 0 (zero GC pressure)
 
 **Large File+Compressed+Encrypted Performance (100MB):** ⭐⭐
-- Throughput: **2173.43 MB/s** (excellent)
-- Execution Time: **46ms** (fast)
-- Peak Memory: **33.34 MB** (streaming processing effective)
+- Throughput: **2085.86 MB/s** (excellent)
+- Execution Time: **48ms** (fast)
+- Peak Memory: **33.33 MB** (streaming processing effective)
 - GC Count: 0 (zero GC pressure)
 
 **Sequential Write Optimization Performance:** ⭐⭐⭐
-- Throughput: **990.81 MB/s** (sequential write scenario)
-- Memory Usage: **18.10 MB** (only one chunk buffer, low memory usage)
+- Throughput: **1067.33 MB/s** (sequential write scenario)
+- Memory Usage: **18.09 MB** (only one chunk buffer, low memory usage)
 - Advantage: Faster than random write, lower memory usage
 
 **Random Write Performance:**
-- Non-contiguous writes: **320.09 MB/s**, Memory: 35.57 MB
-- Overlapping writes: **518.38 MB/s**, Memory: 88.64 MB
-- Small chunks (100 writes): **489.84 MB/s**, **7837.50 ops/sec** ⭐⭐, Memory: 29.75 MB
+- Non-contiguous writes: **294.08 MB/s**, Memory: 74.12 MB
+- Overlapping writes: **506.50 MB/s**, Memory: 93.65 MB
+- Small chunks (100 writes): **553.82 MB/s**, **8861.12 ops/sec** ⭐⭐, Memory: 29.75 MB
 
 ## Implemented Optimizations
 
@@ -244,20 +244,20 @@ Based on optimization principles and actual test data:
 - **After Optimization (Atomic Operations)**: ~900 ops/sec
 - **After Optimization (Remove Sync Flush)**: ~1800 ops/sec (peak)
 - **After Optimization (unsafe direct memory copy)**: 1800.15 ops/sec (stable high performance)
-- **After Optimization (Batch Write+Time Calibrator+Concurrent Test Optimization+Increased Write Volume)**: **2651.23 ops/sec** ✅ (stable high performance, lower GC pressure)
+- **After Optimization (Batch Write+Time Calibrator+Concurrent Test Optimization+Increased Write Volume)**: **2903.14 ops/sec** ✅ (stable high performance, lower GC pressure)
 
 ### Single Thread Performance Improvement Journey
 
 - **Before Optimization**: 1573.64 ops/sec
 - **After Optimization (Batch Write Optimization)**: **2989.94 ops/sec** ✅ (90% improvement ⭐⭐⭐)
-- **After Optimization (Increased Write Volume)**: **5944.55 ops/sec** ✅ (278% improvement ⭐⭐⭐)
-- **Small Data Block Performance**: **49029.13 ops/sec** ⭐⭐⭐ (after batch write optimization, increased write volume)
+- **After Optimization (Increased Write Volume)**: **6650.14 ops/sec** ✅ (323% improvement ⭐⭐⭐)
+- **Small Data Block Performance**: **54621.17 ops/sec** ⭐⭐⭐ (after batch write optimization, increased write volume)
 
 ### Sequential Write Optimization Performance Comparison
 
 **Sequential Write vs Random Write:**
-- **Throughput**: 990.81 MB/s vs 320.09 MB/s (**3.1x improvement**) ⭐⭐⭐
-- **Memory Usage**: 18.10 MB vs 38.56 MB (**2.1x reduction**) ⭐⭐⭐
+- **Throughput**: 1067.33 MB/s vs 294.08 MB/s (**3.6x improvement**) ⭐⭐⭐
+- **Memory Usage**: 18.09 MB vs 74.12 MB (**4.1x reduction**) ⭐⭐⭐
 - **Use Case**: Continuous writes starting from 0, automatically triggers optimization
 - **Automatic Degradation**: Automatically switches to random write mode when random write detected
 
@@ -392,29 +392,29 @@ This optimization significantly improved performance through:
 11. **Time Calibrator Optimization**: Use `core.Now()` instead of `time.Now()`, reduce GC pressure **5-15%** ⭐
 
 **Test Results:**
-- ✅ All tests complete in **0.49 seconds** (after optimization, including batch write and time calibrator optimization)
+- ✅ All tests complete in **0.48 seconds** (after optimization, including batch write and time calibrator optimization)
 - ✅ All functional tests pass (14 performance test scenarios + 18 functional tests)
-- ✅ Concurrent performance: **2651.23 ops/sec** (stable high performance, lower GC pressure) ⭐
-- ✅ Single thread performance: **5944.55 ops/sec** (excellent performance ⭐⭐⭐)
-- ✅ Small data block performance: **49029.13 ops/sec** (after batch write optimization ⭐⭐⭐)
-- ✅ Medium data block performance: **6574.46 ops/sec** (after batch write optimization ⭐⭐)
-- ✅ Large file performance: **2276.30 MB/s** (100MB file, completed in 44ms) ⭐⭐⭐
-- ✅ Large file+Compression+Encryption performance: **2173.43 MB/s** (100MB file, completed in 46ms) ⭐⭐
-- ✅ **Sequential Write Optimization Performance**: **990.81 MB/s** (sequential write scenario) ⭐⭐⭐
-- ✅ **Random Write Performance**: **218.17-518.38 MB/s** (non-contiguous, overlapping, small chunk scenarios)
+- ✅ Concurrent performance: **2903.14 ops/sec** (stable high performance, lower GC pressure) ⭐
+- ✅ Single thread performance: **6650.14 ops/sec** (excellent performance ⭐⭐⭐)
+- ✅ Small data block performance: **54621.17 ops/sec** (after batch write optimization ⭐⭐⭐)
+- ✅ Medium data block performance: **6687.40 ops/sec** (after batch write optimization ⭐⭐)
+- ✅ Large file performance: **2587.92 MB/s** (100MB file, completed in 39ms) ⭐⭐⭐
+- ✅ Large file+Compression+Encryption performance: **2085.86 MB/s** (100MB file, completed in 48ms) ⭐⭐
+- ✅ **Sequential Write Optimization Performance**: **1067.33 MB/s** (sequential write scenario) ⭐⭐⭐
+- ✅ **Random Write Performance**: **240.50-553.82 MB/s** (non-contiguous, overlapping, small chunk scenarios)
 - ✅ Reasonable memory usage (large file actual processing memory about 8-33MB, streaming processing effective)
 - ✅ Low GC pressure (most scenarios 0-1 GC, GC pressure further reduced after time calibrator optimization)
 
 **Latest Optimization Achievements:**
-1. **Batch Write Optimization**: Small file write operation speed reached **49029.13 ops/sec** ⭐⭐⭐
+1. **Batch Write Optimization**: Small file write operation speed reached **54621.17 ops/sec** ⭐⭐⭐
 2. **Time Calibrator Optimization**: Use `core.Now()` instead of `time.Now()`, reduce GC pressure **5-15%**, zero temporary object creation ⭐
-3. **Concurrent Test Optimization**: Operation speed reached **2651.23 ops/sec** ⭐
-4. **Large File Performance**: Throughput reached **2276.30 MB/s**, execution time **44ms**, low memory usage ⭐⭐⭐
-5. **Encryption/Compression Performance**: Average throughput **997.81 MB/s**, operation speed **1944.32 ops/sec** ⭐
+3. **Concurrent Test Optimization**: Operation speed reached **2903.14 ops/sec** ⭐
+4. **Large File Performance**: Throughput reached **2587.92 MB/s**, execution time **39ms**, low memory usage ⭐⭐⭐
+5. **Encryption/Compression Performance**: Average throughput **1092.77 MB/s**, operation speed **2349.05 ops/sec** ⭐
 
 Code optimization completed, can efficiently handle random and sequential write operations while maintaining good memory usage and GC performance. Batch write optimization significantly improved small file write scenario performance. Time calibrator optimization further reduced GC pressure. Concurrent test optimization improved performance in concurrent scenarios. Large file tests prove streaming processing optimization effective:
-- Regular large file: 100MB file actual processing memory about **8.40MB**, throughput reached **2276.30 MB/s**
-- Large file+Compression+Encryption: 100MB file actual processing memory about **33.34MB**, throughput reached **2173.43 MB/s**
+- Regular large file: 100MB file actual processing memory about **8.41MB**, throughput reached **2587.92 MB/s**
+- Large file+Compression+Encryption: 100MB file actual processing memory about **33.33MB**, throughput reached **2085.86 MB/s**
 
 *Note: Large file test memory peak excludes file data size stored to memory disk, only counts temporary allocated memory during processing.
 
