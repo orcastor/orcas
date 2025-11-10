@@ -464,7 +464,7 @@ func PermanentlyDeleteObject(c Ctx, bktID, id int64, h Handler, ma MetadataAdapt
 			dataInfo, err := ma.GetData(c, bktID, obj.DataID)
 			if err == nil && dataInfo != nil && dataInfo.PkgID > 0 {
 				// It's packaged data, use idgen to generate new negative dataID, update DataInfo's ID to mark deletion
-				newDataID := h.NewID()
+				newDataID := NewID()
 				if newDataID > 0 {
 					negativeDataID := -newDataID
 					// Only update current DataInfo's ID to negative (mark deletion)
@@ -1791,7 +1791,7 @@ func Defragment(c Ctx, bktID int64, a Admin, ma MetadataAdapter, da DataAdapter)
 			}
 
 			// 创建新的打包数据ID
-			pkgID := a.NewID()
+			pkgID := NewID()
 			if pkgID <= 0 {
 				continue
 			}
@@ -2045,7 +2045,7 @@ func Defragment(c Ctx, bktID int64, a Admin, ma MetadataAdapter, da DataAdapter)
 		if int64(len(newPkgBuffer)) < fileSize {
 			// 使用新pkgID方案：创建新的打包文件，更新所有引用，旧数据放入等待队列
 			// 1. 生成新的pkgID（作为新的DataID）
-			newPkgID := a.NewID()
+			newPkgID := NewID()
 			if newPkgID <= 0 {
 				continue
 			}
@@ -2062,7 +2062,7 @@ func Defragment(c Ctx, bktID int64, a Admin, ma MetadataAdapter, da DataAdapter)
 			for i, dataInfo := range validData {
 				oldDataID := dataInfo.ID
 				// 创建新的DataInfo，使用新的pkgID
-				newDataID := a.NewID()
+				newDataID := NewID()
 				if newDataID <= 0 {
 					continue
 				}

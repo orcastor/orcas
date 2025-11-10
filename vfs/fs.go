@@ -275,7 +275,7 @@ func (n *OrcasNode) Create(ctx context.Context, name string, flags uint32, mode 
 
 	// Create file object
 	fileObj := &core.ObjectInfo{
-		ID:    n.fs.h.NewID(),
+		ID:    core.NewID(),
 		PID:   obj.ID,
 		Type:  core.OBJ_TYPE_FILE,
 		Name:  name,
@@ -331,7 +331,7 @@ func (n *OrcasNode) Mkdir(ctx context.Context, name string, mode uint32, out *fu
 
 	// Create directory object
 	dirObj := &core.ObjectInfo{
-		ID:    n.fs.h.NewID(),
+		ID:    core.NewID(),
 		PID:   obj.ID,
 		Type:  core.OBJ_TYPE_DIR,
 		Name:  name,

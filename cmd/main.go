@@ -652,7 +652,7 @@ func handleBucketManagement() {
 		}
 
 		// Generate new bucket ID
-		bktID := admin.NewID()
+		bktID := core.NewID()
 		if bktID <= 0 {
 			fmt.Fprintf(os.Stderr, "Error: Failed to generate bucket ID\n")
 			os.Exit(1)

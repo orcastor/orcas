@@ -108,14 +108,13 @@ type Handler interface {
 	// 登录用户
 	Login(c Ctx, usr, pwd string) (Ctx, *UserInfo, []*BucketInfo, error)
 
-	NewID() int64
 	// 只有文件长度、HdrCRC32是预Ref，如果成功返回新DataID，失败返回0
 	// 有文件长度、CRC32、MD5，成功返回引用的DataID，失败返回0，客户端发现DataID有变化，说明不需要上传数据
 	// 如果非预Ref DataID传0，说明跳过了预Ref
 	Ref(c Ctx, bktID int64, d []*DataInfo) ([]int64, error)
-	// sn从0开始，DataID不传默认创建一个新的
+	// PutData uploads data chunk, sn starts from 0, if dataID is 0 a new one will be created
 	PutData(c Ctx, bktID, dataID int64, sn int, buf []byte) (int64, error)
-	// 只传一个参数说明是sn，传两个参数说明是sn+offset，传三个参数说明是sn+offset+size
+	// GetData reads data: one param means sn, two params mean sn+offset, three params mean sn+offset+size
 	GetData(c Ctx, bktID, id int64, sn int, offsetOrSize ...int) ([]byte, error)
 	// 上传元数据
 	PutDataInfo(c Ctx, bktID int64, d []*DataInfo) ([]int64, error)
@@ -130,16 +129,19 @@ type Handler interface {
 	Rename(c Ctx, bktID, id int64, name string) error
 	MoveTo(c Ctx, bktID, id, pid int64) error
 
-	// 垃圾回收时有数据没有元数据引用的为脏数据（需要留出窗口时间），有元数据没有数据的为损坏数据
-	Recycle(c Ctx, bktID, id int64) error // 标记删除到回收站
+	// Recycle marks object as deleted to recycle bin
+	// During garbage collection: data without metadata reference is dirty data (need window time)
+	// Metadata without data is corrupted data
+	Recycle(c Ctx, bktID, id int64) error
+	// Delete permanently deletes object
 	Delete(c Ctx, bktID, id int64) error
 
-	// 清理回收站中已标记删除的对象（物理删除）
+	// CleanRecycleBin physically deletes objects marked as deleted in recycle bin
 	CleanRecycleBin(c Ctx, bktID int64, targetID int64) error
-	// 列举回收站
+	// ListRecycleBin lists objects in recycle bin
 	ListRecycleBin(c Ctx, bktID int64, opt ListOptions) (o []*ObjectInfo, cnt int64, delim string, err error)
 
-	// 循环更新所有文件的最新版DataID、更新时间、大小和目录大小
+	// UpdateFileLatestVersion updates all files' latest version DataID, update time, size and directory size
 	UpdateFileLatestVersion(c Ctx, bktID int64) error
 
 	// GetBkt Get bucket information (for getting bucket configuration)
@@ -150,8 +152,6 @@ type Admin interface {
 	// 传入underlying，返回当前的，构成链式调用
 	New(a Admin) Admin
 	Close()
-
-	NewID() int64
 
 	PutBkt(c Ctx, o []*BucketInfo) error
 	DeleteBkt(c Ctx, bktID int64) error
@@ -189,9 +189,9 @@ func NewLocalHandler() Handler {
 	}
 }
 
-// 传入underlying，返回当前的，构成链式调用
+// New returns current handler, forming a chain with underlying handler
 func (lh *LocalHandler) New(Handler) Handler {
-	// 忽略下层handler
+	// Ignore underlying handler
 	return lh
 }
 
@@ -245,16 +245,16 @@ func (lh *LocalHandler) Login(c Ctx, usr, pwd string) (Ctx, *UserInfo, []*Bucket
 	return c, u, b, nil
 }
 
-// HashPassword 使用 PBKDF2 加密密码
-// 返回格式: iter:salt:hash
-// iter 是随机生成的迭代次数（1000-10000之间），增加密码哈希的多样性
+// HashPassword encrypts password using PBKDF2
+// Returns format: iter:salt:hash
+// iter is randomly generated iteration count (between 1000-10000), increases password hash diversity
 func HashPassword(password string) (string, error) {
-	// 生成随机迭代次数（1000-10000之间）
+	// Generate random iteration count (between 1000-10000)
 	iterBytes := make([]byte, 2)
 	if _, err := rand.Read(iterBytes); err != nil {
 		return "", err
 	}
-	// 将2字节转换为uint16，然后映射到1000-10000范围
+	// Convert 2 bytes to uint16, then map to 1000-10000 range
 	iterRand := binary.BigEndian.Uint16(iterBytes)
 	iter := 1000 + int(iterRand)%9001 // 1000 + (0-9000) = 1000-10000
 
@@ -268,13 +268,10 @@ func HashPassword(password string) (string, error) {
 	return fmt.Sprintf("%d:%s:%s", iter, saltStr, hashStr), nil
 }
 
-func (lh *LocalHandler) NewID() int64 {
-	return NewID()
-}
-
-// 只有文件长度、HdrCRC32是预Ref，如果成功返回新DataID，失败返回0
-// 有文件长度、CRC32、MD5，成功返回引用的DataID，失败返回0，客户端发现DataID有变化，说明不需要上传数据
-// 如果非预Ref DataID传0，说明跳过了预Ref
+// Ref performs pre-ref: only file length and HdrCRC32 are pre-ref, returns new DataID on success, 0 on failure
+// With file length, CRC32, MD5, returns referenced DataID on success, 0 on failure
+// Client detects DataID change means no need to upload data
+// If non-pre-ref DataID is 0, pre-ref is skipped
 func (lh *LocalHandler) Ref(c Ctx, bktID int64, d []*DataInfo) ([]int64, error) {
 	if err := lh.acm.CheckPermission(c, MDRW, bktID); err != nil {
 		return nil, err
@@ -282,16 +279,18 @@ func (lh *LocalHandler) Ref(c Ctx, bktID int64, d []*DataInfo) ([]int64, error) 
 	return lh.ma.RefData(c, bktID, d)
 }
 
-// 打包上传或者小文件，sn传-1，大文件sn从0开始，DataID不传默认创建一个新的
+// PutData uploads data chunk
+// For large files, sn starts from 0. For small files or packaged uploads, use sn=0
+// If dataID is 0, a new dataID will be created automatically
 func (lh *LocalHandler) PutData(c Ctx, bktID, dataID int64, sn int, buf []byte) (int64, error) {
 	if err := lh.acm.CheckPermission(c, DW, bktID); err != nil {
 		return 0, err
 	}
 
-	// 检查配额并更新使用量（每个写入的数据块都需要检查）
+	// Check quota and update usage (each data block write needs to check)
 	dataSize := int64(len(buf))
 	if dataSize > 0 {
-		// 获取桶信息并检查配额
+		// Get bucket info and check quota
 		buckets, err := lh.ma.GetBkt(c, []int64{bktID})
 		if err != nil {
 			return 0, err
@@ -301,14 +300,14 @@ func (lh *LocalHandler) PutData(c Ctx, bktID, dataID int64, sn int, buf []byte) 
 		}
 		bucket := buckets[0]
 
-		// 如果配额 >= 0，需要检查是否超过配额
+		// If quota >= 0, check if it exceeds quota
 		if bucket.Quota >= 0 {
 			if bucket.RealUsed+dataSize > bucket.Quota {
 				return 0, ERR_QUOTA_EXCEED
 			}
 		}
 
-		// 增加实际使用量（原子操作，在数据库层面保证一致性）
+		// Increase actual usage (atomic operation, guaranteed consistency at database level)
 		if err := lh.ma.IncBktRealUsed(c, bktID, dataSize); err != nil {
 			return 0, err
 		}
@@ -324,7 +323,7 @@ func (lh *LocalHandler) PutData(c Ctx, bktID, dataID int64, sn int, buf []byte) 
 	return dataID, lh.da.Write(c, bktID, dataID, sn, buf)
 }
 
-// 上传完数据以后，再创建元数据
+// PutDataInfo creates metadata after data is uploaded
 func (lh *LocalHandler) PutDataInfo(c Ctx, bktID int64, d []*DataInfo) (ids []int64, err error) {
 	if err := lh.acm.CheckPermission(c, MDW, bktID); err != nil {
 		return nil, err
@@ -340,7 +339,7 @@ func (lh *LocalHandler) PutDataInfo(c Ctx, bktID int64, d []*DataInfo) (ids []in
 			n = append(n, x)
 		}
 	}
-	// 设置为反码引用别的元素的数据
+	// Set to two's complement to reference data from other elements
 	for i := range ids {
 		if ids[i] < 0 && ^ids[i] < int64(len(ids)) {
 			ids[i] = ids[^ids[i]]
@@ -356,7 +355,8 @@ func (lh *LocalHandler) GetDataInfo(c Ctx, bktID, id int64) (*DataInfo, error) {
 	return lh.ma.GetData(c, bktID, id)
 }
 
-// 只传一个参数说明是sn，传两个参数说明是sn+offset，传三个参数说明是sn+offset+size
+// GetData reads data chunk
+// One param means sn, two params mean sn+offset, three params mean sn+offset+size
 func (lh *LocalHandler) GetData(c Ctx, bktID, id int64, sn int, offsetOrSize ...int) ([]byte, error) {
 	if err := lh.acm.CheckPermission(c, DR, bktID); err != nil {
 		return nil, err
@@ -371,8 +371,10 @@ func (lh *LocalHandler) GetData(c Ctx, bktID, id int64, sn int, offsetOrSize ...
 	return lh.da.ReadBytes(c, bktID, id, sn, offsetOrSize[0], offsetOrSize[1])
 }
 
-// 垃圾回收时有数据没有元数据引用的为脏数据（需要留出窗口时间），有元数据没有数据的为损坏数据
-// PID支持用补码来直接引用当次还未上传的对象的ID
+// Put creates objects
+// During garbage collection: data without metadata reference is dirty data (need window time)
+// Metadata without data is corrupted data
+// PID supports using two's complement to directly reference object ID that hasn't been uploaded yet
 func (lh *LocalHandler) Put(c Ctx, bktID int64, o []*ObjectInfo) ([]int64, error) {
 	if err := lh.acm.CheckPermission(c, MDW, bktID); err != nil {
 		return nil, err
@@ -448,11 +450,11 @@ func (lh *LocalHandler) Put(c Ctx, bktID int64, o []*ObjectInfo) ([]int64, error
 		}
 	}
 
-	// 增加逻辑使用量（即使秒传了也要计算空间）
+	// Increase logical usage (calculate space even for instant upload)
 	var totalSize int64
-	var dedupSavings int64 // 秒传节省的空间
+	var dedupSavings int64 // Space saved by instant upload
 	for _, obj := range o {
-		// 只有文件对象才计算大小，目录不计算
+		// Only file objects calculate size, directories don't
 		if obj.Type == OBJ_TYPE_FILE && obj.Size > 0 {
 			totalSize += obj.Size
 
@@ -525,7 +527,7 @@ func (lh *LocalHandler) Recycle(c Ctx, bktID, id int64) error {
 	if err := lh.acm.CheckPermission(c, MDRW, bktID); err != nil {
 		return err
 	}
-	// Recycle 只是标记删除，真正的清理由 CleanRecycleBin 完成
+	// Recycle only marks as deleted, actual cleanup is done by CleanRecycleBin
 	return DeleteObject(c, bktID, id, lh.ma)
 }
 
@@ -533,7 +535,7 @@ func (lh *LocalHandler) Delete(c Ctx, bktID, id int64) error {
 	if err := lh.acm.CheckPermission(c, MDD, bktID); err != nil {
 		return err
 	}
-	// Delete 是彻底删除，直接物理删除对象和数据文件
+	// Delete is permanent deletion, directly physically deletes object and data files
 	return PermanentlyDeleteObject(c, bktID, id, lh, lh.ma, lh.da)
 }
 
@@ -590,17 +592,13 @@ func NewLocalAdmin() Admin {
 	}
 }
 
-// 传入underlying，返回当前的，构成链式调用
+// New returns current admin, forming a chain with underlying admin
 func (la *LocalAdmin) New(Admin) Admin {
-	// 忽略下层handler
+	// Ignore underlying admin
 	return la
 }
 
 func (la *LocalAdmin) Close() {
-}
-
-func (la *LocalAdmin) NewID() int64 {
-	return NewID()
 }
 
 func (la *LocalAdmin) PutBkt(c Ctx, o []*BucketInfo) error {
@@ -657,21 +655,21 @@ func (la *LocalAdmin) CreateUser(c Ctx, username, password, name string, role ui
 		return nil, err
 	}
 
-	// 检查用户名是否已存在
+	// Check if username already exists
 	existingUser, err := la.ma.GetUsr2(c, username)
 	if err == nil && existingUser != nil && existingUser.ID > 0 {
 		return nil, fmt.Errorf("user %s already exists", username)
 	}
 
-	// 加密密码
+	// Encrypt password
 	hashedPwd, err := HashPassword(password)
 	if err != nil {
 		return nil, fmt.Errorf("failed to hash password: %v", err)
 	}
 
-	// 创建用户
+	// Create user
 	user := &UserInfo{
-		ID:     la.NewID(),
+		ID:     NewID(),
 		Usr:    username,
 		Pwd:    hashedPwd,
 		Name:   name,
@@ -684,7 +682,7 @@ func (la *LocalAdmin) CreateUser(c Ctx, username, password, name string, role ui
 		return nil, err
 	}
 
-	// 清除敏感信息后返回
+	// Clear sensitive information before returning
 	user.Pwd = ""
 	user.Key = ""
 	return user, nil
@@ -695,7 +693,7 @@ func (la *LocalAdmin) UpdateUser(c Ctx, userID int64, username, password, name s
 		return err
 	}
 
-	// 获取现有用户
+	// Get existing user
 	users, err := la.ma.GetUsr(c, []int64{userID})
 	if err != nil {
 		return err
@@ -705,10 +703,10 @@ func (la *LocalAdmin) UpdateUser(c Ctx, userID int64, username, password, name s
 	}
 	user := users[0]
 
-	// 更新字段
+	// Update fields
 	fields := []string{}
 	if username != "" {
-		// 检查新用户名是否已被其他用户使用
+		// Check if new username is already used by another user
 		existingUser, err := la.ma.GetUsr2(c, username)
 		if err == nil && existingUser != nil && existingUser.ID > 0 && existingUser.ID != userID {
 			return fmt.Errorf("username %s already exists", username)
@@ -734,7 +732,7 @@ func (la *LocalAdmin) UpdateUser(c Ctx, userID int64, username, password, name s
 	}
 
 	if len(fields) == 0 {
-		return nil // 没有需要更新的字段
+		return nil // No fields to update
 	}
 
 	return la.ma.SetUsr(c, fields, user)

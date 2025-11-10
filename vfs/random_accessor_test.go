@@ -2009,7 +2009,7 @@ func TestTruncate(t *testing.T) {
 			So(err, ShouldBeNil)
 			defer ra.Close()
 
-			// 写入小文件（可能使用BatchWriteManager，产生PkgID）
+			// 写入小文件（可能使用BatchWriter，产生PkgID）
 			smallData := make([]byte, 100)
 			for i := range smallData {
 				smallData[i] = byte('A' + (i % 26))
@@ -2216,9 +2216,9 @@ func TestTruncateWithCompression(t *testing.T) {
 	})
 }
 
-// TestBatchWriteManagerSmallFile 测试BatchWriteManager对小文件的处理
+// TestBatchWriteManagerSmallFile 测试BatchWriter对小文件的处理
 func TestBatchWriteManagerSmallFile(t *testing.T) {
-	Convey("BatchWriteManager small file operations", t, func() {
+	Convey("BatchWriter small file operations", t, func() {
 		ig := idgen.NewIDGen(nil, 0)
 		testBktID, _ := ig.New()
 		err := core.InitBucketDB(c, testBktID)
@@ -2247,7 +2247,7 @@ func TestBatchWriteManagerSmallFile(t *testing.T) {
 
 		ofs := NewOrcasFS(lh, testCtx, testBktID, nil)
 
-		Convey("test small file uses BatchWriteManager", func() {
+		Convey("test small file uses BatchWriter", func() {
 			fileID, _ := ig.New()
 			fileObj := &core.ObjectInfo{
 				ID:    fileID,
@@ -2264,7 +2264,7 @@ func TestBatchWriteManagerSmallFile(t *testing.T) {
 			So(err, ShouldBeNil)
 			defer ra.Close()
 
-			// 写入小文件（应该使用BatchWriteManager）
+			// 写入小文件（应该使用BatchWriter）
 			smallData := make([]byte, 100)
 			for i := range smallData {
 				smallData[i] = byte('A' + (i % 26))
@@ -2288,7 +2288,7 @@ func TestBatchWriteManagerSmallFile(t *testing.T) {
 	})
 }
 
-// TestSequentialWriteLargeFile 测试顺序写大文件（不使用BatchWriteManager）
+// TestSequentialWriteLargeFile 测试顺序写大文件（不使用BatchWriter）
 func TestSequentialWriteLargeFile(t *testing.T) {
 	Convey("Sequential write large file", t, func() {
 		ig := idgen.NewIDGen(nil, 0)
@@ -2354,7 +2354,7 @@ func TestSequentialWriteLargeFile(t *testing.T) {
 				So(err, ShouldBeNil)
 			}
 
-			// Flush（应该不使用BatchWriteManager，因为sn > 0）
+			// Flush（应该不使用BatchWriter，因为sn > 0）
 			_, err = ra.Flush()
 			So(err, ShouldBeNil)
 

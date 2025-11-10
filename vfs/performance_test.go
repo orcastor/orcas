@@ -230,7 +230,7 @@ func runPerformanceTest(t *testing.T, name string, dataSize, chunkSize int64, wr
 		// 注意：每个RandomAccessor的Close已经会触发刷新，这里作为保险
 		batchMgr := ofs.getBatchWriteManager()
 		if batchMgr != nil {
-			batchMgr.flushAll()
+			batchMgr.FlushAll(testCtx)
 		}
 	}
 

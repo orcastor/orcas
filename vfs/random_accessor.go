@@ -16,6 +16,7 @@ import (
 	"github.com/mkmueller/aes256"
 	"github.com/orca-zhang/ecache"
 	"github.com/orcastor/orcas/core"
+	"github.com/orcastor/orcas/sdk"
 	"github.com/tjfoc/gmsm/sm4"
 )
 
@@ -41,19 +42,23 @@ var (
 	// ecache cache: cache file object information to reduce database queries
 	// key: "<bktID>_<fileID>", value: *core.ObjectInfo
 	fileObjCache = ecache.NewLRUCache(16, 512, 30*time.Second)
-
-	// Batch write buffer object pool: reuse buffers to reduce memory allocation
-	// Note: buffer is used long-term, only returned when BatchWriteManager is no longer used
-	// Object pool uses default 4MB size, will reallocate if chunkSize differs
-	batchBufferPool = sync.Pool{
-		New: func() interface{} {
-			// Create default 4MB buffer
-			return make([]byte, 4<<20)
-		},
-	}
 )
 
-// BatchWriteManager manages batch writes, supporting packaging multiple small files' data blocks into a single data block
+// Note: vfs now uses sdk.BatchWriter instead of its own implementation
+// The following types and functions are kept for reference but are no longer used:
+/*
+// Batch write buffer object pool: reuse buffers to reduce memory allocation
+// Note: buffer is used long-term, only returned when BatchWriter is no longer used
+// Object pool uses default 4MB size, will reallocate if chunkSize differs
+batchBufferPool = sync.Pool{
+	New: func() interface{} {
+		// Create default 4MB buffer
+		return make([]byte, 4<<20)
+	},
+}
+
+// BatchWriter manages batch writes, supporting packaging multiple small files' data blocks into a single data block
+// Deprecated: This type is kept for reference only, vfs now uses sdk.BatchWriter
 // Uses lock-free buffer management with atomic operations to acquire write positions
 type BatchWriteManager struct {
 	// Filesystem (all files share the same bucket)
@@ -100,51 +105,16 @@ type PackagedFileInfo struct {
 	OrigSize  int64  // Original data size
 	Kind      uint32 // Data status (compression/encryption, etc.)
 }
+*/
 
-// getBatchWriteManager gets the batch write manager for the specified bucket (thread-safe)
+// getBatchWriteManager gets the batch writer for the specified bucket (thread-safe)
 // Returns nil if batch write is disabled
-func (fs *OrcasFS) getBatchWriteManager() *BatchWriteManager {
-	fs.batchWriteMgrOnce.Do(func() {
-		config := core.GetWriteBufferConfig()
-
-		// Check if batch write is enabled
-		if !config.BatchWriteEnabled {
-			fs.batchWriteMgr = nil
-			return
-		}
-
-		// Use chunkSize as buffer size
-		chunkSize := fs.chunkSize
-		if chunkSize <= 0 {
-			chunkSize = 4 << 20 // Default 4MB
-		}
-
-		// Get buffer from object pool (will create new if pool is empty)
-		buffer := batchBufferPool.Get().([]byte)
-		// Ensure buffer size is correct (reallocate if chunkSize differs from pool)
-		if int64(cap(buffer)) < chunkSize {
-			buffer = make([]byte, chunkSize)
-		} else {
-			buffer = buffer[:chunkSize]
-		}
-		// Note: No need to zero buffer, as we always write from writeOffset
-		// flush will atomically reset writeOffset, old data won't affect new data
-
-		fs.batchWriteMgr = &BatchWriteManager{
-			fs:             fs,
-			buffer:         buffer,
-			bufferSize:     chunkSize,
-			fileInfos:      make([]*BatchFileInfo, 1<<10), // Pre-allocate 1024 file infos
-			maxFileInfos:   1 << 10,
-			flushWindow:    config.BufferWindow,
-			maxPackageSize: chunkSize, // Use chunkSize as maximum package size
-		}
-		// Start periodic flush goroutine
-		go fs.batchWriteMgr.flushLoop()
-	})
-	return fs.batchWriteMgr
+// Uses SDK's global batch writer registry
+func (fs *OrcasFS) getBatchWriteManager() *sdk.BatchWriter {
+	return sdk.GetBatchWriterForBucket(fs.h, fs.bktID)
 }
 
+/*
 // flushLoop periodic flush loop
 func (bwm *BatchWriteManager) flushLoop() {
 	ticker := time.NewTicker(bwm.flushWindow)
@@ -201,9 +171,11 @@ func (bwm *BatchWriteManager) flush() {
 		bwm.flushPackage(pkg)
 	}
 }
+*/
 
 // packageDataBlocks packages data blocks (using processed data)
 // Reads data from shared buffer and packages it
+/*
 func (bwm *BatchWriteManager) packageDataBlocks(fileInfos []*BatchFileInfo) []*PackagedDataBlock {
 	var packages []*PackagedDataBlock
 	var currentPkg *PackagedDataBlock
@@ -259,9 +231,11 @@ func (bwm *BatchWriteManager) packageDataBlocks(fileInfos []*BatchFileInfo) []*P
 
 	return packages
 }
+*/
 
 // processFileData processes file data according to configuration (compression and encryption)
 // Returns: processed data, Kind flags, original size
+/*
 func (bwm *BatchWriteManager) processFileData(fs *OrcasFS, originalData []byte) ([]byte, uint32, int64) {
 	origSize := int64(len(originalData))
 	kind := uint32(0)
@@ -338,14 +312,16 @@ func (bwm *BatchWriteManager) processFileData(fs *OrcasFS, originalData []byte) 
 
 	return data, kind, origSize
 }
+*/
 
 // flushPackage flushes a single packaged data block (batch writes data block, DataInfo and ObjectInfo)
+/*
 func (bwm *BatchWriteManager) flushPackage(pkg *PackagedDataBlock) error {
 	if len(pkg.FileInfos) == 0 || len(pkg.Data) == 0 {
 		return nil
 	}
 
-	// Get fs and handler from BatchWriteManager
+		// Get fs and handler from BatchWriter
 	if bwm.fs == nil {
 		return fmt.Errorf("invalid batch write manager: fs is nil")
 	}
@@ -356,7 +332,7 @@ func (bwm *BatchWriteManager) flushPackage(pkg *PackagedDataBlock) error {
 	ctx := fs.c
 
 	// 1. Generate packaged data block ID
-	pkgID := lh.NewID()
+	pkgID := core.NewID()
 	if pkgID <= 0 {
 		return fmt.Errorf("failed to generate package ID")
 	}
@@ -377,7 +353,7 @@ func (bwm *BatchWriteManager) flushPackage(pkg *PackagedDataBlock) error {
 		dataID := fileInfo.DataID
 		if dataID <= 0 {
 			// If DataID is not set (should not happen), generate one
-			dataID = lh.NewID()
+			dataID = core.NewID()
 			if dataID <= 0 {
 				continue
 			}
@@ -470,121 +446,138 @@ func (bwm *BatchWriteManager) flushPackage(pkg *PackagedDataBlock) error {
 
 	return nil
 }
+*/
 
-// addFile adds file data to batch write buffer in lock-free manner
-// If space is insufficient, flushes existing data first, then continues writing
-func (bwm *BatchWriteManager) addFile(ra *RandomAccessor, data []byte) (bool, error) {
-	if len(data) == 0 {
-		return true, nil
+// processFileDataForBatchWrite processes file data (compression/encryption) for batch write
+// This is a helper function to process data before passing to SDK's BatchWriter
+func processFileDataForBatchWrite(fs *OrcasFS, originalData []byte) ([]byte, int64) {
+	origSize := int64(len(originalData))
+	if origSize == 0 {
+		return originalData, origSize
 	}
 
 	// Process compression and encryption according to configuration
-	processedData, kind, origSize := bwm.processFileData(ra.fs, data)
-	if len(processedData) == 0 {
-		return false, fmt.Errorf("failed to process file data")
+	cfg := fs.sdkCfg
+	kind := uint32(0)
+	data := originalData
+	compressedData := originalData
+	var err error
+
+	// 1. Compression (if enabled)
+	if cfg != nil && cfg.WiseCmpr > 0 {
+		kind |= cfg.WiseCmpr
+		var cmpr archiver.Compressor
+		if cfg.WiseCmpr&core.DATA_CMPR_SNAPPY != 0 {
+			cmpr = &archiver.Snappy{}
+		} else if cfg.WiseCmpr&core.DATA_CMPR_ZSTD != 0 {
+			cmpr = &archiver.Zstd{EncoderOptions: []zstd.EOption{zstd.WithEncoderLevel(zstd.EncoderLevelFromZstd(int(cfg.CmprQlty)))}}
+		} else if cfg.WiseCmpr&core.DATA_CMPR_GZIP != 0 {
+			cmpr = &archiver.Gz{CompressionLevel: int(cfg.CmprQlty)}
+		} else if cfg.WiseCmpr&core.DATA_CMPR_BR != 0 {
+			cmpr = &archiver.Brotli{Quality: int(cfg.CmprQlty)}
+		}
+
+		if cmpr != nil {
+			var cmprBuf bytes.Buffer
+			err := cmpr.Compress(bytes.NewBuffer(data), &cmprBuf)
+			if err == nil && cmprBuf.Len() < len(data) {
+				compressedData = cmprBuf.Bytes()
+				data = compressedData
+			} else {
+				kind &= ^core.DATA_CMPR_MASK
+				compressedData = originalData
+				data = originalData
+			}
+		}
 	}
 
-	processedSize := int64(len(processedData))
-
-	// Try to write, may need retry (if space is insufficient, flush first)
-	maxRetries := 10
-	for retry := 0; retry < maxRetries; retry++ {
-		// Check current space first (Load is atomic, but may be modified by other goroutines after check)
-		currentOffset := bwm.writeOffset.Load()
-		if currentOffset+processedSize > bwm.bufferSize {
-			// Space insufficient, flush existing data first
-			if retry == 0 {
-				bwm.flush()
-			} else {
-				// If still insufficient after flush, data is too large, return false for caller to fallback
-				return false, nil
+	// 2. Encryption (if enabled)
+	if cfg != nil && cfg.EndecWay > 0 {
+		kind |= cfg.EndecWay
+		if kind&core.DATA_ENDEC_AES256 != 0 {
+			data, err = aes256.Encrypt(cfg.EndecKey, data)
+			if err != nil {
+				kind &= ^core.DATA_ENDEC_MASK
+				data = compressedData
 			}
-			// Continue retry after flush
-			continue
-		}
-
-		// Use Add to directly reserve space (atomic operation)
-		newOffset := bwm.writeOffset.Add(processedSize)
-		oldOffset := newOffset - processedSize
-
-		// Check again if exceeds buffer size (may be modified by other goroutines during reservation)
-		if newOffset > bwm.bufferSize {
-			// Space insufficient after reservation, don't rollback (space is already allocated)
-			// Get file info index anyway (already allocated)
-			fileIndex := bwm.fileInfoIndex.Add(1) - 1
-			// Mark as nil to skip during flush
-			if fileIndex < bwm.maxFileInfos {
-				bwm.fileInfos[fileIndex] = nil
+		} else if kind&core.DATA_ENDEC_SM4 != 0 {
+			data, err = sm4.Sm4Cbc([]byte(cfg.EndecKey), data, true)
+			if err != nil {
+				kind &= ^core.DATA_ENDEC_MASK
+				data = compressedData
 			}
-			if retry == 0 {
-				bwm.flush()
-			} else {
-				return false, nil
-			}
-			// Continue retry after flush
-			continue
 		}
+	}
 
-		// Write data to buffer
-		// Note: Space is already reserved via Add, so oldOffset to newOffset is safe
-		copy(bwm.buffer[oldOffset:newOffset], processedData)
+	return data, origSize
+}
 
-		// Get file info index (atomic operation)
-		fileIndex := bwm.fileInfoIndex.Add(1) - 1
-		if fileIndex >= bwm.maxFileInfos {
-			// File info list is full, don't rollback (index is already allocated)
-			// Mark as nil to skip during flush
-			bwm.fileInfos[fileIndex] = nil
-			if retry == 0 {
-				bwm.flush()
-			} else {
-				return false, nil
-			}
-			// Continue retry after flush
-			continue
+// addFileToBatchWrite adds file data to SDK's batch write manager
+// This replaces the old vfs BatchWriter.addFile method
+func addFileToBatchWrite(ra *RandomAccessor, data []byte) (bool, int64, error) {
+	if len(data) == 0 {
+		return true, 0, nil
+	}
+
+	// Process compression and encryption
+	processedData, origSize := processFileDataForBatchWrite(ra.fs, data)
+	if len(processedData) == 0 {
+		return false, 0, fmt.Errorf("failed to process file data")
+	}
+
+	// Get file object to get PID and Name
+	fileObj, err := ra.getFileObj()
+	if err != nil {
+		return false, 0, fmt.Errorf("failed to get file object: %v", err)
+	}
+
+	var pid int64 = 0
+	var name string = ""
+	if fileObj != nil {
+		pid = fileObj.PID
+		name = fileObj.Name
+	}
+
+	// Get batch write manager
+	batchMgr := ra.fs.getBatchWriteManager()
+	if batchMgr == nil {
+		return false, 0, nil
+	}
+
+	// Add file to SDK's batch write manager
+	added, dataID, err := batchMgr.AddFile(ra.fileID, processedData, pid, name, origSize)
+	if err != nil {
+		return false, 0, err
+	}
+	if !added {
+		return false, 0, nil
+	}
+
+	// Immediately update fileObj with DataID so reads can work correctly
+	// This is critical: fileObj must have DataID before flush completes
+	if fileObj != nil {
+		// Update fileObj with new DataID and size
+		updateFileObj := &core.ObjectInfo{
+			ID:     fileObj.ID,
+			PID:    fileObj.PID,
+			DataID: dataID,
+			Size:   origSize, // Use original size
+			MTime:  core.Now(),
+			Type:   fileObj.Type,
+			Name:   fileObj.Name,
 		}
-
-		// Generate DataID before adding to buffer (ensures DataID is available immediately)
-		dataID := ra.fs.h.NewID()
-		if dataID <= 0 {
-			return false, fmt.Errorf("failed to generate DataID")
-		}
-
-		// Create file info (lock-free, as we've already acquired write position via Add)
-		bwm.fileInfos[fileIndex] = &BatchFileInfo{
-			FileID:   ra.fileID,
-			DataID:   dataID,
-			Offset:   oldOffset,
-			Size:     processedSize,
-			OrigSize: origSize,
-			Kind:     kind,
-		}
-
-		// Immediately update fileObj with DataID so reads can work correctly
-		// This is critical: fileObj must have DataID before flush completes
-		fileObj, err := ra.getFileObj()
-		if err == nil {
-			// Update fileObj with new DataID and size
-			updateFileObj := &core.ObjectInfo{
-				ID:     fileObj.ID,
-				PID:    fileObj.PID,
-				DataID: dataID,
-				Size:   origSize, // Use original size
-				MTime:  core.Now(),
-				Type:   fileObj.Type,
-				Name:   fileObj.Name,
-			}
-			// Update cache and atomic value immediately
+		// Update file object in database using Put (which handles updates for existing objects)
+		_, err := ra.fs.h.Put(ra.fs.c, ra.fs.bktID, []*core.ObjectInfo{updateFileObj})
+		if err != nil {
+			// Update failed, but data is already in buffer, continue
+		} else {
+			// Update cache
 			fileObjCache.Put(ra.fileObjKey, updateFileObj)
 			ra.fileObj.Store(updateFileObj)
-			// Note: Actual database update will happen in flushPackage
 		}
-
-		return true, nil
 	}
 
-	// Too many retries, return error (avoid infinite loop)
-	return false, fmt.Errorf("failed to add file after %d retries: buffer may be too small", maxRetries)
+	return true, dataID, nil
 }
 
 // formatCacheKey formats cache key (optimized: direct memory copy, highest performance)
@@ -775,7 +768,7 @@ func (ra *RandomAccessor) initSequentialBuffer() error {
 	}
 
 	// Create new data object
-	newDataID := ra.fs.h.NewID()
+	newDataID := core.NewID()
 
 	// Initialize DataInfo
 	dataInfo := &core.DataInfo{
@@ -977,7 +970,7 @@ func (ra *RandomAccessor) flushSequentialBuffer() error {
 		if len(allData) > 0 {
 			batchMgr := ra.fs.getBatchWriteManager()
 			if batchMgr != nil {
-				added, err := batchMgr.addFile(ra, allData)
+				added, _, err := addFileToBatchWrite(ra, allData)
 				if err == nil && added {
 					// Successfully added to batch write manager
 					// Clear sequential buffer
@@ -988,8 +981,8 @@ func (ra *RandomAccessor) flushSequentialBuffer() error {
 				// If batch write failed, fallback to normal write
 				// Retry once after flush
 				if !added {
-					batchMgr.flushAll()
-					added, err = batchMgr.addFile(ra, allData)
+					batchMgr.FlushAll(ra.fs.c)
+					added, _, err = addFileToBatchWrite(ra, allData)
 					if err == nil && added {
 						ra.seqBuffer.hasData = false
 						ra.seqBuffer.buffer = ra.seqBuffer.buffer[:0]
@@ -1261,7 +1254,7 @@ func (ra *RandomAccessor) Flush() (int64, error) {
 			return 0, err
 		}
 		if fileObj.DataID > 0 {
-			return ra.fs.h.NewID(), nil // Return new version ID
+			return core.NewID(), nil // Return new version ID
 		}
 	}
 
@@ -1282,15 +1275,15 @@ func (ra *RandomAccessor) Flush() (int64, error) {
 			return 0, err
 		}
 
-		// If file has existing data, don't use BatchWriteManager (fallback to normal write)
-		// BatchWriteManager is optimized for new files or complete overwrites
+		// If file has existing data, don't use BatchWriter (fallback to normal write)
+		// BatchWriter is optimized for new files or complete overwrites
 		// For incremental updates, normal write path handles merging better
 		if fileObj.DataID > 0 && fileObj.DataID != core.EmptyDataID && fileObj.Size > 0 {
-			// File has existing data, skip BatchWriteManager and use normal write path
+			// File has existing data, skip BatchWriter and use normal write path
 			// This ensures proper merging of existing data with new writes
 			// Continue to normal write path below
 		} else {
-			// No existing data, can use BatchWriteManager
+			// No existing data, can use BatchWriter
 			// Now copy operations (before swapping)
 			operations := make([]WriteOperation, writeIndex)
 			copy(operations, ra.buffer.operations[:writeIndex])
@@ -1315,14 +1308,14 @@ func (ra *RandomAccessor) Flush() (int64, error) {
 				// Add to batch write manager (lock-free)
 				batchMgr := ra.fs.getBatchWriteManager()
 				if batchMgr != nil {
-					added, err := batchMgr.addFile(ra, mergedData)
+					added, _, err := addFileToBatchWrite(ra, mergedData)
 					if err != nil {
 						// Processing failed, fallback to normal write
 					} else if !added {
 						// Buffer full, flush immediately
-						batchMgr.flushAll()
+						batchMgr.FlushAll(ra.fs.c)
 						// Retry add
-						added, err = batchMgr.addFile(ra, mergedData)
+						added, _, err = addFileToBatchWrite(ra, mergedData)
 						if !added {
 							// Still failed after retry, fallback to normal write
 						}
@@ -1330,17 +1323,17 @@ func (ra *RandomAccessor) Flush() (int64, error) {
 
 					if added {
 						// Successfully added to batch write manager
-						// Immediately flush to ensure data is written (DataID is already set in addFile)
-						batchMgr.flushAll()
+						// Immediately flush to ensure data is written
+						batchMgr.FlushAll(ra.fs.c)
 						// Reset buffer
 						atomic.StoreInt64(&ra.buffer.totalSize, 0)
 						// Return new version ID
-						return ra.fs.h.NewID(), nil
+						return core.NewID(), nil
 					}
 				}
 				// If batch write is disabled or add failed, continue with normal write flow
 			}
-		} // End of else block for BatchWriteManager
+		} // End of else block for BatchWriter
 	}
 
 	// Copy actually used portion (avoid modification during flush)
@@ -1354,7 +1347,7 @@ func (ra *RandomAccessor) Flush() (int64, error) {
 	mergedOps := mergeWriteOperations(operations)
 
 	// Get file object information
-	// Note: For BatchWriteManager path, fileObj is already updated in addFile
+	// Note: For BatchWriter path, fileObj is already updated in addFile
 	// For normal write path, we use getFileObj and will create new DataID to overwrite
 	fileObj, err := ra.getFileObj()
 	if err != nil {
@@ -1376,7 +1369,7 @@ func (ra *RandomAccessor) applyRandomWritesWithSDK(fileObj *core.ObjectInfo, wri
 	}
 
 	// Create new data ID
-	newDataID := ra.fs.h.NewID()
+	newDataID := core.NewID()
 
 	// Calculate new file size
 	newSize := fileObj.Size
@@ -1687,7 +1680,7 @@ func (ra *RandomAccessor) applyWritesStreamingUncompressed(fileObj *core.ObjectI
 		// Optimization: use more efficient key generation (function internally uses object pool)
 		dataInfoCache.Put(formatCacheKey(ra.fs.bktID, dataInfo.ID), dataInfo)
 
-		newVersionID := ra.fs.h.NewID()
+		newVersionID := core.NewID()
 		return newVersionID, nil
 	}
 
@@ -1955,7 +1948,7 @@ func (ra *RandomAccessor) processWritesStreaming(
 	// Update cache
 	dataInfoCache.Put(formatCacheKey(ra.fs.bktID, dataInfo.ID), dataInfo)
 
-	newVersionID := ra.fs.h.NewID()
+	newVersionID := core.NewID()
 	return newVersionID, nil
 }
 
@@ -2274,7 +2267,7 @@ func (ra *RandomAccessor) Truncate(newSize int64) (int64, error) {
 	}
 
 	// Generate new version ID
-	newVersionID := ra.fs.h.NewID()
+	newVersionID := core.NewID()
 	if newVersionID <= 0 {
 		return 0, fmt.Errorf("failed to generate version ID")
 	}
@@ -2301,7 +2294,7 @@ func (ra *RandomAccessor) Truncate(newSize int64) (int64, error) {
 			oldDataInfo, err := ra.fs.h.GetDataInfo(ra.fs.c, ra.fs.bktID, oldDataID)
 			if err == nil && oldDataInfo != nil {
 				// Generate new DataID
-				newDataID = ra.fs.h.NewID()
+				newDataID = core.NewID()
 				if newDataID <= 0 {
 					return 0, fmt.Errorf("failed to generate DataID")
 				}
@@ -2349,7 +2342,7 @@ func (ra *RandomAccessor) Truncate(newSize int64) (int64, error) {
 						}
 
 						// Return version ID (already created by Flush)
-						versionID := ra.fs.h.NewID()
+						versionID := core.NewID()
 						if versionID <= 0 {
 							return 0, fmt.Errorf("failed to generate version ID")
 						}
@@ -2450,7 +2443,7 @@ func (ra *RandomAccessor) Truncate(newSize int64) (int64, error) {
 						// However, we already called Flush above, so we need to generate a new version ID
 						// Or we can just return 0 to indicate success (version was created by Flush)
 						// Actually, let's create a version object to track this truncate operation
-						versionID := ra.fs.h.NewID()
+						versionID := core.NewID()
 						if versionID <= 0 {
 							return 0, fmt.Errorf("failed to generate version ID")
 						}
@@ -2527,7 +2520,7 @@ func (ra *RandomAccessor) Truncate(newSize int64) (int64, error) {
 						}
 
 						// Return version ID (already created by Flush)
-						versionID := ra.fs.h.NewID()
+						versionID := core.NewID()
 						if versionID <= 0 {
 							return 0, fmt.Errorf("failed to generate version ID")
 						}
@@ -2705,7 +2698,7 @@ func (ra *RandomAccessor) Close() error {
 	// Ensure batch write data is also flushed (flush will flush all data)
 	batchMgr := ra.fs.getBatchWriteManager()
 	if batchMgr != nil {
-		batchMgr.flushAll()
+		batchMgr.FlushAll(ra.fs.c)
 	}
 
 	return nil

@@ -324,7 +324,7 @@ type WriteBufferConfig struct {
 	MaxBufferSize int64
 
 	// MaxBufferWrites Maximum buffered write count, exceeding this count will trigger immediate write
-	// Configurable via environment variable ORCAS_MAX_WRITE_BUFFER_COUNT, default 200
+	// Configurable via environment variable ORCAS_MAX_WRITE_BUFFER_COUNT, default 2048
 	MaxBufferWrites int64
 
 	// BufferWindow Buffer window time (seconds), multiple writes within the specified time will be merged
@@ -341,7 +341,7 @@ type WriteBufferConfig struct {
 func GetWriteBufferConfig() WriteBufferConfig {
 	config := WriteBufferConfig{
 		MaxBufferSize:     8 * 1024 * 1024,  // Default 8MB
-		MaxBufferWrites:   200,              // Default 200 operations
+		MaxBufferWrites:   2048,             // Default 2048 files
 		BufferWindow:      10 * time.Second, // Default 10 seconds
 		BatchWriteEnabled: true,             // Default enabled
 	}

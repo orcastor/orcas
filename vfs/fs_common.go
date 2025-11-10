@@ -2,8 +2,6 @@
 package vfs
 
 import (
-	"sync"
-
 	"github.com/orcastor/orcas/core"
 	"github.com/orcastor/orcas/sdk"
 )
@@ -11,14 +9,13 @@ import (
 // OrcasFS implements ORCAS filesystem, mapping ORCAS object storage to filesystem
 // This struct is available on all platforms
 type OrcasFS struct {
-	h                 core.Handler
-	c                 core.Ctx
-	bktID             int64
-	root              *OrcasNode
-	sdkCfg            *sdk.Config
-	chunkSize         int64
-	batchWriteMgr     *BatchWriteManager // One batch write manager per bucket
-	batchWriteMgrOnce sync.Once          // Protects batch write manager initialization
+	h         core.Handler
+	c         core.Ctx
+	bktID     int64
+	root      *OrcasNode
+	sdkCfg    *sdk.Config
+	chunkSize int64
+	// Batch writer is now managed globally by SDK, accessed via GetBatchWriterForBucket
 }
 
 // NewOrcasFS creates a new ORCAS filesystem
