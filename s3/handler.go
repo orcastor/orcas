@@ -1029,6 +1029,16 @@ func getObject(c *gin.Context) {
 
 // putObject handles PUT /{bucket}/{key} - PutObject
 func putObject(c *gin.Context) {
+	// Check for copy or move operations
+	if c.GetHeader("x-amz-copy-source") != "" {
+		copyObject(c)
+		return
+	}
+	if c.GetHeader("x-amz-move-source") != "" {
+		moveObject(c)
+		return
+	}
+
 	bucketName := c.Param("bucket")
 	key := c.Param("key")
 	key = strings.TrimPrefix(key, "/")
@@ -1361,6 +1371,390 @@ func deleteObject(c *gin.Context) {
 	}
 
 	c.Status(http.StatusNoContent)
+}
+
+// copyObject handles PUT /{bucket}/{key} with x-amz-copy-source header - CopyObject
+func copyObject(c *gin.Context) {
+	bucketName := c.Param("bucket")
+	destKey := c.Param("key")
+	destKey = strings.TrimPrefix(destKey, "/")
+
+	if bucketName == "" || destKey == "" {
+		util.S3ErrorResponse(c, http.StatusBadRequest, "InvalidRequest", "Bucket name and destination key are required")
+		return
+	}
+
+	// Get source from x-amz-copy-source header
+	source := c.GetHeader("x-amz-copy-source")
+	if source == "" {
+		util.S3ErrorResponse(c, http.StatusBadRequest, "InvalidRequest", "x-amz-copy-source header is required")
+		return
+	}
+
+	// Parse source: /bucket/key or bucket/key
+	source = strings.TrimPrefix(source, "/")
+	parts := strings.SplitN(source, "/", 2)
+	if len(parts) != 2 {
+		util.S3ErrorResponse(c, http.StatusBadRequest, "InvalidRequest", "Invalid x-amz-copy-source format")
+		return
+	}
+	sourceBucket := parts[0]
+	sourceKey := parts[1]
+
+	// Get destination bucket ID
+	destBktID, err := getBucketIDByName(c, bucketName)
+	if err != nil {
+		util.S3ErrorResponse(c, http.StatusNotFound, "NoSuchBucket", "The specified destination bucket does not exist")
+		return
+	}
+
+	// Get source bucket ID (can be same or different bucket)
+	sourceBktID, err := getBucketIDByName(c, sourceBucket)
+	if err != nil {
+		util.S3ErrorResponse(c, http.StatusNotFound, "NoSuchBucket", "The specified source bucket does not exist")
+		return
+	}
+
+	ctx := c.Request.Context()
+
+	// Find source object
+	sourceObj, err := findObjectByPath(c, sourceBktID, sourceKey)
+	if err != nil {
+		util.S3ErrorResponse(c, http.StatusNotFound, "NoSuchKey", "The specified source key does not exist")
+		return
+	}
+
+	if sourceObj.Type != core.OBJ_TYPE_FILE {
+		util.S3ErrorResponse(c, http.StatusBadRequest, "InvalidRequest", "Source key is not a file")
+		return
+	}
+
+	// Read source data
+	sourceData, err := handler.GetData(ctx, sourceBktID, sourceObj.DataID, 0)
+	if err != nil {
+		// Try reading all chunks if single chunk read fails
+		var allChunks []byte
+		for chunkIdx := 0; ; chunkIdx++ {
+			chunkData, chunkErr := handler.GetData(ctx, sourceBktID, sourceObj.DataID, chunkIdx)
+			if chunkErr != nil {
+				break
+			}
+			allChunks = append(allChunks, chunkData...)
+		}
+		if len(allChunks) > 0 {
+			sourceData = allChunks
+			err = nil
+		}
+	}
+	if err != nil {
+		util.S3ErrorResponse(c, http.StatusInternalServerError, "InternalError", fmt.Sprintf("Failed to read source data: %v", err))
+		return
+	}
+
+	// Ensure parent directory exists for destination
+	parentPath := filepath.Dir(destKey)
+	var pid int64 = 0
+	if parentPath != "." && parentPath != "/" {
+		pid, err = ensurePath(c, destBktID, parentPath)
+		if err != nil {
+			util.S3ErrorResponse(c, http.StatusInternalServerError, "InternalError", err.Error())
+			return
+		}
+	}
+
+	// Check if destination object exists
+	fileName := filepath.Base(destKey)
+	destObj, err := findObjectByPath(c, destBktID, destKey)
+	var destObjID int64
+	if err == nil && destObj != nil {
+		// Object exists, update it
+		destObjID = destObj.ID
+		invalidateObjectCache(destBktID, destObjID)
+	} else {
+		// Create new object
+		destObjID = core.NewID()
+	}
+
+	// Get chunk size for destination bucket
+	chunkSize := int64(4 * 1024 * 1024) // Default 4MB
+	bktInfo, err := handler.GetBktInfo(ctx, destBktID)
+	if err == nil && bktInfo != nil && bktInfo.ChunkSize > 0 {
+		chunkSize = bktInfo.ChunkSize
+	}
+
+	dataSize := int64(len(sourceData))
+	var dataID int64
+
+	// Upload data according to chunkSize
+	if dataSize <= chunkSize {
+		// Data fits in one chunk, upload directly with sn=0
+		dataID, err = handler.PutData(ctx, destBktID, 0, 0, sourceData)
+	} else {
+		// Data is larger than chunkSize, split into multiple chunks
+		dataID = core.NewID()
+		chunkCount := int((dataSize + chunkSize - 1) / chunkSize) // Ceiling division
+
+		for chunkIdx := 0; chunkIdx < chunkCount; chunkIdx++ {
+			chunkStart := int64(chunkIdx) * chunkSize
+			chunkEnd := chunkStart + chunkSize
+			if chunkEnd > dataSize {
+				chunkEnd = dataSize
+			}
+			chunkData := sourceData[chunkStart:chunkEnd]
+
+			// Upload chunk with sn=chunkIdx (starting from 0)
+			_, err = handler.PutData(ctx, destBktID, dataID, chunkIdx, chunkData)
+			if err != nil {
+				util.S3ErrorResponse(c, http.StatusInternalServerError, "InternalError", fmt.Sprintf("Failed to upload chunk %d: %v", chunkIdx, err))
+				return
+			}
+		}
+	}
+	if err != nil {
+		util.S3ErrorResponse(c, http.StatusInternalServerError, "InternalError", err.Error())
+		return
+	}
+
+	// Create or update object metadata
+	objInfo := &core.ObjectInfo{
+		ID:     destObjID,
+		PID:    pid,
+		Name:   fileName,
+		Type:   core.OBJ_TYPE_FILE,
+		DataID: dataID,
+		Size:   dataSize,
+		MTime:  core.Now(),
+	}
+
+	_, err = handler.Put(ctx, destBktID, []*core.ObjectInfo{objInfo})
+	if err != nil {
+		util.S3ErrorResponse(c, http.StatusInternalServerError, "InternalError", err.Error())
+		return
+	}
+
+	// Update caches
+	objectCache.Put(formatObjectCacheKey(destBktID, destObjID), objInfo)
+	invalidateDirListCache(destBktID, pid)
+	invalidatePathCache(destBktID, destKey)
+	if parentPath != "." && parentPath != "/" {
+		invalidatePathCache(destBktID, parentPath)
+	}
+
+	// Return copy result in S3 XML format
+	type CopyObjectResult struct {
+		XMLName      xml.Name `xml:"CopyObjectResult"`
+		ETag         string   `xml:"ETag"`
+		LastModified string   `xml:"LastModified"`
+	}
+
+	result := CopyObjectResult{
+		ETag:         fmt.Sprintf(`"%x"`, dataID),
+		LastModified: time.Now().UTC().Format(time.RFC3339),
+	}
+
+	c.Header("Content-Type", "application/xml")
+	c.XML(http.StatusOK, result)
+}
+
+// moveObject handles PUT /{bucket}/{key} with x-amz-move-source header - MoveObject (non-standard)
+func moveObject(c *gin.Context) {
+	bucketName := c.Param("bucket")
+	destKey := c.Param("key")
+	destKey = strings.TrimPrefix(destKey, "/")
+
+	if bucketName == "" || destKey == "" {
+		util.S3ErrorResponse(c, http.StatusBadRequest, "InvalidRequest", "Bucket name and destination key are required")
+		return
+	}
+
+	// Get source from x-amz-move-source header (non-standard extension)
+	source := c.GetHeader("x-amz-move-source")
+	if source == "" {
+		util.S3ErrorResponse(c, http.StatusBadRequest, "InvalidRequest", "x-amz-move-source header is required")
+		return
+	}
+
+	// Parse source: /bucket/key or bucket/key
+	source = strings.TrimPrefix(source, "/")
+	parts := strings.SplitN(source, "/", 2)
+	if len(parts) != 2 {
+		util.S3ErrorResponse(c, http.StatusBadRequest, "InvalidRequest", "Invalid x-amz-move-source format")
+		return
+	}
+	sourceBucket := parts[0]
+	sourceKey := parts[1]
+
+	// Get destination bucket ID
+	destBktID, err := getBucketIDByName(c, bucketName)
+	if err != nil {
+		util.S3ErrorResponse(c, http.StatusNotFound, "NoSuchBucket", "The specified destination bucket does not exist")
+		return
+	}
+
+	// Get source bucket ID (can be same or different bucket)
+	sourceBktID, err := getBucketIDByName(c, sourceBucket)
+	if err != nil {
+		util.S3ErrorResponse(c, http.StatusNotFound, "NoSuchBucket", "The specified source bucket does not exist")
+		return
+	}
+
+	ctx := c.Request.Context()
+
+	// Find source object
+	sourceObj, err := findObjectByPath(c, sourceBktID, sourceKey)
+	if err != nil {
+		util.S3ErrorResponse(c, http.StatusNotFound, "NoSuchKey", "The specified source key does not exist")
+		return
+	}
+
+	// Ensure parent directory exists for destination
+	parentPath := filepath.Dir(destKey)
+	var pid int64 = 0
+	if parentPath != "." && parentPath != "/" {
+		pid, err = ensurePath(c, destBktID, parentPath)
+		if err != nil {
+			util.S3ErrorResponse(c, http.StatusInternalServerError, "InternalError", err.Error())
+			return
+		}
+	}
+
+	// Check if destination object exists
+	fileName := filepath.Base(destKey)
+	destObj, err := findObjectByPath(c, destBktID, destKey)
+	var destObjID int64
+	if err == nil && destObj != nil {
+		// Object exists, delete it first
+		if err := handler.Delete(ctx, destBktID, destObj.ID); err != nil {
+			util.S3ErrorResponse(c, http.StatusInternalServerError, "InternalError", fmt.Sprintf("Failed to delete existing destination object: %v", err))
+			return
+		}
+		invalidateObjectCache(destBktID, destObj.ID)
+		destObjID = destObj.ID
+	} else {
+		// Create new object ID
+		destObjID = core.NewID()
+	}
+
+	// Move object: update PID and name
+	if sourceBktID == destBktID {
+		// Same bucket: just move (update PID and name)
+		if err := handler.MoveTo(ctx, sourceBktID, sourceObj.ID, pid); err != nil {
+			util.S3ErrorResponse(c, http.StatusInternalServerError, "InternalError", fmt.Sprintf("Failed to move object: %v", err))
+			return
+		}
+		if fileName != sourceObj.Name {
+			if err := handler.Rename(ctx, sourceBktID, sourceObj.ID, fileName); err != nil {
+				util.S3ErrorResponse(c, http.StatusInternalServerError, "InternalError", fmt.Sprintf("Failed to rename object: %v", err))
+				return
+			}
+		}
+		destObjID = sourceObj.ID
+	} else {
+		// Different buckets: copy and delete
+		// Read source data
+		sourceData, err := handler.GetData(ctx, sourceBktID, sourceObj.DataID, 0)
+		if err != nil {
+			// Try reading all chunks if single chunk read fails
+			var allChunks []byte
+			for chunkIdx := 0; ; chunkIdx++ {
+				chunkData, chunkErr := handler.GetData(ctx, sourceBktID, sourceObj.DataID, chunkIdx)
+				if chunkErr != nil {
+					break
+				}
+				allChunks = append(allChunks, chunkData...)
+			}
+			if len(allChunks) > 0 {
+				sourceData = allChunks
+				err = nil
+			}
+		}
+		if err != nil {
+			util.S3ErrorResponse(c, http.StatusInternalServerError, "InternalError", fmt.Sprintf("Failed to read source data: %v", err))
+			return
+		}
+
+		// Get chunk size for destination bucket
+		chunkSize := int64(4 * 1024 * 1024) // Default 4MB
+		bktInfo, err := handler.GetBktInfo(ctx, destBktID)
+		if err == nil && bktInfo != nil && bktInfo.ChunkSize > 0 {
+			chunkSize = bktInfo.ChunkSize
+		}
+
+		dataSize := int64(len(sourceData))
+		var dataID int64
+
+		// Upload data according to chunkSize
+		if dataSize <= chunkSize {
+			dataID, err = handler.PutData(ctx, destBktID, 0, 0, sourceData)
+		} else {
+			dataID = core.NewID()
+			chunkCount := int((dataSize + chunkSize - 1) / chunkSize)
+			for chunkIdx := 0; chunkIdx < chunkCount; chunkIdx++ {
+				chunkStart := int64(chunkIdx) * chunkSize
+				chunkEnd := chunkStart + chunkSize
+				if chunkEnd > dataSize {
+					chunkEnd = dataSize
+				}
+				chunkData := sourceData[chunkStart:chunkEnd]
+				_, err = handler.PutData(ctx, destBktID, dataID, chunkIdx, chunkData)
+				if err != nil {
+					util.S3ErrorResponse(c, http.StatusInternalServerError, "InternalError", fmt.Sprintf("Failed to upload chunk %d: %v", chunkIdx, err))
+					return
+				}
+			}
+		}
+		if err != nil {
+			util.S3ErrorResponse(c, http.StatusInternalServerError, "InternalError", err.Error())
+			return
+		}
+
+		// Create destination object
+		objInfo := &core.ObjectInfo{
+			ID:     destObjID,
+			PID:    pid,
+			Name:   fileName,
+			Type:   sourceObj.Type,
+			DataID: dataID,
+			Size:   sourceObj.Size,
+			MTime:  core.Now(),
+		}
+		_, err = handler.Put(ctx, destBktID, []*core.ObjectInfo{objInfo})
+		if err != nil {
+			util.S3ErrorResponse(c, http.StatusInternalServerError, "InternalError", err.Error())
+			return
+		}
+
+		// Delete source object
+		if err := handler.Delete(ctx, sourceBktID, sourceObj.ID); err != nil {
+			util.S3ErrorResponse(c, http.StatusInternalServerError, "InternalError", fmt.Sprintf("Failed to delete source object: %v", err))
+			return
+		}
+
+		// Update caches
+		objectCache.Put(formatObjectCacheKey(destBktID, destObjID), objInfo)
+		invalidateObjectCache(sourceBktID, sourceObj.ID)
+		invalidatePathCache(sourceBktID, sourceKey)
+	}
+
+	// Update caches
+	invalidateDirListCache(destBktID, pid)
+	invalidatePathCache(destBktID, destKey)
+	if parentPath != "." && parentPath != "/" {
+		invalidatePathCache(destBktID, parentPath)
+	}
+	// Invalidate source directory cache
+	sourceParentPath := filepath.Dir(sourceKey)
+	if sourceParentPath != "." && sourceParentPath != "/" {
+		sourceParentObj, err := findObjectByPath(c, sourceBktID, sourceParentPath)
+		if err == nil && sourceParentObj != nil {
+			invalidateDirListCache(sourceBktID, sourceParentObj.ID)
+		}
+	} else {
+		invalidateDirListCache(sourceBktID, 0)
+	}
+
+	c.Header("ETag", fmt.Sprintf(`"%x"`, destObjID))
+	c.Status(http.StatusOK)
 }
 
 // headObject handles HEAD /{bucket}/{key} - HeadObject

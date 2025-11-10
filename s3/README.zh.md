@@ -16,6 +16,8 @@
 - `GET /{bucket}` - ListObjects (列出 bucket 中的对象)
 - `GET /{bucket}/{key}` - GetObject (获取对象)
 - `PUT /{bucket}/{key}` - PutObject (上传对象)
+- `PUT /{bucket}/{key}` with `x-amz-copy-source` header - CopyObject (复制对象)
+- `PUT /{bucket}/{key}` with `x-amz-move-source` header - MoveObject (移动对象，非标准扩展)
 - `DELETE /{bucket}/{key}` - DeleteObject (删除对象)
 - `HEAD /{bucket}/{key}` - HeadObject (获取对象元数据)
 
@@ -235,6 +237,36 @@ curl -X DELETE http://localhost:7983/my-bucket/path/to/file.txt \
 curl -X HEAD http://localhost:7983/my-bucket/path/to/file.txt \
   -H "Authorization: Bearer <token>"
 ```
+
+### 8. CopyObject
+
+```bash
+# 在同一 bucket 内复制对象
+curl -X PUT http://localhost:7983/my-bucket/path/to/copy.txt \
+  -H "Authorization: Bearer <token>" \
+  -H "x-amz-copy-source: /my-bucket/path/to/file.txt"
+
+# 在不同 bucket 之间复制对象
+curl -X PUT http://localhost:7983/my-bucket2/path/to/copy.txt \
+  -H "Authorization: Bearer <token>" \
+  -H "x-amz-copy-source: /my-bucket/path/to/file.txt"
+```
+
+### 9. MoveObject (非标准扩展)
+
+```bash
+# 在同一 bucket 内移动对象（重命名/移动）
+curl -X PUT http://localhost:7983/my-bucket/path/to/new-name.txt \
+  -H "Authorization: Bearer <token>" \
+  -H "x-amz-move-source: /my-bucket/path/to/old-name.txt"
+
+# 在不同 bucket 之间移动对象
+curl -X PUT http://localhost:7983/my-bucket2/path/to/moved.txt \
+  -H "Authorization: Bearer <token>" \
+  -H "x-amz-move-source: /my-bucket/path/to/file.txt"
+```
+
+**注意**：MoveObject 是非标准扩展。它会将对象从源位置移动到目标位置并删除源对象。对于同一 bucket 内的移动，它使用高效的元数据更新。对于跨 bucket 移动，它会复制数据然后删除源对象。
 
 ## 响应格式
 

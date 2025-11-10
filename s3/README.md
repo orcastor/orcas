@@ -16,6 +16,8 @@ The following S3-compatible API interfaces are implemented:
 - `GET /{bucket}` - ListObjects (List objects in bucket)
 - `GET /{bucket}/{key}` - GetObject (Get object)
 - `PUT /{bucket}/{key}` - PutObject (Upload object)
+- `PUT /{bucket}/{key}` with `x-amz-copy-source` header - CopyObject (Copy object)
+- `PUT /{bucket}/{key}` with `x-amz-move-source` header - MoveObject (Move object, non-standard extension)
 - `DELETE /{bucket}/{key}` - DeleteObject (Delete object)
 - `HEAD /{bucket}/{key}` - HeadObject (Get object metadata)
 
@@ -235,6 +237,36 @@ curl -X DELETE http://localhost:7983/my-bucket/path/to/file.txt \
 curl -X HEAD http://localhost:7983/my-bucket/path/to/file.txt \
   -H "Authorization: Bearer <token>"
 ```
+
+### 8. CopyObject
+
+```bash
+# Copy object within same bucket
+curl -X PUT http://localhost:7983/my-bucket/path/to/copy.txt \
+  -H "Authorization: Bearer <token>" \
+  -H "x-amz-copy-source: /my-bucket/path/to/file.txt"
+
+# Copy object between different buckets
+curl -X PUT http://localhost:7983/my-bucket2/path/to/copy.txt \
+  -H "Authorization: Bearer <token>" \
+  -H "x-amz-copy-source: /my-bucket/path/to/file.txt"
+```
+
+### 9. MoveObject (Non-standard Extension)
+
+```bash
+# Move object within same bucket (rename/move)
+curl -X PUT http://localhost:7983/my-bucket/path/to/new-name.txt \
+  -H "Authorization: Bearer <token>" \
+  -H "x-amz-move-source: /my-bucket/path/to/old-name.txt"
+
+# Move object between different buckets
+curl -X PUT http://localhost:7983/my-bucket2/path/to/moved.txt \
+  -H "Authorization: Bearer <token>" \
+  -H "x-amz-move-source: /my-bucket/path/to/file.txt"
+```
+
+**Note**: MoveObject is a non-standard extension. It moves the object from source to destination and deletes the source. For same-bucket moves, it uses efficient metadata updates. For cross-bucket moves, it copies the data and then deletes the source.
 
 ## Response Format
 

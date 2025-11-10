@@ -27,8 +27,16 @@ func main() {
 		// GET /{bucket} - ListObjects
 		// GET /{bucket}/{key} - GetObject
 		// PUT /{bucket}/{key} - PutObject
+		// PUT /{bucket}/{key} with x-amz-copy-source - CopyObject
+		// PUT /{bucket}/{key} with x-amz-move-source - MoveObject (non-standard)
 		// DELETE /{bucket}/{key} - DeleteObject
 		// HEAD /{bucket}/{key} - HeadObject
+		// POST /{bucket}/{key}?uploads - InitiateMultipartUpload
+		// PUT /{bucket}/{key}?partNumber={n}&uploadId={id} - UploadPart
+		// POST /{bucket}/{key}?uploadId={id} - CompleteMultipartUpload
+		// DELETE /{bucket}/{key}?uploadId={id} - AbortMultipartUpload
+		// GET /{bucket}?uploads - ListMultipartUploads
+		// GET /{bucket}/{key}?uploadId={id} - ListParts
 		server.GET("/", listBuckets)
 		server.PUT("/:bucket", createBucket)
 		server.DELETE("/:bucket", deleteBucket)
