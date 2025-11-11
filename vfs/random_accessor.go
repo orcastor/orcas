@@ -1372,10 +1372,17 @@ func (ra *RandomAccessor) applyRandomWritesWithSDK(fileObj *core.ObjectInfo, wri
 	newDataID := core.NewID()
 
 	// Calculate new file size
+	// For writes starting at offset 0, if the write data is shorter than the original file,
+	// the file should be truncated to the write data length (overwrite from beginning)
+	// Otherwise, the file size should be the maximum of original size and write end position
 	newSize := fileObj.Size
 	for _, write := range writes {
 		writeEnd := write.Offset + int64(len(write.Data))
-		if writeEnd > newSize {
+		if write.Offset == 0 && writeEnd < newSize {
+			// Write starts at 0 and is shorter than original file, truncate to write length
+			newSize = writeEnd
+		} else if writeEnd > newSize {
+			// Write extends beyond current file size, extend file
 			newSize = writeEnd
 		}
 	}

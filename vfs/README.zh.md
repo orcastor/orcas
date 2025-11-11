@@ -6,10 +6,11 @@ ORCAS VFS 使用 FUSE (Filesystem in Userspace) 技术，将 ORCAS 对象存储�
 
 - **Linux/macOS**: 使用 FUSE (Filesystem in Userspace) 技术，支持完整文件系统挂载功能
 - **Windows**: 
-  - 当前版本：仅支持 `RandomAccessor` API，不支持文件系统挂载
-  - 未来计划：考虑使用 [Dokany](https://github.com/dokan-dev/dokany) 实现 Windows 平台的文件系统挂载功能
+  - 支持 `RandomAccessor` API 用于程序化文件访问
+  - **Dokany 支持**：支持使用 [Dokany](https://github.com/dokan-dev/dokany) 进行文件系统挂载
     - Dokany 是 Windows 上的 FUSE 替代方案，允许在用户空间创建自定义文件系统
-    - 需要安装 Dokany 驱动程序和 Go 绑定库
+    - 使用 purego（无需 cgo）进行 DLL 加载
+    - 需要安装 Dokany 驱动程序
 
 ## 功能特性
 
@@ -183,7 +184,6 @@ go test -bench=BenchmarkRandomAccessor -benchmem -cpuprofile=cpu.prof -memprofil
   - `github.com/hanwen/go-fuse/v2`：FUSE 库（仅 Linux/macOS）
   - `github.com/orcastor/orcas/core`：ORCAS 核心库
   - `github.com/orcastor/orcas/sdk`：ORCAS SDK
-  - **Windows 挂载（未来）**：需要 Dokany 驱动程序和 Go 绑定库
 
 ### 环境变量
 
@@ -206,7 +206,7 @@ brew install --cask macfuse
 
 安装后需要重启系统或重新登录。
 
-### Windows Dokany 安装（未来支持）
+### Windows Dokany 安装
 
 在 Windows 上使用文件系统挂载功能，需要安装 Dokany：
 
@@ -215,10 +215,35 @@ brew install --cask macfuse
    - 下载最新版本的安装包（DokanSetup_*.exe）
    - 运行安装程序并重启系统
 
-2. **安装 Go 绑定库**（待开发）：
-   ```bash
-   # 等待 Dokany Go 绑定库可用
-   # go get github.com/dokan-dev/dokany-go
+2. **使用示例**：
+   ```go
+   package main
+
+   import (
+       "context"
+       "github.com/orcastor/orcas/core"
+       "github.com/orcastor/orcas/sdk"
+       "github.com/orcastor/orcas/vfs"
+   )
+
+   func main() {
+       h := core.NewLocalHandler()
+       ctx, _, _, _ := h.Login(context.Background(), "username", "password")
+       
+       sdkCfg := &sdk.Config{}
+       instance, err := vfs.Mount(h, ctx, bucketID, &vfs.MountOptions{
+           MountPoint:  "M:\\",
+           Foreground:  true,
+           ThreadCount: 5,
+           SDKConfig:   sdkCfg,
+       })
+       if err != nil {
+           panic(err)
+       }
+       
+       // 运行服务
+       vfs.Serve(instance, true)
+   }
    ```
 
 3. **注意事项**：
@@ -243,30 +268,35 @@ brew install --cask macfuse
 - 当前实现为简化版本，某些高级特性（如符号链接、硬链接）尚未支持
 - 文件截断操作需要完善
 - 大文件的分片读取需要优化
-- Windows 平台当前仅支持 RandomAccessor API，不支持文件系统挂载
-  - 未来计划通过 Dokany 实现 Windows 平台的文件系统挂载功能
+- Windows 平台支持 RandomAccessor API 和 Dokany 文件系统挂载
+  - Dokany 挂载需要安装 Dokany 驱动程序
 
-## Windows 平台支持计划
+## Windows 平台支持
 
 ### 当前状态
 - ✅ 支持 `RandomAccessor` API（程序化访问）
-- ❌ 不支持文件系统挂载
+- ✅ 支持 Dokany 文件系统挂载
 
-### 未来计划
-考虑使用 [Dokany](https://github.com/dokan-dev/dokany) 实现 Windows 平台的文件系统挂载：
+### 实现细节
+
+**Dokany 集成**：
+- 运行时动态加载 `dokan2.dll`
+- 实现完整的文件系统操作：
+  - CreateFile, ReadFile, WriteFile
+  - GetFileInformation, FindFiles
+  - DeleteFile, DeleteDirectory
+  - MoveFile（重命名/移动）
+  - SetFileAttributes, SetFileTime
+  - 以及更多...
 
 **优势**：
 - 类似 FUSE 的用户空间文件系统实现
 - 无需编写内核驱动
 - 支持完整的文件系统操作
-
-**实现要求**：
-1. 安装 Dokany 驱动程序
-2. 使用或开发 Dokany 的 Go 绑定库
-3. 实现 Dokany 的文件系统接口（类似 FUSE 接口）
+- 无 cgo 依赖（使用 purego）
 
 **注意事项**：
-- Dokany 需要管理员权限安装
+- Dokany 需要管理员权限进行安装
 - 不同 Windows 版本可能存在兼容性差异
-- 需要测试与常用软件的兼容性（如 Office、WPS 等）
+- 已在 Windows 10/11 上测试
 

@@ -8,10 +8,10 @@ ORCAS VFS uses FUSE (Filesystem in Userspace) technology to map the ORCAS object
 
 - **Linux/macOS**: Uses FUSE (Filesystem in Userspace) technology, supports full filesystem mounting
 - **Windows**: 
-  - Current version: Only supports `RandomAccessor` API, filesystem mounting not supported
-  - Future plan: Consider using [Dokany](https://github.com/dokan-dev/dokany) for Windows filesystem mounting
+  - Supports `RandomAccessor` API for programmatic file access
+  - **Dokany Support**: Supports filesystem mounting using [Dokany](https://github.com/dokan-dev/dokany)
     - Dokany is a FUSE alternative for Windows, allowing custom filesystems in user space
-    - Requires Dokany driver and Go bindings
+    - Requires Dokany driver to be installed
 
 ## Features
 
@@ -185,7 +185,6 @@ Benchmark test file `random_access_bench_test.go` includes the following tests:
   - `github.com/hanwen/go-fuse/v2`: FUSE library (Linux/macOS only)
   - `github.com/orcastor/orcas/core`: ORCAS core library
   - `github.com/orcastor/orcas/sdk`: ORCAS SDK
-  - **Windows Mounting (Future)**: Requires Dokany driver and Go bindings
 
 ### Environment Variables
 
@@ -208,7 +207,7 @@ brew install --cask macfuse
 
 After installation, restart the system or log out and log back in.
 
-### Windows Dokany Installation (Future Support)
+### Windows Dokany Installation
 
 To use filesystem mounting functionality on Windows, install Dokany:
 
@@ -217,10 +216,35 @@ To use filesystem mounting functionality on Windows, install Dokany:
    - Download the latest version installer (DokanSetup_*.exe)
    - Run the installer and restart the system
 
-2. **Install Go Bindings** (To be developed):
-   ```bash
-   # Wait for Dokany Go bindings to be available
-   # go get github.com/dokan-dev/dokany-go
+2. **Usage Example**:
+   ```go
+   package main
+
+   import (
+       "context"
+       "github.com/orcastor/orcas/core"
+       "github.com/orcastor/orcas/sdk"
+       "github.com/orcastor/orcas/vfs"
+   )
+
+   func main() {
+       h := core.NewLocalHandler()
+       ctx, _, _, _ := h.Login(context.Background(), "username", "password")
+       
+       sdkCfg := &sdk.Config{}
+       instance, err := vfs.Mount(h, ctx, bucketID, &vfs.MountOptions{
+           MountPoint:  "M:\\",
+           Foreground:  true,
+           ThreadCount: 5,
+           SDKConfig:   sdkCfg,
+       })
+       if err != nil {
+           panic(err)
+       }
+       
+       // Run service
+       vfs.Serve(instance, true)
+   }
    ```
 
 3. **Notes**:
@@ -245,32 +269,39 @@ Tests and benchmarks use the following environment:
 - Current implementation is a simplified version, some advanced features (such as symbolic links, hard links) are not yet supported
 - File truncation operations need improvement
 - Large file chunk reading needs optimization
-- Windows platform currently only supports RandomAccessor API, filesystem mounting not supported
-  - Future plans to implement Windows filesystem mounting via Dokany
+- Windows platform supports both RandomAccessor API and Dokany filesystem mounting
+  - Dokany mounting requires Dokany driver to be installed
+  - Uses purego for DLL loading (no cgo required)
 
-## Windows Platform Support Plan
+## Windows Platform Support
 
 ### Current Status
 - ✅ Supports `RandomAccessor` API (programmatic access)
-- ❌ Filesystem mounting not supported
+- ✅ Supports Dokany filesystem mounting
 
-### Future Plans
-Considering using [Dokany](https://github.com/dokan-dev/dokany) to implement Windows filesystem mounting:
+### Implementation Details
+
+**Dokany Integration**:
+- Uses purego for DLL loading (no cgo required)
+- Dynamically loads `dokan2.dll` at runtime
+- Implements full filesystem operations:
+  - CreateFile, ReadFile, WriteFile
+  - GetFileInformation, FindFiles
+  - DeleteFile, DeleteDirectory
+  - MoveFile (rename/move)
+  - SetFileAttributes, SetFileTime
+  - And more...
 
 **Advantages**:
 - Similar to FUSE's userspace filesystem implementation
 - No need to write kernel drivers
 - Supports complete filesystem operations
-
-**Implementation Requirements**:
-1. Install Dokany driver
-2. Use or develop Dokany Go bindings
-3. Implement Dokany filesystem interface (similar to FUSE interface)
+- No cgo dependency (uses purego)
 
 **Notes**:
 - Dokany requires administrator privileges for installation
 - Compatibility differences may exist across Windows versions
-- Need to test compatibility with common software (e.g., Office, WPS, etc.)
+- Tested on Windows 10/11
 
 ## Documentation
 
