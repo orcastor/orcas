@@ -41,7 +41,7 @@ type Config struct {
 	EndecKey string // Encryption KEY, SM4 requires exactly 16 characters, AES256 requires more than 16 characters
 	DontSync string // Filename wildcards to exclude from sync (https://pkg.go.dev/path/filepath#Match), separated by semicolons
 	Conflict uint32 // Conflict resolution for same name, COVER: merge or overwrite / RENAME: rename / THROW: throw error / SKIP: skip
-	NameTmpl string // Rename suffix, "%s的副本"
+	NameTmpl string // Rename suffix, "%s的副本", should contain "%s"
 	WorkersN uint32 // Concurrent pool size, not less than 16
 	// ChkPtDir string // Checkpoint directory for resume, not enabled if path not set
 }

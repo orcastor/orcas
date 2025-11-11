@@ -375,6 +375,15 @@ func createDokanyOperations(ofs *OrcasFS) *DokanyOperations {
 		Cleanup: func(fileName string, context uintptr) {
 			dokanyCleanup(ofs, fileName, context)
 		},
+		SetEndOfFile: func(fileName string, length int64, context uintptr) int {
+			return dokanySetEndOfFile(ofs, fileName, length, context)
+		},
+		SetAllocationSize: func(fileName string, length int64, context uintptr) int {
+			return dokanySetAllocationSize(ofs, fileName, length, context)
+		},
+		FlushFileBuffers: func(fileName string, context uintptr) int {
+			return dokanyFlushFileBuffers(ofs, fileName, context)
+		},
 	}
 }
 
@@ -652,6 +661,105 @@ func dokanyCleanup(ofs *OrcasFS, fileName string, context uintptr) {
 			ra.Flush()
 		}
 	}
+}
+
+// dokanySetEndOfFile sets the end of file (truncate or extend)
+// This is called when file size is explicitly set (e.g., truncate)
+func dokanySetEndOfFile(ofs *OrcasFS, fileName string, length int64, context uintptr) int {
+	obj, err := findObjectByPath(ofs, fileName)
+	if err != nil || obj.Type != core.OBJ_TYPE_FILE {
+		return DOKAN_ERROR
+	}
+
+	// Get or create RandomAccessor
+	ra, err := getOrCreateRandomAccessor(ofs, obj.ID)
+	if err != nil {
+		return DOKAN_ERROR
+	}
+
+	// Use Truncate to set file size (handles both truncate and extend)
+	_, err = ra.Truncate(length)
+	if err != nil {
+		return DOKAN_ERROR
+	}
+
+	return DOKAN_SUCCESS
+}
+
+// dokanySetAllocationSize sets the allocation size (fallocate equivalent)
+// For qBittorrent and similar tools, this pre-allocates space without writing data
+// Optimization: For extend operations, only update file size metadata, don't allocate actual data blocks
+// This creates a sparse file representation, which is efficient for random writes
+func dokanySetAllocationSize(ofs *OrcasFS, fileName string, length int64, context uintptr) int {
+	obj, err := findObjectByPath(ofs, fileName)
+	if err != nil || obj.Type != core.OBJ_TYPE_FILE {
+		return DOKAN_ERROR
+	}
+
+	// Get or create RandomAccessor
+	ra, err := getOrCreateRandomAccessor(ofs, obj.ID)
+	if err != nil {
+		return DOKAN_ERROR
+	}
+
+	// For allocation size, we only need to update the file size metadata
+	// If extending, we don't need to write zeros - sparse file support
+	// The actual data will be written when WriteFile is called
+	oldSize := obj.Size
+
+	// If extending (length > oldSize), just update size metadata without allocating data
+	// This is the key optimization for qBittorrent: pre-allocate without writing zeros
+	if length > oldSize {
+		// Update file object size directly (sparse file - no data allocation)
+		// This is much faster than writing zeros for large files
+		updateFileObj := &core.ObjectInfo{
+			ID:     obj.ID,
+			PID:    obj.PID,
+			DataID: obj.DataID,
+			Size:   length, // Update size without allocating data
+			MTime:  core.Now(),
+			Type:   obj.Type,
+			Name:   obj.Name,
+		}
+
+		// Update file object in database
+		_, err = ofs.h.Put(ofs.c, ofs.bktID, []*core.ObjectInfo{updateFileObj})
+		if err != nil {
+			return DOKAN_ERROR
+		}
+
+		// Mark as sparse file in RandomAccessor for optimization
+		// This will help optimize subsequent random writes
+		ra.MarkSparseFile(length)
+	} else if length < oldSize {
+		// If truncating, use Truncate method which properly handles data
+		_, err = ra.Truncate(length)
+		if err != nil {
+			return DOKAN_ERROR
+		}
+	}
+	// If length == oldSize, no operation needed
+
+	return DOKAN_SUCCESS
+}
+
+// dokanyFlushFileBuffers flushes file buffers
+func dokanyFlushFileBuffers(ofs *OrcasFS, fileName string, context uintptr) int {
+	obj, err := findObjectByPath(ofs, fileName)
+	if err != nil || obj.Type != core.OBJ_TYPE_FILE {
+		return DOKAN_ERROR
+	}
+
+	// Get RandomAccessor and flush
+	ra, err := getRandomAccessor(ofs, obj.ID)
+	if err == nil {
+		_, err = ra.Flush()
+		if err != nil {
+			return DOKAN_ERROR
+		}
+	}
+
+	return DOKAN_SUCCESS
 }
 
 // Helper functions

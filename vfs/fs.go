@@ -787,10 +787,48 @@ func (n *OrcasNode) truncateFile(newSize int64) syscall.Errno {
 			}
 		}
 	} else {
-		// New size is greater than old size, extend file (fill with 0)
-		// Note: In POSIX, extending file usually fills with 0, but can also not fill (sparse file)
-		// Here we adopt non-filling approach, only allocate space when actually writing
-		// If need to fill 0, can write 0-byte data here
+		// New size is greater than old size, extend file
+		// Optimization: For fallocate-like operations (pre-allocation), we don't need to write zeros
+		// Just update the file size metadata (sparse file support)
+		// This is much faster for large file pre-allocation (e.g., qBittorrent)
+		ra, err := n.getRandomAccessor()
+		if err != nil {
+			// If can't get RandomAccessor, just update size metadata
+			updateFileObj := &core.ObjectInfo{
+				ID:     obj.ID,
+				PID:    obj.PID,
+				DataID: obj.DataID,
+				Size:   newSize,
+				MTime:  core.Now(),
+				Type:   obj.Type,
+				Name:   obj.Name,
+			}
+			_, err := n.fs.h.Put(n.fs.c, n.fs.bktID, []*core.ObjectInfo{updateFileObj})
+			if err != nil {
+				return syscall.EIO
+			}
+			return 0
+		}
+
+		// Mark as sparse file for optimization
+		ra.MarkSparseFile(newSize)
+
+		// Update file object size directly (sparse file - no data allocation)
+		updateFileObj := &core.ObjectInfo{
+			ID:     obj.ID,
+			PID:    obj.PID,
+			DataID: obj.DataID,
+			Size:   newSize, // Update size without allocating data
+			MTime:  core.Now(),
+			Type:   obj.Type,
+			Name:   obj.Name,
+		}
+
+		// Update file object in database
+		_, err = n.fs.h.Put(n.fs.c, n.fs.bktID, []*core.ObjectInfo{updateFileObj})
+		if err != nil {
+			return syscall.EIO
+		}
 	}
 
 	return 0

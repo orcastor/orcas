@@ -9,7 +9,6 @@ ORCAS VFS 使用 FUSE (Filesystem in Userspace) 技术，将 ORCAS 对象存储�
   - 支持 `RandomAccessor` API 用于程序化文件访问
   - **Dokany 支持**：支持使用 [Dokany](https://github.com/dokan-dev/dokany) 进行文件系统挂载
     - Dokany 是 Windows 上的 FUSE 替代方案，允许在用户空间创建自定义文件系统
-    - 使用 purego（无需 cgo）进行 DLL 加载
     - 需要安装 Dokany 驱动程序
 
 ## 功能特性
@@ -293,7 +292,6 @@ brew install --cask macfuse
 - 类似 FUSE 的用户空间文件系统实现
 - 无需编写内核驱动
 - 支持完整的文件系统操作
-- 无 cgo 依赖（使用 purego）
 
 **注意事项**：
 - Dokany 需要管理员权限进行安装

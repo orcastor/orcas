@@ -28,6 +28,14 @@ func NewOrcasFS(h core.Handler, c core.Ctx, bktID int64, sdkCfg *sdk.Config) *Or
 		chunkSize = bucket.ChunkSize
 	}
 
+	// Register SDK config to Handler for ConvertWritingVersions job
+	// This allows the scheduled job to access compression/encryption settings
+	if sdkCfg != nil {
+		if lh, ok := h.(*core.LocalHandler); ok {
+			lh.SetSDKConfig(bktID, sdkCfg.WiseCmpr, sdkCfg.CmprQlty, sdkCfg.EndecWay, sdkCfg.EndecKey)
+		}
+	}
+
 	ofs := &OrcasFS{
 		h:         h,
 		c:         c,

@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"hash/crc32"
+	"io"
 	"testing"
 	"time"
 
@@ -1284,6 +1285,741 @@ func TestQuotaAndUsed(t *testing.T) {
 			buckets, err = dma.GetBkt(c, []int64{testBktID})
 			So(err, ShouldBeNil)
 			So(buckets[0].Used, ShouldEqual, initialUsed)
+		})
+	})
+}
+
+func TestDefragment(t *testing.T) {
+	Convey("Defragment small files and fill holes", t, func() {
+		ig := idgen.NewIDGen(nil, 0)
+		testBktID, _ := ig.New()
+		InitBucketDB(c, testBktID)
+
+		dma := &DefaultMetadataAdapter{}
+		dda := &DefaultDataAdapter{}
+		dda.SetOptions(Options{Sync: true})
+
+		// Create bucket with chunk size
+		uid, _ := ig.New()
+		bucket := &BucketInfo{
+			ID:        testBktID,
+			Name:      "test_bucket",
+			UID:       uid,
+			Type:      1,
+			ChunkSize: 4 * 1024 * 1024, // 4MB
+		}
+		So(dma.PutBkt(c, []*BucketInfo{bucket}), ShouldBeNil)
+
+		admin := NewLocalAdmin()
+
+		Convey("defragment with small files", func() {
+			// Create multiple small files
+			const numFiles = 10
+			dataIDs := make([]int64, numFiles)
+			fileSizes := make([]int64, numFiles)
+
+			for i := 0; i < numFiles; i++ {
+				dataID, _ := ig.New()
+				dataIDs[i] = dataID
+				fileSize := int64(100 * 1024) // 100KB each
+				fileSizes[i] = fileSize
+				testData := make([]byte, fileSize)
+				for j := range testData {
+					testData[j] = byte(i + j)
+				}
+
+				// Write data
+				So(dda.Write(c, testBktID, dataID, 0, testData), ShouldBeNil)
+
+				// Create DataInfo
+				dataInfo := &DataInfo{
+					ID:       dataID,
+					Size:     fileSize,
+					OrigSize: fileSize,
+					Kind:     DATA_NORMAL,
+				}
+				So(dma.PutData(c, testBktID, []*DataInfo{dataInfo}), ShouldBeNil)
+
+				// Create object referencing this data
+				objID, _ := ig.New()
+				obj := &ObjectInfo{
+					ID:     objID,
+					PID:    ROOT_OID,
+					DataID: dataID,
+					Type:   OBJ_TYPE_FILE,
+					Name:   fmt.Sprintf("file_%d.txt", i),
+					Size:   fileSize,
+					MTime:  Now(),
+				}
+				_, err := dma.PutObj(c, testBktID, []*ObjectInfo{obj})
+				So(err, ShouldBeNil)
+			}
+
+			// Run defragmentation
+			result, err := admin.Defragment(c, testBktID)
+			So(err, ShouldBeNil)
+			So(result, ShouldNotBeNil)
+
+			// Verify files were packed
+			So(result.PackedFiles, ShouldBeGreaterThan, 0)
+			So(result.PackedGroups, ShouldBeGreaterThan, 0)
+
+			// Verify data integrity: read back all files
+			for i, dataID := range dataIDs {
+				// Check if data is now packaged
+				dataInfo, err := dma.GetData(c, testBktID, dataID)
+				So(err, ShouldBeNil)
+				So(dataInfo, ShouldNotBeNil)
+
+				// Read data back
+				var readData []byte
+				if dataInfo.PkgID > 0 {
+					// Packaged data
+					pkgReader, _, err := createPkgDataReader(ORCAS_DATA, testBktID, dataInfo.PkgID, int(dataInfo.PkgOffset), int(dataInfo.Size))
+					So(err, ShouldBeNil)
+					readData = make([]byte, dataInfo.Size)
+					_, err = io.ReadFull(pkgReader, readData)
+					pkgReader.Close()
+					So(err, ShouldBeNil)
+				} else {
+					// Still chunked (shouldn't happen after defragmentation for small files)
+					readData, err = dda.Read(c, testBktID, dataID, 0)
+					So(err, ShouldBeNil)
+				}
+
+				// Verify data size
+				So(int64(len(readData)), ShouldEqual, fileSizes[i])
+			}
+		})
+
+		Convey("defragment with no small files", func() {
+			// Create only large files (should not be packed)
+			dataID, _ := ig.New()
+			largeData := make([]byte, 5*1024*1024) // 5MB, larger than default 4MB maxSize
+			So(dda.Write(c, testBktID, dataID, 0, largeData), ShouldBeNil)
+
+			dataInfo := &DataInfo{
+				ID:       dataID,
+				Size:     int64(len(largeData)),
+				OrigSize: int64(len(largeData)),
+				Kind:     DATA_NORMAL,
+			}
+			So(dma.PutData(c, testBktID, []*DataInfo{dataInfo}), ShouldBeNil)
+
+			objID, _ := ig.New()
+			obj := &ObjectInfo{
+				ID:     objID,
+				PID:    ROOT_OID,
+				DataID: dataID,
+				Type:   OBJ_TYPE_FILE,
+				Name:   "large_file.txt",
+				Size:   int64(len(largeData)),
+				MTime:  Now(),
+			}
+			_, err := dma.PutObj(c, testBktID, []*ObjectInfo{obj})
+			So(err, ShouldBeNil)
+
+			// Run defragmentation
+			result, err := admin.Defragment(c, testBktID)
+			So(err, ShouldBeNil)
+			So(result, ShouldNotBeNil)
+
+			// Large files should not be packed
+			So(result.PackedFiles, ShouldEqual, 0)
+			So(result.PackedGroups, ShouldEqual, 0)
+		})
+
+		Convey("defragment with hole filling", func() {
+			// Create a package file with a hole (simulate deleted data)
+			pkgID, _ := ig.New()
+
+			// Create first data block at start
+			dataID1, _ := ig.New()
+			data1 := make([]byte, 500*1024) // 500KB
+			for i := range data1 {
+				data1[i] = 1
+			}
+			So(dda.Write(c, testBktID, pkgID, 0, data1), ShouldBeNil)
+
+			// Create second data block with gap (hole) - 500KB hole between
+			dataID2, _ := ig.New()
+			data2 := make([]byte, 300*1024) // 300KB
+			for i := range data2 {
+				data2[i] = 2
+			}
+			// Write at offset 1MB (leaving 500KB hole)
+			So(dda.Write(c, testBktID, pkgID, 1*1024*1024, data2), ShouldBeNil)
+
+			// Create DataInfo for both blocks
+			dataInfo1 := &DataInfo{
+				ID:        dataID1,
+				Size:      int64(len(data1)),
+				OrigSize:  int64(len(data1)),
+				PkgID:     pkgID,
+				PkgOffset: 0,
+				Kind:      DATA_NORMAL,
+			}
+			dataInfo2 := &DataInfo{
+				ID:        dataID2,
+				Size:      int64(len(data2)),
+				OrigSize:  int64(len(data2)),
+				PkgID:     pkgID,
+				PkgOffset: 1 * 1024 * 1024,
+				Kind:      DATA_NORMAL,
+			}
+			So(dma.PutData(c, testBktID, []*DataInfo{dataInfo1, dataInfo2}), ShouldBeNil)
+
+			// Create objects
+			obj1ID, _ := ig.New()
+			obj1 := &ObjectInfo{
+				ID:     obj1ID,
+				PID:    ROOT_OID,
+				DataID: dataID1,
+				Type:   OBJ_TYPE_FILE,
+				Name:   "file1.txt",
+				Size:   int64(len(data1)),
+				MTime:  Now(),
+			}
+			obj2ID, _ := ig.New()
+			obj2 := &ObjectInfo{
+				ID:     obj2ID,
+				PID:    ROOT_OID,
+				DataID: dataID2,
+				Type:   OBJ_TYPE_FILE,
+				Name:   "file2.txt",
+				Size:   int64(len(data2)),
+				MTime:  Now(),
+			}
+			_, err := dma.PutObj(c, testBktID, []*ObjectInfo{obj1, obj2})
+			So(err, ShouldBeNil)
+
+			// Create a small file that can fill the hole
+			holeFillerID, _ := ig.New()
+			holeFillerData := make([]byte, 400*1024) // 400KB, fits in 500KB hole
+			for i := range holeFillerData {
+				holeFillerData[i] = 3
+			}
+			So(dda.Write(c, testBktID, holeFillerID, 0, holeFillerData), ShouldBeNil)
+
+			holeFillerInfo := &DataInfo{
+				ID:       holeFillerID,
+				Size:     int64(len(holeFillerData)),
+				OrigSize: int64(len(holeFillerData)),
+				Kind:     DATA_NORMAL,
+			}
+			So(dma.PutData(c, testBktID, []*DataInfo{holeFillerInfo}), ShouldBeNil)
+
+			obj3ID, _ := ig.New()
+			obj3 := &ObjectInfo{
+				ID:     obj3ID,
+				PID:    ROOT_OID,
+				DataID: holeFillerID,
+				Type:   OBJ_TYPE_FILE,
+				Name:   "hole_filler.txt",
+				Size:   int64(len(holeFillerData)),
+				MTime:  Now(),
+			}
+			_, err = dma.PutObj(c, testBktID, []*ObjectInfo{obj3})
+			So(err, ShouldBeNil)
+
+			// Run defragmentation
+			result, err := admin.Defragment(c, testBktID)
+			So(err, ShouldBeNil)
+			So(result, ShouldNotBeNil)
+
+			// Verify hole was filled
+			updatedInfo, err := dma.GetData(c, testBktID, holeFillerID)
+			So(err, ShouldBeNil)
+			So(updatedInfo, ShouldNotBeNil)
+			So(updatedInfo.PkgID, ShouldBeGreaterThan, 0)
+
+			// Verify data integrity
+			pkgReader, _, err := createPkgDataReader(ORCAS_DATA, testBktID, updatedInfo.PkgID, int(updatedInfo.PkgOffset), int(updatedInfo.Size))
+			So(err, ShouldBeNil)
+			readData := make([]byte, updatedInfo.Size)
+			_, err = io.ReadFull(pkgReader, readData)
+			pkgReader.Close()
+			So(err, ShouldBeNil)
+
+			// Verify data matches
+			So(len(readData), ShouldEqual, len(holeFillerData))
+			for i := range readData {
+				So(readData[i], ShouldEqual, holeFillerData[i])
+			}
+		})
+
+		Convey("defragment with combination strategy for large holes", func() {
+			// Create a large hole (2MB)
+			pkgID, _ := ig.New()
+			largeHoleSize := int64(2 * 1024 * 1024) // 2MB
+
+			// Create data at start
+			dataID1, _ := ig.New()
+			data1 := make([]byte, 500*1024)
+			So(dda.Write(c, testBktID, pkgID, 0, data1), ShouldBeNil)
+
+			// Create data at end (leaving large hole in middle)
+			dataID2, _ := ig.New()
+			data2 := make([]byte, 500*1024)
+			So(dda.Write(c, testBktID, pkgID, int(largeHoleSize+500*1024), data2), ShouldBeNil)
+
+			// Create DataInfo
+			dataInfo1 := &DataInfo{
+				ID:        dataID1,
+				Size:      int64(len(data1)),
+				OrigSize:  int64(len(data1)),
+				PkgID:     pkgID,
+				PkgOffset: 0,
+				Kind:      DATA_NORMAL,
+			}
+			dataInfo2 := &DataInfo{
+				ID:        dataID2,
+				Size:      int64(len(data2)),
+				OrigSize:  int64(len(data2)),
+				PkgID:     pkgID,
+				PkgOffset: uint32(largeHoleSize + 500*1024),
+				Kind:      DATA_NORMAL,
+			}
+			So(dma.PutData(c, testBktID, []*DataInfo{dataInfo1, dataInfo2}), ShouldBeNil)
+
+			// Create objects
+			obj1ID, _ := ig.New()
+			obj1 := &ObjectInfo{
+				ID:     obj1ID,
+				PID:    ROOT_OID,
+				DataID: dataID1,
+				Type:   OBJ_TYPE_FILE,
+				Name:   "file1.txt",
+				Size:   int64(len(data1)),
+				MTime:  Now(),
+			}
+			obj2ID, _ := ig.New()
+			obj2 := &ObjectInfo{
+				ID:     obj2ID,
+				PID:    ROOT_OID,
+				DataID: dataID2,
+				Type:   OBJ_TYPE_FILE,
+				Name:   "file2.txt",
+				Size:   int64(len(data2)),
+				MTime:  Now(),
+			}
+			_, err := dma.PutObj(c, testBktID, []*ObjectInfo{obj1, obj2})
+			So(err, ShouldBeNil)
+
+			// Create multiple small files that can fill the large hole
+			const numSmallFiles = 5
+			smallFileIDs := make([]int64, numSmallFiles)
+			smallFileSize := int64(300 * 1024) // 300KB each, total 1.5MB fits in 2MB hole
+			smallFileData := make([][]byte, numSmallFiles)
+
+			for i := 0; i < numSmallFiles; i++ {
+				dataID, _ := ig.New()
+				smallFileIDs[i] = dataID
+				data := make([]byte, smallFileSize)
+				smallFileData[i] = data
+				for j := range data {
+					data[j] = byte(i + 10)
+				}
+				So(dda.Write(c, testBktID, dataID, 0, data), ShouldBeNil)
+
+				dataInfo := &DataInfo{
+					ID:       dataID,
+					Size:     smallFileSize,
+					OrigSize: smallFileSize,
+					Kind:     DATA_NORMAL,
+				}
+				So(dma.PutData(c, testBktID, []*DataInfo{dataInfo}), ShouldBeNil)
+
+				objID, _ := ig.New()
+				obj := &ObjectInfo{
+					ID:     objID,
+					PID:    ROOT_OID,
+					DataID: dataID,
+					Type:   OBJ_TYPE_FILE,
+					Name:   fmt.Sprintf("small_%d.txt", i),
+					Size:   smallFileSize,
+					MTime:  Now(),
+				}
+				_, err = dma.PutObj(c, testBktID, []*ObjectInfo{obj})
+				So(err, ShouldBeNil)
+			}
+
+			// Run defragmentation
+			result, err := admin.Defragment(c, testBktID)
+			So(err, ShouldBeNil)
+			So(result, ShouldNotBeNil)
+
+			// Verify some files were packed
+			So(result.PackedFiles, ShouldBeGreaterThan, 0)
+
+			// Verify at least some small files are now packaged
+			packagedCount := 0
+			for i, dataID := range smallFileIDs {
+				dataInfo, err := dma.GetData(c, testBktID, dataID)
+				So(err, ShouldBeNil)
+				if dataInfo.PkgID > 0 {
+					packagedCount++
+					// Verify data integrity
+					pkgReader, _, err := createPkgDataReader(ORCAS_DATA, testBktID, dataInfo.PkgID, int(dataInfo.PkgOffset), int(dataInfo.Size))
+					So(err, ShouldBeNil)
+					readData := make([]byte, dataInfo.Size)
+					_, err = io.ReadFull(pkgReader, readData)
+					pkgReader.Close()
+					So(err, ShouldBeNil)
+
+					// Verify data matches
+					for j := range readData {
+						So(readData[j], ShouldEqual, smallFileData[i][j])
+					}
+				}
+			}
+			So(packagedCount, ShouldBeGreaterThan, 0)
+		})
+
+		Convey("defragment with orphaned data", func() {
+			// Create orphaned data (no object references)
+			dataID, _ := ig.New()
+			testData := make([]byte, 100*1024)
+			for i := range testData {
+				testData[i] = byte(i % 256)
+			}
+			So(dda.Write(c, testBktID, dataID, 0, testData), ShouldBeNil)
+
+			dataInfo := &DataInfo{
+				ID:       dataID,
+				Size:     int64(len(testData)),
+				OrigSize: int64(len(testData)),
+				Kind:     DATA_NORMAL,
+			}
+			So(dma.PutData(c, testBktID, []*DataInfo{dataInfo}), ShouldBeNil)
+
+			// Don't create object, so data is orphaned
+
+			// Run defragmentation
+			result, err := admin.Defragment(c, testBktID)
+			So(err, ShouldBeNil)
+			So(result, ShouldNotBeNil)
+
+			// Orphaned data should be deleted, not packed
+			So(result.PackedFiles, ShouldEqual, 0)
+
+			// Verify data is still in database (delayed delete)
+			// Note: actual deletion happens after delay, so data might still exist
+			_, err = dma.GetData(c, testBktID, dataID)
+			// Data might still exist due to delayed delete
+			_ = err
+		})
+
+		Convey("defragment compact existing package files", func() {
+			// Create a package file with deleted data blocks
+			pkgID, _ := ig.New()
+
+			// Create three data blocks
+			data1 := make([]byte, 200*1024)
+			data2 := make([]byte, 200*1024)
+			data3 := make([]byte, 200*1024)
+			for i := range data1 {
+				data1[i] = 1
+			}
+			for i := range data2 {
+				data2[i] = 2
+			}
+			for i := range data3 {
+				data3[i] = 3
+			}
+
+			So(dda.Write(c, testBktID, pkgID, 0, data1), ShouldBeNil)
+			So(dda.Write(c, testBktID, pkgID, 200*1024, data2), ShouldBeNil)
+			So(dda.Write(c, testBktID, pkgID, 400*1024, data3), ShouldBeNil)
+
+			dataID1, _ := ig.New()
+			dataID2, _ := ig.New()
+			dataID3, _ := ig.New()
+
+			dataInfo1 := &DataInfo{
+				ID:        dataID1,
+				Size:      int64(len(data1)),
+				OrigSize:  int64(len(data1)),
+				PkgID:     pkgID,
+				PkgOffset: 0,
+				Kind:      DATA_NORMAL,
+			}
+			dataInfo2 := &DataInfo{
+				ID:        dataID2,
+				Size:      int64(len(data2)),
+				OrigSize:  int64(len(data2)),
+				PkgID:     pkgID,
+				PkgOffset: 200 * 1024,
+				Kind:      DATA_NORMAL,
+			}
+			dataInfo3 := &DataInfo{
+				ID:        dataID3,
+				Size:      int64(len(data3)),
+				OrigSize:  int64(len(data3)),
+				PkgID:     pkgID,
+				PkgOffset: 400 * 1024,
+				Kind:      DATA_NORMAL,
+			}
+			So(dma.PutData(c, testBktID, []*DataInfo{dataInfo1, dataInfo2, dataInfo3}), ShouldBeNil)
+
+			// Create objects for data1 and data3 only (data2 is "deleted")
+			obj1ID, _ := ig.New()
+			obj1 := &ObjectInfo{
+				ID:     obj1ID,
+				PID:    ROOT_OID,
+				DataID: dataID1,
+				Type:   OBJ_TYPE_FILE,
+				Name:   "file1.txt",
+				Size:   int64(len(data1)),
+				MTime:  Now(),
+			}
+			obj3ID, _ := ig.New()
+			obj3 := &ObjectInfo{
+				ID:     obj3ID,
+				PID:    ROOT_OID,
+				DataID: dataID3,
+				Type:   OBJ_TYPE_FILE,
+				Name:   "file3.txt",
+				Size:   int64(len(data3)),
+				MTime:  Now(),
+			}
+			_, err := dma.PutObj(c, testBktID, []*ObjectInfo{obj1, obj3})
+			So(err, ShouldBeNil)
+
+			// Run defragmentation
+			result, err := admin.Defragment(c, testBktID)
+			So(err, ShouldBeNil)
+			So(result, ShouldNotBeNil)
+
+			// Should compact package file (remove deleted data2, move data3 forward)
+			So(result.CompactedPkgs, ShouldBeGreaterThan, 0)
+
+			// Verify data1 and data3 are still accessible
+			updatedInfo1, err := dma.GetData(c, testBktID, dataID1)
+			So(err, ShouldBeNil)
+			So(updatedInfo1, ShouldNotBeNil)
+
+			updatedInfo3, err := dma.GetData(c, testBktID, dataID3)
+			So(err, ShouldBeNil)
+			So(updatedInfo3, ShouldNotBeNil)
+
+			// Verify data can still be read correctly
+			var readData1, readData3 []byte
+			if updatedInfo1.PkgID > 0 {
+				pkgReader, _, err := createPkgDataReader(ORCAS_DATA, testBktID, updatedInfo1.PkgID, int(updatedInfo1.PkgOffset), int(updatedInfo1.Size))
+				So(err, ShouldBeNil)
+				readData1 = make([]byte, updatedInfo1.Size)
+				_, err = io.ReadFull(pkgReader, readData1)
+				pkgReader.Close()
+				So(err, ShouldBeNil)
+			}
+
+			if updatedInfo3.PkgID > 0 {
+				pkgReader, _, err := createPkgDataReader(ORCAS_DATA, testBktID, updatedInfo3.PkgID, int(updatedInfo3.PkgOffset), int(updatedInfo3.Size))
+				So(err, ShouldBeNil)
+				readData3 = make([]byte, updatedInfo3.Size)
+				_, err = io.ReadFull(pkgReader, readData3)
+				pkgReader.Close()
+				So(err, ShouldBeNil)
+			}
+
+			So(len(readData1), ShouldEqual, len(data1))
+			So(len(readData3), ShouldEqual, len(data3))
+
+			// Verify data content
+			for i := range readData1 {
+				So(readData1[i], ShouldEqual, data1[i])
+			}
+			for i := range readData3 {
+				So(readData3[i], ShouldEqual, data3[i])
+			}
+		})
+
+		Convey("defragment with empty bucket", func() {
+			// Run defragmentation on empty bucket
+			result, err := admin.Defragment(c, testBktID)
+			So(err, ShouldBeNil)
+			So(result, ShouldNotBeNil)
+
+			// Should return zero results
+			So(result.PackedFiles, ShouldEqual, 0)
+			So(result.PackedGroups, ShouldEqual, 0)
+			So(result.CompactedPkgs, ShouldEqual, 0)
+		})
+
+		Convey("defragment with mixed file sizes", func() {
+			// Create mix of small and large files
+			const numSmallFiles = 5
+			const numLargeFiles = 2
+
+			smallFileIDs := make([]int64, numSmallFiles)
+			largeFileIDs := make([]int64, numLargeFiles)
+
+			// Create small files
+			for i := 0; i < numSmallFiles; i++ {
+				dataID, _ := ig.New()
+				smallFileIDs[i] = dataID
+				fileSize := int64(50 * 1024) // 50KB
+				testData := make([]byte, fileSize)
+				for j := range testData {
+					testData[j] = byte(i + j)
+				}
+				So(dda.Write(c, testBktID, dataID, 0, testData), ShouldBeNil)
+
+				dataInfo := &DataInfo{
+					ID:       dataID,
+					Size:     fileSize,
+					OrigSize: fileSize,
+					Kind:     DATA_NORMAL,
+				}
+				So(dma.PutData(c, testBktID, []*DataInfo{dataInfo}), ShouldBeNil)
+
+				objID, _ := ig.New()
+				obj := &ObjectInfo{
+					ID:     objID,
+					PID:    ROOT_OID,
+					DataID: dataID,
+					Type:   OBJ_TYPE_FILE,
+					Name:   fmt.Sprintf("small_%d.txt", i),
+					Size:   fileSize,
+					MTime:  Now(),
+				}
+				_, err := dma.PutObj(c, testBktID, []*ObjectInfo{obj})
+				So(err, ShouldBeNil)
+			}
+
+			// Create large files
+			for i := 0; i < numLargeFiles; i++ {
+				dataID, _ := ig.New()
+				largeFileIDs[i] = dataID
+				fileSize := int64(6 * 1024 * 1024) // 6MB, larger than 4MB maxSize
+				testData := make([]byte, fileSize)
+				for j := range testData {
+					testData[j] = byte(i + 100)
+				}
+				So(dda.Write(c, testBktID, dataID, 0, testData), ShouldBeNil)
+
+				dataInfo := &DataInfo{
+					ID:       dataID,
+					Size:     fileSize,
+					OrigSize: fileSize,
+					Kind:     DATA_NORMAL,
+				}
+				So(dma.PutData(c, testBktID, []*DataInfo{dataInfo}), ShouldBeNil)
+
+				objID, _ := ig.New()
+				obj := &ObjectInfo{
+					ID:     objID,
+					PID:    ROOT_OID,
+					DataID: dataID,
+					Type:   OBJ_TYPE_FILE,
+					Name:   fmt.Sprintf("large_%d.txt", i),
+					Size:   fileSize,
+					MTime:  Now(),
+				}
+				_, err := dma.PutObj(c, testBktID, []*ObjectInfo{obj})
+				So(err, ShouldBeNil)
+			}
+
+			// Run defragmentation
+			result, err := admin.Defragment(c, testBktID)
+			So(err, ShouldBeNil)
+			So(result, ShouldNotBeNil)
+
+			// Only small files should be packed
+			So(result.PackedFiles, ShouldBeGreaterThan, 0)
+			So(result.PackedFiles, ShouldBeLessThanOrEqualTo, numSmallFiles)
+
+			// Verify small files are packaged
+			packagedCount := 0
+			for _, dataID := range smallFileIDs {
+				dataInfo, err := dma.GetData(c, testBktID, dataID)
+				So(err, ShouldBeNil)
+				if dataInfo.PkgID > 0 {
+					packagedCount++
+				}
+			}
+			So(packagedCount, ShouldBeGreaterThan, 0)
+
+			// Verify large files are NOT packaged
+			for _, dataID := range largeFileIDs {
+				dataInfo, err := dma.GetData(c, testBktID, dataID)
+				So(err, ShouldBeNil)
+				So(dataInfo.PkgID, ShouldEqual, 0) // Should remain unpackaged
+			}
+		})
+
+		Convey("defragment preserves data integrity after multiple runs", func() {
+			// Create multiple small files
+			const numFiles = 8
+			dataIDs := make([]int64, numFiles)
+			originalData := make([][]byte, numFiles)
+
+			for i := 0; i < numFiles; i++ {
+				dataID, _ := ig.New()
+				dataIDs[i] = dataID
+				fileSize := int64(150 * 1024) // 150KB
+				testData := make([]byte, fileSize)
+				for j := range testData {
+					testData[j] = byte(i*100 + j)
+				}
+				originalData[i] = testData
+				So(dda.Write(c, testBktID, dataID, 0, testData), ShouldBeNil)
+
+				dataInfo := &DataInfo{
+					ID:       dataID,
+					Size:     fileSize,
+					OrigSize: fileSize,
+					Kind:     DATA_NORMAL,
+				}
+				So(dma.PutData(c, testBktID, []*DataInfo{dataInfo}), ShouldBeNil)
+
+				objID, _ := ig.New()
+				obj := &ObjectInfo{
+					ID:     objID,
+					PID:    ROOT_OID,
+					DataID: dataID,
+					Type:   OBJ_TYPE_FILE,
+					Name:   fmt.Sprintf("file_%d.txt", i),
+					Size:   fileSize,
+					MTime:  Now(),
+				}
+				_, err := dma.PutObj(c, testBktID, []*ObjectInfo{obj})
+				So(err, ShouldBeNil)
+			}
+
+			// Run defragmentation multiple times
+			for run := 0; run < 3; run++ {
+				result, err := admin.Defragment(c, testBktID)
+				So(err, ShouldBeNil)
+				So(result, ShouldNotBeNil)
+
+				// Verify all data is still readable and correct
+				for i, dataID := range dataIDs {
+					dataInfo, err := dma.GetData(c, testBktID, dataID)
+					So(err, ShouldBeNil)
+					So(dataInfo, ShouldNotBeNil)
+
+					var readData []byte
+					if dataInfo.PkgID > 0 {
+						pkgReader, _, err := createPkgDataReader(ORCAS_DATA, testBktID, dataInfo.PkgID, int(dataInfo.PkgOffset), int(dataInfo.Size))
+						So(err, ShouldBeNil)
+						readData = make([]byte, dataInfo.Size)
+						_, err = io.ReadFull(pkgReader, readData)
+						pkgReader.Close()
+						So(err, ShouldBeNil)
+					} else {
+						readData, err = dda.Read(c, testBktID, dataID, 0)
+						So(err, ShouldBeNil)
+					}
+
+					// Verify data matches original
+					So(len(readData), ShouldEqual, len(originalData[i]))
+					for j := range readData {
+						So(readData[j], ShouldEqual, originalData[i][j])
+					}
+				}
+			}
 		})
 	})
 }

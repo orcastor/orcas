@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"fmt"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -178,6 +179,18 @@ type LocalHandler struct {
 	da  DataAdapter
 	acm AccessCtrlMgr
 	opt Options
+	// SDK config registry: map[bktID] -> SDK config
+	// This allows ConvertWritingVersions to access SDK config for compression/encryption
+	sdkConfigs sync.Map // map[int64]*SDKConfigInfo
+}
+
+// SDKConfigInfo stores SDK configuration for a bucket
+// This is a simplified version of sdk.Config, containing only compression/encryption settings
+type SDKConfigInfo struct {
+	WiseCmpr uint32 // Compression method (core.DATA_CMPR_MASK)
+	CmprQlty uint32 // Compression quality
+	EndecWay uint32 // Encryption method (core.DATA_ENDEC_MASK)
+	EndecKey string // Encryption key
 }
 
 func NewLocalHandler() Handler {
@@ -209,6 +222,27 @@ func (lh *LocalHandler) SetAdapter(ma MetadataAdapter, da DataAdapter) {
 	lh.ma = ma
 	lh.da = da
 	lh.acm.SetAdapter(ma)
+}
+
+// SetSDKConfig sets SDK configuration for a bucket
+// This allows ConvertWritingVersions to access compression/encryption settings
+func (lh *LocalHandler) SetSDKConfig(bktID int64, wiseCmpr, cmprQlty, endecWay uint32, endecKey string) {
+	lh.sdkConfigs.Store(bktID, &SDKConfigInfo{
+		WiseCmpr: wiseCmpr,
+		CmprQlty: cmprQlty,
+		EndecWay: endecWay,
+		EndecKey: endecKey,
+	})
+}
+
+// GetSDKConfig gets SDK configuration for a bucket
+func (lh *LocalHandler) GetSDKConfig(bktID int64) *SDKConfigInfo {
+	if cfg, ok := lh.sdkConfigs.Load(bktID); ok {
+		if sdkCfg, ok := cfg.(*SDKConfigInfo); ok {
+			return sdkCfg
+		}
+	}
+	return nil
 }
 
 func (lh *LocalHandler) Login(c Ctx, usr, pwd string) (Ctx, *UserInfo, []*BucketInfo, error) {
@@ -357,18 +391,313 @@ func (lh *LocalHandler) GetDataInfo(c Ctx, bktID, id int64) (*DataInfo, error) {
 
 // GetData reads data chunk
 // One param means sn, two params mean sn+offset, three params mean sn+offset+size
+// For sparse files (DATA_SPARSE flag), missing chunks are filled with zeros
 func (lh *LocalHandler) GetData(c Ctx, bktID, id int64, sn int, offsetOrSize ...int) ([]byte, error) {
 	if err := lh.acm.CheckPermission(c, DR, bktID); err != nil {
 		return nil, err
 	}
 
+	// Get DataInfo to check if it's a sparse file
+	dataInfo, err := lh.ma.GetData(c, bktID, id)
+	if err != nil {
+		return nil, err
+	}
+	isSparse := IsSparseFile(dataInfo)
+
+	var data []byte
 	switch len(offsetOrSize) {
 	case 0:
-		return lh.da.Read(c, bktID, id, sn)
+		data, err = lh.da.Read(c, bktID, id, sn)
 	case 1:
-		return lh.da.ReadBytes(c, bktID, id, sn, offsetOrSize[0], -1)
+		data, err = lh.da.ReadBytes(c, bktID, id, sn, offsetOrSize[0], -1)
+	default:
+		data, err = lh.da.ReadBytes(c, bktID, id, sn, offsetOrSize[0], offsetOrSize[1])
 	}
-	return lh.da.ReadBytes(c, bktID, id, sn, offsetOrSize[0], offsetOrSize[1])
+
+	// For sparse files, if file doesn't exist, fill with zeros
+	if err != nil && isSparse {
+		if os.IsNotExist(err) {
+			// Calculate expected size
+			var expectedSize int
+			switch len(offsetOrSize) {
+			case 0:
+				// Read entire chunk - use chunk size from bucket configuration
+				chunkSize := getChunkSize(c, bktID, lh.ma)
+				// For sparse files, if chunk doesn't exist, return chunkSize zeros
+				// This allows readers to continue reading subsequent chunks
+				return make([]byte, chunkSize), nil
+			case 1:
+				// Read from offset to end - we don't know end size, return empty
+				return []byte{}, nil
+			default:
+				// Read specific size
+				expectedSize = offsetOrSize[1]
+				if expectedSize > 0 {
+					return make([]byte, expectedSize), nil
+				}
+				return []byte{}, nil
+			}
+		}
+		// For other errors, still return error
+		return nil, err
+	}
+
+	// For sparse files, if read less than requested, fill remaining with zeros
+	if err == nil && isSparse && len(offsetOrSize) >= 2 {
+		requestedSize := offsetOrSize[1]
+		if requestedSize > 0 && len(data) < requestedSize {
+			// Fill remaining bytes with zeros
+			padded := make([]byte, requestedSize)
+			copy(padded, data)
+			return padded, nil
+		}
+	}
+
+	return data, err
+}
+
+// GetOrCreateWritingVersion gets or creates a "writing version" (name="0") for a file
+// Writing versions allow direct modification of data blocks without creating new versions
+// This is optimized for scenarios like qBittorrent random writes
+// The version ID is set to creation time (timestamp), and name will be set to completion time when finished
+func (lh *LocalHandler) GetOrCreateWritingVersion(c Ctx, bktID, fileID int64) (*ObjectInfo, error) {
+	if err := lh.acm.CheckPermission(c, MDW, bktID); err != nil {
+		return nil, err
+	}
+
+	// Query for existing writing version (name="0"), include writing versions
+	versions, err := lh.ma.ListVersions(c, bktID, fileID, false)
+	if err != nil {
+		return nil, err
+	}
+
+	// Find writing version (name="0")
+	for _, v := range versions {
+		if v.Name == WritingVersionName {
+			return v, nil
+		}
+	}
+
+	// No writing version exists, create one
+	// Get file object to get current DataID and Size
+	fileObjs, err := lh.ma.GetObj(c, bktID, []int64{fileID})
+	if err != nil {
+		return nil, err
+	}
+	if len(fileObjs) == 0 {
+		return nil, fmt.Errorf("file %d not found", fileID)
+	}
+	fileObj := fileObjs[0]
+
+	// For writing version, we need a separate DataID without compression/encryption
+	// Check if current DataID has compression/encryption
+	var writingDataID int64 = fileObj.DataID
+	if fileObj.DataID > 0 && fileObj.DataID != EmptyDataID {
+		dataInfo, err := lh.ma.GetData(c, bktID, fileObj.DataID)
+		if err == nil && dataInfo != nil {
+			hasCompression := dataInfo.Kind&DATA_CMPR_MASK != 0
+			hasEncryption := dataInfo.Kind&DATA_ENDEC_MASK != 0
+			// If original data has compression/encryption, create new DataID for writing version
+			if hasCompression || hasEncryption {
+				// Create new DataID for writing version (uncompressed/unencrypted)
+				writingDataID = NewID()
+				if writingDataID <= 0 {
+					return nil, fmt.Errorf("failed to create DataID for writing version")
+				}
+				// Create DataInfo for writing version (no compression/encryption)
+				writingDataInfo := &DataInfo{
+					ID:       writingDataID,
+					Size:     0,
+					OrigSize: fileObj.Size,
+					Kind:     DATA_NORMAL, // No compression, no encryption
+				}
+				if dataInfo.Kind&DATA_SPARSE != 0 {
+					writingDataInfo.Kind |= DATA_SPARSE // Preserve sparse flag
+				}
+				_, err = lh.PutDataInfo(c, bktID, []*DataInfo{writingDataInfo})
+				if err != nil {
+					return nil, fmt.Errorf("failed to create DataInfo for writing version: %v", err)
+				}
+			}
+		}
+	} else if fileObj.DataID == 0 || fileObj.DataID == EmptyDataID {
+		// File has no data yet, create new DataID for writing version
+		writingDataID = NewID()
+		if writingDataID <= 0 {
+			return nil, fmt.Errorf("failed to create DataID for writing version")
+		}
+		// Create DataInfo for writing version (no compression/encryption)
+		writingDataInfo := &DataInfo{
+			ID:       writingDataID,
+			Size:     0,
+			OrigSize: fileObj.Size,
+			Kind:     DATA_NORMAL | DATA_SPARSE, // No compression, no encryption, sparse
+		}
+		_, err = lh.PutDataInfo(c, bktID, []*DataInfo{writingDataInfo})
+		if err != nil {
+			return nil, fmt.Errorf("failed to create DataInfo for writing version: %v", err)
+		}
+	}
+
+	// Create writing version with name="0"
+	// ID is set to creation time (timestamp in seconds)
+	creationTime := Now()
+	writingVersion := &ObjectInfo{
+		ID:     creationTime, // Use creation time as ID
+		PID:    fileID,
+		Type:   OBJ_TYPE_VERSION,
+		Name:   WritingVersionName, // Will be changed to completion time when finished
+		DataID: writingDataID,      // Use DataID without compression/encryption
+		Size:   fileObj.Size,       // Use current file's Size
+		MTime:  creationTime,
+	}
+
+	// Put the writing version (will not trigger version retention policy if name="0")
+	ids, err := lh.Put(c, bktID, []*ObjectInfo{writingVersion})
+	if err != nil {
+		return nil, err
+	}
+	if len(ids) == 0 || ids[0] == 0 {
+		return nil, fmt.Errorf("failed to create writing version")
+	}
+
+	writingVersion.ID = ids[0]
+	return writingVersion, nil
+}
+
+// CompleteWritingVersion completes a writing version by changing name from "0" to completion time
+// This marks the version as finished and makes it participate in version retention policy
+// After completion, the version can no longer be directly modified
+// If compression/encryption is needed, it will be processed asynchronously in the background
+func (lh *LocalHandler) CompleteWritingVersion(c Ctx, bktID, fileID int64) error {
+	if err := lh.acm.CheckPermission(c, MDW, bktID); err != nil {
+		return err
+	}
+
+	// Get writing version (name="0")
+	versions, err := lh.ma.ListVersions(c, bktID, fileID, false)
+	if err != nil {
+		return err
+	}
+
+	var writingVersion *ObjectInfo
+	for _, v := range versions {
+		if v.Name == WritingVersionName {
+			writingVersion = v
+			break
+		}
+	}
+
+	if writingVersion == nil {
+		return fmt.Errorf("writing version not found for file %d", fileID)
+	}
+
+	// Get file object to check if compression/encryption is needed
+	fileObjs, err := lh.ma.GetObj(c, bktID, []int64{fileID})
+	if err != nil {
+		return err
+	}
+	if len(fileObjs) == 0 {
+		return fmt.Errorf("file %d not found", fileID)
+	}
+
+	// Note: Compression/encryption conversion will be handled by scheduled job (ConvertWritingVersions)
+	// No need to check or process here - the job will find and convert versions that need it
+
+	// Change name from "0" to completion time (timestamp as string)
+	completionTime := Now()
+	completionTimeStr := strconv.FormatInt(completionTime, 10)
+
+	// Update version name to completion time
+	// If compression/encryption is needed, keep writing DataID for now (will be updated asynchronously)
+	updateVersion := &ObjectInfo{
+		ID:     writingVersion.ID,
+		Name:   completionTimeStr,     // Change from "0" to completion time
+		MTime:  completionTime,        // Update MTime to completion time
+		DataID: writingVersion.DataID, // Keep writing DataID, will be updated asynchronously if needed
+		Size:   writingVersion.Size,
+	}
+
+	// Update version object
+	err = lh.ma.SetObj(c, bktID, []string{"name", "mtime", "did", "size"}, updateVersion)
+	if err != nil {
+		return err
+	}
+
+	// Note: Compression/encryption conversion is handled by scheduled job (crontab)
+	// The conversion will be processed later by ConvertWritingVersions job
+	// For now, just update file object DataID to writing version's DataID
+	updateFileObj := &ObjectInfo{
+		ID:     fileID,
+		DataID: writingVersion.DataID,
+		Size:   writingVersion.Size,
+	}
+	lh.ma.SetObj(c, bktID, []string{"did", "size"}, updateFileObj)
+
+	// Now trigger version retention policy for the completed version
+	// This will process version merging and count limits
+	asyncApplyVersionRetention(c, bktID, fileID, completionTime, lh.ma, lh.da)
+
+	return nil
+}
+
+// UpdateData updates part of existing data chunk (for writing versions with name="0")
+// This allows direct modification of data blocks without creating new versions
+// offset: offset within the chunk, buf: data to write at that offset
+// Unlike PutData which creates new data blocks, UpdateData modifies existing ones
+func (lh *LocalHandler) UpdateData(c Ctx, bktID, dataID int64, sn int, offset int, buf []byte) error {
+	if err := lh.acm.CheckPermission(c, DW, bktID); err != nil {
+		return err
+	}
+
+	if len(buf) == 0 {
+		return nil // Nothing to update
+	}
+
+	// For UpdateData, we need to handle quota differently:
+	// If the data block already exists, we need to calculate the size difference
+	// Get old data size if exists
+	oldData, err := lh.da.Read(c, bktID, dataID, sn)
+	oldSize := int64(0)
+	if err == nil {
+		oldSize = int64(len(oldData))
+	}
+
+	// Calculate new size after update
+	newSize := int64(offset + len(buf))
+	if newSize < oldSize {
+		newSize = oldSize // Update doesn't shrink, only extends or modifies
+	}
+
+	sizeDiff := newSize - oldSize
+
+	// Only update quota if size changed (extended)
+	if sizeDiff > 0 {
+		// Get bucket info and check quota
+		buckets, err := lh.ma.GetBkt(c, []int64{bktID})
+		if err != nil {
+			return err
+		}
+		if len(buckets) == 0 {
+			return ERR_QUERY_DB
+		}
+		bucket := buckets[0]
+
+		// If quota >= 0, check if it exceeds quota
+		if bucket.Quota >= 0 {
+			if bucket.RealUsed+sizeDiff > bucket.Quota {
+				return ERR_QUOTA_EXCEED
+			}
+		}
+
+		// Increase usage (only when extending)
+		if err := lh.ma.IncBktRealUsed(c, bktID, sizeDiff); err != nil {
+			return err
+		}
+	}
+
+	// Update data block using DataAdapter.Update (supports partial update)
+	return lh.da.Update(c, bktID, dataID, sn, offset, buf)
 }
 
 // Put creates objects
@@ -381,6 +710,7 @@ func (lh *LocalHandler) Put(c Ctx, bktID int64, o []*ObjectInfo) ([]int64, error
 	}
 
 	// 设置版本对象的时间戳（用于后续的版本保留策略处理）
+	// Note: Writing versions (name="0") do not trigger version retention policy
 	for _, obj := range o {
 		if obj.Type == OBJ_TYPE_VERSION && obj.PID > 0 {
 			// 设置MTime（如果未设置）
@@ -394,7 +724,11 @@ func (lh *LocalHandler) Put(c Ctx, bktID int64, o []*ObjectInfo) ([]int64, error
 		if x.ID == 0 {
 			x.ID = NewID()
 		}
-		if x.Name == "" {
+		// Writing versions (name="0") keep their name, don't auto-generate
+		if x.Name == "" && x.Type != OBJ_TYPE_VERSION {
+			x.Name = strconv.FormatInt(x.ID, 10)
+		} else if x.Name == "" {
+			// For version objects without name, use ID as name (normal versions)
 			x.Name = strconv.FormatInt(x.ID, 10)
 		}
 	}
@@ -411,9 +745,11 @@ func (lh *LocalHandler) Put(c Ctx, bktID int64, o []*ObjectInfo) ([]int64, error
 
 	// 如果是新版本对象（OBJ_TYPE_VERSION），异步处理版本保留策略
 	// 统一处理时间窗口内的版本合并和版本数量限制
+	// Note: Writing versions (name="0") do not trigger version retention policy
 	for _, obj := range o {
-		if obj.Type == OBJ_TYPE_VERSION && obj.PID > 0 {
+		if obj.Type == OBJ_TYPE_VERSION && obj.PID > 0 && obj.Name != WritingVersionName {
 			// 异步应用版本保留策略（后置处理：时间窗口合并 + 版本数量限制）
+			// 跳过正在写入的版本（name="0"），它们可以随时修改，不需要版本管理
 			asyncApplyVersionRetention(c, bktID, obj.PID, obj.MTime, lh.ma, lh.da)
 		}
 	}

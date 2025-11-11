@@ -266,20 +266,27 @@ type CronJobConfig struct {
 	// DefragmentThreshold Space usage threshold for Defragment (percentage, 0-100)
 	// Defragmentation will only be performed when fragmentation rate ((Used - RealUsed) / Used * 100) reaches this threshold
 	DefragmentThreshold int64
+
+	// ConvertWritingVersionsEnabled Whether to enable ConvertWritingVersions scheduled task
+	ConvertWritingVersionsEnabled bool
+	// ConvertWritingVersionsSchedule Cron expression for ConvertWritingVersions
+	ConvertWritingVersionsSchedule string
 }
 
 // GetCronJobConfig Get scheduled task configuration
 func GetCronJobConfig() CronJobConfig {
 	config := CronJobConfig{
-		ScrubEnabled:           false,
-		ScrubSchedule:          "0 2 * * *", // Daily at 2 AM
-		MergeEnabled:           false,
-		MergeSchedule:          "0 3 * * *", // Daily at 3 AM
-		DefragmentEnabled:      false,
-		DefragmentSchedule:     "0 4 * * 0",      // Sundays at 4 AM
-		DefragmentMaxSize:      10 * 1024 * 1024, // Default 10MB
-		DefragmentAccessWindow: 0,                // Default no limit
-		DefragmentThreshold:    10,               // Default 10% (execute when fragmentation rate >= 10%)
+		ScrubEnabled:                   false,
+		ScrubSchedule:                  "0 2 * * *", // Daily at 2 AM
+		MergeEnabled:                   false,
+		MergeSchedule:                  "0 3 * * *", // Daily at 3 AM
+		DefragmentEnabled:              false,
+		DefragmentSchedule:             "0 4 * * 0",      // Sundays at 4 AM
+		DefragmentMaxSize:              10 * 1024 * 1024, // Default 10MB
+		DefragmentAccessWindow:         0,                // Default no limit
+		DefragmentThreshold:            10,               // Default 10% (execute when fragmentation rate >= 10%)
+		ConvertWritingVersionsEnabled:  false,
+		ConvertWritingVersionsSchedule: "0 1 * * *", // Daily at 1 AM
 	}
 
 	// Read configuration from environment variables
@@ -317,6 +324,13 @@ func GetCronJobConfig() CronJobConfig {
 		if d, err := strconv.ParseInt(threshold, 10, 64); err == nil && d >= 0 && d <= 100 {
 			config.DefragmentThreshold = d
 		}
+	}
+
+	if convert := os.Getenv("ORCAS_CRON_CONVERT_WRITING_VERSIONS_ENABLED"); convert != "" {
+		config.ConvertWritingVersionsEnabled = convert == "true" || convert == "1"
+	}
+	if schedule := os.Getenv("ORCAS_CRON_CONVERT_WRITING_VERSIONS_SCHEDULE"); schedule != "" {
+		config.ConvertWritingVersionsSchedule = schedule
 	}
 
 	return config

@@ -271,7 +271,6 @@ Tests and benchmarks use the following environment:
 - Large file chunk reading needs optimization
 - Windows platform supports both RandomAccessor API and Dokany filesystem mounting
   - Dokany mounting requires Dokany driver to be installed
-  - Uses purego for DLL loading (no cgo required)
 
 ## Windows Platform Support
 
@@ -282,7 +281,6 @@ Tests and benchmarks use the following environment:
 ### Implementation Details
 
 **Dokany Integration**:
-- Uses purego for DLL loading (no cgo required)
 - Dynamically loads `dokan2.dll` at runtime
 - Implements full filesystem operations:
   - CreateFile, ReadFile, WriteFile
@@ -296,7 +294,6 @@ Tests and benchmarks use the following environment:
 - Similar to FUSE's userspace filesystem implementation
 - No need to write kernel drivers
 - Supports complete filesystem operations
-- No cgo dependency (uses purego)
 
 **Notes**:
 - Dokany requires administrator privileges for installation

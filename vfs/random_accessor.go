@@ -519,6 +519,37 @@ func addFileToBatchWrite(ra *RandomAccessor, data []byte) (bool, int64, error) {
 		return true, 0, nil
 	}
 
+	// Try instant upload (deduplication) before processing
+	// Calculate checksums from original data (before compression/encryption)
+	origSize := int64(len(data))
+	instantDataID, err := tryInstantUpload(ra.fs, data, origSize, core.DATA_NORMAL)
+	if err == nil && instantDataID > 0 {
+		// Instant upload succeeded, use existing DataID
+		// Update file object with instant upload DataID
+		fileObj, err := ra.getFileObj()
+		if err == nil && fileObj != nil {
+			updateFileObj := &core.ObjectInfo{
+				ID:     fileObj.ID,
+				PID:    fileObj.PID,
+				DataID: instantDataID,
+				Size:   origSize,
+				MTime:  core.Now(),
+				Type:   fileObj.Type,
+				Name:   fileObj.Name,
+			}
+			// Update file object in database
+			_, err := ra.fs.h.Put(ra.fs.c, ra.fs.bktID, []*core.ObjectInfo{updateFileObj})
+			if err == nil {
+				// Update cache
+				fileObjCache.Put(ra.fileObjKey, updateFileObj)
+				ra.fileObj.Store(updateFileObj)
+				// Return success with instant upload DataID
+				return true, instantDataID, nil
+			}
+		}
+		// If update failed, continue with normal write
+	}
+
 	// Process compression and encryption
 	processedData, origSize := processFileDataForBatchWrite(ra.fs, data)
 	if len(processedData) == 0 {
@@ -628,6 +659,7 @@ type RandomAccessor struct {
 	fileObj      atomic.Value
 	fileObjKey   string       // Pre-computed file_obj cache key (optimized: avoid repeated conversion)
 	pendingFlush atomic.Value // Delayed flush timer (*time.Timer)
+	sparseSize   atomic.Int64 // Sparse file size (for pre-allocated files, e.g., qBittorrent)
 }
 
 // NewRandomAccessor creates a random access object
@@ -651,8 +683,15 @@ func NewRandomAccessor(fs *OrcasFS, fileID int64) (*RandomAccessor, error) {
 	return ra, nil
 }
 
+// MarkSparseFile marks file as sparse (pre-allocated) for optimization
+// This is used when SetAllocationSize is called to pre-allocate space
+func (ra *RandomAccessor) MarkSparseFile(size int64) {
+	ra.sparseSize.Store(size)
+}
+
 // Write adds write operation to buffer
 // Optimization: sequential write optimization - if sequential write starting from 0, directly write to data block, avoid caching
+// Optimization: for sparse files (pre-allocated), use more aggressive delayed flush to reduce frequent flushes
 func (ra *RandomAccessor) Write(offset int64, data []byte) error {
 	// Check if in sequential write mode
 	if ra.seqBuffer != nil && !ra.seqBuffer.closed {
@@ -692,7 +731,19 @@ func (ra *RandomAccessor) Write(offset int64, data []byte) error {
 	// Optimization: reduce data copying, only copy when necessary
 	// Check if exceeds capacity (optimized: check early to avoid out of bounds)
 	config := core.GetWriteBufferConfig()
-	if atomic.LoadInt64(&ra.buffer.writeIndex)+1 >= int64(len(ra.buffer.operations)) || atomic.LoadInt64(&ra.buffer.totalSize) >= config.MaxBufferSize {
+
+	// For sparse files (pre-allocated), use larger buffer threshold to reduce flush frequency
+	// This is critical for qBittorrent random write performance
+	sparseSize := ra.sparseSize.Load()
+	isSparseFile := sparseSize > 0
+	maxBufferSize := config.MaxBufferSize
+	if isSparseFile {
+		// For sparse files, allow larger buffer (2x) to reduce flush frequency
+		// This significantly improves performance for random writes
+		maxBufferSize = config.MaxBufferSize * 2
+	}
+
+	if atomic.LoadInt64(&ra.buffer.writeIndex)+1 >= int64(len(ra.buffer.operations)) || atomic.LoadInt64(&ra.buffer.totalSize) >= maxBufferSize {
 		// Exceeds capacity, need to force flush
 		// Don't rollback writeIndex (already incremented, space is allocated)
 		// Force flush current buffer (synchronous execution, ensure data is persisted)
@@ -713,12 +764,20 @@ func (ra *RandomAccessor) Write(offset int64, data []byte) error {
 	ra.buffer.operations[writeIndex].Data = make([]byte, len(data))
 	copy(ra.buffer.operations[writeIndex].Data, data)
 
+	// Optimization: for sparse files, use longer delayed flush window to batch more writes
+	// This reduces flush frequency and improves performance for random writes
+	flushWindow := config.BufferWindow
+	if isSparseFile {
+		// For sparse files, use 2x flush window to batch more random writes
+		flushWindow = config.BufferWindow * 2
+	}
+
 	// Optimization: for small file writes, use batch write manager
 	// If data size is small and hasn't reached force flush condition, add to batch write manager
 	// Note: batch write only applies to small files, and needs to ensure data integrity
 	// Here use delayed flush first, batch write logic is handled in Flush
-	if int64(len(data)) < config.MaxBufferSize/10 && atomic.LoadInt64(&ra.buffer.totalSize) < config.MaxBufferSize {
-		ra.scheduleDelayedFlush(config.BufferWindow)
+	if int64(len(data)) < maxBufferSize/10 && atomic.LoadInt64(&ra.buffer.totalSize) < maxBufferSize {
+		ra.scheduleDelayedFlush(flushWindow)
 	}
 
 	return nil
@@ -963,11 +1022,41 @@ func (ra *RandomAccessor) flushSequentialBuffer() error {
 	totalSize := ra.seqBuffer.dataInfo.OrigSize
 	if totalSize > 0 && totalSize < 1<<20 && ra.seqBuffer.sn == 0 {
 		// Small file and all data is still in buffer (no chunks written yet)
-		// Use batch write manager
+		// Try instant upload first (before batch write)
 		allData := ra.seqBuffer.buffer
-
-		// If we have data in buffer, use batch write
 		if len(allData) > 0 {
+			// Try instant upload (deduplication)
+			instantDataID, err := tryInstantUpload(ra.fs, allData, totalSize, core.DATA_NORMAL)
+			if err == nil && instantDataID > 0 {
+				// Instant upload succeeded, use existing DataID
+				// Update file object with instant upload DataID
+				fileObj, err := ra.getFileObj()
+				if err == nil && fileObj != nil {
+					updateFileObj := &core.ObjectInfo{
+						ID:     fileObj.ID,
+						PID:    fileObj.PID,
+						DataID: instantDataID,
+						Size:   totalSize,
+						MTime:  core.Now(),
+						Type:   fileObj.Type,
+						Name:   fileObj.Name,
+					}
+					// Update file object in database
+					_, err := ra.fs.h.Put(ra.fs.c, ra.fs.bktID, []*core.ObjectInfo{updateFileObj})
+					if err == nil {
+						// Update cache
+						fileObjCache.Put(ra.fileObjKey, updateFileObj)
+						ra.fileObj.Store(updateFileObj)
+						// Clear sequential buffer
+						ra.seqBuffer.hasData = false
+						ra.seqBuffer.buffer = ra.seqBuffer.buffer[:0]
+						return nil
+					}
+				}
+				// If update failed, continue with batch write or normal write
+			}
+
+			// If instant upload failed, try batch write
 			batchMgr := ra.fs.getBatchWriteManager()
 			if batchMgr != nil {
 				added, _, err := addFileToBatchWrite(ra, allData)
@@ -1354,6 +1443,34 @@ func (ra *RandomAccessor) Flush() (int64, error) {
 		return 0, err
 	}
 
+	// Optimization for sparse files (qBittorrent scenario): use writing version to directly modify data blocks
+	// This avoids creating new versions and significantly improves performance for random writes
+	// Note: Sparse files can support compression and encryption, but require special handling
+	sparseSize := ra.sparseSize.Load()
+	isSparseFile := sparseSize > 0
+	if isSparseFile && fileObj.DataID > 0 && fileObj.DataID != core.EmptyDataID {
+		// Get DataInfo to check compression/encryption status
+		var oldDataInfo *core.DataInfo
+		oldDataID := fileObj.DataID
+		dataInfoCacheKey := formatCacheKey(ra.fs.bktID, oldDataID)
+		if cached, ok := dataInfoCache.Get(dataInfoCacheKey); ok {
+			if info, ok := cached.(*core.DataInfo); ok && info != nil {
+				oldDataInfo = info
+			}
+		}
+		if oldDataInfo == nil {
+			var err error
+			oldDataInfo, err = ra.fs.h.GetDataInfo(ra.fs.c, ra.fs.bktID, oldDataID)
+			if err == nil && oldDataInfo != nil {
+				dataInfoCache.Put(dataInfoCacheKey, oldDataInfo)
+			}
+		}
+
+		// For sparse files, always use writing version path (supports compression/encryption)
+		// This provides better performance even with compression/encryption enabled
+		return ra.applyWritesWithWritingVersion(fileObj, mergedOps, oldDataInfo)
+	}
+
 	// Use SDK's listener to handle compression and encryption
 	// This will create new DataID and overwrite existing data
 	return ra.applyRandomWritesWithSDK(fileObj, mergedOps)
@@ -1513,6 +1630,187 @@ func (ra *RandomAccessor) applyRandomWritesWithSDK(fileObj *core.ObjectInfo, wri
 	}
 
 	return newVersionID, err
+}
+
+// applyWritesWithWritingVersion applies writes using writing version (name="0") to directly modify data blocks
+// This is optimized for sparse files (qBittorrent scenario) to avoid creating new versions
+// Writing versions always use uncompressed/unencrypted data for better performance
+func (ra *RandomAccessor) applyWritesWithWritingVersion(fileObj *core.ObjectInfo, writes []WriteOperation, oldDataInfo *core.DataInfo) (int64, error) {
+	// Get LocalHandler
+	lh, ok := ra.fs.h.(*core.LocalHandler)
+	if !ok {
+		return 0, fmt.Errorf("handler is not LocalHandler")
+	}
+
+	// Get or create writing version
+	writingVersion, err := lh.GetOrCreateWritingVersion(ra.fs.c, ra.fs.bktID, ra.fileID)
+	if err != nil {
+		return 0, fmt.Errorf("failed to get or create writing version: %v", err)
+	}
+
+	// Use writing version's DataID (writing version always has its own DataID without compression/encryption)
+	dataID := writingVersion.DataID
+	if dataID == 0 || dataID == core.EmptyDataID {
+		return 0, fmt.Errorf("writing version has invalid DataID")
+	}
+
+	// Get chunk size
+	chunkSize := ra.fs.chunkSize
+	if chunkSize <= 0 {
+		chunkSize = 4 << 20 // Default 4MB
+	}
+
+	// Writing versions always use uncompressed/unencrypted data
+	// No need to handle compression/encryption
+	chunkSizeInt := int64(chunkSize)
+
+	// Group writes by chunk to batch updates
+	type chunkUpdate struct {
+		sn         int
+		offset     int
+		data       []byte
+		needsWrite bool
+	}
+	chunkUpdates := make(map[int]*chunkUpdate)
+
+	for _, write := range writes {
+		writeEnd := write.Offset + int64(len(write.Data))
+		startChunk := write.Offset / chunkSizeInt
+		endChunk := (writeEnd - 1) / chunkSizeInt
+
+		// Process each chunk that this write affects
+		for chunkIdx := startChunk; chunkIdx <= endChunk; chunkIdx++ {
+			chunkStart := chunkIdx * chunkSizeInt
+			chunkEnd := chunkStart + chunkSizeInt
+
+			// Calculate overlap between write and chunk
+			overlapStart := write.Offset
+			if overlapStart < chunkStart {
+				overlapStart = chunkStart
+			}
+			overlapEnd := writeEnd
+			if overlapEnd > chunkEnd {
+				overlapEnd = chunkEnd
+			}
+
+			if overlapStart >= overlapEnd {
+				continue
+			}
+
+			// Extract data for this chunk
+			writeDataStart := overlapStart - write.Offset
+			writeDataEnd := writeDataStart + (overlapEnd - overlapStart)
+			chunkData := write.Data[writeDataStart:writeDataEnd]
+
+			// Calculate offset within chunk
+			chunkOffset := int(overlapStart - chunkStart)
+			sn := int(chunkIdx)
+
+			// Check if we already have an update for this chunk
+			key := sn
+			if existing, ok := chunkUpdates[key]; ok {
+				// Merge with existing update (overwrite overlapping region)
+				existingEnd := existing.offset + len(existing.data)
+				newEnd := chunkOffset + len(chunkData)
+
+				// Calculate merged range
+				mergedStart := existing.offset
+				if chunkOffset < mergedStart {
+					mergedStart = chunkOffset
+				}
+				mergedEnd := existingEnd
+				if newEnd > mergedEnd {
+					mergedEnd = newEnd
+				}
+
+				// Create merged data
+				mergedData := make([]byte, mergedEnd-mergedStart)
+				// Copy existing data
+				if existing.offset >= mergedStart {
+					copy(mergedData[existing.offset-mergedStart:], existing.data)
+				}
+				// Overwrite with new data
+				if chunkOffset >= mergedStart {
+					copy(mergedData[chunkOffset-mergedStart:], chunkData)
+				}
+
+				existing.offset = mergedStart
+				existing.data = mergedData
+				existing.needsWrite = true
+			} else {
+				// New chunk update
+				chunkUpdates[key] = &chunkUpdate{
+					sn:         sn,
+					offset:     chunkOffset,
+					data:       chunkData,
+					needsWrite: true,
+				}
+			}
+		}
+	}
+
+	// Apply all chunk updates
+	// Optimization: check if data already exists to avoid duplicate writes
+	// Writing versions always use uncompressed/unencrypted data, so we can use UpdateData directly
+	for _, update := range chunkUpdates {
+		if !update.needsWrite {
+			continue
+		}
+
+		// Try to read existing data to check if update is needed (deduplication)
+		existingData, err := ra.fs.h.GetData(ra.fs.c, ra.fs.bktID, dataID, update.sn, update.offset, len(update.data))
+		if err == nil && len(existingData) == len(update.data) {
+			// Check if data is identical (simple byte comparison)
+			identical := true
+			for i := 0; i < len(update.data); i++ {
+				if existingData[i] != update.data[i] {
+					identical = false
+					break
+				}
+			}
+			if identical {
+				// Data is identical, skip write
+				continue
+			}
+		}
+
+		// Use UpdateData to directly modify data block (uncompressed/unencrypted)
+		// This avoids creating new versions and significantly improves performance
+		updateErr := lh.UpdateData(ra.fs.c, ra.fs.bktID, dataID, update.sn, update.offset, update.data)
+		if updateErr != nil {
+			return 0, fmt.Errorf("failed to update data chunk %d: %v", update.sn, updateErr)
+		}
+	}
+
+	// Update file object size if needed
+	newSize := fileObj.Size
+	for _, write := range writes {
+		writeEnd := write.Offset + int64(len(write.Data))
+		if writeEnd > newSize {
+			newSize = writeEnd
+		}
+	}
+
+	// Update writing version and file object if size changed
+	if newSize != fileObj.Size {
+		updateFileObj := &core.ObjectInfo{
+			ID:     ra.fileID,
+			DataID: dataID,
+			Size:   newSize,
+			MTime:  core.Now(),
+		}
+		_, err = lh.Put(ra.fs.c, ra.fs.bktID, []*core.ObjectInfo{updateFileObj})
+		if err != nil {
+			return 0, fmt.Errorf("failed to update file object: %v", err)
+		}
+
+		// Update cache
+		fileObjCache.Put(ra.fileObjKey, updateFileObj)
+		ra.fileObj.Store(updateFileObj)
+	}
+
+	// Return 0 to indicate no new version was created (using writing version)
+	return 0, nil
 }
 
 // applyWritesStreamingCompressed handles compressed or encrypted data

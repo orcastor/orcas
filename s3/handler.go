@@ -2,8 +2,11 @@ package main
 
 import (
 	"context"
+	"crypto/md5"
+	"encoding/binary"
 	"encoding/xml"
 	"fmt"
+	"hash/crc32"
 	"io"
 	"net/http"
 	"path/filepath"
@@ -20,6 +23,40 @@ import (
 	"github.com/orcastor/orcas/s3/util"
 	"github.com/orcastor/orcas/sdk"
 )
+
+const (
+	HDR_SIZE = 102400 // First 100KB for HdrCRC32
+)
+
+// calculateChecksumsForInstantUpload calculates HdrCRC32, CRC32, and MD5 checksums from data
+// Returns HdrCRC32, CRC32, MD5 (as int64), and error
+func calculateChecksumsForInstantUpload(data []byte) (uint32, uint32, int64, error) {
+	if len(data) == 0 {
+		return 0, 0, 0, nil
+	}
+
+	// Calculate HdrCRC32 (first 100KB or entire file if smaller)
+	var hdrCRC32 uint32
+	if len(data) > HDR_SIZE {
+		hdrCRC32 = crc32.ChecksumIEEE(data[0:HDR_SIZE])
+	} else {
+		hdrCRC32 = crc32.ChecksumIEEE(data)
+	}
+
+	// Calculate CRC32 for entire file
+	crc32Hash := crc32.NewIEEE()
+	if _, err := crc32Hash.Write(data); err != nil {
+		return 0, 0, 0, err
+	}
+	fullCRC32 := crc32Hash.Sum32()
+
+	// Calculate MD5 for entire file
+	md5Hash := md5.Sum(data)
+	// Extract middle 8 bytes and convert to int64 (same as SDK)
+	md5Int64 := int64(binary.BigEndian.Uint64(md5Hash[4:12]))
+
+	return hdrCRC32, fullCRC32, md5Int64, nil
+}
 
 var (
 	handler = core.NewLocalHandler()
@@ -43,14 +80,6 @@ var (
 	// bucketCache caches bucket by name and user ID
 	// key: "<uid>:<bucketName>", value: *core.BucketInfo
 	bucketCache = ecache.NewLRUCache(16, 512, 30*time.Second)
-
-	// Batch write size thresholds (exported for use in handler.go)
-	// These are updated dynamically when GetWriteBufferConfig() is called
-	// Default values, will be updated based on config
-	// Note: maxBatchWriteFileSize now uses MaxBatchWriteFileSize from config (default 64KB)
-	// instead of MaxBufferSize (8MB) for optimal performance
-	maxBatchWriteFileSize = int64(64 * 1024) // Default 64KB (optimal based on performance tests)
-	minBatchWriteFileSize = int64(0)
 
 	// multipartUploads stores ongoing multipart uploads
 	// key: "<bktID>:<uploadId>", value: *MultipartUpload
@@ -1234,6 +1263,37 @@ func putObject(c *gin.Context) {
 	var dataID int64
 	var objInfo *core.ObjectInfo
 
+	// Try instant upload (deduplication) before uploading data
+	// Calculate checksums and check if data already exists
+	if dataSize > 0 {
+		// Calculate checksums for instant upload
+		hdrCRC32, crc32Val, md5Val, err := calculateChecksumsForInstantUpload(data)
+		if err == nil {
+			// Create DataInfo for Ref
+			dataInfo := &core.DataInfo{
+				OrigSize: dataSize,
+				HdrCRC32: hdrCRC32,
+				CRC32:    crc32Val,
+				MD5:      md5Val,
+				Kind:     core.DATA_NORMAL, // Default: no compression/encryption
+			}
+
+			// Try instant upload
+			refIDs, err := handler.Ref(ctx, bktID, []*core.DataInfo{dataInfo})
+			if err == nil && len(refIDs) > 0 && refIDs[0] != 0 {
+				if refIDs[0] > 0 {
+					// Instant upload succeeded, use existing DataID from database
+					dataID = refIDs[0]
+				} else {
+					// Negative ID means reference to another element in current batch
+					// This should not happen in S3 PutObject (single file upload)
+					// But we handle it for completeness: skip instant upload, use normal upload
+					// The negative reference will be resolved in PutDataInfo
+				}
+			}
+		}
+	}
+
 	// Check if batch write should be used for small files
 	// Only use batch write for files within optimal size range (1KB - 64KB)
 	// Performance tests show:
@@ -1243,10 +1303,8 @@ func putObject(c *gin.Context) {
 	// Optimal threshold: 64KB for best overall performance
 	config := core.GetWriteBufferConfig()
 	// Use MaxBatchWriteFileSize from config (default 64KB) instead of MaxBufferSize (8MB)
-	maxBatchWriteFileSize = config.MaxBatchWriteFileSize
 	useBatchWrite := config.BatchWriteEnabled &&
-		dataSize >= minBatchWriteFileSize &&
-		dataSize <= maxBatchWriteFileSize &&
+		dataSize <= config.MaxBatchWriteFileSize &&
 		obj == nil // Only for new files
 
 	if useBatchWrite {
@@ -1262,22 +1320,22 @@ func putObject(c *gin.Context) {
 				// 2. Reduced database transactions
 				// 3. Better I/O patterns for small files
 				dataID = batchDataID
-				objs, err := handler.Get(ctx, bktID, []int64{objID})
-				if err == nil && len(objs) > 0 {
-					objInfo = objs[0]
+				// First check memory cache (pending objects) for better performance
+				if fileInfo, ok := batchMgr.GetPendingObject(objID); ok {
+					objInfo = &core.ObjectInfo{
+						ID:     fileInfo.ObjectID,
+						PID:    fileInfo.PID,
+						Name:   fileInfo.Name,
+						Type:   core.OBJ_TYPE_FILE,
+						DataID: fileInfo.DataID,
+						Size:   fileInfo.Size,
+						MTime:  core.Now(),
+					}
 				} else {
-					// If object not found after flush, create ObjectInfo from pending objects
-					// This handles the case where flush is still in progress
-					if fileInfo, ok := batchMgr.GetPendingObject(objID); ok {
-						objInfo = &core.ObjectInfo{
-							ID:     fileInfo.ObjectID,
-							PID:    fileInfo.PID,
-							Name:   fileInfo.Name,
-							Type:   core.OBJ_TYPE_FILE,
-							DataID: fileInfo.DataID,
-							Size:   fileInfo.Size,
-							MTime:  core.Now(),
-						}
+					// If not in memory cache, query database
+					objs, err := handler.Get(ctx, bktID, []int64{objID})
+					if err == nil && len(objs) > 0 {
+						objInfo = objs[0]
 					}
 					// If still no objInfo, we'll create it from metadata below
 					// Don't fallback to normal write here, as data is already in batch buffer
@@ -1303,26 +1361,23 @@ func putObject(c *gin.Context) {
 				batchMgr.FlushAll(ctx)
 				added, batchDataID, err = batchMgr.AddFile(objID, data, pid, fileName, dataSize)
 				if err == nil && added {
-					// Successfully added after flush, flush again to ensure data is written
-					batchMgr.FlushAll(ctx)
 					dataID = batchDataID
-					// Wait a bit for database to be updated
-					time.Sleep(50 * time.Millisecond)
-					objs, err := handler.Get(ctx, bktID, []int64{objID})
-					if err == nil && len(objs) > 0 {
-						objInfo = objs[0]
+					// First check memory cache (pending objects) for better performance
+					if fileInfo, ok := batchMgr.GetPendingObject(objID); ok {
+						objInfo = &core.ObjectInfo{
+							ID:     fileInfo.ObjectID,
+							PID:    fileInfo.PID,
+							Name:   fileInfo.Name,
+							Type:   core.OBJ_TYPE_FILE,
+							DataID: fileInfo.DataID,
+							Size:   fileInfo.Size,
+							MTime:  core.Now(),
+						}
 					} else {
-						// If object not found after flush, create ObjectInfo from pending objects
-						if fileInfo, ok := batchMgr.GetPendingObject(objID); ok {
-							objInfo = &core.ObjectInfo{
-								ID:     fileInfo.ObjectID,
-								PID:    fileInfo.PID,
-								Name:   fileInfo.Name,
-								Type:   core.OBJ_TYPE_FILE,
-								DataID: fileInfo.DataID,
-								Size:   fileInfo.Size,
-								MTime:  core.Now(),
-							}
+						// If not in memory cache, query database
+						objs, err := handler.Get(ctx, bktID, []int64{objID})
+						if err == nil && len(objs) > 0 {
+							objInfo = objs[0]
 						}
 						// If still no objInfo, create it from metadata
 						if objInfo == nil {
@@ -1349,44 +1404,95 @@ func putObject(c *gin.Context) {
 
 	if !useBatchWrite {
 		// Normal write path
-		// Get chunk size from bucket configuration
-		// If GetBktInfo fails, use default chunkSize (4MB)
-		chunkSize := int64(4 * 1024 * 1024) // Default 4MB
-		bktInfo, err := handler.GetBktInfo(ctx, bktID)
-		if err == nil && bktInfo != nil && bktInfo.ChunkSize > 0 {
-			chunkSize = bktInfo.ChunkSize
-		}
-		// If GetBktInfo fails, continue with default chunkSize
+		// Only upload if instant upload failed (dataID == 0)
+		if dataID == 0 {
+			// Get chunk size from bucket configuration
+			// If GetBktInfo fails, use default chunkSize (4MB)
+			chunkSize := int64(4 * 1024 * 1024) // Default 4MB
+			bktInfo, err := handler.GetBktInfo(ctx, bktID)
+			if err == nil && bktInfo != nil && bktInfo.ChunkSize > 0 {
+				chunkSize = bktInfo.ChunkSize
+			}
+			// If GetBktInfo fails, continue with default chunkSize
 
-		// Upload data according to chunkSize
-		// If data size is larger than chunkSize, split into multiple chunks
-		if dataSize <= chunkSize {
-			// Data fits in one chunk, upload directly with sn=0
-			dataID, err = handler.PutData(ctx, bktID, 0, 0, data)
-		} else {
-			// Data is larger than chunkSize, split into multiple chunks
-			dataID = core.NewID()
-			chunkCount := int((dataSize + chunkSize - 1) / chunkSize) // Ceiling division
+			// Upload data according to chunkSize
+			// If data size is larger than chunkSize, split into multiple chunks
+			if dataSize <= chunkSize {
+				// Data fits in one chunk, upload directly with sn=0
+				dataID, err = handler.PutData(ctx, bktID, 0, 0, data)
+			} else {
+				// Data is larger than chunkSize, split into multiple chunks
+				dataID = core.NewID()
+				chunkCount := int((dataSize + chunkSize - 1) / chunkSize) // Ceiling division
 
-			for chunkIdx := 0; chunkIdx < chunkCount; chunkIdx++ {
-				chunkStart := int64(chunkIdx) * chunkSize
-				chunkEnd := chunkStart + chunkSize
-				if chunkEnd > dataSize {
-					chunkEnd = dataSize
+				for chunkIdx := 0; chunkIdx < chunkCount; chunkIdx++ {
+					chunkStart := int64(chunkIdx) * chunkSize
+					chunkEnd := chunkStart + chunkSize
+					if chunkEnd > dataSize {
+						chunkEnd = dataSize
+					}
+					chunkData := data[chunkStart:chunkEnd]
+
+					// Upload chunk with sn=chunkIdx (starting from 0)
+					_, err = handler.PutData(ctx, bktID, dataID, chunkIdx, chunkData)
+					if err != nil {
+						util.S3ErrorResponse(c, http.StatusInternalServerError, "InternalError", fmt.Sprintf("Failed to upload chunk %d: %v", chunkIdx, err))
+						return
+					}
 				}
-				chunkData := data[chunkStart:chunkEnd]
 
-				// Upload chunk with sn=chunkIdx (starting from 0)
-				_, err = handler.PutData(ctx, bktID, dataID, chunkIdx, chunkData)
-				if err != nil {
-					util.S3ErrorResponse(c, http.StatusInternalServerError, "InternalError", fmt.Sprintf("Failed to upload chunk %d: %v", chunkIdx, err))
-					return
+				// Create DataInfo for multi-chunk file
+				// Calculate checksums from full data for instant upload
+				if dataID > 0 && dataID != core.EmptyDataID {
+					hdrCRC32, crc32Val, md5Val, calcErr := calculateChecksumsForInstantUpload(data)
+					if calcErr == nil {
+						dataInfo := &core.DataInfo{
+							ID:       dataID,
+							Size:     dataSize, // Total size of all chunks
+							OrigSize: dataSize,
+							HdrCRC32: hdrCRC32,
+							CRC32:    crc32Val,
+							MD5:      md5Val,
+							Kind:     core.DATA_NORMAL, // Default: no compression/encryption
+						}
+						_, putErr := handler.PutDataInfo(ctx, bktID, []*core.DataInfo{dataInfo})
+						if putErr != nil {
+							// Log error but don't fail the request
+							// DataInfo creation failure doesn't prevent object creation
+							_ = putErr // Suppress unused variable warning
+						}
+					}
 				}
 			}
-		}
-		if err != nil {
-			util.S3ErrorResponse(c, http.StatusInternalServerError, "InternalError", err.Error())
-			return
+			if err != nil {
+				util.S3ErrorResponse(c, http.StatusInternalServerError, "InternalError", err.Error())
+				return
+			}
+
+			// Create DataInfo for single-chunk file (batch write creates DataInfo in flushPackage)
+			// This is needed for instant upload (Ref) to work correctly
+			if dataSize <= chunkSize && dataID > 0 && dataID != core.EmptyDataID {
+				// Calculate checksums for DataInfo
+				hdrCRC32, crc32Val, md5Val, calcErr := calculateChecksumsForInstantUpload(data)
+				if calcErr == nil {
+					dataInfo := &core.DataInfo{
+						ID:       dataID,
+						Size:     dataSize, // For single chunk, size equals dataSize
+						OrigSize: dataSize,
+						HdrCRC32: hdrCRC32,
+						CRC32:    crc32Val,
+						MD5:      md5Val,
+						Kind:     core.DATA_NORMAL, // Default: no compression/encryption
+					}
+					_, putErr := handler.PutDataInfo(ctx, bktID, []*core.DataInfo{dataInfo})
+					if putErr != nil {
+						// Log error but don't fail the request
+						// DataInfo creation failure doesn't prevent object creation
+						// Instant upload may not work for this file, but normal upload will work
+						_ = putErr // Suppress unused variable warning
+					}
+				}
+			}
 		}
 
 		// Create or update object metadata
@@ -1628,34 +1734,68 @@ func copyObject(c *gin.Context) {
 	dataSize := int64(len(sourceData))
 	var dataID int64
 
-	// Upload data according to chunkSize
-	if dataSize <= chunkSize {
-		// Data fits in one chunk, upload directly with sn=0
-		dataID, err = handler.PutData(ctx, destBktID, 0, 0, sourceData)
-	} else {
-		// Data is larger than chunkSize, split into multiple chunks
-		dataID = core.NewID()
-		chunkCount := int((dataSize + chunkSize - 1) / chunkSize) // Ceiling division
-
-		for chunkIdx := 0; chunkIdx < chunkCount; chunkIdx++ {
-			chunkStart := int64(chunkIdx) * chunkSize
-			chunkEnd := chunkStart + chunkSize
-			if chunkEnd > dataSize {
-				chunkEnd = dataSize
+	// Try instant upload (deduplication) before uploading data
+	// Calculate checksums and check if data already exists in destination bucket
+	if dataSize > 0 {
+		// Calculate checksums for instant upload
+		hdrCRC32, crc32Val, md5Val, err := calculateChecksumsForInstantUpload(sourceData)
+		if err == nil {
+			// Create DataInfo for Ref
+			dataInfo := &core.DataInfo{
+				OrigSize: dataSize,
+				HdrCRC32: hdrCRC32,
+				CRC32:    crc32Val,
+				MD5:      md5Val,
+				Kind:     core.DATA_NORMAL, // Default: no compression/encryption
 			}
-			chunkData := sourceData[chunkStart:chunkEnd]
 
-			// Upload chunk with sn=chunkIdx (starting from 0)
-			_, err = handler.PutData(ctx, destBktID, dataID, chunkIdx, chunkData)
-			if err != nil {
-				util.S3ErrorResponse(c, http.StatusInternalServerError, "InternalError", fmt.Sprintf("Failed to upload chunk %d: %v", chunkIdx, err))
-				return
+			// Try instant upload
+			refIDs, err := handler.Ref(ctx, destBktID, []*core.DataInfo{dataInfo})
+			if err == nil && len(refIDs) > 0 && refIDs[0] != 0 {
+				if refIDs[0] > 0 {
+					// Instant upload succeeded, use existing DataID from database
+					dataID = refIDs[0]
+				} else {
+					// Negative ID means reference to another element in current batch
+					// This should not happen in S3 CopyObject (single file copy)
+					// But we handle it for completeness: skip instant upload, use normal upload
+					// The negative reference will be resolved in PutDataInfo
+				}
 			}
 		}
 	}
-	if err != nil {
-		util.S3ErrorResponse(c, http.StatusInternalServerError, "InternalError", err.Error())
-		return
+
+	// Only upload if instant upload failed (dataID == 0)
+	if dataID == 0 {
+		// Upload data according to chunkSize
+		if dataSize <= chunkSize {
+			// Data fits in one chunk, upload directly with sn=0
+			dataID, err = handler.PutData(ctx, destBktID, 0, 0, sourceData)
+		} else {
+			// Data is larger than chunkSize, split into multiple chunks
+			dataID = core.NewID()
+			chunkCount := int((dataSize + chunkSize - 1) / chunkSize) // Ceiling division
+
+			for chunkIdx := 0; chunkIdx < chunkCount; chunkIdx++ {
+				chunkStart := int64(chunkIdx) * chunkSize
+				chunkEnd := chunkStart + chunkSize
+				if chunkEnd > dataSize {
+					chunkEnd = dataSize
+				}
+				chunkData := sourceData[chunkStart:chunkEnd]
+
+				// Upload chunk with sn=chunkIdx (starting from 0)
+				_, err = handler.PutData(ctx, destBktID, dataID, chunkIdx, chunkData)
+				if err != nil {
+					util.S3ErrorResponse(c, http.StatusInternalServerError, "InternalError", fmt.Sprintf("Failed to upload chunk %d: %v", chunkIdx, err))
+					return
+				}
+			}
+		}
+		if err != nil {
+			util.S3ErrorResponse(c, http.StatusInternalServerError, "InternalError", err.Error())
+			return
+		}
 	}
 
 	// Create or update object metadata
@@ -1826,29 +1966,63 @@ func moveObject(c *gin.Context) {
 		dataSize := int64(len(sourceData))
 		var dataID int64
 
-		// Upload data according to chunkSize
-		if dataSize <= chunkSize {
-			dataID, err = handler.PutData(ctx, destBktID, 0, 0, sourceData)
-		} else {
-			dataID = core.NewID()
-			chunkCount := int((dataSize + chunkSize - 1) / chunkSize)
-			for chunkIdx := 0; chunkIdx < chunkCount; chunkIdx++ {
-				chunkStart := int64(chunkIdx) * chunkSize
-				chunkEnd := chunkStart + chunkSize
-				if chunkEnd > dataSize {
-					chunkEnd = dataSize
+		// Try instant upload (deduplication) before uploading data
+		// Calculate checksums and check if data already exists in destination bucket
+		if dataSize > 0 {
+			// Calculate checksums for instant upload
+			hdrCRC32, crc32Val, md5Val, err := calculateChecksumsForInstantUpload(sourceData)
+			if err == nil {
+				// Create DataInfo for Ref
+				dataInfo := &core.DataInfo{
+					OrigSize: dataSize,
+					HdrCRC32: hdrCRC32,
+					CRC32:    crc32Val,
+					MD5:      md5Val,
+					Kind:     core.DATA_NORMAL, // Default: no compression/encryption
 				}
-				chunkData := sourceData[chunkStart:chunkEnd]
-				_, err = handler.PutData(ctx, destBktID, dataID, chunkIdx, chunkData)
-				if err != nil {
-					util.S3ErrorResponse(c, http.StatusInternalServerError, "InternalError", fmt.Sprintf("Failed to upload chunk %d: %v", chunkIdx, err))
-					return
+
+				// Try instant upload
+				refIDs, err := handler.Ref(ctx, destBktID, []*core.DataInfo{dataInfo})
+				if err == nil && len(refIDs) > 0 && refIDs[0] != 0 {
+					if refIDs[0] > 0 {
+						// Instant upload succeeded, use existing DataID from database
+						dataID = refIDs[0]
+					} else {
+						// Negative ID means reference to another element in current batch
+						// This should not happen in S3 MoveObject (single file move)
+						// But we handle it for completeness: skip instant upload, use normal upload
+						// The negative reference will be resolved in PutDataInfo
+					}
 				}
 			}
 		}
-		if err != nil {
-			util.S3ErrorResponse(c, http.StatusInternalServerError, "InternalError", err.Error())
-			return
+
+		// Only upload if instant upload failed (dataID == 0)
+		if dataID == 0 {
+			// Upload data according to chunkSize
+			if dataSize <= chunkSize {
+				dataID, err = handler.PutData(ctx, destBktID, 0, 0, sourceData)
+			} else {
+				dataID = core.NewID()
+				chunkCount := int((dataSize + chunkSize - 1) / chunkSize)
+				for chunkIdx := 0; chunkIdx < chunkCount; chunkIdx++ {
+					chunkStart := int64(chunkIdx) * chunkSize
+					chunkEnd := chunkStart + chunkSize
+					if chunkEnd > dataSize {
+						chunkEnd = dataSize
+					}
+					chunkData := sourceData[chunkStart:chunkEnd]
+					_, err = handler.PutData(ctx, destBktID, dataID, chunkIdx, chunkData)
+					if err != nil {
+						util.S3ErrorResponse(c, http.StatusInternalServerError, "InternalError", fmt.Sprintf("Failed to upload chunk %d: %v", chunkIdx, err))
+						return
+					}
+				}
+			}
+			if err != nil {
+				util.S3ErrorResponse(c, http.StatusInternalServerError, "InternalError", err.Error())
+				return
+			}
 		}
 
 		// Create destination object

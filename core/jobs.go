@@ -1,6 +1,7 @@
 package core
 
 import (
+	"bytes"
 	"crypto/md5"
 	"encoding/binary"
 	"fmt"
@@ -9,10 +10,16 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/klauspost/compress/zstd"
+	"github.com/mholt/archiver/v3"
+	"github.com/mkmueller/aes256"
+	"github.com/tjfoc/gmsm/sm4"
 )
 
 // workLocks is used to ensure only one work is executing for the same key at a time
@@ -198,6 +205,352 @@ func delayedDelete(c Ctx, bktID, dataID int64, ma MetadataAdapter, da DataAdapte
 	}()
 }
 
+// ConvertWritingVersionsResult Result of converting writing versions
+type ConvertWritingVersionsResult struct {
+	ProcessedVersions int   // Number of versions processed
+	ConvertedVersions int   // Number of versions successfully converted
+	FailedVersions    int   // Number of versions that failed to convert
+	FreedSize         int64 // Size of old data freed (bytes)
+	Errors            []string
+}
+
+// ConvertWritingVersions converts writing version data from uncompressed/unencrypted to compressed/encrypted
+// This is a scheduled job that processes completed writing versions in batches
+// It finds versions that need conversion (completed but still using uncompressed/unencrypted DataID)
+// and converts them according to the file's compression/encryption requirements
+func ConvertWritingVersions(c Ctx, bktID int64, lh *LocalHandler) (*ConvertWritingVersionsResult, error) {
+	// Acquire work lock to ensure only one conversion is processing for the same bucket
+	key := fmt.Sprintf("convert_writing_versions_%d", bktID)
+	acquired, release := acquireWorkLock(key)
+	if !acquired {
+		return nil, fmt.Errorf("convert writing versions operation already in progress for bucket %d", bktID)
+	}
+	defer release()
+
+	result := &ConvertWritingVersionsResult{
+		ProcessedVersions: 0,
+		ConvertedVersions: 0,
+		FailedVersions:    0,
+		FreedSize:         0,
+		Errors:            []string{},
+	}
+
+	// Initialize resource controller
+	rc := NewResourceController(GetResourceControlConfig())
+
+	// Get chunk size from bucket configuration
+	chunkSize := getChunkSize(c, bktID, lh.ma)
+	if chunkSize <= 0 {
+		chunkSize = DEFAULT_CHUNK_SIZE
+	}
+	chunkSizeInt := int(chunkSize)
+
+	// Find all versions that need conversion
+	// Criteria:
+	// 1. Version is completed (name != "0")
+	// 2. Version has DataID
+	// 3. Version's DataID has no compression/encryption (writing version DataID)
+	// 4. File object has compression/encryption requirements
+	// Process by iterating through all files and their versions
+	pageSize := 100
+	offset := 0
+
+	// Get all files in the bucket with pagination
+	for {
+		// Check if should stop
+		if rc.ShouldStop() {
+			break
+		}
+
+		// Query files in batches with pagination
+		// Use ListObjsByType to get files with pagination
+		files, totalCount, err := lh.ma.ListObjsByType(c, bktID, OBJ_TYPE_FILE, offset, pageSize)
+		if err != nil {
+			result.Errors = append(result.Errors, fmt.Sprintf("failed to list files: %v", err))
+			break
+		}
+
+		if len(files) == 0 {
+			break
+		}
+
+		// Process files in current batch
+		processed := 0
+		for _, fileObj := range files {
+
+			// Get all versions for this file (excluding writing versions)
+			versions, err := lh.ma.ListVersions(c, bktID, fileObj.ID, true)
+			if err != nil {
+				result.Errors = append(result.Errors, fmt.Sprintf("failed to list versions for file %d: %v", fileObj.ID, err))
+				continue
+			}
+
+			// Process each version
+			for _, version := range versions {
+				result.ProcessedVersions++
+
+				// Check if version needs conversion
+				needsConversion, originalDataID, err := checkVersionNeedsConversion(c, bktID, version, lh.ma)
+				if err != nil {
+					result.Errors = append(result.Errors, fmt.Sprintf("failed to check version %d: %v", version.ID, err))
+					result.FailedVersions++
+					continue
+				}
+
+				if !needsConversion {
+					continue
+				}
+
+				// Convert version
+				converted, freedSize, err := convertVersionData(c, bktID, version, originalDataID, chunkSizeInt, lh)
+				if err != nil {
+					result.Errors = append(result.Errors, fmt.Sprintf("failed to convert version %d: %v", version.ID, err))
+					result.FailedVersions++
+					continue
+				}
+
+				if converted {
+					result.ConvertedVersions++
+					result.FreedSize += freedSize
+				}
+
+				processed++
+			}
+		}
+
+		offset += pageSize
+		rc.WaitIfNeeded(processed)
+
+		// If we've processed all files, break
+		if offset >= int(totalCount) {
+			break
+		}
+	}
+
+	return result, nil
+}
+
+// checkVersionNeedsConversion checks if a version needs compression/encryption conversion
+func checkVersionNeedsConversion(c Ctx, bktID int64, version *ObjectInfo, ma MetadataAdapter) (bool, int64, error) {
+	// Version must have DataID
+	if version.DataID == 0 || version.DataID == EmptyDataID {
+		return false, 0, nil
+	}
+
+	// Get version's DataInfo
+	versionDataInfo, err := ma.GetData(c, bktID, version.DataID)
+	if err != nil || versionDataInfo == nil {
+		return false, 0, nil
+	}
+
+	// Check if version's DataID already has compression/encryption
+	hasCompression := versionDataInfo.Kind&DATA_CMPR_MASK != 0
+	hasEncryption := versionDataInfo.Kind&DATA_ENDEC_MASK != 0
+	if hasCompression || hasEncryption {
+		// Already compressed/encrypted, no conversion needed
+		return false, 0, nil
+	}
+
+	// Get file object to check if it needs compression/encryption
+	fileObjs, err := ma.GetObj(c, bktID, []int64{version.PID})
+	if err != nil || len(fileObjs) == 0 {
+		return false, 0, nil
+	}
+	fileObj := fileObjs[0]
+
+	// Check if file has different DataID (with compression/encryption)
+	if fileObj.DataID > 0 && fileObj.DataID != EmptyDataID && fileObj.DataID != version.DataID {
+		fileDataInfo, err := ma.GetData(c, bktID, fileObj.DataID)
+		if err == nil && fileDataInfo != nil {
+			fileHasCompression := fileDataInfo.Kind&DATA_CMPR_MASK != 0
+			fileHasEncryption := fileDataInfo.Kind&DATA_ENDEC_MASK != 0
+			if fileHasCompression || fileHasEncryption {
+				// File needs compression/encryption, version needs conversion
+				return true, fileObj.DataID, nil
+			}
+		}
+	}
+
+	return false, 0, nil
+}
+
+// convertVersionData converts a version's data from uncompressed/unencrypted to compressed/encrypted
+func convertVersionData(c Ctx, bktID int64, version *ObjectInfo, originalDataID int64, chunkSizeInt int, lh *LocalHandler) (bool, int64, error) {
+	// Get original DataInfo to get compression/encryption settings
+	originalDataInfo, err := lh.ma.GetData(c, bktID, originalDataID)
+	if err != nil || originalDataInfo == nil {
+		return false, 0, fmt.Errorf("failed to get original DataInfo: %v", err)
+	}
+
+	// Get writing DataInfo
+	writingDataInfo, err := lh.ma.GetData(c, bktID, version.DataID)
+	if err != nil || writingDataInfo == nil {
+		return false, 0, fmt.Errorf("failed to get writing DataInfo: %v", err)
+	}
+
+	// Check if conversion is needed
+	needsCompression := originalDataInfo.Kind&DATA_CMPR_MASK != 0
+	needsEncryption := originalDataInfo.Kind&DATA_ENDEC_MASK != 0
+	if !needsCompression && !needsEncryption {
+		// No conversion needed
+		return false, 0, nil
+	}
+
+	// Create new DataID for converted data
+	newDataID := NewID()
+	if newDataID <= 0 {
+		return false, 0, fmt.Errorf("failed to generate new DataID")
+	}
+
+	// Create new DataInfo with compression/encryption flags
+	newDataInfo := &DataInfo{
+		ID:       newDataID,
+		Size:     0,
+		OrigSize: version.Size,
+		Kind:     originalDataInfo.Kind & (DATA_CMPR_MASK | DATA_ENDEC_MASK), // Copy compression/encryption flags
+	}
+	if writingDataInfo.Kind&DATA_SPARSE != 0 {
+		newDataInfo.Kind |= DATA_SPARSE // Preserve sparse flag
+	}
+
+	// Calculate number of chunks
+	numChunks := int((version.Size + int64(chunkSizeInt) - 1) / int64(chunkSizeInt))
+
+	// Get SDK config for compression/encryption
+	sdkCfg := lh.GetSDKConfig(bktID)
+	if sdkCfg == nil {
+		// No SDK config available, cannot perform compression/encryption
+		// Return false to indicate conversion was skipped
+		return false, 0, nil
+	}
+
+	// Read and convert chunks with compression/encryption
+	for sn := 0; sn < numChunks; sn++ {
+		// Read chunk from writing DataID (uncompressed/unencrypted)
+		chunkData, err := lh.da.Read(c, bktID, version.DataID, sn)
+		if err != nil {
+			// Chunk may not exist (sparse file), skip
+			if os.IsNotExist(err) {
+				continue
+			}
+			return false, 0, fmt.Errorf("failed to read chunk %d: %v", sn, err)
+		}
+
+		// Apply compression/encryption
+		processedData, err := processChunkData(chunkData, needsCompression, needsEncryption, originalDataInfo, sdkCfg)
+		if err != nil {
+			return false, 0, fmt.Errorf("failed to process chunk %d: %v", sn, err)
+		}
+
+		// Write processed chunk
+		_, err = lh.PutData(c, bktID, newDataID, sn, processedData)
+		if err != nil {
+			return false, 0, fmt.Errorf("failed to write chunk %d: %v", sn, err)
+		}
+	}
+
+	// Calculate actual size
+	actualSize := int64(0)
+	for sn := 0; sn < numChunks; sn++ {
+		chunkData, err := lh.da.Read(c, bktID, newDataID, sn)
+		if err == nil {
+			actualSize += int64(len(chunkData))
+		}
+	}
+	newDataInfo.Size = actualSize
+
+	// Create DataInfo
+	_, err = lh.PutDataInfo(c, bktID, []*DataInfo{newDataInfo})
+	if err != nil {
+		return false, 0, fmt.Errorf("failed to create DataInfo: %v", err)
+	}
+
+	// Update version object with new DataID
+	updateVersion := &ObjectInfo{
+		ID:     version.ID,
+		DataID: newDataID,
+		Size:   version.Size,
+	}
+	err = lh.ma.SetObj(c, bktID, []string{"did", "size"}, updateVersion)
+	if err != nil {
+		return false, 0, fmt.Errorf("failed to update version: %v", err)
+	}
+
+	// Update file object with new DataID if this is the latest version
+	fileObjs, err := lh.ma.GetObj(c, bktID, []int64{version.PID})
+	if err == nil && len(fileObjs) > 0 {
+		fileObj := fileObjs[0]
+		// Check if this version's DataID matches file's DataID (it's the current version)
+		if fileObj.DataID == version.DataID {
+			updateFileObj := &ObjectInfo{
+				ID:     version.PID,
+				DataID: newDataID,
+				Size:   version.Size,
+			}
+			lh.ma.SetObj(c, bktID, []string{"did", "size"}, updateFileObj)
+		}
+	}
+
+	// Calculate freed size (old DataID size)
+	oldSize := int64(0)
+	for sn := 0; sn < numChunks; sn++ {
+		chunkData, err := lh.da.Read(c, bktID, version.DataID, sn)
+		if err == nil {
+			oldSize += int64(len(chunkData))
+		}
+	}
+
+	// Delete old DataID (release space)
+	// Use delayed delete to ensure safety
+	delayedDelete(c, bktID, version.DataID, lh.ma, lh.da)
+
+	return true, oldSize, nil
+}
+
+// processChunkData processes chunk data with compression and/or encryption
+func processChunkData(originalData []byte, needsCompression, needsEncryption bool, dataInfo *DataInfo, sdkCfg *SDKConfigInfo) ([]byte, error) {
+	data := originalData
+
+	// 1. Apply compression (if needed)
+	if needsCompression && sdkCfg.WiseCmpr > 0 {
+		var cmpr archiver.Compressor
+		if dataInfo.Kind&DATA_CMPR_SNAPPY != 0 {
+			cmpr = &archiver.Snappy{}
+		} else if dataInfo.Kind&DATA_CMPR_ZSTD != 0 {
+			cmpr = &archiver.Zstd{EncoderOptions: []zstd.EOption{zstd.WithEncoderLevel(zstd.EncoderLevelFromZstd(int(sdkCfg.CmprQlty)))}}
+		} else if dataInfo.Kind&DATA_CMPR_GZIP != 0 {
+			cmpr = &archiver.Gz{CompressionLevel: int(sdkCfg.CmprQlty)}
+		} else if dataInfo.Kind&DATA_CMPR_BR != 0 {
+			cmpr = &archiver.Brotli{Quality: int(sdkCfg.CmprQlty)}
+		}
+
+		if cmpr != nil {
+			var cmprBuf bytes.Buffer
+			err := cmpr.Compress(bytes.NewBuffer(data), &cmprBuf)
+			if err == nil && cmprBuf.Len() < len(data) {
+				// Compression succeeded and compressed size is smaller
+				data = cmprBuf.Bytes()
+			}
+			// If compression failed or compressed size is larger, use original data
+		}
+	}
+
+	// 2. Apply encryption (if needed)
+	if needsEncryption && sdkCfg.EndecWay > 0 && sdkCfg.EndecKey != "" {
+		var err error
+		if dataInfo.Kind&DATA_ENDEC_AES256 != 0 {
+			data, err = aes256.Encrypt(sdkCfg.EndecKey, data)
+		} else if dataInfo.Kind&DATA_ENDEC_SM4 != 0 {
+			data, err = sm4.Sm4Cbc([]byte(sdkCfg.EndecKey), data, true)
+		}
+		if err != nil {
+			return nil, fmt.Errorf("encryption failed: %v", err)
+		}
+	}
+
+	return data, nil
+}
+
 // asyncApplyVersionRetention asynchronously applies version retention policy (post-processing)
 // After version creation succeeds, uniformly process:
 // 1. Version merging within time window (delete old versions within time window, keep only latest version)
@@ -216,8 +569,9 @@ func asyncApplyVersionRetention(c Ctx, bktID, fileID int64, newVersionTime int64
 		// Wait a short time to ensure version has been created successfully
 		time.Sleep(100 * time.Millisecond)
 
-		// Query all versions of the file (including the newly created version)
-		versions, err := ma.ListVersions(c, bktID, fileID)
+		// Query all versions of the file (excluding writing versions with name="0")
+		// Writing versions are not finished yet and should not participate in version retention
+		versions, err := ma.ListVersions(c, bktID, fileID, true)
 		if err != nil {
 			// Query failed, don't process
 			return
@@ -298,8 +652,9 @@ func UpdateFileLatestVersion(c Ctx, bktID int64, ma MetadataAdapter) error {
 	for iteration := 0; iteration < maxIterations; iteration++ {
 		hasChange := false
 
-		// Query all directory objects
-		dirs, err := ma.ListObjsByType(c, bktID, OBJ_TYPE_DIR)
+		// Query all directory objects with pagination
+		// Use large page size to get all directories in one batch for this use case
+		dirs, _, err := ma.ListObjsByType(c, bktID, OBJ_TYPE_DIR, 0, 10000)
 		if err != nil {
 			break
 		}
@@ -309,8 +664,9 @@ func UpdateFileLatestVersion(c Ctx, bktID int64, ma MetadataAdapter) error {
 			var totalSize int64
 			var maxDataID int64 = dir.DataID // Default to directory's own DataID
 
-			// Query all child objects under this directory (not deleted)
-			children, err := ma.ListChildren(c, bktID, dir.ID)
+			// Query all child objects under this directory (not deleted) with pagination
+			// Use large page size to get all children in one batch for this use case
+			children, _, err := ma.ListChildren(c, bktID, dir.ID, 0, 10000)
 			if err != nil {
 				continue
 			}
@@ -1339,13 +1695,13 @@ func MergeDuplicateData(c Ctx, bktID int64, ma MetadataAdapter, da DataAdapter) 
 			break
 		}
 
-		// 处理每一组重复数据
+		// Process each duplicate data group
 		for _, group := range groups {
 			if len(group.DataIDs) < 2 {
-				continue // 不是重复数据
+				continue // Not duplicate data
 			}
 
-			// 选择最小的ID作为主DataID（保持一致性）
+			// Select smallest ID as master DataID (for consistency)
 			masterDataID := group.DataIDs[0]
 			for _, dataID := range group.DataIDs[1:] {
 				if dataID < masterDataID {
@@ -1353,16 +1709,16 @@ func MergeDuplicateData(c Ctx, bktID int64, ma MetadataAdapter, da DataAdapter) 
 				}
 			}
 
-			// 检查主数据是否存在
+			// Check if master data exists
 			masterData, err := ma.GetData(c, bktID, masterDataID)
 			if err != nil || masterData == nil {
-				// 主数据不存在，跳过这组
+				// Master data doesn't exist, skip this group
 				continue
 			}
 
-			// 检查主数据的文件是否存在
+			// Check if master data file exists
 			if !dataFileExists(ORCAS_DATA, bktID, masterDataID, 0) && masterData.PkgID == 0 {
-				// 主数据文件不存在，尝试找另一个存在的作为主数据
+				// Master data file doesn't exist, try to find another existing one as master
 				found := false
 				for _, dataID := range group.DataIDs {
 					if dataID == masterDataID {
@@ -1379,21 +1735,21 @@ func MergeDuplicateData(c Ctx, bktID int64, ma MetadataAdapter, da DataAdapter) 
 					}
 				}
 				if !found {
-					// 没有找到有效的主数据，跳过
+					// No valid master data found, skip
 					continue
 				}
 			}
 
-			// 更新所有引用重复DataID的对象，将它们指向主DataID
+			// Update all objects referencing duplicate DataIDs to point to master DataID
 			duplicateDataIDs := make([]int64, 0)
 			mergedMap := make(map[int64]int64)
 
 			for _, dataID := range group.DataIDs {
 				if dataID == masterDataID {
-					continue // 跳过主数据
+					continue // Skip master data
 				}
 
-				// 检查这个数据是否被引用（只统计未删除的对象）
+				// Check if this data is referenced (only count non-deleted objects)
 				refCounts, err := ma.CountDataRefs(c, bktID, []int64{dataID})
 				if err != nil {
 					continue
@@ -1401,32 +1757,32 @@ func MergeDuplicateData(c Ctx, bktID int64, ma MetadataAdapter, da DataAdapter) 
 
 				refCount := refCounts[dataID]
 				if refCount > 0 {
-					// 有对象引用这个数据，需要更新引用
+					// Objects reference this data, need to update references
 					if err := ma.UpdateObjDataID(c, bktID, dataID, masterDataID); err != nil {
-						continue // 更新失败，跳过这个数据
+						continue // Update failed, skip this data
 					}
 					mergedMap[dataID] = masterDataID
 					allMergedData[dataID] = masterDataID
 				}
 
-				// 计算数据大小（用于计算释放的空间）
+				// Calculate data size (for calculating freed space)
 				dataSize := calculateDataSize(ORCAS_DATA, bktID, dataID)
 				if dataSize > 0 {
 					totalFreedSize += dataSize
 				}
 
-				// 如果这个数据没有被引用或已经更新完成，可以删除
-				// 但是只有确认所有引用都已更新后才能删除数据文件
-				// 这里先收集要删除的数据ID
+				// If this data is not referenced or update completed, can delete
+				// But only delete data files after confirming all references are updated
+				// Collect data IDs to delete here
 				if refCount == 0 || len(mergedMap) > 0 {
 					duplicateDataIDs = append(duplicateDataIDs, dataID)
 				}
 			}
 
-			// 删除重复的数据文件（只有在没有引用或引用已更新后）
-			// 在删除前等待窗口时间，防止有人在访问
+			// Delete duplicate data files (only after no references or references updated)
+			// Wait for window time before deletion to prevent access conflicts
 			for _, dataID := range duplicateDataIDs {
-				// 再次检查引用计数（确保没有遗漏）
+				// Check reference count again (ensure nothing missed)
 				refCounts, err := ma.CountDataRefs(c, bktID, []int64{dataID})
 				if err != nil {
 					continue
@@ -1434,12 +1790,12 @@ func MergeDuplicateData(c Ctx, bktID int64, ma MetadataAdapter, da DataAdapter) 
 
 				refCount := refCounts[dataID]
 				if refCount == 0 {
-					// 没有引用，使用延迟删除处理
-					// delayedDelete 会在等待窗口时间后检查引用计数，如果仍为0则删除
+					// No references, use delayed delete
+					// delayedDelete will check reference count after window time, delete if still 0
 					delayedDelete(c, bktID, dataID, ma, da)
 				} else {
-					// 还有引用，说明UpdateObjDataID可能失败了，不删除
-					// 但是元数据可能需要保留（因为引用已更新）
+					// Still has references, UpdateObjDataID may have failed, don't delete
+					// But metadata may need to be kept (because references were updated)
 				}
 			}
 
@@ -1449,14 +1805,14 @@ func MergeDuplicateData(c Ctx, bktID int64, ma MetadataAdapter, da DataAdapter) 
 			}
 		}
 
-		// 如果返回的组数少于pageSize，说明已经是最后一页
+		// If returned groups less than pageSize, this is the last page
 		if len(groups) < pageSize {
-			// 最后一页处理完后等待
+			// Wait after processing last page
 			rc.WaitIfNeeded(len(groups))
 			break
 		}
 
-		// 批次处理间隔和速率限制
+		// Batch processing interval and rate limiting
 		rc.WaitIfNeeded(len(groups))
 		offset += pageSize
 	}
@@ -1465,14 +1821,14 @@ func MergeDuplicateData(c Ctx, bktID int64, ma MetadataAdapter, da DataAdapter) 
 	return result, nil
 }
 
-// verifyChecksum 验证数据的校验和（使用流式计算，避免全部加载到内存）
+// verifyChecksum verifies data checksum (using streaming calculation to avoid loading all into memory)
 func verifyChecksum(c Ctx, bktID int64, dataInfo *DataInfo, da DataAdapter, maxSN int) bool {
 	var reader io.Reader
 	var err error
 
-	// 如果是打包数据，从打包文件中读取指定片段
+	// If packaged data, read specified segment from package file
 	if dataInfo.PkgID > 0 {
-		// 打包数据存储在 PkgID 文件中（sn=0），从 PkgOffset 位置读取 Size 大小的数据
+		// Packaged data stored in PkgID file (sn=0), read Size bytes from PkgOffset position
 		var pkgReader *pkgReader
 		pkgReader, _, err = createPkgDataReader(ORCAS_DATA, bktID, dataInfo.PkgID, int(dataInfo.PkgOffset), int(dataInfo.Size))
 		if err != nil {
@@ -1481,14 +1837,14 @@ func verifyChecksum(c Ctx, bktID int64, dataInfo *DataInfo, da DataAdapter, maxS
 		defer pkgReader.Close()
 		reader = pkgReader
 	} else {
-		// 创建分片数据读取器（流式读取所有分片）
+		// Create chunk data reader (streaming read all chunks)
 		reader, _, err = createChunkDataReader(c, da, bktID, dataInfo.ID, maxSN)
 		if err != nil {
 			return false
 		}
 	}
 
-	// 初始化哈希计算器
+	// Initialize hash calculators
 	var crc32Hash hash.Hash32
 	var md5Hash hash.Hash
 	needCksum := dataInfo.Cksum > 0
@@ -1502,8 +1858,8 @@ func verifyChecksum(c Ctx, bktID int64, dataInfo *DataInfo, da DataAdapter, maxS
 		md5Hash = md5.New()
 	}
 
-	// 流式读取并更新哈希，同时计算总大小
-	const bufferSize = 64 * 1024 // 64KB 缓冲区
+	// Stream read and update hash, calculate total size
+	const bufferSize = 64 * 1024 // 64KB buffer
 	buf := make([]byte, bufferSize)
 	var actualSize int64
 	for {
@@ -1525,12 +1881,12 @@ func verifyChecksum(c Ctx, bktID int64, dataInfo *DataInfo, da DataAdapter, maxS
 		}
 	}
 
-	// 验证数据大小
+	// Verify data size
 	if actualSize != dataInfo.Size {
 		return false
 	}
 
-	// 验证Cksum（最终数据的CRC32）
+	// Verify Cksum (CRC32 of final data)
 	if needCksum {
 		calculated := crc32Hash.Sum32()
 		if calculated != dataInfo.Cksum {
@@ -1538,7 +1894,7 @@ func verifyChecksum(c Ctx, bktID int64, dataInfo *DataInfo, da DataAdapter, maxS
 		}
 	}
 
-	// 如果数据是未加密未压缩的，可以验证CRC32和MD5
+	// If data is unencrypted and uncompressed, can verify CRC32 and MD5
 	if needCRC32 {
 		calculated := crc32Hash.Sum32()
 		if calculated != dataInfo.CRC32 {
@@ -1547,8 +1903,8 @@ func verifyChecksum(c Ctx, bktID int64, dataInfo *DataInfo, da DataAdapter, maxS
 	}
 	if needMD5 {
 		hashSum := md5Hash.Sum(nil)
-		// MD5存储为int64，取第4-12字节（索引4到11），使用大端序转换
-		// 与 sdk/data.go 中的计算方式保持一致
+		// MD5 stored as int64, take bytes 4-12 (index 4 to 11), use big-endian conversion
+		// Consistent with calculation method in sdk/data.go
 		md5Int64 := int64(binary.BigEndian.Uint64(hashSum[4:12]))
 		if md5Int64 != dataInfo.MD5 {
 			return false
@@ -1558,7 +1914,7 @@ func verifyChecksum(c Ctx, bktID int64, dataInfo *DataInfo, da DataAdapter, maxS
 	return true
 }
 
-// createPkgDataReader 创建打包数据的流式读取器
+// createPkgDataReader creates streaming reader for packaged data
 func createPkgDataReader(basePath string, bktID, pkgID int64, offset, size int) (*pkgReader, int64, error) {
 	fileName := fmt.Sprintf("%d_%d", pkgID, 0)
 	hash := fmt.Sprintf("%X", md5.Sum([]byte(fileName)))
@@ -1569,7 +1925,7 @@ func createPkgDataReader(basePath string, bktID, pkgID int64, offset, size int) 
 		return nil, 0, err
 	}
 
-	// 定位到偏移位置
+	// Seek to offset position
 	if offset > 0 {
 		if _, err := f.Seek(int64(offset), io.SeekStart); err != nil {
 			f.Close()
@@ -1577,7 +1933,7 @@ func createPkgDataReader(basePath string, bktID, pkgID int64, offset, size int) 
 		}
 	}
 
-	// 创建 LimitedReader 限制读取大小，并确保文件正确关闭
+	// Create LimitedReader to limit read size and ensure file is properly closed
 	limitedReader := &pkgReader{
 		Reader: io.LimitReader(f, int64(size)),
 		file:   f,
@@ -1585,7 +1941,7 @@ func createPkgDataReader(basePath string, bktID, pkgID int64, offset, size int) 
 	return limitedReader, int64(size), nil
 }
 
-// pkgReader 包装 LimitedReader 并确保文件关闭
+// pkgReader wraps LimitedReader and ensures file is closed
 type pkgReader struct {
 	io.Reader
 	file *os.File
@@ -1598,7 +1954,7 @@ func (pr *pkgReader) Close() error {
 	return nil
 }
 
-// createChunkDataReader 创建分片数据的流式读取器
+// createChunkDataReader creates streaming reader for chunk data
 func createChunkDataReader(c Ctx, da DataAdapter, bktID, dataID int64, maxSN int) (io.Reader, int64, error) {
 	return &chunkReader{
 		c:      c,
@@ -1626,7 +1982,7 @@ func (cr *chunkReader) Read(p []byte) (n int, err error) {
 		return 0, nil
 	}
 
-	// 如果当前缓冲区已读完，读取下一个分片
+	// If current buffer is exhausted, read next chunk
 	if cr.bufIdx >= len(cr.buf) {
 		if cr.sn > cr.maxSN {
 			return 0, io.EOF
@@ -1640,20 +1996,176 @@ func (cr *chunkReader) Read(p []byte) (n int, err error) {
 		cr.sn++
 	}
 
-	// 从缓冲区复制数据到输出
+	// Copy data from buffer to output
 	n = copy(p, cr.buf[cr.bufIdx:])
 	cr.bufIdx += n
 	return n, nil
 }
 
-// Defragment 碎片整理：小文件离线归并打包，打包中被删除的数据块前移
-// maxSize: 最大文件大小（小于此大小的文件会被打包）
-// accessWindow: 访问窗口时间（秒），预留参数。目前只基于引用计数判断数据是否正在使用，
-// 如果数据有引用（refCount > 0），则跳过。将来如果添加了访问时间字段，可以使用此参数。
-// 确保同一个bktID同一时间只有一个碎片整理操作在执行
+// holeInfo represents a hole (gap) in a package file where data can be filled
+type holeInfo struct {
+	pkgID    int64  // Package file ID
+	start    int64  // Start offset of the hole
+	size     int64  // Size of the hole
+	filePath string // Path to the package file
+}
+
+// holeMatch represents the best match for filling a hole
+type holeMatch struct {
+	singleFile    *DataInfo   // Best single file match
+	combinedFiles []*DataInfo // Combined files for large holes
+}
+
+// findBestMatchForHole finds the best match (single file or combination) for a hole
+func findBestMatchForHole(hole holeInfo, unfilledFiles []*DataInfo, filledFiles map[int64]bool, avgFileSize int64) holeMatch {
+	match := holeMatch{}
+
+	// Strategy 1: Find single best-fit file (minimize waste)
+	bestUtilization := float64(0)
+	bestWaste := int64(1 << 62)
+
+	for _, dataInfo := range unfilledFiles {
+		if filledFiles[dataInfo.ID] || dataInfo.Size > hole.size {
+			continue
+		}
+		waste := hole.size - dataInfo.Size
+		utilization := float64(dataInfo.Size) / float64(hole.size)
+		if utilization > bestUtilization || (utilization == bestUtilization && waste < bestWaste) {
+			bestWaste = waste
+			bestUtilization = utilization
+			match.singleFile = dataInfo
+		}
+	}
+
+	// Strategy 2: For large holes, try combining multiple small files
+	if hole.size > 2*avgFileSize && avgFileSize > 0 && len(unfilledFiles) > 1 {
+		combinedSize := int64(0)
+		combined := make([]*DataInfo, 0)
+		for _, dataInfo := range unfilledFiles {
+			if filledFiles[dataInfo.ID] {
+				continue
+			}
+			if combinedSize+dataInfo.Size <= hole.size {
+				combinedSize += dataInfo.Size
+				combined = append(combined, dataInfo)
+			}
+		}
+		if len(combined) > 1 {
+			combinedUtilization := float64(combinedSize) / float64(hole.size)
+			// Use combination if it uses at least 80% of hole or is better than single file
+			if combinedUtilization > 0.8 || (match.singleFile != nil && combinedUtilization > bestUtilization) {
+				match.combinedFiles = combined
+				match.singleFile = nil // Prefer combination
+			}
+		}
+	}
+
+	return match
+}
+
+// removeFromSlice removes a DataInfo with given ID from slice
+func removeFromSlice(slice []*DataInfo, id int64) []*DataInfo {
+	for i, di := range slice {
+		if di.ID == id {
+			return append(slice[:i], slice[i+1:]...)
+		}
+	}
+	return slice
+}
+
+// fillHoleWithFile fills a hole with a file data, returns true if successful
+func fillHoleWithFile(c Ctx, bktID int64, ma MetadataAdapter, da DataAdapter, hole holeInfo, pkgID int64, dataInfo *DataInfo, chunkSize int64, filledFiles *map[int64]bool, result *DefragmentResult) bool {
+	(*filledFiles)[dataInfo.ID] = true
+
+	// Read file data
+	var dataBytes []byte
+	var err error
+	if dataInfo.PkgID > 0 {
+		// If already packaged, read from package file
+		pkgReader, _, err := createPkgDataReader(ORCAS_DATA, bktID, dataInfo.PkgID, int(dataInfo.PkgOffset), int(dataInfo.Size))
+		if err != nil {
+			(*filledFiles)[dataInfo.ID] = false
+			return false
+		}
+		dataBytes = make([]byte, dataInfo.Size)
+		_, err = io.ReadFull(pkgReader, dataBytes)
+		pkgReader.Close()
+		if err != nil {
+			(*filledFiles)[dataInfo.ID] = false
+			return false
+		}
+	} else {
+		// Read chunk data
+		maxSN := int((dataInfo.Size + chunkSize - 1) / chunkSize)
+		reader, _, err := createChunkDataReader(c, da, bktID, dataInfo.ID, maxSN)
+		if err != nil {
+			(*filledFiles)[dataInfo.ID] = false
+			return false
+		}
+		dataBytes = make([]byte, dataInfo.Size)
+		_, err = io.ReadFull(reader, dataBytes)
+		if err != nil {
+			(*filledFiles)[dataInfo.ID] = false
+			return false
+		}
+	}
+
+	// Write to hole in package file
+	pkgFile, err := os.OpenFile(hole.filePath, os.O_RDWR, 0o666)
+	if err != nil {
+		(*filledFiles)[dataInfo.ID] = false
+		return false
+	}
+
+	_, err = pkgFile.WriteAt(dataBytes, hole.start)
+	pkgFile.Close()
+	if err != nil {
+		(*filledFiles)[dataInfo.ID] = false
+		return false
+	}
+
+	// Update DataInfo to point to this package file
+	newDataInfo := *dataInfo
+	newDataInfo.PkgID = pkgID
+	newDataInfo.PkgOffset = uint32(hole.start)
+	err = ma.PutData(c, bktID, []*DataInfo{&newDataInfo})
+	if err != nil {
+		(*filledFiles)[dataInfo.ID] = false
+		return false
+	}
+
+	// Delete old data files if not packaged
+	if dataInfo.PkgID == 0 {
+		oldSize := calculateDataSize(ORCAS_DATA, bktID, dataInfo.ID)
+		if oldSize > 0 {
+			deleteDataFiles(ORCAS_DATA, bktID, dataInfo.ID, ma, c)
+			ma.DecBktRealUsed(c, bktID, oldSize-dataInfo.Size)
+			result.FreedSize += oldSize - dataInfo.Size
+		}
+	}
+
+	return true
+}
+
+// Defragment performs defragmentation: offline merge and pack small files, move remaining data blocks forward in packages
+// Strategy:
+// 1. First, find holes (gaps from deleted data blocks) in existing package files and fill them with small files
+// 2. Then, pack remaining small files into new package files
+// Benefits of hole-filling approach:
+// - Reuses space in existing package files, reducing new package file creation
+// - Reduces fragmentation by consolidating data
+// - More efficient than repacking everything: only processes files that fit in holes
+// Evaluation: Hole-filling is beneficial when:
+// - Package files have significant fragmentation (many deleted blocks)
+// - Small files can efficiently fill existing holes
+// - Reduces total I/O compared to full repacking
+// maxSize: Maximum file size (files smaller than this will be packed)
+// accessWindow: Access window time (seconds), reserved parameter. Currently only uses reference count to determine if data is in use.
+// If data has references (refCount > 0), skip. If access time field is added in future, can use this parameter.
+// Ensures only one defragmentation operation is executing for the same bktID at a time
 func Defragment(c Ctx, bktID int64, a Admin, ma MetadataAdapter, da DataAdapter) (*DefragmentResult, error) {
 	var maxSize int64 = 4 * 1024 * 1024 // 4MB
-	var accessWindow int64 = 3600       // 1小时
+	var accessWindow int64 = 3600       // 1 hour
 
 	cfg := GetCronJobConfig()
 	if cfg.DefragmentMaxSize > 0 {
@@ -1663,16 +2175,16 @@ func Defragment(c Ctx, bktID int64, a Admin, ma MetadataAdapter, da DataAdapter)
 		accessWindow = cfg.DefragmentAccessWindow
 	}
 
-	// 生成唯一key，确保同一个bktID同一时间只有一个碎片整理操作
+	// Generate unique key to ensure only one defragmentation operation per bktID at a time
 	key := fmt.Sprintf("defragment_%d", bktID)
 
-	// 获取工作锁
+	// Acquire work lock
 	acquired, release := acquireWorkLock(key)
 	if !acquired {
-		// 无法获取锁，说明已有其他goroutine在处理，返回错误
+		// Cannot acquire lock, another goroutine is processing, return error
 		return nil, fmt.Errorf("defragment operation already in progress for bucket %d", bktID)
 	}
-	// 确保在处理完成后释放锁
+	// Ensure lock is released after processing completes
 	defer release()
 
 	result := &DefragmentResult{
@@ -1683,10 +2195,10 @@ func Defragment(c Ctx, bktID int64, a Admin, ma MetadataAdapter, da DataAdapter)
 		SkippedInUse:  0,
 	}
 
-	// 初始化资源控制器
+	// Initialize resource controller
 	rc := NewResourceController(GetResourceControlConfig())
 
-	// 获取桶配置
+	// Get bucket configuration
 	buckets, err := ma.GetBkt(c, []int64{bktID})
 	if err != nil {
 		return nil, err
@@ -1699,197 +2211,21 @@ func Defragment(c Ctx, bktID int64, a Admin, ma MetadataAdapter, da DataAdapter)
 		chunkSize = DEFAULT_CHUNK_SIZE
 	}
 
-	// 1. 查找可以打包的小文件数据（分页处理）
-	// 注意：由于系统中没有访问时间（ATime）字段，只有MTime（修改时间），
-	// 而MTime和访问时间不是同一个概念，所以这里只基于引用计数来判断数据是否正在使用
+	// Step 1: Find holes in existing package files and collect small files for packing
+	// Note: System doesn't have access time (ATime) field, only MTime (modification time),
+	// and MTime is different from access time, so we only use reference count to determine if data is in use
 	pageSize := 500
 	offset := 0
 	pendingPacking := make([]*DataInfo, 0)
-	batchDataIDs := make([]int64, 0, pageSize) // 批量收集DataID用于查询引用计数
+	batchDataIDs := make([]int64, 0, pageSize) // Batch collect DataIDs for reference count query
 
-	for {
-		// 检查是否应该停止
-		if rc.ShouldStop() {
-			break
-		}
-
-		dataList, _, err := ma.FindSmallPackageData(c, bktID, maxSize, offset, pageSize)
-		if err != nil {
-			return nil, err
-		}
-
-		if len(dataList) == 0 {
-			break
-		}
-
-		// 收集当前页的DataID
-		batchDataIDs = batchDataIDs[:0]
-		for _, dataInfo := range dataList {
-			batchDataIDs = append(batchDataIDs, dataInfo.ID)
-		}
-
-		// 批量查询引用计数
-		refCounts, err := ma.CountDataRefs(c, bktID, batchDataIDs)
-		if err != nil {
-			refCounts = make(map[int64]int64)
-		}
-
-		for _, dataInfo := range dataList {
-			refCount := refCounts[dataInfo.ID]
-
-			if refCount == 0 {
-				// 未被引用，这是孤儿数据，应该删除而不是打包
-				// 使用延迟删除处理，等待窗口时间后再删除
-				delayedDelete(c, bktID, dataInfo.ID, ma, da)
-			} else {
-				// 被引用，说明数据正在使用中，可以考虑打包
-				// 但需要检查访问窗口（目前使用引用计数作为判断）
-				// 如果将来添加了访问时间字段，可以使用accessWindow参数
-				pendingPacking = append(pendingPacking, dataInfo)
-			}
-		}
-
-		if len(dataList) < pageSize {
-			// 最后一页处理完后等待
-			rc.WaitIfNeeded(len(dataList))
-			break
-		}
-
-		// 批次处理间隔和速率限制
-		rc.WaitIfNeeded(len(dataList))
-		offset += pageSize
-	}
-
-	// 2. 打包小文件（按chunkSize分组）
-	if len(pendingPacking) > 0 {
-		// 按大小排序，尽量填满每个包
-		// 简单的贪心算法：从小到大排序，尽量填满chunkSize
-		pkgGroups := make([][]*DataInfo, 0)
-		currentGroup := make([]*DataInfo, 0)
-		currentGroupSize := int64(0)
-
-		for _, dataInfo := range pendingPacking {
-			// 检查是否超过chunkSize
-			if currentGroupSize+dataInfo.Size > chunkSize && len(currentGroup) > 0 {
-				// 当前组已满，创建新组
-				pkgGroups = append(pkgGroups, currentGroup)
-				currentGroup = make([]*DataInfo, 0)
-				currentGroupSize = 0
-			}
-			currentGroup = append(currentGroup, dataInfo)
-			currentGroupSize += dataInfo.Size
-		}
-
-		if len(currentGroup) > 0 {
-			pkgGroups = append(pkgGroups, currentGroup)
-		}
-
-		// 3. 执行打包：读取每个数据，写入新打包文件
-		for _, group := range pkgGroups {
-			if len(group) == 0 {
-				continue
-			}
-
-			// 创建新的打包数据ID
-			pkgID := NewID()
-			if pkgID <= 0 {
-				continue
-			}
-
-			// 读取所有数据并合并
-			pkgBuffer := make([]byte, 0, chunkSize)
-			dataInfos := make([]*DataInfo, 0, len(group))
-
-			for _, dataInfo := range group {
-				// 读取数据
-				var dataBytes []byte
-				if dataInfo.PkgID > 0 {
-					// 如果已经是打包数据，从打包文件中读取
-					pkgReader, _, err := createPkgDataReader(ORCAS_DATA, bktID, dataInfo.PkgID, int(dataInfo.PkgOffset), int(dataInfo.Size))
-					if err != nil {
-						continue // 读取失败，跳过
-					}
-					dataBytes = make([]byte, dataInfo.Size)
-					_, err = io.ReadFull(pkgReader, dataBytes)
-					pkgReader.Close()
-					if err != nil {
-						continue
-					}
-				} else {
-					// 读取分片数据
-					maxSN := int((dataInfo.Size + chunkSize - 1) / chunkSize)
-					reader, _, err := createChunkDataReader(c, da, bktID, dataInfo.ID, maxSN)
-					if err != nil {
-						continue
-					}
-					dataBytes = make([]byte, dataInfo.Size)
-					_, err = io.ReadFull(reader, dataBytes)
-					if err != nil {
-						continue
-					}
-				}
-
-				// 记录偏移位置
-				offset := len(pkgBuffer)
-				pkgBuffer = append(pkgBuffer, dataBytes...)
-
-				// 更新数据信息
-				newDataInfo := *dataInfo
-				newDataInfo.PkgID = pkgID
-				newDataInfo.PkgOffset = uint32(offset)
-				dataInfos = append(dataInfos, &newDataInfo)
-			}
-
-			if len(dataInfos) == 0 || len(pkgBuffer) == 0 {
-				continue
-			}
-
-			// 写入新的打包文件
-			err := da.Write(c, bktID, pkgID, 0, pkgBuffer)
-			if err != nil {
-				continue // 写入失败，跳过
-			}
-
-			// 更新元数据
-			err = ma.PutData(c, bktID, dataInfos)
-			if err != nil {
-				continue
-			}
-
-			// 计算释放的空间（旧数据文件大小）
-			var freedSize int64
-			for _, dataInfo := range group {
-				if dataInfo.PkgID > 0 {
-					// 如果原来是打包数据，需要检查是否还有其他数据引用同一个打包文件
-					// 简化处理：只统计非打包数据的大小
-				} else {
-					// 计算分片数据的总大小
-					oldSize := calculateDataSize(ORCAS_DATA, bktID, dataInfo.ID)
-					freedSize += oldSize - dataInfo.Size // 减去新打包数据的大小
-					// 删除旧数据文件
-					deleteDataFiles(ORCAS_DATA, bktID, dataInfo.ID, ma, c)
-				}
-			}
-
-			// 更新实际使用量
-			if freedSize > 0 {
-				ma.DecBktRealUsed(c, bktID, freedSize)
-				result.FreedSize += freedSize
-			}
-
-			result.PackedGroups++
-			result.PackedFiles += int64(len(dataInfos))
-		}
-	}
-
-	// 4. 整理已有打包文件：删除打包中被删除的数据块，前移剩余数据
-	// 查找所有打包文件（PkgID > 0）
-	// 这里需要遍历所有数据，找出打包文件ID列表
+	// First, collect all existing package files and identify holes
 	pkgDataMap := make(map[int64][]*DataInfo) // pkgID -> []DataInfo
+	pkgHoles := make(map[int64][]holeInfo)    // pkgID -> []holeInfo (holes in package files)
 
+	// Collect all package files and their data
 	offset = 0
 	for {
-		// 检查是否应该停止
 		if rc.ShouldStop() {
 			break
 		}
@@ -1906,20 +2242,17 @@ func Defragment(c Ctx, bktID int64, a Admin, ma MetadataAdapter, da DataAdapter)
 		}
 
 		if len(dataList) < pageSize {
-			// 最后一页处理完后等待
 			rc.WaitIfNeeded(len(dataList))
 			break
 		}
 
-		// 批次处理间隔和速率限制
 		rc.WaitIfNeeded(len(dataList))
 		offset += pageSize
 	}
 
-	// 整理每个打包文件
+	// Identify holes in existing package files
 	for pkgID, dataList := range pkgDataMap {
-		// 读取整个打包文件
-		// 使用与core/data.go中相同的路径计算方式
+		// Read package file to find holes
 		fileName := fmt.Sprintf("%d_%d", pkgID, 0)
 		hash := fmt.Sprintf("%X", md5.Sum([]byte(fileName)))
 		pkgPath := filepath.Join(ORCAS_DATA, fmt.Sprint(bktID), hash[21:24], hash[8:24], fileName)
@@ -1928,7 +2261,358 @@ func Defragment(c Ctx, bktID int64, a Admin, ma MetadataAdapter, da DataAdapter)
 			continue
 		}
 
-		// 读取文件大小
+		fileInfo, err := pkgFile.Stat()
+		if err != nil {
+			pkgFile.Close()
+			continue
+		}
+		fileSize := fileInfo.Size()
+		pkgFile.Close()
+
+		// Check which data blocks are still valid (referenced)
+		validData := make([]*DataInfo, 0)
+		dataIDs := make([]int64, 0, len(dataList))
+		for _, di := range dataList {
+			dataIDs = append(dataIDs, di.ID)
+		}
+
+		refCounts, err := ma.CountDataRefs(c, bktID, dataIDs)
+		if err != nil {
+			refCounts = make(map[int64]int64)
+		}
+
+		for _, di := range dataList {
+			if refCounts[di.ID] > 0 {
+				validData = append(validData, di)
+			}
+		}
+
+		// Calculate holes: gaps between valid data blocks
+		// Sort valid data by offset using efficient sort
+		sortedData := make([]*DataInfo, len(validData))
+		copy(sortedData, validData)
+		sort.Slice(sortedData, func(i, j int) bool {
+			return sortedData[i].PkgOffset < sortedData[j].PkgOffset
+		})
+
+		// Find holes
+		holes := make([]holeInfo, 0)
+		currentPos := int64(0)
+		for _, di := range sortedData {
+			holeStart := currentPos
+			holeEnd := int64(di.PkgOffset)
+			if holeEnd > holeStart {
+				holes = append(holes, holeInfo{
+					pkgID:    pkgID,
+					start:    holeStart,
+					size:     holeEnd - holeStart,
+					filePath: pkgPath,
+				})
+			}
+			currentPos = int64(di.PkgOffset) + di.Size
+		}
+		// Check hole at end of file
+		if currentPos < fileSize {
+			holes = append(holes, holeInfo{
+				pkgID:    pkgID,
+				start:    currentPos,
+				size:     fileSize - currentPos,
+				filePath: pkgPath,
+			})
+		}
+
+		if len(holes) > 0 {
+			pkgHoles[pkgID] = holes
+		}
+	}
+
+	// Step 2: Find small files that can be packed (paginated)
+	offset = 0
+	for {
+		// Check if should stop
+		if rc.ShouldStop() {
+			break
+		}
+
+		dataList, _, err := ma.FindSmallPackageData(c, bktID, maxSize, offset, pageSize)
+		if err != nil {
+			return nil, err
+		}
+
+		if len(dataList) == 0 {
+			break
+		}
+
+		// Collect current page's DataIDs
+		batchDataIDs = batchDataIDs[:0]
+		for _, dataInfo := range dataList {
+			batchDataIDs = append(batchDataIDs, dataInfo.ID)
+		}
+
+		// Batch query reference counts
+		refCounts, err := ma.CountDataRefs(c, bktID, batchDataIDs)
+		if err != nil {
+			refCounts = make(map[int64]int64)
+		}
+
+		for _, dataInfo := range dataList {
+			refCount := refCounts[dataInfo.ID]
+
+			if refCount == 0 {
+				// Not referenced, this is orphan data, should delete instead of pack
+				// Use delayed delete, wait for window time before deletion
+				delayedDelete(c, bktID, dataInfo.ID, ma, da)
+			} else {
+				// Referenced, data is in use, can consider packing
+				// But need to check access window (currently using reference count as judgment)
+				// If access time field is added in future, can use accessWindow parameter
+				pendingPacking = append(pendingPacking, dataInfo)
+			}
+		}
+
+		if len(dataList) < pageSize {
+			// Wait after processing last page
+			rc.WaitIfNeeded(len(dataList))
+			break
+		}
+
+		// Batch processing interval and rate limiting
+		rc.WaitIfNeeded(len(dataList))
+		offset += pageSize
+	}
+
+	// Step 3: Fill holes in existing package files with small files
+	// Optimized strategy:
+	// 1. Sort files by size (smallest first) using efficient O(n log n) sort
+	// 2. Sort holes by size (smallest first) to prioritize filling small holes (better utilization)
+	// 3. For each hole, try to find best fit (minimize waste)
+	// 4. For large holes, try to combine multiple small files (greedy combination)
+	sortedPending := make([]*DataInfo, len(pendingPacking))
+	copy(sortedPending, pendingPacking)
+	sort.Slice(sortedPending, func(i, j int) bool {
+		return sortedPending[i].Size < sortedPending[j].Size
+	})
+
+	filledFiles := make(map[int64]bool) // Track which files have been filled into holes
+
+	// Collect all holes from all packages and sort by size (smallest first)
+	// This prioritizes filling small holes first, which improves space utilization
+	allHoles := make([]struct {
+		hole  holeInfo
+		pkgID int64
+		index int
+	}, 0)
+	for pkgID, holes := range pkgHoles {
+		for i, hole := range holes {
+			allHoles = append(allHoles, struct {
+				hole  holeInfo
+				pkgID int64
+				index int
+			}{hole, pkgID, i})
+		}
+	}
+	// Sort holes by size (smallest first) - filling small holes first improves utilization
+	sort.Slice(allHoles, func(i, j int) bool {
+		return allHoles[i].hole.size < allHoles[j].hole.size
+	})
+
+	// Pre-calculate average file size once (optimization: avoid recalculating in loop)
+	unfilledFiles := make([]*DataInfo, 0, len(sortedPending))
+	for _, di := range sortedPending {
+		if !filledFiles[di.ID] {
+			unfilledFiles = append(unfilledFiles, di)
+		}
+	}
+	avgFileSize := int64(0)
+	if len(unfilledFiles) > 0 {
+		totalSize := int64(0)
+		for _, di := range unfilledFiles {
+			totalSize += di.Size
+		}
+		avgFileSize = totalSize / int64(len(unfilledFiles))
+	}
+
+	// Fill holes with optimized matching
+	for _, holeEntry := range allHoles {
+		hole := holeEntry.hole
+		pkgID := holeEntry.pkgID
+
+		// Find best match for this hole
+		bestMatch := findBestMatchForHole(hole, unfilledFiles, filledFiles, avgFileSize)
+
+		// Fill the hole with best match
+		if bestMatch.singleFile != nil {
+			// Fill with single best-fit file
+			if fillHoleWithFile(c, bktID, ma, da, hole, pkgID, bestMatch.singleFile, chunkSize, &filledFiles, result) {
+				result.PackedFiles++
+				// Update unfilledFiles list (remove filled file)
+				unfilledFiles = removeFromSlice(unfilledFiles, bestMatch.singleFile.ID)
+			}
+		} else if len(bestMatch.combinedFiles) > 0 {
+			// Fill with multiple combined files
+			currentOffset := hole.start
+			for _, dataInfo := range bestMatch.combinedFiles {
+				if filledFiles[dataInfo.ID] {
+					continue
+				}
+				// Create a sub-hole for this file
+				subHole := holeInfo{
+					pkgID:    hole.pkgID,
+					start:    currentOffset,
+					size:     dataInfo.Size,
+					filePath: hole.filePath,
+				}
+				if fillHoleWithFile(c, bktID, ma, da, subHole, pkgID, dataInfo, chunkSize, &filledFiles, result) {
+					currentOffset += dataInfo.Size
+					result.PackedFiles++
+					// Update unfilledFiles list
+					unfilledFiles = removeFromSlice(unfilledFiles, dataInfo.ID)
+				}
+			}
+		}
+	}
+
+	// Step 4: Pack remaining small files (those not filled into holes)
+	// Use unfilledFiles which is already maintained during hole filling
+	remainingFiles := unfilledFiles
+
+	// Pack remaining small files (grouped by chunkSize)
+	if len(remainingFiles) > 0 {
+		// Sort by size to fill each package efficiently
+		// Simple greedy algorithm: sort from small to large, try to fill chunkSize
+		pkgGroups := make([][]*DataInfo, 0)
+		currentGroup := make([]*DataInfo, 0)
+		currentGroupSize := int64(0)
+
+		for _, dataInfo := range remainingFiles {
+			// Check if exceeds chunkSize
+			if currentGroupSize+dataInfo.Size > chunkSize && len(currentGroup) > 0 {
+				// Current group is full, create new group
+				pkgGroups = append(pkgGroups, currentGroup)
+				currentGroup = make([]*DataInfo, 0)
+				currentGroupSize = 0
+			}
+			currentGroup = append(currentGroup, dataInfo)
+			currentGroupSize += dataInfo.Size
+		}
+
+		if len(currentGroup) > 0 {
+			pkgGroups = append(pkgGroups, currentGroup)
+		}
+
+		// Execute packing: read each data, write to new package file
+		for _, group := range pkgGroups {
+			if len(group) == 0 {
+				continue
+			}
+
+			// Create new package data ID
+			pkgID := NewID()
+			if pkgID <= 0 {
+				continue
+			}
+
+			// Read all data and merge
+			pkgBuffer := make([]byte, 0, chunkSize)
+			dataInfos := make([]*DataInfo, 0, len(group))
+
+			for _, dataInfo := range group {
+				// Read data
+				var dataBytes []byte
+				if dataInfo.PkgID > 0 {
+					// If already packaged, read from package file
+					pkgReader, _, err := createPkgDataReader(ORCAS_DATA, bktID, dataInfo.PkgID, int(dataInfo.PkgOffset), int(dataInfo.Size))
+					if err != nil {
+						continue // Read failed, skip
+					}
+					dataBytes = make([]byte, dataInfo.Size)
+					_, err = io.ReadFull(pkgReader, dataBytes)
+					pkgReader.Close()
+					if err != nil {
+						continue
+					}
+				} else {
+					// Read chunk data
+					maxSN := int((dataInfo.Size + chunkSize - 1) / chunkSize)
+					reader, _, err := createChunkDataReader(c, da, bktID, dataInfo.ID, maxSN)
+					if err != nil {
+						continue
+					}
+					dataBytes = make([]byte, dataInfo.Size)
+					_, err = io.ReadFull(reader, dataBytes)
+					if err != nil {
+						continue
+					}
+				}
+
+				// Record offset position
+				offset := len(pkgBuffer)
+				pkgBuffer = append(pkgBuffer, dataBytes...)
+
+				// Update data information
+				newDataInfo := *dataInfo
+				newDataInfo.PkgID = pkgID
+				newDataInfo.PkgOffset = uint32(offset)
+				dataInfos = append(dataInfos, &newDataInfo)
+			}
+
+			if len(dataInfos) == 0 || len(pkgBuffer) == 0 {
+				continue
+			}
+
+			// Write to new package file
+			err := da.Write(c, bktID, pkgID, 0, pkgBuffer)
+			if err != nil {
+				continue // Write failed, skip
+			}
+
+			// Update metadata
+			err = ma.PutData(c, bktID, dataInfos)
+			if err != nil {
+				continue
+			}
+
+			// Calculate freed space (old data file size)
+			var freedSize int64
+			for _, dataInfo := range group {
+				if dataInfo.PkgID > 0 {
+					// If originally packaged, need to check if other data references same package file
+					// Simplified: only count non-packaged data size
+				} else {
+					// Calculate total size of chunk data
+					oldSize := calculateDataSize(ORCAS_DATA, bktID, dataInfo.ID)
+					freedSize += oldSize - dataInfo.Size // Subtract new packaged data size
+					// Delete old data files
+					deleteDataFiles(ORCAS_DATA, bktID, dataInfo.ID, ma, c)
+				}
+			}
+
+			// Update actual usage
+			if freedSize > 0 {
+				ma.DecBktRealUsed(c, bktID, freedSize)
+				result.FreedSize += freedSize
+			}
+
+			result.PackedGroups++
+			result.PackedFiles += int64(len(dataInfos))
+		}
+	}
+
+	// Step 5: Compact existing package files: remove deleted data blocks, move remaining data forward
+	// Use pkgDataMap already collected in Step 1
+	// Compact each package file
+	for pkgID, dataList := range pkgDataMap {
+		// Read entire package file
+		// Use same path calculation as in core/data.go
+		fileName := fmt.Sprintf("%d_%d", pkgID, 0)
+		hash := fmt.Sprintf("%X", md5.Sum([]byte(fileName)))
+		pkgPath := filepath.Join(ORCAS_DATA, fmt.Sprint(bktID), hash[21:24], hash[8:24], fileName)
+		pkgFile, err := os.Open(pkgPath)
+		if err != nil {
+			continue
+		}
+
+		// Read file size
 		fileInfo, err := pkgFile.Stat()
 		if err != nil {
 			pkgFile.Close()
@@ -1942,76 +2626,76 @@ func Defragment(c Ctx, bktID int64, a Admin, ma MetadataAdapter, da DataAdapter)
 			continue
 		}
 
-		// 检查每个数据是否仍被引用
+		// Check if each data is still referenced
 		validData := make([]*DataInfo, 0)
-		validOffsets := make([]int, 0) // 有效的偏移位置列表
+		validOffsets := make([]int, 0) // List of valid offset positions
 
 		for _, dataInfo := range dataList {
-			// 检查DataInfo的ID是否为负数（标记为已删除）
+			// Check if DataInfo ID is negative (marked as deleted)
 			if dataInfo.ID < 0 {
-				// DataInfo的ID为负数，说明已标记删除
-				// 查询引用这个DataInfo的对象，获取删除时间（MTime）
-				objs, err := ma.GetObjByDataID(c, bktID, dataInfo.ID) // 使用负数ID查找对象
+				// DataInfo ID is negative, marked as deleted
+				// Query objects referencing this DataInfo to get deletion time (MTime)
+				objs, err := ma.GetObjByDataID(c, bktID, dataInfo.ID) // Use negative ID to find objects
 				if err == nil && len(objs) > 0 {
-					// 使用第一个对象的MTime作为删除时间的参考
+					// Use first object's MTime as deletion time reference
 					deleteTime := objs[0].MTime
 					if deleteTime > 0 {
-						// 检查删除时间是否超过窗口时间
+						// Check if deletion time exceeds window time
 						now := Now()
 						if now-deleteTime >= accessWindow {
-							// 超过窗口时间，可以删除这个数据块
-							// 不添加到validData中，后续会被清理
+							// Exceeds window time, can delete this data block
+							// Don't add to validData, will be cleaned up later
 							continue
 						} else {
-							// 未超过窗口时间，暂时保留（可能被恢复）
+							// Not exceeded window time, temporarily keep (may be recovered)
 							validData = append(validData, dataInfo)
 							validOffsets = append(validOffsets, int(dataInfo.PkgOffset))
 							continue
 						}
 					}
 				}
-				// 如果无法获取删除时间，默认不保留
+				// If cannot get deletion time, don't keep by default
 				continue
 			}
 
-			// DataInfo的ID为正数，检查是否仍被引用
+			// DataInfo ID is positive, check if still referenced
 			refCounts, err := ma.CountDataRefs(c, bktID, []int64{dataInfo.ID})
 			if err != nil {
 				continue
 			}
 
 			if refCounts[dataInfo.ID] > 0 {
-				// 仍被正常引用，保留
+				// Still normally referenced, keep
 				validData = append(validData, dataInfo)
 				validOffsets = append(validOffsets, int(dataInfo.PkgOffset))
 			}
-			// 如果没有引用且ID为正数，可能是孤儿数据，不添加到validData
+			// If no reference and ID is positive, may be orphan data, don't add to validData
 		}
 
 		if len(validData) == 0 {
-			// 打包文件中没有有效数据，可以删除整个打包文件
-			// 先删除所有相关数据的元数据，再删除文件，避免出现有元数据但没有文件的情况
+			// No valid data in package file, can delete entire package file
+			// Delete all related data metadata first, then delete file, avoid having metadata but no file
 			dataIDs := make([]int64, 0, len(dataList))
 			for _, di := range dataList {
 				dataIDs = append(dataIDs, di.ID)
 			}
 			if len(dataIDs) > 0 {
 				if err := ma.DeleteData(c, bktID, dataIDs); err != nil {
-					// 元数据删除失败，不继续删除文件
+					// Metadata deletion failed, don't continue deleting file
 					continue
 				}
 			}
-			// 这里传入 nil 表示不是打包数据，而是打包文件本身，需要删除整个文件
+			// Pass nil to indicate not packaged data, but package file itself, need to delete entire file
 			deleteDataFiles(ORCAS_DATA, bktID, pkgID, nil, nil)
 			result.CompactedPkgs++
 			continue
 		}
 
-		// 重新打包有效数据（前移）
+		// Repack valid data (move forward)
 		newPkgBuffer := make([]byte, 0, chunkSize)
 		newDataInfos := make([]*DataInfo, 0, len(validData))
 
-		// 预先计算每个数据在新打包文件中的偏移量
+		// Pre-calculate offset of each data in new package file
 		newOffsets := make([]int, len(validData))
 		currentOffset := 0
 		for i, dataInfo := range validData {
@@ -2025,7 +2709,7 @@ func Defragment(c Ctx, bktID int64, a Admin, ma MetadataAdapter, da DataAdapter)
 
 			newOffset := newOffsets[i]
 			if len(newPkgBuffer) < newOffset+int(dataInfo.Size) {
-				// 确保缓冲区足够大
+				// Ensure buffer is large enough
 				if cap(newPkgBuffer) < newOffset+int(dataInfo.Size) {
 					oldBuf := newPkgBuffer
 					newPkgBuffer = make([]byte, newOffset+int(dataInfo.Size))
@@ -2041,33 +2725,33 @@ func Defragment(c Ctx, bktID int64, a Admin, ma MetadataAdapter, da DataAdapter)
 			newDataInfos = append(newDataInfos, &newDataInfo)
 		}
 
-		// 如果新打包文件更小，更新
+		// If new package file is smaller, update
 		if int64(len(newPkgBuffer)) < fileSize {
-			// 使用新pkgID方案：创建新的打包文件，更新所有引用，旧数据放入等待队列
-			// 1. 生成新的pkgID（作为新的DataID）
+			// Use new pkgID scheme: create new package file, update all references, put old data in wait queue
+			// 1. Generate new pkgID (as new DataID)
 			newPkgID := NewID()
 			if newPkgID <= 0 {
 				continue
 			}
 
-			// 2. 创建新的打包文件
+			// 2. Create new package file
 			err := da.Write(c, bktID, newPkgID, 0, newPkgBuffer)
 			if err != nil {
-				continue // 写入失败，跳过
+				continue // Write failed, skip
 			}
 
-			// 3. 收集所有需要更新的对象（引用旧DataInfo的对象）
+			// 3. Collect all objects that need updating (objects referencing old DataInfo)
 			oldDataIDs := make([]int64, 0, len(validData))
 
 			for i, dataInfo := range validData {
 				oldDataID := dataInfo.ID
-				// 创建新的DataInfo，使用新的pkgID
+				// Create new DataInfo, use new pkgID
 				newDataID := NewID()
 				if newDataID <= 0 {
 					continue
 				}
 
-				// 使用预先计算的偏移量
+				// Use pre-calculated offset
 				newOffset := newOffsets[i]
 
 				newDataInfo := *dataInfo
@@ -2075,27 +2759,27 @@ func Defragment(c Ctx, bktID int64, a Admin, ma MetadataAdapter, da DataAdapter)
 				newDataInfo.PkgID = newPkgID
 				newDataInfo.PkgOffset = uint32(newOffset)
 
-				// 记录旧的DataID
+				// Record old DataID
 				oldDataIDs = append(oldDataIDs, oldDataID)
 
-				// 更新新数据的元数据
+				// Update new data metadata
 				ma.PutData(c, bktID, []*DataInfo{&newDataInfo})
 
-				// 更新所有引用旧DataID的对象的DataID为新DataID
+				// Update all objects referencing old DataID to point to new DataID
 				ma.UpdateObjDataID(c, bktID, oldDataID, newDataID)
 			}
 
-			// 4. 使用延迟删除处理旧pkgID和旧DataID
-			// 将旧的pkgID放入延迟删除
+			// 4. Use delayed delete for old pkgID and old DataIDs
+			// Put old pkgID in delayed delete
 			delayedDelete(c, bktID, pkgID, ma, da)
 
-			// 将旧的DataID放入延迟删除
+			// Put old DataIDs in delayed delete
 			for _, oldDataID := range oldDataIDs {
 				delayedDelete(c, bktID, oldDataID, ma, da)
 			}
 
-			// 5. 计算释放的空间（暂时不减少，等待延迟时间后再减少）
-			// 因为旧文件还在，只是不再被引用
+			// 5. Calculate freed space (don't reduce yet, wait for delay time before reducing)
+			// Because old file still exists, just no longer referenced
 			freedSize := fileSize - int64(len(newPkgBuffer))
 			if freedSize > 0 {
 				result.FreedSize += freedSize
