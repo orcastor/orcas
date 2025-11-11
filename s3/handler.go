@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/xml"
 	"fmt"
 	"io"
@@ -310,6 +311,139 @@ func findObjectByPath(c *gin.Context, bktID int64, key string) (*core.ObjectInfo
 	return nil, fmt.Errorf("object not found")
 }
 
+// listAllObjectsRecursively lists all objects in a bucket using iterative approach (not recursive)
+func listAllObjectsRecursively(c *gin.Context, bktID int64, prefix string, delimiter string, maxKeys int) ([]Content, []CommonPrefix, error) {
+	ctx := c.Request.Context()
+	var contents []Content
+	var commonPrefixes []CommonPrefix
+	commonPrefixSet := make(map[string]bool)
+
+	// Use a queue to store directories to process: (pid, currentPath)
+	type dirEntry struct {
+		pid         int64
+		currentPath string
+	}
+	queue := []dirEntry{{pid: 0, currentPath: ""}}
+
+	// Process directories iteratively
+	for len(queue) > 0 && len(contents) < maxKeys {
+		// Dequeue first directory
+		entry := queue[0]
+		queue = queue[1:]
+
+		// List objects in current directory with pagination
+		processedIDs := make(map[int64]bool) // Track processed object IDs to avoid duplicates
+		// Note: processedIDs is per directory, reset for each new directory
+		for {
+			if len(contents) >= maxKeys {
+				break
+			}
+
+			opt := core.ListOptions{
+				Count: core.DefaultListPageSize,
+				Order: "+name",
+			}
+
+			objs, _, _, err := handler.List(ctx, bktID, entry.pid, opt)
+			if err != nil {
+				return nil, nil, err
+			}
+
+			if len(objs) == 0 {
+				break // No more objects in this directory
+			}
+
+			// Filter out already processed objects
+			newObjs := make([]*core.ObjectInfo, 0)
+			for _, obj := range objs {
+				if !processedIDs[obj.ID] {
+					newObjs = append(newObjs, obj)
+					processedIDs[obj.ID] = true
+				}
+			}
+
+			if len(newObjs) == 0 {
+				// All objects were already processed, but we got results
+				// This means we've seen all objects, break
+				break
+			}
+
+			for _, obj := range newObjs {
+				if len(contents) >= maxKeys {
+					break
+				}
+
+				// Build full path (key)
+				// Note: obj.Name is just the filename/dirname, not the full path
+				// We need to build the full path from currentPath + obj.Name
+				var key string
+				if entry.currentPath == "" {
+					key = obj.Name
+				} else {
+					key = entry.currentPath + "/" + obj.Name
+				}
+
+				// Filter by prefix
+				if prefix != "" && !strings.HasPrefix(key, prefix) {
+					continue
+				}
+
+				if obj.Type == core.OBJ_TYPE_FILE {
+					// It's a file, add to contents
+					contents = append(contents, Content{
+						Key:          key,
+						LastModified: time.Unix(obj.MTime, 0).UTC().Format(time.RFC1123),
+						ETag:         fmt.Sprintf(`"%x"`, obj.DataID),
+						Size:         obj.Size,
+						StorageClass: "STANDARD",
+					})
+				} else if obj.Type == core.OBJ_TYPE_DIR {
+					// It's a directory
+					if delimiter != "" {
+						// With delimiter, add to common prefixes
+						prefixKey := key + delimiter
+						if !commonPrefixSet[prefixKey] {
+							commonPrefixes = append(commonPrefixes, CommonPrefix{
+								Prefix: prefixKey,
+							})
+							commonPrefixSet[prefixKey] = true
+						}
+					} else {
+						// Without delimiter, add directory to queue for processing
+						queue = append(queue, dirEntry{
+							pid:         obj.ID,
+							currentPath: key,
+						})
+					}
+				}
+			}
+
+			// Check if there are more objects to fetch
+			// If we got fewer objects than requested, we've reached the end
+			if int64(len(objs)) < core.DefaultListPageSize {
+				break // No more objects in this directory
+			}
+
+			// If all returned objects were already processed, we've seen everything
+			if len(newObjs) == 0 {
+				break
+			}
+		}
+	}
+
+	// Sort contents by key
+	sort.Slice(contents, func(i, j int) bool {
+		return contents[i].Key < contents[j].Key
+	})
+
+	// Sort common prefixes
+	sort.Slice(commonPrefixes, func(i, j int) bool {
+		return commonPrefixes[i].Prefix < commonPrefixes[j].Prefix
+	})
+
+	return contents, commonPrefixes, nil
+}
+
 // ensurePath ensures the path exists, creating directories as needed (with cache)
 func ensurePath(c *gin.Context, bktID int64, key string) (int64, error) {
 	ctx := c.Request.Context()
@@ -580,155 +714,159 @@ func listObjects(c *gin.Context) {
 	}
 	delimiter := c.Query("delimiter")
 
-	ctx := c.Request.Context()
-	pid := int64(0)
-	if prefix != "" {
-		// Find parent directory for prefix
-		obj, err := findObjectByPath(c, bktID, prefix)
-		if err == nil && obj != nil && obj.Type == core.OBJ_TYPE_DIR {
-			pid = obj.ID
+	// List all objects recursively in the bucket
+	contents, commonPrefixes, err := listAllObjectsRecursively(c, bktID, prefix, delimiter, maxKeys+1) // +1 to check if truncated
+	if err != nil {
+		util.S3ErrorResponse(c, http.StatusInternalServerError, "InternalError", err.Error())
+		return
+	}
+
+	// Handle marker (pagination)
+	startIndex := 0
+	if marker != "" {
+		for i, content := range contents {
+			if content.Key > marker {
+				startIndex = i
+				break
+			}
 		}
 	}
 
-	// Merge pending objects from batch writer FIRST (before querying database)
-	// This ensures pending objects are always visible, even if cache is empty
-	batchMgr := sdk.GetBatchWriterForBucket(handler, bktID)
-	pendingObjsMap := make(map[int64]*sdk.PackagedFileInfo)
-	if batchMgr != nil {
-		pendingObjsMap = batchMgr.GetPendingObjects()
-	}
-
-	// Try directory listing cache first
-	dirCacheKey := formatDirListCacheKey(bktID, pid)
-	var objs []*core.ObjectInfo
-	var cnt int64
-	if cached, ok := dirListCache.Get(dirCacheKey); ok {
-		if cachedObjs, ok := cached.([]*core.ObjectInfo); ok {
-			objs = cachedObjs
-			cnt = int64(len(objs))
-		}
-	}
-
-	// If cache miss or need to filter by prefix/delimiter, query from database
-	if objs == nil {
-		opt := core.ListOptions{
-			Word:  prefix,
-			Delim: delimiter,
-			Count: maxKeys,
-			Order: "+name",
-		}
-
-		var err error
-		objs, cnt, _, err = handler.List(ctx, bktID, pid, opt)
-		if err != nil {
-			util.S3ErrorResponse(c, http.StatusInternalServerError, "InternalError", err.Error())
-			return
-		}
-		// Update cache
-		dirListCache.Put(dirCacheKey, objs)
+	// Apply maxKeys limit
+	isTruncated := len(contents) > startIndex+maxKeys
+	if startIndex+maxKeys < len(contents) {
+		contents = contents[startIndex : startIndex+maxKeys]
 	} else {
-		// Filter cached objects by prefix and delimiter if needed
-		if prefix != "" || delimiter != "" {
-			filteredObjs := make([]*core.ObjectInfo, 0)
-			for _, obj := range objs {
-				// Filter by prefix
-				if prefix != "" && !strings.HasPrefix(obj.Name, prefix) {
+		contents = contents[startIndex:]
+	}
+
+	// Merge pending objects from batch writer
+	batchMgr := sdk.GetBatchWriterForBucket(handler, bktID)
+	if batchMgr != nil {
+		pendingObjsMap := batchMgr.GetPendingObjects()
+		existingKeys := make(map[string]bool)
+		for _, content := range contents {
+			existingKeys[content.Key] = true
+		}
+
+		// Build paths for pending objects and add them if they match prefix
+		for _, fileInfo := range pendingObjsMap {
+			// Build full path for pending object
+			// We need to find the path by traversing from fileInfo.PID to root
+			ctx := c.Request.Context()
+			key, err := buildPathFromPID(ctx, bktID, fileInfo.PID, fileInfo.Name)
+			if err != nil {
+				continue // Skip if we can't build path
+			}
+
+			// Check if already exists
+			if existingKeys[key] {
+				continue
+			}
+
+			// Filter by prefix
+			if prefix != "" && !strings.HasPrefix(key, prefix) {
+				continue
+			}
+
+			// Filter by delimiter
+			if delimiter != "" {
+				relativeKey := key
+				if prefix != "" {
+					relativeKey = strings.TrimPrefix(key, prefix)
+				}
+				if strings.Contains(relativeKey, delimiter) {
+					// This would be a CommonPrefix, skip
 					continue
 				}
-				// Filter by delimiter (simplified, full implementation would handle CommonPrefixes)
-				if delimiter != "" {
-					// Check if object name contains delimiter after prefix
-					if prefix != "" {
-						relativeName := strings.TrimPrefix(obj.Name, prefix)
-						if strings.Contains(relativeName, delimiter) {
-							// This would be a CommonPrefix, skip for now
-							continue
-						}
-					} else if strings.Contains(obj.Name, delimiter) {
-						// This would be a CommonPrefix, skip for now
-						continue
-					}
-				}
-				filteredObjs = append(filteredObjs, obj)
 			}
-			objs = filteredObjs
-			cnt = int64(len(objs))
-		}
-	}
 
-	// Merge pending objects from batch write manager (before flush)
-	// Only add pending objects that are not already in the database results
-	// Create a set of existing object IDs for fast lookup
-	existingIDs := make(map[int64]bool)
-	for _, obj := range objs {
-		existingIDs[obj.ID] = true
-	}
-
-	for fileID, fileInfo := range pendingObjsMap {
-		// Skip if object already exists in database results
-		if existingIDs[fileID] {
-			continue
+			// Add to contents
+			contents = append(contents, Content{
+				Key:          key,
+				LastModified: time.Unix(core.Now(), 0).UTC().Format(time.RFC1123),
+				ETag:         fmt.Sprintf(`"%x"`, fileInfo.DataID),
+				Size:         fileInfo.Size,
+				StorageClass: "STANDARD",
+			})
 		}
 
-		// Check if object belongs to this directory (PID matches)
-		if fileInfo.PID == pid {
-			// Check if object matches prefix and delimiter filters
-			matches := true
-			if prefix != "" && !strings.HasPrefix(fileInfo.Name, prefix) {
-				matches = false
-			}
-			if matches && delimiter != "" {
-				if prefix != "" {
-					relativeName := strings.TrimPrefix(fileInfo.Name, prefix)
-					if strings.Contains(relativeName, delimiter) {
-						matches = false
-					}
-				} else if strings.Contains(fileInfo.Name, delimiter) {
-					matches = false
-				}
-			}
-			if matches {
-				// Create ObjectInfo from PackagedFileInfo
-				objInfo := &core.ObjectInfo{
-					ID:     fileInfo.ObjectID,
-					PID:    fileInfo.PID,
-					Name:   fileInfo.Name,
-					Type:   core.OBJ_TYPE_FILE,
-					DataID: fileInfo.DataID,
-					Size:   fileInfo.Size,
-					MTime:  core.Now(),
-				}
-				objs = append(objs, objInfo)
-				cnt++
-				// Add to existing IDs to avoid duplicates
-				existingIDs[fileID] = true
-			}
+		// Re-sort after adding pending objects
+		sort.Slice(contents, func(i, j int) bool {
+			return contents[i].Key < contents[j].Key
+		})
+
+		// Re-apply maxKeys limit
+		if len(contents) > maxKeys {
+			contents = contents[:maxKeys]
+			isTruncated = true
 		}
 	}
 
 	result := ListBucketResult{
-		Name:        bucketName,
-		Prefix:      prefix,
-		Marker:      marker,
-		MaxKeys:     maxKeys,
-		IsTruncated: cnt > int64(maxKeys),
-		Contents:    make([]Content, 0),
-	}
-
-	for _, obj := range objs {
-		if obj.Type == core.OBJ_TYPE_FILE {
-			result.Contents = append(result.Contents, Content{
-				Key:          obj.Name,
-				LastModified: time.Unix(obj.MTime, 0).UTC().Format(time.RFC1123),
-				ETag:         fmt.Sprintf(`"%x"`, obj.DataID),
-				Size:         obj.Size,
-				StorageClass: "STANDARD",
-			})
-		}
+		Name:           bucketName,
+		Prefix:         prefix,
+		Marker:         marker,
+		MaxKeys:        maxKeys,
+		IsTruncated:    isTruncated,
+		Contents:       contents,
+		CommonPrefixes: commonPrefixes,
 	}
 
 	c.Header("Content-Type", "application/xml")
 	c.XML(http.StatusOK, result)
+}
+
+// buildPathFromPID builds the full path from a parent ID and object name
+func buildPathFromPID(ctx context.Context, bktID int64, pid int64, name string) (string, error) {
+	if pid == 0 {
+		return name, nil
+	}
+
+	parts := []string{name}
+	currentPID := pid
+
+	for currentPID != 0 {
+		// Try object cache
+		objCacheKey := formatObjectCacheKey(bktID, currentPID)
+		if cached, ok := objectCache.Get(objCacheKey); ok {
+			if parent, ok := cached.(*core.ObjectInfo); ok && parent != nil {
+				parts = append([]string{parent.Name}, parts...)
+				currentPID = parent.PID
+				continue
+			}
+		}
+
+		// Query to find parent object
+		opt := core.ListOptions{
+			Count: 10000,
+		}
+		allObjs, _, _, err := handler.List(ctx, bktID, 0, opt)
+		if err != nil {
+			return "", err
+		}
+
+		var parent *core.ObjectInfo
+		for _, o := range allObjs {
+			if o.ID == currentPID {
+				parent = o
+				break
+			}
+		}
+
+		if parent == nil {
+			// Can't find parent, return partial path
+			return strings.Join(parts, "/"), nil
+		}
+
+		// Cache parent
+		objectCache.Put(objCacheKey, parent)
+
+		parts = append([]string{parent.Name}, parts...)
+		currentPID = parent.PID
+	}
+
+	return strings.Join(parts, "/"), nil
 }
 
 // getObject handles GET /{bucket}/{key} - GetObject
