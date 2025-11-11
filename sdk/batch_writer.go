@@ -27,9 +27,9 @@ type PackagedFileInfo struct {
 // BatchWriterBuffer encapsulates buffer, offset, and file infos for double-buffering
 type BatchWriterBuffer struct {
 	buffer      []byte              // Buffer data
-	writeOffset atomic.Int64        // Current write position (atomic operation)
+	writeOffset int64               // Current write position (atomic operation, use atomic.LoadInt64/StoreInt64/AddInt64)
 	fileInfos   []*PackagedFileInfo // File info list
-	fileIndex   atomic.Int64        // Current file info index (atomic operation)
+	fileIndex   int64               // Current file info index (atomic operation, use atomic.LoadInt64/StoreInt64/AddInt64)
 }
 
 // BatchWriter manages batch writes for small files
@@ -207,8 +207,8 @@ func (bwm *BatchWriter) flush(ctx context.Context) {
 	currentBuf := (*BatchWriterBuffer)(atomic.LoadPointer(&bwm.currentBuffer))
 
 	// Get old offset and index from current buffer, atomically reset to 0
-	oldOffset := currentBuf.writeOffset.Swap(0)
-	oldIndex := currentBuf.fileIndex.Swap(0)
+	oldOffset := atomic.SwapInt64(&currentBuf.writeOffset, 0)
+	oldIndex := atomic.SwapInt64(&currentBuf.fileIndex, 0)
 
 	if oldOffset == 0 || oldIndex == 0 {
 		return // No pending write data
@@ -224,13 +224,13 @@ func (bwm *BatchWriter) flush(ctx context.Context) {
 	// Check if bgBuffer is ready (already flushed and reset to 0)
 	// If bgBuffer still has data (writeOffset > 0), it means previous flush is still in progress
 	// In this case, we cannot swap - both buffers are in use
-	bgOffset := bgBuf.writeOffset.Load()
+	bgOffset := atomic.LoadInt64(&bgBuf.writeOffset)
 	if bgOffset > 0 {
 		// bgBuffer is still being flushed, cannot swap
 		// Both buffers are in use: currentBuffer is full and bgBuffer is flushing
 		// Restore currentBuffer offset/index and return (caller should use direct write)
-		currentBuf.writeOffset.Store(oldOffset)
-		currentBuf.fileIndex.Store(oldIndex)
+		atomic.StoreInt64(&currentBuf.writeOffset, oldOffset)
+		atomic.StoreInt64(&currentBuf.fileIndex, oldIndex)
 		return
 	}
 
@@ -317,8 +317,8 @@ func (bwm *BatchWriter) flush(ctx context.Context) {
 
 	// Reset bgBuffer's offset to 0 to indicate it's ready for next swap
 	// Note: currentBuf is now bgBuffer after swap
-	currentBuf.writeOffset.Store(0)
-	currentBuf.fileIndex.Store(0)
+	atomic.StoreInt64(&currentBuf.writeOffset, 0)
+	atomic.StoreInt64(&currentBuf.fileIndex, 0)
 }
 
 // getFileInfoOffsetSize extracts offset and size from file info
@@ -442,12 +442,12 @@ func (bwm *BatchWriter) AddFile(fileID int64, data []byte, pid int64, name strin
 		currentBuf := (*BatchWriterBuffer)(atomic.LoadPointer(&bwm.currentBuffer))
 
 		// Check current buffer space
-		currOffset := currentBuf.writeOffset.Load()
+		currOffset := atomic.LoadInt64(&currentBuf.writeOffset)
 		if currOffset+processedSize > bwm.bufferSize {
 			// Current buffer is full
 			// Check if the background buffer is also full
 			bgBuf := (*BatchWriterBuffer)(atomic.LoadPointer(&bwm.bgBuffer))
-			bgOff := bgBuf.writeOffset.Load()
+			bgOff := atomic.LoadInt64(&bgBuf.writeOffset)
 			if bgOff+processedSize > bwm.bufferSize {
 				// Both buffers are full, cannot use batch write
 				// Caller should write directly to storage, not use batch writer
@@ -459,8 +459,8 @@ func (bwm *BatchWriter) AddFile(fileID int64, data []byte, pid int64, name strin
 		}
 
 		// Reserve space in current buffer (atomic operation)
-		newOffset := currentBuf.writeOffset.Add(processedSize)
-		oldOffset := newOffset - processedSize
+		oldOffset := atomic.LoadInt64(&currentBuf.writeOffset)
+		newOffset := atomic.AddInt64(&currentBuf.writeOffset, processedSize)
 
 		// Check again if exceeds buffer size (race condition check)
 		if newOffset > bwm.bufferSize {
@@ -468,13 +468,13 @@ func (bwm *BatchWriter) AddFile(fileID int64, data []byte, pid int64, name strin
 			return false, 0, nil
 		}
 
-		// Memory barrier: writeOffset.Add already provides memory barrier
+		// Memory barrier: atomic.AddInt64 already provides memory barrier
 
 		// Write data to current buffer
 		copy(currentBuf.buffer[oldOffset:newOffset], data)
 
 		// Get file info index
-		idx := currentBuf.fileIndex.Add(1) - 1
+		idx := atomic.AddInt64(&currentBuf.fileIndex, 1) - 1
 		if idx >= bwm.maxFileInfos {
 			// File info list is full, return false
 			return false, 0, nil

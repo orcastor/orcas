@@ -421,6 +421,8 @@ func TestConcurrentListObjects(t *testing.T) {
 
 // TestPerformanceReport 生成性能测试报告
 func TestPerformanceReport(t *testing.T) {
+	// Use current environment variable setting (default enabled)
+	// This test uses whatever ORCAS_BATCH_WRITE_ENABLED is set to
 	report := &strings.Builder{}
 	report.WriteString("# S3 Performance Test Report\n\n")
 	report.WriteString(fmt.Sprintf("Generated at: %s\n\n", time.Now().Format(time.RFC3339)))
@@ -475,7 +477,7 @@ func TestPerformanceReport(t *testing.T) {
 
 	// 写入报告文件
 	reportFile := "PERFORMANCE_TEST_REPORT.md"
-	err := os.WriteFile(reportFile, []byte(report.String()), 0644)
+	err := os.WriteFile(reportFile, []byte(report.String()), 0o644)
 	if err != nil {
 		t.Fatalf("Failed to write report: %v", err)
 	}
@@ -490,5 +492,24 @@ func formatSize(size int64) string {
 		return fmt.Sprintf("%dKB", size/1024)
 	} else {
 		return fmt.Sprintf("%dMB", size/(1024*1024))
+	}
+}
+
+// TestMissingData 测试待补充的数据：1KB和10MB在不同并发级别下的性能
+func TestMissingData(t *testing.T) {
+	// 测试场景：1KB和10MB，并发级别：10, 50, 100
+	sizes := []int64{1024, 10 * 1024 * 1024} // 1KB, 10MB
+	concurrencies := []int{10, 50, 100}
+	operations := 200 // 每个并发级别的操作数
+
+	for _, size := range sizes {
+		for _, concurrency := range concurrencies {
+			metrics := runConcurrentTest(t,
+				fmt.Sprintf("MissingData-%s-%d", formatSize(size), concurrency),
+				"PUT", size, concurrency, operations)
+
+			t.Logf("%s - Concurrency %d: %.2f ops/sec, %.2f MB/s, %v avg latency",
+				formatSize(size), concurrency, metrics.OpsPerSecond, metrics.ThroughputMBps, metrics.AvgLatency)
+		}
 	}
 }

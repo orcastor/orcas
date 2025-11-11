@@ -16,7 +16,7 @@ import (
 	"github.com/orcastor/orcas/sdk"
 )
 
-// PerformanceMetrics 性能指标
+// PerformanceMetrics performance metrics
 type PerformanceMetrics struct {
 	TestName       string
 	DataSize       int64
@@ -33,19 +33,19 @@ type PerformanceMetrics struct {
 	HasEncryption  bool
 }
 
-// ensureTestUser 确保测试用户存在，如果不存在则创建
+// ensureTestUser ensures test user exists, creates it if not
 func ensureTestUser(t *testing.T) {
-	// 先尝试登录，如果成功说明用户已存在
+	// Try to login first, if successful, user already exists
 	handler := core.NewLocalHandler()
 	ctx := context.Background()
 	_, _, _, err := handler.Login(ctx, "orcas", "orcas")
 	if err == nil {
-		// 用户已存在，直接返回
+		// User already exists, return directly
 		return
 	}
 
-	// 用户不存在，需要创建。由于创建用户需要管理员权限，我们直接通过数据库创建
-	// 使用与原来默认用户相同的密码哈希
+	// User doesn't exist, need to create. Since creating user requires admin permission, we create directly via database
+	// Use the same password hash as the original default user
 	hashedPwd := "1000:Zd54dfEjoftaY8NiAINGag==:q1yB510yT5tGIGNewItVSg=="
 	db, err := core.GetDB()
 	if err != nil {
@@ -54,16 +54,16 @@ func ensureTestUser(t *testing.T) {
 	}
 	defer db.Close()
 
-	// 使用 INSERT OR IGNORE 避免重复创建
+	// Use INSERT OR IGNORE to avoid duplicate creation
 	_, err = db.Exec(`INSERT OR IGNORE INTO usr (id, role, usr, pwd, name, avatar, key) VALUES (1, 1, 'orcas', ?, 'orcas', '', '')`, hashedPwd)
 	if err != nil {
 		t.Logf("Warning: Failed to create test user: %v", err)
 	}
 }
 
-// runPerformanceTest 运行性能测试并返回指标
+// runPerformanceTest runs performance test and returns metrics
 func runPerformanceTest(t *testing.T, name string, dataSize, chunkSize int64, writeOps, concurrency int, sdkCfg *sdk.Config) PerformanceMetrics {
-	// 初始化
+	// Initialize
 	if core.ORCAS_BASE == "" {
 		tmpDir := filepath.Join(os.TempDir(), "orcas_perf_test")
 		os.MkdirAll(tmpDir, 0o755)
@@ -78,7 +78,7 @@ func runPerformanceTest(t *testing.T, name string, dataSize, chunkSize int64, wr
 	}
 	core.InitDB()
 
-	// 确保测试用户存在
+	// Ensure test user exists
 	ensureTestUser(t)
 
 	ig := idgen.NewIDGen(nil, 0)
@@ -113,7 +113,7 @@ func runPerformanceTest(t *testing.T, name string, dataSize, chunkSize int64, wr
 		t.Fatalf("PutBkt failed: %v", err)
 	}
 
-	// 创建文件对象
+	// Create file object
 	fileID, _ := ig.New()
 	fileObj := &core.ObjectInfo{
 		ID:    fileID,
@@ -130,7 +130,7 @@ func runPerformanceTest(t *testing.T, name string, dataSize, chunkSize int64, wr
 
 	ofs := NewOrcasFS(lh, testCtx, testBktID, sdkCfg)
 
-	// 准备测试数据
+	// Prepare test data
 	testData := make([]byte, dataSize)
 	for i := range testData {
 		testData[i] = byte(i % 256)
@@ -139,46 +139,46 @@ func runPerformanceTest(t *testing.T, name string, dataSize, chunkSize int64, wr
 	hasCompression := sdkCfg != nil && sdkCfg.WiseCmpr > 0
 	hasEncryption := sdkCfg != nil && sdkCfg.EndecWay > 0
 
-	// 记录开始状态
+	// Record start state
 	var startMem runtime.MemStats
 	runtime.GC()
 	runtime.ReadMemStats(&startMem)
 	startTime := time.Now()
 
-	// 执行写入操作
+	// Execute write operations
 	if concurrency == 1 {
-		// 单线程
+		// Single thread
 		ra, err := NewRandomAccessor(ofs, fileID)
 		if err != nil {
 			t.Fatalf("NewRandomAccessor failed: %v", err)
 		}
 
-		// 优化：使用延迟刷新机制，小文件写入先写到内存，定期或关闭前刷新
-		// 批量写入优化：减少Flush频率，让缓冲区积累更多操作
+		// Optimization: Use delayed flush mechanism, small file writes go to memory first, flush periodically or before close
+		// Batch write optimization: Reduce Flush frequency, let buffer accumulate more operations
 		for i := 0; i < writeOps; i++ {
 			offset := int64(i) * dataSize
 			err := ra.Write(offset, testData)
 			if err != nil {
 				t.Fatalf("Write failed: %v", err)
 			}
-			// 对于小文件，使用延迟刷新（由Write方法自动处理）
-			// 不主动Flush，让批量写入管理器处理
+			// For small files, use delayed flush (automatically handled by Write method)
+			// Don't actively Flush, let batch write manager handle it
 		}
-		// 关闭时自动刷新所有待写入数据
+		// Automatically flush all pending writes when closing
 		err = ra.Close()
 		if err != nil {
 			t.Fatalf("Close failed: %v", err)
 		}
 	} else {
-		// 并发优化：
-		// 1. 每个goroutine使用独立的RandomAccessor（避免内部锁竞争）
-		// 2. 优化写入偏移量计算，确保不重叠且连续
-		// 3. 减少Flush调用，让批量写入管理器统一处理（小文件优化）
-		// 4. 使用Close自动刷新，避免显式Flush竞争
+		// Concurrency optimization:
+		// 1. Each goroutine uses independent RandomAccessor (avoid internal lock contention)
+		// 2. Optimize write offset calculation to ensure non-overlapping and continuous
+		// 3. Reduce Flush calls, let batch write manager handle uniformly (small file optimization)
+		// 4. Use Close to automatically flush, avoid explicit Flush contention
 		var wg sync.WaitGroup
 		wg.Add(concurrency)
 
-		// 计算每个goroutine的写入范围，确保不重叠
+		// Calculate write range for each goroutine to ensure no overlap
 		opsPerGoroutine := writeOps / concurrency
 		remainingOps := writeOps % concurrency
 
@@ -186,21 +186,21 @@ func runPerformanceTest(t *testing.T, name string, dataSize, chunkSize int64, wr
 			go func(goroutineID int) {
 				defer wg.Done()
 
-				// 每个goroutine创建独立的RandomAccessor
+				// Each goroutine creates independent RandomAccessor
 				ra, err := NewRandomAccessor(ofs, fileID)
 				if err != nil {
 					t.Errorf("NewRandomAccessor failed in goroutine %d: %v", goroutineID, err)
 					return
 				}
-				defer ra.Close() // Close会自动刷新，不需要显式Flush
+				defer ra.Close() // Close will automatically flush, no need for explicit Flush
 
-				// 计算当前goroutine的写入操作数（处理余数分配）
+				// Calculate write operations for current goroutine (handle remainder allocation)
 				myOps := opsPerGoroutine
 				if goroutineID < remainingOps {
 					myOps++
 				}
 
-				// 计算起始偏移量：前面所有goroutine写入的总数据量
+				// Calculate start offset: total data written by all previous goroutines
 				startOffset := int64(0)
 				for i := 0; i < goroutineID; i++ {
 					prevOps := opsPerGoroutine
@@ -210,7 +210,7 @@ func runPerformanceTest(t *testing.T, name string, dataSize, chunkSize int64, wr
 					startOffset += int64(prevOps) * dataSize
 				}
 
-				// 执行写入操作（连续写入，不重叠）
+				// Execute write operations (continuous writes, no overlap)
 				for i := 0; i < myOps; i++ {
 					offset := startOffset + int64(i)*dataSize
 					err := ra.Write(offset, testData)
@@ -220,21 +220,21 @@ func runPerformanceTest(t *testing.T, name string, dataSize, chunkSize int64, wr
 					}
 				}
 
-				// 对于小文件，使用批量写入管理器，不需要显式Flush
-				// Close时会自动刷新所有待写入数据
+				// For small files, use batch write manager, no need for explicit Flush
+				// Close will automatically flush all pending writes
 			}(g)
 		}
 		wg.Wait()
 
-		// 所有goroutine完成后，确保批量写入管理器刷新所有数据
-		// 注意：每个RandomAccessor的Close已经会触发刷新，这里作为保险
+		// After all goroutines complete, ensure batch write manager flushes all data
+		// Note: Each RandomAccessor's Close will already trigger flush, this is a safeguard
 		batchMgr := ofs.getBatchWriteManager()
 		if batchMgr != nil {
 			batchMgr.FlushAll(testCtx)
 		}
 	}
 
-	// 记录结束状态
+	// Record end state
 	endTime := time.Now()
 	var endMem runtime.MemStats
 	runtime.ReadMemStats(&endMem)
@@ -261,7 +261,7 @@ func runPerformanceTest(t *testing.T, name string, dataSize, chunkSize int64, wr
 	}
 }
 
-// TestPerformanceComprehensive 综合性能测试
+// TestPerformanceComprehensive comprehensive performance test
 func TestPerformanceComprehensive(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping comprehensive performance test in short mode")
@@ -269,47 +269,47 @@ func TestPerformanceComprehensive(t *testing.T) {
 
 	var results []PerformanceMetrics
 
-	// 测试场景1: 小数据块，单线程（优化：使用批量写入，增加数据量）
+	// Test scenario 1: Small data blocks, single thread (optimization: use batch write, increase data volume)
 	t.Run("SmallData_SingleThread", func(t *testing.T) {
-		result := runPerformanceTest(t, "small_single", 4*1024, 4*1024*1024, 200, 1, nil) // 从100增加到200
+		result := runPerformanceTest(t, "small_single", 4*1024, 4*1024*1024, 200, 1, nil) // Increased from 100 to 200
 		results = append(results, result)
 	})
 
-	// 测试场景2: 中等数据块，单线程（优化：使用批量写入，增加数据量）
+	// Test scenario 2: Medium data blocks, single thread (optimization: use batch write, increase data volume)
 	t.Run("MediumData_SingleThread", func(t *testing.T) {
-		result := runPerformanceTest(t, "medium_single", 256*1024, 4*1024*1024, 100, 1, nil) // 从50增加到100
+		result := runPerformanceTest(t, "medium_single", 256*1024, 4*1024*1024, 100, 1, nil) // Increased from 50 to 100
 		results = append(results, result)
 	})
 
-	// 测试场景3: 小数据块，并发（3个goroutine，优化测试）
-	// 优化：增加写入操作数，更好地测试批量写入管理器的性能
-	// 增加到60次写入 = 240KB，可以更好地测试批量打包和刷新机制
+	// Test scenario 3: Small data blocks, concurrent (3 goroutines, optimized test)
+	// Optimization: Increase write operations to better test batch write manager performance
+	// Increased to 60 writes = 240KB, can better test batch packaging and flush mechanism
 	t.Run("SmallData_Concurrent3", func(t *testing.T) {
-		result := runPerformanceTest(t, "small_concurrent3", 4*1024, 4*1024*1024, 60, 3, nil) // 从30增加到60
+		result := runPerformanceTest(t, "small_concurrent3", 4*1024, 4*1024*1024, 60, 3, nil) // Increased from 30 to 60
 		results = append(results, result)
 	})
 
-	// 测试场景4: 加密，单线程（增加数据量）
+	// Test scenario 4: Encryption, single thread (increase data volume)
 	t.Run("Encrypted_SingleThread", func(t *testing.T) {
 		sdkCfg := &sdk.Config{
 			EndecWay: core.DATA_ENDEC_AES256,
 			EndecKey: "this is a test encryption key that is long enough for AES256",
 		}
-		result := runPerformanceTest(t, "encrypted_single", 256*1024, 4*1024*1024, 20, 1, sdkCfg) // 从5增加到20
+		result := runPerformanceTest(t, "encrypted_single", 256*1024, 4*1024*1024, 20, 1, sdkCfg) // Increased from 5 to 20
 		results = append(results, result)
 	})
 
-	// 测试场景5: 压缩，单线程（增加数据量）
+	// Test scenario 5: Compression, single thread (increase data volume)
 	t.Run("Compressed_SingleThread", func(t *testing.T) {
 		sdkCfg := &sdk.Config{
 			WiseCmpr: core.DATA_CMPR_SNAPPY,
 			CmprQlty: 1,
 		}
-		result := runPerformanceTest(t, "compressed_single", 256*1024, 4*1024*1024, 20, 1, sdkCfg) // 从5增加到20
+		result := runPerformanceTest(t, "compressed_single", 256*1024, 4*1024*1024, 20, 1, sdkCfg) // Increased from 5 to 20
 		results = append(results, result)
 	})
 
-	// 测试场景6: 压缩+加密，单线程（增加数据量）
+	// Test scenario 6: Compression+Encryption, single thread (increase data volume)
 	t.Run("CompressedEncrypted_SingleThread", func(t *testing.T) {
 		sdkCfg := &sdk.Config{
 			WiseCmpr: core.DATA_CMPR_SNAPPY,
@@ -317,17 +317,17 @@ func TestPerformanceComprehensive(t *testing.T) {
 			EndecWay: core.DATA_ENDEC_AES256,
 			EndecKey: "this is a test encryption key that is long enough for AES256",
 		}
-		result := runPerformanceTest(t, "compressed_encrypted_single", 256*1024, 4*1024*1024, 20, 1, sdkCfg) // 从5增加到20
+		result := runPerformanceTest(t, "compressed_encrypted_single", 256*1024, 4*1024*1024, 20, 1, sdkCfg) // Increased from 5 to 20
 		results = append(results, result)
 	})
 
-	// 测试场景7: 大文件，单线程（100MB）
+	// Test scenario 7: Large file, single thread (100MB)
 	t.Run("LargeFile_SingleThread", func(t *testing.T) {
 		result := runPerformanceTest(t, "large_single", 100*1024*1024, 4*1024*1024, 1, 1, nil)
 		results = append(results, result)
 	})
 
-	// 测试场景8: 大文件+压缩+加密，单线程（100MB）
+	// Test scenario 8: Large file+Compression+Encryption, single thread (100MB)
 	t.Run("LargeFile_CompressedEncrypted_SingleThread", func(t *testing.T) {
 		sdkCfg := &sdk.Config{
 			WiseCmpr: core.DATA_CMPR_SNAPPY,
@@ -339,13 +339,13 @@ func TestPerformanceComprehensive(t *testing.T) {
 		results = append(results, result)
 	})
 
-	// 测试场景9: 顺序写优化（从0开始顺序写，触发顺序写优化）
+	// Test scenario 9: Sequential write optimization (sequential write from 0, trigger sequential write optimization)
 	t.Run("SequentialWrite_Optimized", func(t *testing.T) {
 		result := runSequentialWriteTest(t, "sequential_write_optimized", 10*1024*1024, 4*1024*1024, nil)
 		results = append(results, result)
 	})
 
-	// 测试场景10: 顺序写+压缩+加密优化
+	// Test scenario 10: Sequential write+Compression+Encryption optimization
 	t.Run("SequentialWrite_CompressedEncrypted", func(t *testing.T) {
 		sdkCfg := &sdk.Config{
 			WiseCmpr: core.DATA_CMPR_SNAPPY,
@@ -357,13 +357,13 @@ func TestPerformanceComprehensive(t *testing.T) {
 		results = append(results, result)
 	})
 
-	// 测试场景11: 随机写（不同offset，不连续）
+	// Test scenario 11: Random write (different offsets, non-contiguous)
 	t.Run("RandomWrite_NonSequential", func(t *testing.T) {
 		result := runRandomWriteTest(t, "random_write_nonsequential", 10*1024*1024, 4*1024*1024, nil)
 		results = append(results, result)
 	})
 
-	// 测试场景12: 随机写+压缩+加密
+	// Test scenario 12: Random write+Compression+Encryption
 	t.Run("RandomWrite_CompressedEncrypted", func(t *testing.T) {
 		sdkCfg := &sdk.Config{
 			WiseCmpr: core.DATA_CMPR_SNAPPY,
@@ -375,29 +375,29 @@ func TestPerformanceComprehensive(t *testing.T) {
 		results = append(results, result)
 	})
 
-	// 测试场景13: 随机写（重叠写入）
+	// Test scenario 13: Random write (overlapping writes)
 	t.Run("RandomWrite_Overlapping", func(t *testing.T) {
 		result := runRandomWriteOverlappingTest(t, "random_write_overlapping", 10*1024*1024, 4*1024*1024, nil)
 		results = append(results, result)
 	})
 
-	// 测试场景14: 随机写（小数据块，多次写入）
+	// Test scenario 14: Random write (small data chunks, multiple writes)
 	t.Run("RandomWrite_SmallChunks", func(t *testing.T) {
 		result := runRandomWriteSmallChunksTest(t, "random_write_small_chunks", 10*1024*1024, 4*1024*1024, nil)
 		results = append(results, result)
 	})
 
-	// 打印性能报告
+	// Print performance report
 	printPerformanceReport(results)
 
-	// 打印批量写入优化对比
+	// Print batch write optimization comparison
 	fmt.Println("\n" + strings.Repeat("=", 120))
 	fmt.Println("Batch Write Optimization Comparison")
 	fmt.Println(strings.Repeat("=", 120))
 	fmt.Printf("%-50s %12s %12s %10s %15s\n", "Test Name", "Throughput", "Ops/sec", "Memory", "Total Data")
 	fmt.Println(strings.Repeat("-", 120))
 
-	// 打印所有测试结果
+	// Print all test results
 	for _, r := range results {
 		totalDataMB := float64(r.DataSize) * float64(r.WriteOps) / 1024 / 1024
 		fmt.Printf("%-50s %10.2f MB/s %10.2f ops/s %8.2f MB %12.2f MB\n",
@@ -415,9 +415,9 @@ func TestPerformanceComprehensive(t *testing.T) {
 	fmt.Println(strings.Repeat("=", 120))
 }
 
-// runSequentialWriteTest 运行顺序写性能测试（测试顺序写优化）
+// runSequentialWriteTest runs sequential write performance test (test sequential write optimization)
 func runSequentialWriteTest(t *testing.T, name string, totalSize, chunkSize int64, sdkCfg *sdk.Config) PerformanceMetrics {
-	// 初始化
+	// Initialize
 	if core.ORCAS_BASE == "" {
 		tmpDir := filepath.Join(os.TempDir(), "orcas_perf_test")
 		os.MkdirAll(tmpDir, 0o755)
@@ -430,13 +430,13 @@ func runSequentialWriteTest(t *testing.T, name string, totalSize, chunkSize int6
 		os.Setenv("ORCAS_DATA", tmpDir)
 		core.ORCAS_DATA = tmpDir
 	}
-	// 性能测试默认开启批量写入优化
+	// Performance test enables batch write optimization by default
 	if os.Getenv("ORCAS_BATCH_WRITE_ENABLED") == "" {
 		os.Setenv("ORCAS_BATCH_WRITE_ENABLED", "true")
 	}
 	core.InitDB()
 
-	// 确保测试用户存在
+	// Ensure test user exists
 	ensureTestUser(t)
 
 	ig := idgen.NewIDGen(nil, 0)
@@ -471,7 +471,7 @@ func runSequentialWriteTest(t *testing.T, name string, totalSize, chunkSize int6
 		t.Fatalf("PutBkt failed: %v", err)
 	}
 
-	// 创建文件对象
+	// Create file object
 	fileID, _ := ig.New()
 	fileObj := &core.ObjectInfo{
 		ID:    fileID,
@@ -488,7 +488,7 @@ func runSequentialWriteTest(t *testing.T, name string, totalSize, chunkSize int6
 
 	ofs := NewOrcasFS(lh, testCtx, testBktID, sdkCfg)
 
-	// 准备测试数据
+	// Prepare test data
 	writeChunkSize := int64(1024 * 1024) // 1MB per write
 	writeCount := int(totalSize / writeChunkSize)
 	if writeCount == 0 {
@@ -498,13 +498,13 @@ func runSequentialWriteTest(t *testing.T, name string, totalSize, chunkSize int6
 	hasCompression := sdkCfg != nil && sdkCfg.WiseCmpr > 0
 	hasEncryption := sdkCfg != nil && sdkCfg.EndecWay > 0
 
-	// 记录开始状态
+	// Record start state
 	var startMem runtime.MemStats
 	runtime.GC()
 	runtime.ReadMemStats(&startMem)
 	startTime := time.Now()
 
-	// 执行顺序写入（从0开始，连续写入）
+	// Execute sequential writes (starting from 0, continuous writes)
 	ra, err := NewRandomAccessor(ofs, fileID)
 	if err != nil {
 		t.Fatalf("NewRandomAccessor failed: %v", err)
@@ -540,7 +540,7 @@ func runSequentialWriteTest(t *testing.T, name string, totalSize, chunkSize int6
 	}
 	ra.Close()
 
-	// 记录结束状态
+	// Record end state
 	endTime := time.Now()
 	var endMem runtime.MemStats
 	runtime.ReadMemStats(&endMem)
@@ -566,9 +566,9 @@ func runSequentialWriteTest(t *testing.T, name string, totalSize, chunkSize int6
 	}
 }
 
-// runRandomWriteTest 运行随机写性能测试（不同offset，不连续）
+// runRandomWriteTest runs random write performance test (different offsets, non-contiguous)
 func runRandomWriteTest(t *testing.T, name string, totalSize, chunkSize int64, sdkCfg *sdk.Config) PerformanceMetrics {
-	// 初始化（与runSequentialWriteTest相同）
+	// Initialize (same as runSequentialWriteTest)
 	if core.ORCAS_BASE == "" {
 		tmpDir := filepath.Join(os.TempDir(), "orcas_perf_test")
 		os.MkdirAll(tmpDir, 0o755)
@@ -581,13 +581,13 @@ func runRandomWriteTest(t *testing.T, name string, totalSize, chunkSize int64, s
 		os.Setenv("ORCAS_DATA", tmpDir)
 		core.ORCAS_DATA = tmpDir
 	}
-	// 性能测试默认开启批量写入优化
+	// Performance test enables batch write optimization by default
 	if os.Getenv("ORCAS_BATCH_WRITE_ENABLED") == "" {
 		os.Setenv("ORCAS_BATCH_WRITE_ENABLED", "true")
 	}
 	core.InitDB()
 
-	// 确保测试用户存在
+	// Ensure test user exists
 	ensureTestUser(t)
 
 	ig := idgen.NewIDGen(nil, 0)
@@ -622,7 +622,7 @@ func runRandomWriteTest(t *testing.T, name string, totalSize, chunkSize int64, s
 		t.Fatalf("PutBkt failed: %v", err)
 	}
 
-	// 创建文件对象
+	// Create file object
 	fileID, _ := ig.New()
 	fileObj := &core.ObjectInfo{
 		ID:    fileID,
@@ -639,34 +639,34 @@ func runRandomWriteTest(t *testing.T, name string, totalSize, chunkSize int64, s
 
 	ofs := NewOrcasFS(lh, testCtx, testBktID, sdkCfg)
 
-	// 准备测试数据：随机offset，不连续写入
+	// Prepare test data: random offsets, non-contiguous writes
 	writeChunkSize := int64(512 * 1024) // 512KB per write
-	writeCount := 20                    // 写入20次
+	writeCount := 20                    // Write 20 times
 	writeSize := writeChunkSize
 
 	hasCompression := sdkCfg != nil && sdkCfg.WiseCmpr > 0
 	hasEncryption := sdkCfg != nil && sdkCfg.EndecWay > 0
 
-	// 记录开始状态
+	// Record start state
 	var startMem runtime.MemStats
 	runtime.GC()
 	runtime.ReadMemStats(&startMem)
 	startTime := time.Now()
 
-	// 执行随机写入（不同offset，不连续）
+	// Execute random writes (different offsets, non-contiguous)
 	ra, err := NewRandomAccessor(ofs, fileID)
 	if err != nil {
 		t.Fatalf("NewRandomAccessor failed: %v", err)
 	}
 
-	// 生成随机offset列表（确保不连续）
+	// Generate random offset list (ensure non-contiguous)
 	offsets := make([]int64, writeCount)
 	for i := 0; i < writeCount; i++ {
-		// 生成随机offset，确保不连续
-		offsets[i] = int64(i*2) * writeChunkSize // 间隔写入，跳过一些位置
+		// Generate random offset, ensure non-contiguous
+		offsets[i] = int64(i*2) * writeChunkSize // Write with intervals, skip some positions
 	}
 
-	// 打乱顺序（模拟真实随机写）
+	// Shuffle order (simulate real random writes)
 	for i := writeCount - 1; i > 0; i-- {
 		j := i % (i + 1)
 		offsets[i], offsets[j] = offsets[j], offsets[i]
@@ -694,7 +694,7 @@ func runRandomWriteTest(t *testing.T, name string, totalSize, chunkSize int64, s
 	}
 	ra.Close()
 
-	// 记录结束状态
+	// Record end state
 	endTime := time.Now()
 	var endMem runtime.MemStats
 	runtime.ReadMemStats(&endMem)
@@ -720,9 +720,9 @@ func runRandomWriteTest(t *testing.T, name string, totalSize, chunkSize int64, s
 	}
 }
 
-// runRandomWriteOverlappingTest 运行随机写性能测试（重叠写入）
+// runRandomWriteOverlappingTest runs random write performance test (overlapping writes)
 func runRandomWriteOverlappingTest(t *testing.T, name string, totalSize, chunkSize int64, sdkCfg *sdk.Config) PerformanceMetrics {
-	// 初始化（与runSequentialWriteTest相同）
+	// Initialize (same as runSequentialWriteTest)
 	if core.ORCAS_BASE == "" {
 		tmpDir := filepath.Join(os.TempDir(), "orcas_perf_test")
 		os.MkdirAll(tmpDir, 0o755)
@@ -737,7 +737,7 @@ func runRandomWriteOverlappingTest(t *testing.T, name string, totalSize, chunkSi
 	}
 	core.InitDB()
 
-	// 确保测试用户存在
+	// Ensure test user exists
 	ensureTestUser(t)
 
 	ig := idgen.NewIDGen(nil, 0)
@@ -772,7 +772,7 @@ func runRandomWriteOverlappingTest(t *testing.T, name string, totalSize, chunkSi
 		t.Fatalf("PutBkt failed: %v", err)
 	}
 
-	// 创建文件对象
+	// Create file object
 	fileID, _ := ig.New()
 	fileObj := &core.ObjectInfo{
 		ID:    fileID,
@@ -789,21 +789,21 @@ func runRandomWriteOverlappingTest(t *testing.T, name string, totalSize, chunkSi
 
 	ofs := NewOrcasFS(lh, testCtx, testBktID, sdkCfg)
 
-	// 准备测试数据：重叠写入
+	// Prepare test data: overlapping writes
 	writeChunkSize := int64(1024 * 1024) // 1MB per write
-	writeCount := 15                     // 写入15次
-	overlapSize := int64(256 * 1024)     // 每次重叠256KB
+	writeCount := 15                     // Write 15 times
+	overlapSize := int64(256 * 1024)     // Overlap 256KB each time
 
 	hasCompression := sdkCfg != nil && sdkCfg.WiseCmpr > 0
 	hasEncryption := sdkCfg != nil && sdkCfg.EndecWay > 0
 
-	// 记录开始状态
+	// Record start state
 	var startMem runtime.MemStats
 	runtime.GC()
 	runtime.ReadMemStats(&startMem)
 	startTime := time.Now()
 
-	// 执行重叠写入
+	// Execute overlapping writes
 	ra, err := NewRandomAccessor(ofs, fileID)
 	if err != nil {
 		t.Fatalf("NewRandomAccessor failed: %v", err)
@@ -823,7 +823,7 @@ func runRandomWriteOverlappingTest(t *testing.T, name string, totalSize, chunkSi
 		}
 		totalWritten += writeChunkSize
 
-		// 下次写入与本次重叠
+		// Next write overlaps with current one
 		currentOffset += writeChunkSize - overlapSize
 	}
 
@@ -834,7 +834,7 @@ func runRandomWriteOverlappingTest(t *testing.T, name string, totalSize, chunkSi
 	}
 	ra.Close()
 
-	// 记录结束状态
+	// Record end state
 	endTime := time.Now()
 	var endMem runtime.MemStats
 	runtime.ReadMemStats(&endMem)
@@ -860,9 +860,9 @@ func runRandomWriteOverlappingTest(t *testing.T, name string, totalSize, chunkSi
 	}
 }
 
-// runRandomWriteSmallChunksTest 运行随机写性能测试（小数据块，多次写入）
+// runRandomWriteSmallChunksTest runs random write performance test (small data chunks, multiple writes)
 func runRandomWriteSmallChunksTest(t *testing.T, name string, totalSize, chunkSize int64, sdkCfg *sdk.Config) PerformanceMetrics {
-	// 初始化（与runSequentialWriteTest相同）
+	// Initialize (same as runSequentialWriteTest)
 	if core.ORCAS_BASE == "" {
 		tmpDir := filepath.Join(os.TempDir(), "orcas_perf_test")
 		os.MkdirAll(tmpDir, 0o755)
@@ -877,7 +877,7 @@ func runRandomWriteSmallChunksTest(t *testing.T, name string, totalSize, chunkSi
 	}
 	core.InitDB()
 
-	// 确保测试用户存在
+	// Ensure test user exists
 	ensureTestUser(t)
 
 	ig := idgen.NewIDGen(nil, 0)
@@ -912,7 +912,7 @@ func runRandomWriteSmallChunksTest(t *testing.T, name string, totalSize, chunkSi
 		t.Fatalf("PutBkt failed: %v", err)
 	}
 
-	// 创建文件对象
+	// Create file object
 	fileID, _ := ig.New()
 	fileObj := &core.ObjectInfo{
 		ID:    fileID,
@@ -929,34 +929,34 @@ func runRandomWriteSmallChunksTest(t *testing.T, name string, totalSize, chunkSi
 
 	ofs := NewOrcasFS(lh, testCtx, testBktID, sdkCfg)
 
-	// 准备测试数据：小数据块，多次写入
+	// Prepare test data: small data chunks, multiple writes
 	writeChunkSize := int64(64 * 1024) // 64KB per write
-	writeCount := 100                  // 写入100次
+	writeCount := 100                  // Write 100 times
 
 	hasCompression := sdkCfg != nil && sdkCfg.WiseCmpr > 0
 	hasEncryption := sdkCfg != nil && sdkCfg.EndecWay > 0
 
-	// 记录开始状态
+	// Record start state
 	var startMem runtime.MemStats
 	runtime.GC()
 	runtime.ReadMemStats(&startMem)
 	startTime := time.Now()
 
-	// 执行小数据块随机写入
+	// Execute small chunk random writes
 	ra, err := NewRandomAccessor(ofs, fileID)
 	if err != nil {
 		t.Fatalf("NewRandomAccessor failed: %v", err)
 	}
 
-	// 生成随机offset列表
+	// Generate random offset list
 	offsets := make([]int64, writeCount)
 	for i := 0; i < writeCount; i++ {
-		// 随机offset，但确保在totalSize范围内
+		// Random offset, but ensure within totalSize range
 		maxOffset := totalSize - writeChunkSize
 		if maxOffset < 0 {
 			maxOffset = 0
 		}
-		offsets[i] = int64(i%10) * (maxOffset / 10) // 分散在不同位置
+		offsets[i] = int64(i%10) * (maxOffset / 10) // Distribute across different positions
 	}
 
 	totalWritten := int64(0)
@@ -981,7 +981,7 @@ func runRandomWriteSmallChunksTest(t *testing.T, name string, totalSize, chunkSi
 	}
 	ra.Close()
 
-	// 记录结束状态
+	// Record end state
 	endTime := time.Now()
 	var endMem runtime.MemStats
 	runtime.ReadMemStats(&endMem)
@@ -1007,7 +1007,7 @@ func runRandomWriteSmallChunksTest(t *testing.T, name string, totalSize, chunkSi
 	}
 }
 
-// printPerformanceReport 打印性能报告
+// printPerformanceReport prints performance report
 func printPerformanceReport(results []PerformanceMetrics) {
 	fmt.Println("\n" + strings.Repeat("=", 120))
 	fmt.Println("Comprehensive Performance Test Report")
@@ -1046,21 +1046,21 @@ func printPerformanceReport(results []PerformanceMetrics) {
 	fmt.Println("Performance Analysis:")
 	fmt.Println(strings.Repeat("-", 120))
 
-	// 分析单线程性能
+	// Analyze single thread performance
 	fmt.Println("\nSingle Thread Performance:")
 	singleThread := filterResults(results, func(r PerformanceMetrics) bool {
 		return r.Concurrency == 1
 	})
 	printAnalysis(singleThread)
 
-	// 分析并发性能
+	// Analyze concurrent performance
 	fmt.Println("\nConcurrent Performance:")
 	concurrent := filterResults(results, func(r PerformanceMetrics) bool {
 		return r.Concurrency > 1
 	})
 	printAnalysis(concurrent)
 
-	// 分析加密压缩性能
+	// Analyze encryption/compression performance
 	fmt.Println("\nEncryption/Compression Performance:")
 	encrypted := filterResults(results, func(r PerformanceMetrics) bool {
 		return r.HasEncryption || r.HasCompression
@@ -1070,7 +1070,7 @@ func printPerformanceReport(results []PerformanceMetrics) {
 	fmt.Println("\n" + strings.Repeat("=", 120))
 }
 
-// formatBytes 格式化字节数
+// formatBytes formats byte count
 func formatBytes(bytes int64) string {
 	const unit = 1024
 	if bytes < unit {

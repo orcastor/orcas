@@ -65,13 +65,13 @@ type BatchWriteManager struct {
 	fs *OrcasFS
 
 	// Shared buffer (lock-free)
-	buffer      []byte       // Shared buffer (size is chunkSize)
-	writeOffset atomic.Int64 // Current write position (atomic operation)
-	bufferSize  int64        // Buffer size (equals chunkSize)
+	buffer      []byte // Shared buffer (size is chunkSize)
+	writeOffset int64  // Current write position (atomic operation, use atomic.LoadInt64/StoreInt64/AddInt64)
+	bufferSize  int64  // Buffer size (equals chunkSize)
 
 	// File info list (lock-free, managed with atomic operations)
 	fileInfos     []*BatchFileInfo // File info list (fixed size, pre-allocated)
-	fileInfoIndex atomic.Int64     // Current file info index (atomic operation)
+	fileInfoIndex int64            // Current file info index (atomic operation, use atomic.LoadInt64/StoreInt64/AddInt64)
 	maxFileInfos  int64            // Maximum number of file infos
 
 	// Flush control
@@ -135,10 +135,10 @@ func (bwm *BatchWriteManager) flushAll() {
 // Atomically gets current write position and file info, then packages and writes
 func (bwm *BatchWriteManager) flush() {
 	// Atomically swap write position to 0 (reset and get old value)
-	oldOffset := bwm.writeOffset.Swap(0)
+	oldOffset := atomic.SwapInt64(&bwm.writeOffset, 0)
 
 	// Atomically swap file index to 0 (reset and get old value)
-	oldIndex := bwm.fileInfoIndex.Swap(0)
+	oldIndex := atomic.SwapInt64(&bwm.fileInfoIndex, 0)
 
 	if oldOffset == 0 || oldIndex == 0 {
 		return // No pending write data

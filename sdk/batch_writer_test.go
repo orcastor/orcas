@@ -103,8 +103,8 @@ func TestBatchWriterBufferFull(t *testing.T) {
 
 	t.Logf("Files per buffer: %d, Total files: %d", filesPerBuffer, totalFiles)
 
-	var successCount atomic.Int64
-	var failCount atomic.Int64
+	var successCount int64 // Use atomic operations: atomic.AddInt64/LoadInt64
+	var failCount int64    // Use atomic operations: atomic.AddInt64/LoadInt64
 	var wg sync.WaitGroup
 
 	// 并发写入文件，填满两个buffer
@@ -123,16 +123,16 @@ func TestBatchWriterBufferFull(t *testing.T) {
 			added, dataID, err := batchMgr.AddFile(core.NewID(), data, 0, fmt.Sprintf("file-%d", id), int64(len(data)))
 			if err != nil {
 				t.Errorf("addFile failed for file %d: %v", id, err)
-				failCount.Add(1)
+				atomic.AddInt64(&failCount, 1)
 				return
 			}
 
 			if added {
-				successCount.Add(1)
+				atomic.AddInt64(&successCount, 1)
 				t.Logf("File %d added to batch write (dataID: %d)", id, dataID)
 			} else {
 				// 如果addFile返回false，说明buffer满了，需要flush
-				failCount.Add(1)
+				atomic.AddInt64(&failCount, 1)
 				t.Logf("File %d rejected (buffer full)", id)
 
 				// 尝试flush
@@ -142,7 +142,7 @@ func TestBatchWriterBufferFull(t *testing.T) {
 				// 重试
 				added, dataID, err = batchMgr.AddFile(core.NewID(), data, 0, fmt.Sprintf("file-%d-retry", id), int64(len(data)))
 				if added {
-					successCount.Add(1)
+					atomic.AddInt64(&successCount, 1)
 					t.Logf("File %d added after flush (dataID: %d)", id, dataID)
 				} else {
 					t.Logf("File %d still rejected after flush (both buffers full)", id)
@@ -153,14 +153,14 @@ func TestBatchWriterBufferFull(t *testing.T) {
 
 	wg.Wait()
 
-	t.Logf("Success: %d, Failed: %d", successCount.Load(), failCount.Load())
+	t.Logf("Success: %d, Failed: %d", atomic.LoadInt64(&successCount), atomic.LoadInt64(&failCount))
 
 	// Note: We can't directly access internal buffer state in the new SDK implementation
 	// The buffer state is encapsulated. We'll just verify that flush works.
 	t.Logf("Buffer state is managed internally by SDK")
 
 	// 验证：如果两个buffer都满，应该有一些文件被拒绝
-	if successCount.Load() == totalFiles {
+	if atomic.LoadInt64(&successCount) == totalFiles {
 		t.Log("All files were accepted (buffers may have been flushed in time)")
 	}
 
