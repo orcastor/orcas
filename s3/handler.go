@@ -706,6 +706,29 @@ func listObjects(c *gin.Context) {
 		return
 	}
 
+	// Check if this is a GetBucketLocation request
+	// location parameter can be empty string or present
+	// Check both GetQuery (for empty values) and raw query string
+	if _, hasLocation := c.GetQuery("location"); hasLocation || strings.Contains(c.Request.URL.RawQuery, "location") {
+		// Handle GetBucketLocation API
+		bktID, err := getBucketIDByName(c, bucketName)
+		if err != nil {
+			util.S3ErrorResponse(c, http.StatusNotFound, "NoSuchBucket", "The specified bucket does not exist")
+			return
+		}
+		_ = bktID // bucket exists, proceed
+		// Return default location (us-east-1)
+		locationResult := struct {
+			XMLName  xml.Name `xml:"LocationConstraint"`
+			Location string   `xml:",chardata"`
+		}{
+			Location: "us-east-1",
+		}
+		c.Header("Content-Type", "application/xml")
+		c.XML(http.StatusOK, locationResult)
+		return
+	}
+
 	bktID, err := getBucketIDByName(c, bucketName)
 	if err != nil {
 		util.S3ErrorResponse(c, http.StatusNotFound, "NoSuchBucket", "The specified bucket does not exist")
@@ -883,8 +906,55 @@ func getObject(c *gin.Context) {
 	key := c.Param("key")
 	key = util.FastTrimPrefix(key, "/")
 
-	if bucketName == "" || key == "" {
+	// Check if key is empty and handle special bucket-level operations
+	if key == "" {
+		// Check if this is a GetBucketLocation request
+		if _, hasLocation := c.GetQuery("location"); hasLocation || strings.Contains(c.Request.URL.RawQuery, "location") {
+			bktID, err := getBucketIDByName(c, bucketName)
+			if err != nil {
+				util.S3ErrorResponse(c, http.StatusNotFound, "NoSuchBucket", "The specified bucket does not exist")
+				return
+			}
+			_ = bktID // bucket exists, proceed
+			// Return default location (us-east-1)
+			locationResult := struct {
+				XMLName  xml.Name `xml:"LocationConstraint"`
+				Location string   `xml:",chardata"`
+			}{
+				Location: "us-east-1",
+			}
+			c.Header("Content-Type", "application/xml")
+			c.XML(http.StatusOK, locationResult)
+			return
+		}
+
+		// Check if this is an object-lock configuration request
+		if _, hasObjectLock := c.GetQuery("object-lock"); hasObjectLock || strings.Contains(c.Request.URL.RawQuery, "object-lock") {
+			bktID, err := getBucketIDByName(c, bucketName)
+			if err != nil {
+				util.S3ErrorResponse(c, http.StatusNotFound, "NoSuchBucket", "The specified bucket does not exist")
+				return
+			}
+			_ = bktID // bucket exists, proceed
+			// Object lock is not configured for this bucket
+			util.S3ErrorResponse(c, http.StatusNotFound, "ObjectLockConfigurationNotFoundError", "Object Lock configuration does not exist for this bucket")
+			return
+		}
+
+		// Check if this is a ListObjectsV2 request (list-type=2)
+		if listType := c.Query("list-type"); listType == "2" || c.Query("prefix") != "" || c.Query("delimiter") != "" {
+			// Delegate to listObjects function
+			listObjects(c)
+			return
+		}
+
+		// If none of the above, return error
 		util.S3ErrorResponse(c, http.StatusBadRequest, "InvalidRequest", "Bucket name and key are required")
+		return
+	}
+
+	if bucketName == "" {
+		util.S3ErrorResponse(c, http.StatusBadRequest, "InvalidRequest", "Bucket name is required")
 		return
 	}
 
@@ -2075,13 +2145,10 @@ func moveObject(c *gin.Context) {
 	c.Status(http.StatusOK)
 }
 
-// headObject handles HEAD /{bucket}/{key} - HeadObject
-func headObject(c *gin.Context) {
+// headBucket handles HEAD /{bucket}/ - HeadBucket (bucket existence check)
+func headBucket(c *gin.Context) {
 	bucketName := c.Param("bucket")
-	key := c.Param("key")
-	key = util.FastTrimPrefix(key, "/")
-
-	if bucketName == "" || key == "" {
+	if bucketName == "" {
 		c.Status(http.StatusBadRequest)
 		return
 	}
@@ -2089,6 +2156,35 @@ func headObject(c *gin.Context) {
 	bktID, err := getBucketIDByName(c, bucketName)
 	if err != nil {
 		c.Status(http.StatusNotFound)
+		return
+	}
+
+	// Bucket exists, return 200 OK
+	_ = bktID // bucket exists, proceed
+	c.Status(http.StatusOK)
+}
+
+// headObject handles HEAD /{bucket}/{key} - HeadObject
+func headObject(c *gin.Context) {
+	bucketName := c.Param("bucket")
+	key := c.Param("key")
+	key = util.FastTrimPrefix(key, "/")
+
+	if bucketName == "" {
+		c.Status(http.StatusBadRequest)
+		return
+	}
+
+	bktID, err := getBucketIDByName(c, bucketName)
+	if err != nil {
+		c.Status(http.StatusNotFound)
+		return
+	}
+
+	// If key is empty (e.g., HEAD /bucket/), treat as bucket check
+	// Return 200 OK to indicate bucket exists
+	if key == "" {
+		c.Status(http.StatusOK)
 		return
 	}
 

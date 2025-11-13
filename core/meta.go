@@ -231,7 +231,13 @@ type MetadataAdapter interface {
 }
 
 func GetDB(c ...interface{}) (*sql.DB, error) {
-	param := "?_journal=WAL&cache=shared&mode=rwc&nolock=1"
+	// Use proper parameters for concurrent access:
+	// - _journal=WAL: Write-Ahead Logging for better concurrency
+	// - cache=shared: Share cache between connections
+	// - mode=rwc: Read-Write-Create mode
+	// - _busy_timeout=10000: Wait up to 10 seconds for locks (increased for high concurrency)
+	// - _txlock=immediate: Use immediate transaction locks to reduce contention
+	param := "?_journal=WAL&cache=shared&mode=rwc&_busy_timeout=10000&_txlock=immediate"
 	dirPath := ORCAS_BASE
 	var dbKey string
 
@@ -245,11 +251,12 @@ func GetDB(c ...interface{}) (*sql.DB, error) {
 			if key := getKey(ctx); key != "" {
 				dbKey = key
 			}
+			c = c[1:] // Remove context from remaining params
 		}
 	}
 
 	if len(c) > 0 {
-		// Second parameter (or first if key was provided) is bucket ID
+		// Next parameter is bucket ID
 		dirPath = filepath.Join(ORCAS_DATA, fmt.Sprint(c[0]))
 		if len(c) > 1 {
 			if ctx, ok := c[1].(Ctx); ok {
@@ -265,18 +272,41 @@ func GetDB(c ...interface{}) (*sql.DB, error) {
 	}
 
 	os.MkdirAll(dirPath, 0o766)
-	return sql.Open("sqlite3", filepath.Join(dirPath, "meta.db")+param)
+	db, err := sql.Open("sqlite3", filepath.Join(dirPath, "meta.db")+param)
+	if err != nil {
+		return nil, err
+	}
+
+	// Set connection pool limits for better concurrency
+	// MaxOpenConns = 25: Allow up to 25 concurrent connections (good for 10 concurrent clients)
+	// MaxIdleConns = 10: Keep 10 connections in pool for reuse
+	// ConnMaxLifetime = 0: Connections don't expire (reuse indefinitely)
+	db.SetMaxOpenConns(25)
+	db.SetMaxIdleConns(10)
+	db.SetConnMaxLifetime(0)
+
+	return db, nil
 }
 
 // GetDBWithKey opens database with specified encryption key
 func GetDBWithKey(key string) (*sql.DB, error) {
-	param := "?_journal=WAL&cache=shared&mode=rwc&nolock=1"
+	param := "?_journal=WAL&cache=shared&mode=rwc&_busy_timeout=10000&_txlock=immediate"
 	if key != "" {
 		param += "&key=" + key
 	}
 	dirPath := ORCAS_BASE
 	os.MkdirAll(dirPath, 0o766)
-	return sql.Open("sqlite3", filepath.Join(dirPath, "meta.db")+param)
+	db, err := sql.Open("sqlite3", filepath.Join(dirPath, "meta.db")+param)
+	if err != nil {
+		return nil, err
+	}
+
+	// Set connection pool limits
+	db.SetMaxOpenConns(25)
+	db.SetMaxIdleConns(10)
+	db.SetConnMaxLifetime(0)
+
+	return db, nil
 }
 
 // ChangeDBKey changes the database encryption key

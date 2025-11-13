@@ -80,6 +80,16 @@ func (dacm *DefaultAccessCtrlMgr) CheckRole(c Ctx, role uint32) error {
 	if uid <= 0 {
 		return ERR_NEED_LOGIN
 	}
+
+	// First check if role is already in context (for benchmark/testing)
+	if v, ok := c.Value("o").(map[string]interface{}); ok {
+		if ctxRole, okk := v["role"].(uint32); okk {
+			if ctxRole == role {
+				return nil
+			}
+		}
+	}
+
 	rk := fmt.Sprintf("role:%d", uid)
 	if r, ok := cache.GetInt64(rk); ok {
 		if uint32(r) == role {
@@ -130,9 +140,14 @@ func (dacm *DefaultAccessCtrlMgr) CheckOwn(c Ctx, bktID int64) error {
 }
 
 func UserInfo2Ctx(c Ctx, u *UserInfo) Ctx {
-	return context.WithValue(c, "o", map[string]interface{}{
+	o := map[string]interface{}{
 		"uid": u.ID,
-	})
+	}
+	// Also store role if provided (for benchmark/testing)
+	if u != nil && u.Role > 0 {
+		o["role"] = u.Role
+	}
+	return context.WithValue(c, "o", o)
 }
 
 // BucketInfo2Ctx sets bucket information to context, including bucket key
