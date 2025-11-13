@@ -128,7 +128,6 @@ export ORCAS_MAX_WRITE_BUFFER_COUNT=200
 - 延迟刷新：`vfs/random_access.go` (scheduleDelayedFlush)
 - 批量元数据：`vfs/random_access.go` (applyRandomWritesWithSDK)
 - 性能测试：`vfs/performance_test.go`
-- 文档：`vfs/BATCH_WRITE_OPTIMIZATION.md`
 
 ### 时间校准器优化
 - 实现：`core/const.go` (Line 388-423)

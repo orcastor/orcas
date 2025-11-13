@@ -239,7 +239,6 @@ Based on real performance test data (continuously updated)
 - Improve throughput: Significant improvement for small file write scenarios
 
 **Code Location:** `vfs/random_access.go:291-311` (delayed flush), `vfs/random_access.go:883-935` (batch metadata)
-**Documentation:** `vfs/BATCH_WRITE_OPTIMIZATION.md`
 
 ### 9. Time Calibrator Optimization ✅ ⭐
 

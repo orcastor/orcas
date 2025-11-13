@@ -128,7 +128,6 @@ export ORCAS_MAX_WRITE_BUFFER_COUNT=200
 - Delayed flush: `vfs/random_access.go` (scheduleDelayedFlush)
 - Batch metadata: `vfs/random_access.go` (applyRandomWritesWithSDK)
 - Performance tests: `vfs/performance_test.go`
-- Documentation: `vfs/BATCH_WRITE_OPTIMIZATION.md`
 
 ### Time Calibrator Optimization
 - Implementation: `core/const.go` (Line 388-423)
