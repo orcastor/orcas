@@ -610,8 +610,9 @@ func (n *OrcasNode) getDataReader() (io.Reader, syscall.Errno) {
 
 	// Get encryption key
 	var endecKey string
-	if n.fs.sdkCfg != nil {
-		endecKey = n.fs.sdkCfg.EndecKey
+	bucket := n.fs.getBucketConfig()
+	if bucket != nil {
+		endecKey = bucket.EndecKey
 	}
 
 	// Create new decodingChunkReader (create new one for each read, since FUSE reads are random access)

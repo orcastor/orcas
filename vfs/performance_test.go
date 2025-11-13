@@ -76,7 +76,7 @@ func runPerformanceTest(t *testing.T, name string, dataSize, chunkSize int64, wr
 		os.Setenv("ORCAS_DATA", tmpDir)
 		core.ORCAS_DATA = tmpDir
 	}
-	core.InitDB()
+	core.InitDB("")
 
 	// Ensure test user exists
 	ensureTestUser(t)
@@ -387,6 +387,11 @@ func TestPerformanceComprehensive(t *testing.T) {
 		results = append(results, result)
 	})
 
+	// Test scenario 15: Instant upload (deduplication) performance
+	t.Run("InstantUpload_Performance", func(t *testing.T) {
+		runInstantUploadPerformanceTest(t)
+	})
+
 	// Print performance report
 	printPerformanceReport(results)
 
@@ -434,7 +439,7 @@ func runSequentialWriteTest(t *testing.T, name string, totalSize, chunkSize int6
 	if os.Getenv("ORCAS_BATCH_WRITE_ENABLED") == "" {
 		os.Setenv("ORCAS_BATCH_WRITE_ENABLED", "true")
 	}
-	core.InitDB()
+	core.InitDB("")
 
 	// Ensure test user exists
 	ensureTestUser(t)
@@ -585,7 +590,7 @@ func runRandomWriteTest(t *testing.T, name string, totalSize, chunkSize int64, s
 	if os.Getenv("ORCAS_BATCH_WRITE_ENABLED") == "" {
 		os.Setenv("ORCAS_BATCH_WRITE_ENABLED", "true")
 	}
-	core.InitDB()
+	core.InitDB("")
 
 	// Ensure test user exists
 	ensureTestUser(t)
@@ -735,7 +740,7 @@ func runRandomWriteOverlappingTest(t *testing.T, name string, totalSize, chunkSi
 		os.Setenv("ORCAS_DATA", tmpDir)
 		core.ORCAS_DATA = tmpDir
 	}
-	core.InitDB()
+	core.InitDB("")
 
 	// Ensure test user exists
 	ensureTestUser(t)
@@ -875,7 +880,7 @@ func runRandomWriteSmallChunksTest(t *testing.T, name string, totalSize, chunkSi
 		os.Setenv("ORCAS_DATA", tmpDir)
 		core.ORCAS_DATA = tmpDir
 	}
-	core.InitDB()
+	core.InitDB("")
 
 	// Ensure test user exists
 	ensureTestUser(t)
@@ -1113,4 +1118,260 @@ func printAnalysis(results []PerformanceMetrics) {
 	fmt.Printf("  Average Ops/sec: %.2f\n", totalOps/count)
 	fmt.Printf("  Average Memory: %.2f MB\n", totalMemory/count)
 	fmt.Printf("  Average GC: %.1f\n", totalGC/count)
+}
+
+// runInstantUploadPerformanceTest runs instant upload performance test
+func runInstantUploadPerformanceTest(t *testing.T) {
+	// Initialize
+	if core.ORCAS_BASE == "" {
+		tmpDir := filepath.Join(os.TempDir(), "orcas_instant_upload_perf_test")
+		os.MkdirAll(tmpDir, 0o755)
+		os.Setenv("ORCAS_BASE", tmpDir)
+		core.ORCAS_BASE = tmpDir
+	}
+	if core.ORCAS_DATA == "" {
+		tmpDir := filepath.Join(os.TempDir(), "orcas_instant_upload_perf_test_data")
+		os.MkdirAll(tmpDir, 0o755)
+		os.Setenv("ORCAS_DATA", tmpDir)
+		core.ORCAS_DATA = tmpDir
+	}
+	core.InitDB("")
+
+	// Ensure test user exists
+	ensureTestUser(t)
+
+	ig := idgen.NewIDGen(nil, 0)
+	testBktID, _ := ig.New()
+	err := core.InitBucketDB(context.Background(), testBktID)
+	if err != nil {
+		t.Fatalf("InitBucketDB failed: %v", err)
+	}
+
+	dma := &core.DefaultMetadataAdapter{}
+	dda := &core.DefaultDataAdapter{}
+	dda.SetOptions(core.Options{Sync: true})
+
+	lh := core.NewLocalHandler().(*core.LocalHandler)
+	lh.SetAdapter(dma, dda)
+
+	testCtx, userInfo, _, err := lh.Login(context.Background(), "orcas", "orcas")
+	if err != nil {
+		t.Fatalf("Login failed: %v", err)
+	}
+
+	// Create bucket
+	bucket := &core.BucketInfo{
+		ID:        testBktID,
+		Name:      "test-bucket",
+		UID:       userInfo.ID,
+		Type:      1,
+		Quota:     10 << 30, // 10GB
+		ChunkSize: 4 * 1024 * 1024,
+	}
+	dma.PutBkt(testCtx, []*core.BucketInfo{bucket})
+
+	// Test different file sizes
+	testSizes := []struct {
+		size     int64
+		numTests int
+		name     string
+	}{
+		{1 * 1024, 50, "1KB"},
+		{10 * 1024, 50, "10KB"},
+		{100 * 1024, 30, "100KB"},
+		{1024 * 1024, 20, "1MB"},
+		{10 * 1024 * 1024, 10, "10MB"},
+	}
+
+	fmt.Println("\n" + strings.Repeat("=", 120))
+	fmt.Println("Instant Upload (Deduplication) Performance Test")
+	fmt.Println(strings.Repeat("=", 120))
+
+	for _, testCase := range testSizes {
+		t.Run(testCase.name, func(t *testing.T) {
+			testInstantUploadForSize(t, lh, testCtx, testBktID, testCase.size, testCase.numTests, testCase.name)
+		})
+	}
+}
+
+// testInstantUploadForSize tests instant upload performance for a specific file size
+func testInstantUploadForSize(t *testing.T, lh *core.LocalHandler, ctx context.Context, bktID int64, dataSize int64, numTests int, sizeName string) {
+	// Prepare test data (same data for instant upload, different data for normal upload)
+	duplicateData := make([]byte, dataSize)
+	for i := range duplicateData {
+		duplicateData[i] = byte(i % 256)
+	}
+
+	uniqueData := make([]byte, dataSize)
+	for i := range uniqueData {
+		uniqueData[i] = byte((i + 10000) % 256)
+	}
+
+	// Create file system with instant upload enabled
+	fs := &OrcasFS{
+		h:         lh,
+		bktID:     bktID,
+		c:         ctx,
+		chunkSize: 4 * 1024 * 1024,
+	}
+
+	// Upload baseline file for instant upload
+	ig := idgen.NewIDGen(nil, 0)
+	baselineFileID, _ := ig.New()
+	baselineObj := &core.ObjectInfo{
+		ID:     baselineFileID,
+		PID:    0,
+		Type:   core.OBJ_TYPE_FILE,
+		Name:   fmt.Sprintf("baseline_%s.bin", sizeName),
+		DataID: core.EmptyDataID,
+		Size:   0,
+		MTime:  core.Now(),
+	}
+	_, err := lh.Put(ctx, bktID, []*core.ObjectInfo{baselineObj})
+	if err != nil {
+		t.Fatalf("Failed to create baseline file: %v", err)
+	}
+
+	baselineRA, err := NewRandomAccessor(fs, baselineFileID)
+	if err != nil {
+		t.Fatalf("Failed to create baseline RandomAccessor: %v", err)
+	}
+	err = baselineRA.Write(0, duplicateData)
+	if err != nil {
+		t.Fatalf("Failed to write baseline data: %v", err)
+	}
+	_, err = baselineRA.Flush()
+	if err != nil {
+		t.Fatalf("Failed to flush baseline data: %v", err)
+	}
+	baselineRA.Close()
+
+	// Wait a bit for data to be written
+	time.Sleep(200 * time.Millisecond)
+
+	// Test instant upload performance (upload same data multiple times)
+	instantUploadTimes := make([]time.Duration, numTests)
+	var instantUploadDataIDs []int64
+	for i := 0; i < numTests; i++ {
+		fileID, _ := ig.New()
+		obj := &core.ObjectInfo{
+			ID:     fileID,
+			PID:    0,
+			Type:   core.OBJ_TYPE_FILE,
+			Name:   fmt.Sprintf("instant_%s_%d.bin", sizeName, i),
+			DataID: core.EmptyDataID,
+			Size:   0,
+			MTime:  core.Now(),
+		}
+		_, err := lh.Put(ctx, bktID, []*core.ObjectInfo{obj})
+		if err != nil {
+			t.Fatalf("Failed to create file: %v", err)
+		}
+
+		ra, err := NewRandomAccessor(fs, fileID)
+		if err != nil {
+			t.Fatalf("Failed to create RandomAccessor: %v", err)
+		}
+
+		startTime := time.Now()
+		err = ra.Write(0, duplicateData)
+		if err != nil {
+			t.Fatalf("Failed to write data: %v", err)
+		}
+		_, err = ra.Flush()
+		if err != nil {
+			t.Fatalf("Failed to flush data: %v", err)
+		}
+		instantUploadTimes[i] = time.Since(startTime)
+
+		// Get file object to check DataID
+		objs, err := lh.Get(ctx, bktID, []int64{fileID})
+		if err == nil && len(objs) > 0 {
+			instantUploadDataIDs = append(instantUploadDataIDs, objs[0].DataID)
+		}
+
+		ra.Close()
+	}
+
+	// Test normal upload performance (upload different data)
+	normalUploadTimes := make([]time.Duration, numTests)
+	for i := 0; i < numTests; i++ {
+		// Create unique data for each upload
+		uniqueDataCopy := make([]byte, len(uniqueData))
+		copy(uniqueDataCopy, uniqueData)
+		uniqueDataCopy[0] = byte(i) // Make it unique
+
+		fileID, _ := ig.New()
+		obj := &core.ObjectInfo{
+			ID:     fileID,
+			PID:    0,
+			Type:   core.OBJ_TYPE_FILE,
+			Name:   fmt.Sprintf("normal_%s_%d.bin", sizeName, i),
+			DataID: core.EmptyDataID,
+			Size:   0,
+			MTime:  core.Now(),
+		}
+		_, err := lh.Put(ctx, bktID, []*core.ObjectInfo{obj})
+		if err != nil {
+			t.Fatalf("Failed to create file: %v", err)
+		}
+
+		ra, err := NewRandomAccessor(fs, fileID)
+		if err != nil {
+			t.Fatalf("Failed to create RandomAccessor: %v", err)
+		}
+
+		startTime := time.Now()
+		err = ra.Write(0, uniqueDataCopy)
+		if err != nil {
+			t.Fatalf("Failed to write data: %v", err)
+		}
+		_, err = ra.Flush()
+		if err != nil {
+			t.Fatalf("Failed to flush data: %v", err)
+		}
+		normalUploadTimes[i] = time.Since(startTime)
+
+		ra.Close()
+	}
+
+	// Calculate statistics
+	var instantTotal, normalTotal time.Duration
+	for i := 0; i < numTests; i++ {
+		instantTotal += instantUploadTimes[i]
+		normalTotal += normalUploadTimes[i]
+	}
+	instantAvg := instantTotal / time.Duration(numTests)
+	normalAvg := normalTotal / time.Duration(numTests)
+
+	// Calculate improvement
+	improvement := float64(normalAvg) / float64(instantAvg)
+	timeSaved := normalAvg - instantAvg
+
+	// Check how many files actually used instant upload (same DataID as baseline)
+	baselineObjs, _ := lh.Get(ctx, bktID, []int64{baselineFileID})
+	baselineDataID := int64(0)
+	if len(baselineObjs) > 0 {
+		baselineDataID = baselineObjs[0].DataID
+	}
+	instantUploadCount := 0
+	for _, dataID := range instantUploadDataIDs {
+		if dataID == baselineDataID && dataID > 0 {
+			instantUploadCount++
+		}
+	}
+
+	// Print results
+	fmt.Printf("\n=== Size: %s (%d tests) ===\n", sizeName, numTests)
+	fmt.Printf("Instant Upload (duplicate data):\n")
+	fmt.Printf("  Average time: %v\n", instantAvg)
+	fmt.Printf("  Total time: %v\n", instantTotal)
+	fmt.Printf("  Files using instant upload: %d/%d\n", instantUploadCount, numTests)
+	fmt.Printf("\nNormal Upload (unique data):\n")
+	fmt.Printf("  Average time: %v\n", normalAvg)
+	fmt.Printf("  Total time: %v\n", normalTotal)
+	fmt.Printf("\nPerformance Improvement:\n")
+	fmt.Printf("  Speedup: %.2fx faster\n", improvement)
+	fmt.Printf("  Time saved per upload: %v\n", timeSaved)
+	fmt.Printf("  Total time saved: %v\n", normalTotal-instantTotal)
 }

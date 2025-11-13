@@ -19,15 +19,16 @@ func TestInstantUploadOverheadComparison(t *testing.T) {
 	bucketName := "test-bucket"
 
 	// Test with different file sizes
+	// Increase test count for small files to get more accurate results
 	sizes := []struct {
 		size     int
 		numTests int
 	}{
-		{1024, 50},            // 1KB, 50 tests
-		{10 * 1024, 30},       // 10KB, 30 tests
-		{100 * 1024, 20},      // 100KB, 20 tests
-		{1024 * 1024, 10},     // 1MB, 10 tests
-		{10 * 1024 * 1024, 5}, // 10MB, 5 tests
+		{1024, 200},            // 1KB, 200 tests (increased for accuracy)
+		{10 * 1024, 100},       // 10KB, 100 tests (increased for accuracy)
+		{100 * 1024, 50},       // 100KB, 50 tests (increased)
+		{1024 * 1024, 20},      // 1MB, 20 tests (increased)
+		{10 * 1024 * 1024, 10}, // 10MB, 10 tests
 	}
 
 	for _, testCase := range sizes {

@@ -41,7 +41,7 @@ func setupTestEnvironmentForMultipart(t *testing.T) (int64, *gin.Engine) {
 	// 注意：core.InitDB()会检查数据库是否已初始化，如果已初始化则不会重新初始化
 	// 为了确保每个测试使用独立的数据库，我们需要先关闭旧连接
 	// 但由于core.InitDB()的实现，我们需要确保环境变量已设置
-	core.InitDB()
+	core.InitDB("")
 
 	// 等待一小段时间确保数据库连接稳定
 	time.Sleep(50 * time.Millisecond)

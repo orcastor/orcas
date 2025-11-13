@@ -295,7 +295,7 @@ func setupTestEnvironmentForInstantUpload(t *testing.T) (int64, *gin.Engine) {
 	core.ORCAS_DATA = dataDir
 
 	// Initialize database
-	core.InitDB()
+	core.InitDB("")
 	time.Sleep(50 * time.Millisecond)
 
 	ensureTestUserForInstantUpload(t)
@@ -362,7 +362,7 @@ func findObjectByPathForTest(ctx context.Context, bktID int64, path string) (*co
 	handler := core.NewLocalHandler()
 	// Ensure context has user info for permission check
 	userCtx := core.UserInfo2Ctx(ctx, &core.UserInfo{ID: 1})
-	
+
 	parts := splitPath(path)
 	if len(parts) == 0 {
 		return nil, fmt.Errorf("empty path")
@@ -427,7 +427,7 @@ func findObjectByPathForTest(ctx context.Context, bktID int64, path string) (*co
 func getBucketIDByNameForTest(ctx context.Context, name string) (int64, error) {
 	// Ensure context has user info
 	userCtx := core.UserInfo2Ctx(ctx, &core.UserInfo{ID: 1})
-	
+
 	ma := &core.DefaultMetadataAdapter{}
 	buckets, err := ma.ListBkt(userCtx, 1) // UID = 1 for test user
 	if err != nil {
@@ -498,4 +498,3 @@ func ensureTestUserForInstantUpload(t *testing.T) {
 		t.Logf("Warning: Failed to create user: %v", err)
 	}
 }
-

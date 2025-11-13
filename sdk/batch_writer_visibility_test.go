@@ -34,7 +34,7 @@ func setupTestEnvironmentForBatchWriterVisibility(t *testing.T) (int64, context.
 		core.ORCAS_DATA = tmpDir
 	}
 
-	core.InitDB()
+	core.InitDB("")
 
 	// 确保测试用户存在
 	handler := core.NewLocalHandler()

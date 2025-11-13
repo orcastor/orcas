@@ -1,12 +1,13 @@
+// Package util provides S3-specific utility functions for S3 API handlers
 package util
 
 import (
 	"encoding/xml"
-	"fmt"
 	"strconv"
 	"strings"
 
 	"github.com/gin-gonic/gin"
+	"github.com/orcastor/orcas/sdk"
 )
 
 // S3Error represents an S3 error response
@@ -20,12 +21,12 @@ type S3Error struct {
 
 // S3ErrorResponse sends an S3-compatible error response
 func S3ErrorResponse(c *gin.Context, statusCode int, code, message string) {
-	error := S3Error{
+	errResp := S3Error{
 		Code:    code,
 		Message: message,
 	}
 	c.Header("Content-Type", "application/xml")
-	c.XML(statusCode, error)
+	c.XML(statusCode, errResp)
 }
 
 // RangeSpec represents a parsed HTTP Range request
@@ -59,7 +60,6 @@ func ParseRangeHeader(rangeHeader string, fileSize int64) *RangeSpec {
 	}
 
 	var start, end int64
-	var err error
 
 	if parts[0] == "" {
 		// Suffix range: bytes=-suffix
@@ -77,6 +77,7 @@ func ParseRangeHeader(rangeHeader string, fileSize int64) *RangeSpec {
 		end = fileSize - 1
 	} else if parts[1] == "" {
 		// Start to end: bytes=start-
+		var err error
 		start, err = strconv.ParseInt(parts[0], 10, 64)
 		if err != nil || start < 0 {
 			return nil
@@ -87,6 +88,7 @@ func ParseRangeHeader(rangeHeader string, fileSize int64) *RangeSpec {
 		end = fileSize - 1
 	} else {
 		// Start to end: bytes=start-end
+		var err error
 		start, err = strconv.ParseInt(parts[0], 10, 64)
 		if err != nil || start < 0 {
 			return nil
@@ -116,7 +118,91 @@ func ParseRangeHeader(rangeHeader string, fileSize int64) *RangeSpec {
 }
 
 // FormatContentRangeHeader formats the Content-Range header
-// Format: bytes start-end/total
+// Delegates to sdk.FormatContentRangeHeader for consistency
 func FormatContentRangeHeader(start, end, total int64) string {
-	return fmt.Sprintf("bytes %d-%d/%d", start, end, total)
+	return sdk.FormatContentRangeHeader(start, end, total)
+}
+
+// FormatETag formats DataID as ETag (hex string with quotes)
+// Delegates to sdk.FormatETag for consistency
+func FormatETag(dataID int64) string {
+	return sdk.FormatETag(dataID)
+}
+
+// FormatContentLength formats int64 as Content-Length header value
+// Delegates to sdk.FormatContentLength for consistency
+func FormatContentLength(size int64) string {
+	return sdk.FormatContentLength(size)
+}
+
+// FormatLastModified formats Unix timestamp as RFC1123 Last-Modified header
+// Delegates to sdk.FormatLastModified for consistency
+func FormatLastModified(mtime int64) string {
+	return sdk.FormatLastModified(mtime)
+}
+
+// SetObjectHeaders sets common object response headers in batch
+// Optimized: reduces multiple c.Header() calls overhead
+func SetObjectHeaders(c *gin.Context, contentLength int64, etag int64, lastModified int64, acceptRanges string) {
+	// Set headers in optimal order (most frequently used first)
+	c.Header("Content-Length", FormatContentLength(contentLength))
+	c.Header("ETag", FormatETag(etag))
+	c.Header("Last-Modified", FormatLastModified(lastModified))
+	if acceptRanges != "" {
+		c.Header("Accept-Ranges", acceptRanges)
+	}
+}
+
+// SetObjectHeadersWithContentType sets object headers including Content-Type
+// Optimized: batch header setting for GetObject/HeadObject responses
+func SetObjectHeadersWithContentType(c *gin.Context, contentType string, contentLength int64, etag int64, lastModified int64, acceptRanges string) {
+	c.Header("Content-Type", contentType)
+	c.Header("Content-Length", FormatContentLength(contentLength))
+	c.Header("ETag", FormatETag(etag))
+	c.Header("Last-Modified", FormatLastModified(lastModified))
+	if acceptRanges != "" {
+		c.Header("Accept-Ranges", acceptRanges)
+	}
+}
+
+// FastSplitPath splits a path string into parts, optimized for performance
+// Delegates to sdk.FastSplitPath for consistency
+func FastSplitPath(path string) []string {
+	return sdk.FastSplitPath(path)
+}
+
+// FormatCacheKeyInt formats a cache key with two int64 values
+// Delegates to sdk.FormatCacheKeyInt for consistency
+func FormatCacheKeyInt(id1, id2 int64) string {
+	return sdk.FormatCacheKeyInt(id1, id2)
+}
+
+// FormatCacheKeySingleInt formats a cache key with a single int64 value
+// Delegates to sdk.FormatCacheKeySingleInt for consistency
+func FormatCacheKeySingleInt(id int64) string {
+	return sdk.FormatCacheKeySingleInt(id)
+}
+
+// FormatCacheKeyString formats a cache key with int64 and string
+// Delegates to sdk.FormatCacheKeyString for consistency
+func FormatCacheKeyString(id int64, s string) string {
+	return sdk.FormatCacheKeyString(id, s)
+}
+
+// FastBase extracts the base name from a path (like filepath.Base but faster)
+// Delegates to sdk.FastBase for consistency
+func FastBase(path string) string {
+	return sdk.FastBase(path)
+}
+
+// FastDir extracts the directory from a path (like filepath.Dir but faster)
+// Delegates to sdk.FastDir for consistency
+func FastDir(path string) string {
+	return sdk.FastDir(path)
+}
+
+// FastTrimPrefix removes the leading prefix from a string, optimized version
+// Delegates to sdk.FastTrimPrefix for consistency
+func FastTrimPrefix(s, prefix string) string {
+	return sdk.FastTrimPrefix(s, prefix)
 }

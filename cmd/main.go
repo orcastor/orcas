@@ -19,7 +19,7 @@ import (
 
 var (
 	configFile  = flag.String("config", "", "Configuration file path (JSON format)")
-	action      = flag.String("action", "", "Operation type: upload, download, add-user, update-user, delete-user, list-users, create-bucket, delete-bucket, list-buckets")
+	action      = flag.String("action", "", "Operation type: upload, download, add-user, update-user, delete-user, list-users, create-bucket, delete-bucket, list-buckets, update-bucket, change-db-key")
 	localPath   = flag.String("local", "", "Local file or directory path")
 	remotePath  = flag.String("remote", "", "Remote path (relative to bucket root directory)")
 	bucketID    = flag.Int64("bucket", 0, "Bucket ID (if not specified, use first bucket)")
@@ -27,7 +27,17 @@ var (
 	bucketQuota = flag.Int64("quota", -1, "Bucket quota in bytes (-1 for unlimited, for create-bucket)")
 	bucketOwner = flag.String("owner", "", "Bucket owner username or user ID (for create-bucket, default is current user)")
 
-	// Configuration parameters (can be set via command line arguments or configuration file)
+	// Database key parameters
+	dbKey    = flag.String("dbkey", "", "Main database encryption key (for InitDB and change-db-key, used as old    key)")
+	newDbKey = flag.String("newdbkey", "", "New database encryption key (for change-db   -key)")
+
+	// Bucket configuration parameters (for update-bucket)
+	bucketCmprWay  = flag.String("cmprway", "", "Compression method: SNAPPY, ZSTD, GZIP, BR (for update-bucket)")
+	bucketCmprQlty = flag.Int("cmprqlty", 0, "Compression quality/level (for update-bucket)")
+	bucketEndecWay = flag.String("endecway", "", "Encryption method: AES256, SM4 (for update -bucket)")
+	bucketEndecKey = flag.String("endeckey", "", "Encryption key (for update-bucket)")
+
+	//  Configuration parameters (can be set via command line arguments or configuration file)
 	userName = flag.String("user", "", "Username")
 	password = flag.String("pass", "", "Password")
 	dataSync = flag.String("datasync", "", "Data sync (power failure protection): true or false")
@@ -67,15 +77,25 @@ type Config struct {
 func main() {
 	flag.Parse()
 
-	// Initialize database
-	core.InitDB()
+	// Initialize database with key if provided
+	var dbKeyValue string
+	if *dbKey != "" {
+		dbKeyValue = *dbKey
+	}
+	core.InitDB(dbKeyValue)
+
+	// Handle database key management
+	if *action == "change-db-key" {
+		handleChangeDBKey()
+		return
+	}
 
 	// Handle user management and bucket management commands
 	if *action == "add-user" || *action == "update-user" || *action == "delete-user" || *action == "list-users" {
 		handleUserManagement()
 		return
 	}
-	if *action == "create-bucket" || *action == "delete-bucket" || *action == "list-buckets" {
+	if *action == "create-bucket" || *action == "delete-bucket" || *action == "list-buckets" || *action == "update-bucket" {
 		handleBucketManagement()
 		return
 	}
@@ -658,7 +678,7 @@ func handleBucketManagement() {
 			os.Exit(1)
 		}
 
-		// Create bucket
+		// Create bucket with configuration from command line
 		bucket := &core.BucketInfo{
 			ID:           bktID,
 			Name:         *bucketName,
@@ -670,6 +690,36 @@ func handleBucketManagement() {
 			LogicalUsed:  0,
 			DedupSavings: 0,
 			ChunkSize:    0, // Use default chunk size
+		}
+
+		// Set compression configuration if provided
+		if *bucketCmprWay != "" {
+			switch *bucketCmprWay {
+			case "SNAPPY":
+				bucket.CmprWay = core.DATA_CMPR_SNAPPY
+			case "ZSTD":
+				bucket.CmprWay = core.DATA_CMPR_ZSTD
+			case "GZIP":
+				bucket.CmprWay = core.DATA_CMPR_GZIP
+			case "BR":
+				bucket.CmprWay = core.DATA_CMPR_BR
+			}
+		}
+		if *bucketCmprQlty > 0 {
+			bucket.CmprQlty = uint32(*bucketCmprQlty)
+		}
+
+		// Set encryption configuration if provided
+		if *bucketEndecWay != "" {
+			switch *bucketEndecWay {
+			case "AES256":
+				bucket.EndecWay = core.DATA_ENDEC_AES256
+			case "SM4":
+				bucket.EndecWay = core.DATA_ENDEC_SM4
+			}
+		}
+		if *bucketEndecKey != "" {
+			bucket.EndecKey = *bucketEndecKey
 		}
 
 		err := admin.PutBkt(ctx, []*core.BucketInfo{bucket})
@@ -687,6 +737,14 @@ func handleBucketManagement() {
 			fmt.Printf("  Quota: %d bytes (%.2f GB)\n", bucket.Quota, float64(bucket.Quota)/(1024*1024*1024))
 		}
 		fmt.Printf("  Owner: %s (ID: %d)\n", ownerName, ownerID)
+		if bucket.CmprWay > 0 {
+			cmprStr := getCompressionString(bucket.CmprWay)
+			fmt.Printf("  Compression: %s (level: %d)\n", cmprStr, bucket.CmprQlty)
+		}
+		if bucket.EndecWay > 0 {
+			endecStr := getEncryptionString(bucket.EndecWay)
+			fmt.Printf("  Encryption: %s\n", endecStr)
+		}
 
 	case "delete-bucket":
 		if *bucketID == 0 {
@@ -734,11 +792,152 @@ func handleBucketManagement() {
 			}
 			fmt.Printf("  Used: %d bytes (%.2f GB)\n", bkt.Used, float64(bkt.Used)/(1024*1024*1024))
 			fmt.Printf("  Real Used: %d bytes (%.2f GB)\n", bkt.RealUsed, float64(bkt.RealUsed)/(1024*1024*1024))
+			if bkt.CmprWay > 0 {
+				cmprStr := getCompressionString(bkt.CmprWay)
+				fmt.Printf("  Compression: %s (level: %d)\n", cmprStr, bkt.CmprQlty)
+			}
+			if bkt.EndecWay > 0 {
+				endecStr := getEncryptionString(bkt.EndecWay)
+				fmt.Printf("  Encryption: %s\n", endecStr)
+			}
 			fmt.Println()
+		}
+
+	case "update-bucket":
+		if *bucketID == 0 {
+			fmt.Fprintf(os.Stderr, "Error: Must specify bucket ID with -bucket parameter\n")
+			os.Exit(1)
+		}
+
+		// Get current bucket info
+		bucket, err := handler.GetBktInfo(ctx, *bucketID)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: Bucket %d not found: %v\n", *bucketID, err)
+			os.Exit(1)
+		}
+
+		// Update compression configuration if provided
+		updated := false
+		if *bucketCmprWay != "" {
+			switch *bucketCmprWay {
+			case "SNAPPY":
+				bucket.CmprWay = core.DATA_CMPR_SNAPPY
+			case "ZSTD":
+				bucket.CmprWay = core.DATA_CMPR_ZSTD
+			case "GZIP":
+				bucket.CmprWay = core.DATA_CMPR_GZIP
+			case "BR":
+				bucket.CmprWay = core.DATA_CMPR_BR
+			case "NONE", "OFF", "":
+				bucket.CmprWay = 0
+			}
+			updated = true
+		}
+		if *bucketCmprQlty > 0 {
+			bucket.CmprQlty = uint32(*bucketCmprQlty)
+			updated = true
+		}
+
+		// Update encryption configuration if provided
+		if *bucketEndecWay != "" {
+			switch *bucketEndecWay {
+			case "AES256":
+				bucket.EndecWay = core.DATA_ENDEC_AES256
+			case "SM4":
+				bucket.EndecWay = core.DATA_ENDEC_SM4
+			case "NONE", "OFF", "":
+				bucket.EndecWay = 0
+			}
+			updated = true
+		}
+		if *bucketEndecKey != "" {
+			bucket.EndecKey = *bucketEndecKey
+			updated = true
+		}
+
+		if !updated {
+			fmt.Fprintf(os.Stderr, "Error: No configuration changes specified. Use -cmprway, -cmprqlty, -endecway, or -endeckey to update bucket configuration.\n")
+			os.Exit(1)
+		}
+
+		// Update bucket
+		err = admin.PutBkt(ctx, []*core.BucketInfo{bucket})
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to update bucket: %v\n", err)
+			os.Exit(1)
+		}
+
+		fmt.Printf("Bucket %d updated successfully:\n", *bucketID)
+		if bucket.CmprWay > 0 {
+			cmprStr := getCompressionString(bucket.CmprWay)
+			fmt.Printf("  Compression: %s (level: %d)\n", cmprStr, bucket.CmprQlty)
+		} else {
+			fmt.Printf("  Compression: None\n")
+		}
+		if bucket.EndecWay > 0 {
+			endecStr := getEncryptionString(bucket.EndecWay)
+			fmt.Printf("  Encryption: %s\n", endecStr)
+		} else {
+			fmt.Printf("  Encryption: None\n")
 		}
 
 	default:
 		fmt.Fprintf(os.Stderr, "Error: Unknown bucket management action: %s\n", *action)
 		os.Exit(1)
 	}
+}
+
+func handleChangeDBKey() {
+	// dbKey is used as oldKey, newDbKey can be empty (unencrypted)
+	oldKey := *dbKey
+	newKey := *newDbKey
+
+	fmt.Printf("Changing database encryption key...\n")
+	fmt.Printf("  Old key: %s\n", maskKey(oldKey))
+	fmt.Printf("  New key: %s\n", maskKey(newKey))
+
+	err := core.ChangeDBKey(oldKey, newKey)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to change database key: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Println("Database key changed successfully!")
+	fmt.Println("  Backup file: meta.db.backup")
+}
+
+func getCompressionString(cmprWay uint32) string {
+	switch {
+	case cmprWay&core.DATA_CMPR_SNAPPY != 0:
+		return "SNAPPY"
+	case cmprWay&core.DATA_CMPR_ZSTD != 0:
+		return "ZSTD"
+	case cmprWay&core.DATA_CMPR_GZIP != 0:
+		return "GZIP"
+	case cmprWay&core.DATA_CMPR_BR != 0:
+		return "BR"
+	default:
+		return "NONE"
+	}
+}
+
+func getEncryptionString(endecWay uint32) string {
+	switch {
+	case endecWay&core.DATA_ENDEC_AES256 != 0:
+		return "AES256"
+	case endecWay&core.DATA_ENDEC_SM4 != 0:
+		return "SM4"
+	default:
+		return "NONE"
+	}
+}
+
+func maskKey(key string) string {
+	if key == "" {
+		return "(empty)"
+	}
+	if len(key) <= 8 {
+		return "***"
+	}
+	return key[:4] + "..." + key[len(key)-4:]
 }

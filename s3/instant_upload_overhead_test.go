@@ -316,7 +316,7 @@ func setupTestEnvironmentForInstantUploadOverhead(t testing.TB) (int64, *gin.Eng
 	core.ORCAS_DATA = dataDir
 
 	// Initialize database
-	core.InitDB()
+	core.InitDB("")
 	time.Sleep(50 * time.Millisecond)
 
 	ensureTestUserForInstantUploadOverhead(t)

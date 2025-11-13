@@ -36,7 +36,7 @@ func init() {
 		core.ORCAS_DATA = tmpDir
 	}
 	// 初始化主数据库
-	core.InitDB()
+	core.InitDB("")
 }
 
 func TestVFSRandomAccessor(t *testing.T) {

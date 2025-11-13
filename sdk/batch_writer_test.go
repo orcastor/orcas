@@ -36,7 +36,7 @@ func setupTestEnvironmentForBatchWriterBufferFullTest(t *testing.T) (int64, cont
 		core.ORCAS_DATA = tmpDir
 	}
 
-	core.InitDB()
+	core.InitDB("")
 
 	// 确保测试用户存在
 	handler := core.NewLocalHandler()

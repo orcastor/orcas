@@ -85,14 +85,15 @@ func TestInstantUploadPerformanceComparison(t *testing.T) {
 	bucketName := "test-bucket"
 
 	// Prepare test data sets
+	// Test with smaller files for more accurate small file performance measurement
 	// Data set 1: Can be instant uploaded (duplicate data)
-	duplicateData := make([]byte, 512*1024) // 512KB
+	duplicateData := make([]byte, 10*1024) // 10KB (smaller file for better accuracy)
 	for i := range duplicateData {
 		duplicateData[i] = byte(i % 256)
 	}
 
 	// Data set 2: Cannot be instant uploaded (unique data)
-	uniqueData := make([]byte, 512*1024) // 512KB
+	uniqueData := make([]byte, 10*1024) // 10KB (smaller file for better accuracy)
 	for i := range uniqueData {
 		uniqueData[i] = byte((i + 10000) % 256)
 	}
@@ -109,7 +110,8 @@ func TestInstantUploadPerformanceComparison(t *testing.T) {
 	time.Sleep(200 * time.Millisecond)
 
 	// Test instant upload performance (upload same data multiple times)
-	numUploads := 10
+	// Increase test count for more accurate results, especially for small files
+	numUploads := 50
 	instantUploadTimes := make([]time.Duration, numUploads)
 	for i := 0; i < numUploads; i++ {
 		key := fmt.Sprintf("instant_%d.txt", i)
@@ -299,7 +301,7 @@ func setupTestEnvironmentForInstantUploadPerf(t testing.TB) (int64, *gin.Engine)
 	core.ORCAS_DATA = dataDir
 
 	// Initialize database
-	core.InitDB()
+	core.InitDB("")
 	time.Sleep(50 * time.Millisecond)
 
 	ensureTestUserForInstantUploadPerf(t)
@@ -366,7 +368,7 @@ func findObjectByPathForTestPerf(ctx context.Context, bktID int64, path string) 
 	handler := core.NewLocalHandler()
 	// Ensure context has user info for permission check
 	userCtx := core.UserInfo2Ctx(ctx, &core.UserInfo{ID: 1})
-	
+
 	parts := splitPathPerf(path)
 	if len(parts) == 0 {
 		return nil, fmt.Errorf("empty path")
@@ -431,7 +433,7 @@ func findObjectByPathForTestPerf(ctx context.Context, bktID int64, path string) 
 func getBucketIDByNameForTestPerf(ctx context.Context, name string) (int64, error) {
 	// Ensure context has user info
 	userCtx := core.UserInfo2Ctx(ctx, &core.UserInfo{ID: 1})
-	
+
 	ma := &core.DefaultMetadataAdapter{}
 	buckets, err := ma.ListBkt(userCtx, 1) // UID = 1 for test user
 	if err != nil {
@@ -502,4 +504,3 @@ func ensureTestUserForInstantUploadPerf(t testing.TB) {
 		t.Logf("Warning: Failed to create user: %v", err)
 	}
 }
-

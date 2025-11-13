@@ -1,6 +1,7 @@
 package core
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"os"
@@ -24,6 +25,12 @@ type BucketInfo struct {
 	LogicalUsed  int64  `borm:"logical_used" json:"lu,omitempty"`  // Logical occupancy, counts logical size of all valid objects (not deleted, PID >= 0) considering deduplication but excluding deleted objects
 	DedupSavings int64  `borm:"dedup_savings" json:"ds,omitempty"` // Instant upload space savings, counts deduplicated data savings (LogicalUsed - unique data block size)
 	ChunkSize    int64  `borm:"chunk_size" json:"cs,omitempty"`    // Chunk size (bytes), 0 or unset uses default 4MB
+	Key          string `borm:"key" json:"k,omitempty"`            // Database encryption key
+	CmprWay      uint32 `borm:"cmpr_way" json:"cw,omitempty"`      // Compression method (DATA_CMPR_MASK)
+	WiseCmpr     uint32 `borm:"wise_cmpr" json:"wc,omitempty"`     // Compression method (DATA_CMPR_MASK), same as CmprWay
+	CmprQlty     uint32 `borm:"cmpr_qlty" json:"cq,omitempty"`     // Compression quality
+	EndecWay     uint32 `borm:"endec_way" json:"ew,omitempty"`     // Encryption method (DATA_ENDEC_MASK)
+	EndecKey     string `borm:"endec_key" json:"ek,omitempty"`     // Encryption key
 	// SnapshotID int64 // Latest snapshot version ID
 }
 
@@ -31,7 +38,6 @@ type UserInfo struct {
 	ID     int64  `borm:"id" json:"i,omitempty"`     // User ID
 	Usr    string `borm:"usr" json:"u,omitempty"`    // Username
 	Pwd    string `borm:"pwd" json:"p,omitempty"`    // Password, encrypted using PBKDF2-HMAC-SHA256
-	Key    string `borm:"key" json:"k,omitempty"`    // Database key
 	Role   uint32 `borm:"role" json:"r,omitempty"`   // User role: regular user / administrator
 	Name   string `borm:"name" json:"n,omitempty"`   // Name
 	Avatar string `borm:"avatar" json:"a,omitempty"` // Avatar
@@ -227,20 +233,242 @@ type MetadataAdapter interface {
 func GetDB(c ...interface{}) (*sql.DB, error) {
 	param := "?_journal=WAL&cache=shared&mode=rwc&nolock=1"
 	dirPath := ORCAS_BASE
-	if len(c) > 1 {
-		dirPath = filepath.Join(ORCAS_DATA, fmt.Sprint(c[1]))
-		if c, ok := c[0].(Ctx); ok {
-			if key := getKey(c); key != "" {
-				param += "&key=" + key
+	var dbKey string
+
+	if len(c) > 0 {
+		// Check if first parameter is a string (database key)
+		if keyStr, ok := c[0].(string); ok {
+			dbKey = keyStr
+			c = c[1:] // Remove key from remaining params
+		} else if ctx, ok := c[0].(Ctx); ok {
+			// If it's a Ctx, try to get key from context
+			if key := getKey(ctx); key != "" {
+				dbKey = key
 			}
 		}
 	}
+
+	if len(c) > 0 {
+		// Second parameter (or first if key was provided) is bucket ID
+		dirPath = filepath.Join(ORCAS_DATA, fmt.Sprint(c[0]))
+		if len(c) > 1 {
+			if ctx, ok := c[1].(Ctx); ok {
+				if key := getKey(ctx); key != "" {
+					dbKey = key
+				}
+			}
+		}
+	}
+
+	if dbKey != "" {
+		param += "&key=" + dbKey
+	}
+
 	os.MkdirAll(dirPath, 0o766)
 	return sql.Open("sqlite3", filepath.Join(dirPath, "meta.db")+param)
 }
 
-func InitDB() error {
-	db, err := GetDB()
+// GetDBWithKey opens database with specified encryption key
+func GetDBWithKey(key string) (*sql.DB, error) {
+	param := "?_journal=WAL&cache=shared&mode=rwc&nolock=1"
+	if key != "" {
+		param += "&key=" + key
+	}
+	dirPath := ORCAS_BASE
+	os.MkdirAll(dirPath, 0o766)
+	return sql.Open("sqlite3", filepath.Join(dirPath, "meta.db")+param)
+}
+
+// ChangeDBKey changes the database encryption key
+// This function re-encrypts the database with a new key by:
+// 1. Exporting all data from old database
+// 2. Creating a new database with new key
+// 3. Importing all data into new database
+// 4. Replacing old database with new one
+func ChangeDBKey(oldKey, newKey string) error {
+	// If new key is same as old key, no change needed
+	if oldKey == newKey {
+		return nil
+	}
+
+	// Get database file path
+	dbPath := filepath.Join(ORCAS_BASE, "meta.db")
+
+	// Check if database file exists before opening
+	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
+		return fmt.Errorf("database file does not exist")
+	}
+
+	// Open database with old key
+	dbOld, err := GetDBWithKey(oldKey)
+	if err != nil {
+		return ERR_OPEN_DB
+	}
+	defer dbOld.Close()
+
+	// Verify old key works by querying
+	var count int
+	err = dbOld.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE type='table'").Scan(&count)
+	if err != nil {
+		return fmt.Errorf("old key verification failed: %v", err)
+	}
+
+	tempPath := dbPath + ".tmp"
+
+	// Step 1: Create temporary database with new key
+	dbNew, err := func() (*sql.DB, error) {
+		param := "?_journal=WAL&cache=shared&mode=rwc&nolock=1"
+		if newKey != "" {
+			param += "&key=" + newKey
+		}
+		return sql.Open("sqlite3", tempPath+param)
+	}()
+	if err != nil {
+		return fmt.Errorf("failed to create new database: %v", err)
+	}
+	defer dbNew.Close()
+
+	// Step 2: Get all table names
+	rows, err := dbOld.Query("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")
+	if err != nil {
+		return fmt.Errorf("failed to query tables: %v", err)
+	}
+	defer rows.Close()
+
+	var tables []string
+	for rows.Next() {
+		var tableName string
+		if err := rows.Scan(&tableName); err != nil {
+			continue
+		}
+		tables = append(tables, tableName)
+	}
+	rows.Close()
+
+	// Step 3: Create all tables in new database
+	for _, tableName := range tables {
+		// Get CREATE TABLE statement
+		var createSQL string
+		err = dbOld.QueryRow("SELECT sql FROM sqlite_master WHERE type='table' AND name=?", tableName).Scan(&createSQL)
+		if err != nil {
+			return fmt.Errorf("failed to get CREATE TABLE for %s: %v", tableName, err)
+		}
+
+		// Execute CREATE TABLE in new database
+		_, err = dbNew.Exec(createSQL)
+		if err != nil {
+			return fmt.Errorf("failed to create table %s: %v", tableName, err)
+		}
+	}
+
+	// Step 4: Copy all data from old to new database
+	for _, tableName := range tables {
+		// Get all data from old table
+		rows, err := dbOld.Query(fmt.Sprintf("SELECT * FROM %s", tableName))
+		if err != nil {
+			return fmt.Errorf("failed to query table %s: %v", tableName, err)
+		}
+
+		// Get column names
+		columns, err := rows.Columns()
+		if err != nil {
+			rows.Close()
+			return fmt.Errorf("failed to get columns for %s: %v", tableName, err)
+		}
+
+		// Build INSERT statement
+		placeholders := strings.Repeat("?,", len(columns))
+		placeholders = placeholders[:len(placeholders)-1] // Remove trailing comma
+		insertSQL := fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s)",
+			tableName, strings.Join(columns, ","), placeholders)
+
+		// Insert rows
+		for rows.Next() {
+			values := make([]interface{}, len(columns))
+			valuePtrs := make([]interface{}, len(columns))
+			for i := range values {
+				valuePtrs[i] = &values[i]
+			}
+
+			if err := rows.Scan(valuePtrs...); err != nil {
+				rows.Close()
+				return fmt.Errorf("failed to scan row from %s: %v", tableName, err)
+			}
+
+			_, err = dbNew.Exec(insertSQL, values...)
+			if err != nil {
+				rows.Close()
+				return fmt.Errorf("failed to insert row into %s: %v", tableName, err)
+			}
+		}
+		rows.Close()
+	}
+
+	// Step 5: Copy indexes
+	indexRows, err := dbOld.Query("SELECT sql FROM sqlite_master WHERE type='index' AND name NOT LIKE 'sqlite_%'")
+	if err == nil {
+		defer indexRows.Close()
+		for indexRows.Next() {
+			var indexSQL string
+			if err := indexRows.Scan(&indexSQL); err != nil {
+				continue
+			}
+			if indexSQL != "" {
+				_, _ = dbNew.Exec(indexSQL) // Ignore errors for indexes
+			}
+		}
+	}
+
+	// Step 6: Close databases
+	dbOld.Close()
+	dbNew.Close()
+
+	// Step 7: Replace old database with new one
+	// Backup old database first
+	backupPath := dbPath + ".backup"
+	if err := os.Rename(dbPath, backupPath); err != nil {
+		return fmt.Errorf("failed to backup old database: %v", err)
+	}
+
+	// Move new database to final location
+	if err := os.Rename(tempPath, dbPath); err != nil {
+		// Restore backup on error
+		os.Rename(backupPath, dbPath)
+		return fmt.Errorf("failed to replace database: %v", err)
+	}
+
+	// Step 8: Verify new key works
+	dbVerify, err := GetDBWithKey(newKey)
+	if err != nil {
+		// Restore backup on error
+		os.Rename(backupPath, dbPath)
+		return ERR_OPEN_DB
+	}
+	defer dbVerify.Close()
+
+	err = dbVerify.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE type='table'").Scan(&count)
+	if err != nil {
+		// Restore backup on error
+		os.Rename(backupPath, dbPath)
+		return fmt.Errorf("new key verification failed: %v", err)
+	}
+
+	// Step 9: Keep backup file for safety (can be removed manually if needed)
+	// os.Remove(backupPath) // Commented out to keep backup for safety
+
+	return nil
+}
+
+// InitDB initializes the main database
+// If key is provided, the database will be encrypted with that key
+// If key is empty string, the database will be unencrypted
+func InitDB(key ...string) error {
+	var dbKey string
+	if len(key) > 0 {
+		dbKey = key[0]
+	}
+
+	db, err := GetDBWithKey(dbKey)
 	if err != nil {
 		return ERR_OPEN_DB
 	}
@@ -255,25 +483,21 @@ func InitDB() error {
 		dedup_savings BIGINT NOT NULL DEFAULT 0,
 		type TINYINT NOT NULL,
 		name TEXT NOT NULL,
-		chunk_size BIGINT NOT NULL DEFAULT 0
+		chunk_size BIGINT NOT NULL DEFAULT 0,
+		key TEXT NOT NULL DEFAULT '',
+		cmpr_way INTEGER NOT NULL DEFAULT 0,
+		wise_cmpr INTEGER NOT NULL DEFAULT 0,
+		cmpr_qlty INTEGER NOT NULL DEFAULT 0,
+		endec_way INTEGER NOT NULL DEFAULT 0,
+		endec_key TEXT NOT NULL DEFAULT ''
 	)`)
-
-	// 添加新列的迁移（如果列不存在，忽略错误）
-	// SQLite会在列已存在时返回错误，但我们可以安全地忽略它
-	_, _ = db.Exec(`ALTER TABLE bkt ADD COLUMN logical_used BIGINT NOT NULL DEFAULT 0`)
-	_, _ = db.Exec(`ALTER TABLE bkt ADD COLUMN dedup_savings BIGINT NOT NULL DEFAULT 0`)
-
-	// 迁移旧列名usage到used（如果存在旧列但不存在新列）
-	_, _ = db.Exec(`ALTER TABLE bkt ADD COLUMN used BIGINT NOT NULL DEFAULT 0`)
-	_, _ = db.Exec(`UPDATE bkt SET used = usage WHERE used = 0 AND usage != 0`)
 
 	db.Exec(`CREATE TABLE usr (id BIGINT PRIMARY KEY NOT NULL,
 		role TINYINT NOT NULL,
 		usr TEXT NOT NULL,
 		pwd TEXT NOT NULL,
 		name TEXT NOT NULL,
-		avatar TEXT NOT NULL,
-		key TEXT NOT NULL
+		avatar TEXT NOT NULL
 	)`)
 
 	db.Exec(`CREATE INDEX ix_uid on bkt (uid)`)
@@ -289,9 +513,11 @@ func InitDB() error {
 // initDefaultAdmin creates a default admin user if no admin user exists
 func initDefaultAdmin(db *sql.DB) {
 	// Check if any admin user exists
-	var count int
-	err := db.QueryRow(`SELECT COUNT(*) FROM usr WHERE role = ?`, ADMIN).Scan(&count)
-	if err != nil {
+	var count int64
+	ctx := context.Background()
+	if _, err := b.TableContext(ctx, db, USR_TBL).Select(&count,
+		b.Fields("count(1)"),
+		b.Where(b.Eq("role", ADMIN))); err != nil {
 		return // If query fails, skip creating default admin
 	}
 
@@ -310,9 +536,15 @@ func initDefaultAdmin(db *sql.DB) {
 		}
 
 		// Create default admin user
-		_, err = db.Exec(`INSERT INTO usr (id, role, usr, pwd, name, avatar, key) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-			adminID, ADMIN, "orcas", hashedPwd, "Administrator", "", "")
-		if err != nil {
+		adminUser := &UserInfo{
+			ID:     adminID,
+			Role:   ADMIN,
+			Usr:    "orcas",
+			Pwd:    hashedPwd,
+			Name:   "Administrator",
+			Avatar: "",
+		}
+		if _, err = b.TableContext(ctx, db, USR_TBL).Insert(adminUser); err != nil {
 			// If insert fails (e.g., user already exists), ignore the error
 			return
 		}
@@ -513,58 +745,66 @@ func (dma *DefaultMetadataAdapter) FindDuplicateData(c Ctx, bktID int64, offset,
 	}
 	defer db.Close()
 
-	// 查找具有相同校验值的重复数据（需要OrigSize, HdrCRC32, CRC32, MD5都相同）
-	// 首先获取总数（重复组数）
-	query := `SELECT COUNT(*) FROM (
-		SELECT o_size, h_crc32, crc32, md5, COUNT(*) as cnt
-		FROM data
-		WHERE o_size > 0 AND h_crc32 > 0 AND crc32 > 0 AND md5 != 0
-		GROUP BY o_size, h_crc32, crc32, md5
-		HAVING cnt > 1
-	)`
-	err = db.QueryRow(query).Scan(&total)
-	if err != nil {
+	// 定义结构体来接收GROUP BY的结果
+	type duplicateGroupResult struct {
+		OrigSize int64  `borm:"o_size"`
+		HdrCRC32 uint32 `borm:"h_crc32"`
+		CRC32    uint32 `borm:"crc32"`
+		MD5      int64  `borm:"md5"`
+		IDs      string `borm:"GROUP_CONCAT(id)"`
+		Count    int64  `borm:"count(1)"`
+		MinID    int64  `borm:"min(id)"`
+	}
+
+	// 查询条件
+	whereConds := []interface{}{
+		b.Gt("o_size", 0),
+		b.Gt("h_crc32", 0),
+		b.Gt("crc32", 0),
+		b.Neq("md5", 0),
+	}
+
+	// 先查询所有分组（包括重复的和不重复的）
+	var allGroups []duplicateGroupResult
+	if _, err = b.TableContext(c, db, DATA_TBL).Select(&allGroups,
+		b.Fields("o_size", "h_crc32", "crc32", "md5", "GROUP_CONCAT(id)", "count(1)", "min(id)"),
+		b.Where(whereConds...),
+		b.GroupBy("o_size", "h_crc32", "crc32", "md5"),
+		b.OrderBy("min(id)")); err != nil {
 		return nil, 0, ERR_QUERY_DB
 	}
+
+	// 过滤出重复的组（count > 1）
+	var duplicateGroups []duplicateGroupResult
+	for _, g := range allGroups {
+		if g.Count > 1 {
+			duplicateGroups = append(duplicateGroups, g)
+		}
+	}
+
+	// 计算总数
+	total = int64(len(duplicateGroups))
 	if total == 0 {
 		return groups, 0, nil
 	}
 
-	// 分页查询重复数据组
-	if limit > 0 {
-		query = fmt.Sprintf(`SELECT o_size, h_crc32, crc32, md5, GROUP_CONCAT(id) as ids
-			FROM data
-			WHERE o_size > 0 AND h_crc32 > 0 AND crc32 > 0 AND md5 != 0
-			GROUP BY o_size, h_crc32, crc32, md5
-			HAVING COUNT(*) > 1
-			ORDER BY MIN(id)
-			LIMIT %d OFFSET %d`, limit, offset)
-	} else {
-		query = `SELECT o_size, h_crc32, crc32, md5, GROUP_CONCAT(id) as ids
-			FROM data
-			WHERE o_size > 0 AND h_crc32 > 0 AND crc32 > 0 AND md5 != 0
-			GROUP BY o_size, h_crc32, crc32, md5
-			HAVING COUNT(*) > 1
-			ORDER BY MIN(id)`
+	// 分页处理
+	start := offset
+	end := offset + limit
+	if limit <= 0 {
+		end = len(duplicateGroups)
+	}
+	if start > len(duplicateGroups) {
+		return groups, total, nil
+	}
+	if end > len(duplicateGroups) {
+		end = len(duplicateGroups)
 	}
 
-	rows, err := db.Query(query)
-	if err != nil {
-		return nil, 0, ERR_QUERY_DB
-	}
-	defer rows.Close()
-
-	for rows.Next() {
-		var oSize int64
-		var hCrc32, crc32 uint32
-		var md5 int64
-		var idsStr string
-		if err = rows.Scan(&oSize, &hCrc32, &crc32, &md5, &idsStr); err != nil {
-			continue
-		}
-
+	// 转换为DuplicateGroup
+	for _, g := range duplicateGroups[start:end] {
 		// 解析ID列表
-		idStrs := strings.Split(idsStr, ",")
+		idStrs := strings.Split(g.IDs, ",")
 		dataIDs := make([]int64, 0, len(idStrs))
 		for _, idStr := range idStrs {
 			id, err2 := strconv.ParseInt(strings.TrimSpace(idStr), 10, 64)
@@ -575,13 +815,14 @@ func (dma *DefaultMetadataAdapter) FindDuplicateData(c Ctx, bktID int64, offset,
 		}
 
 		if len(dataIDs) > 1 {
-			key := fmt.Sprintf("%d:%d:%d:%d", oSize, hCrc32, crc32, md5)
+			key := fmt.Sprintf("%d:%d:%d:%d", g.OrigSize, g.HdrCRC32, g.CRC32, g.MD5)
 			groups = append(groups, DuplicateGroup{
 				Key:     key,
 				DataIDs: dataIDs,
 			})
 		}
 	}
+
 	return
 }
 
@@ -593,8 +834,13 @@ func (dma *DefaultMetadataAdapter) UpdateObjDataID(c Ctx, bktID int64, oldDataID
 	defer db.Close()
 
 	// 更新所有引用oldDataID的对象，将其DataID改为newDataID
-	_, err = db.Exec("UPDATE obj SET did = ? WHERE did = ?", newDataID, oldDataID)
-	if err != nil {
+	// 使用borm进行批量更新
+	updateObj := &ObjectInfo{
+		DataID: newDataID,
+	}
+	if _, err = b.TableContext(c, db, OBJ_TBL).Update(updateObj,
+		b.Fields("did"),
+		b.Where(b.Eq("did", oldDataID))); err != nil {
 		return ERR_EXEC_DB
 	}
 	return nil
@@ -626,19 +872,19 @@ func (dma *DefaultMetadataAdapter) FindSmallPackageData(c Ctx, bktID int64, maxS
 	defer db.Close()
 
 	// Find small file data: pkg_id=0 (not packaged), o_size < maxSize
-	// Get total count
-	query := fmt.Sprintf("SELECT COUNT(*) FROM data WHERE pkg_id = 0 AND o_size > 0 AND o_size < %d", maxSize)
-	err = db.QueryRow(query).Scan(&total)
-	if err != nil {
-		return nil, 0, ERR_QUERY_DB
-	}
-
-	// Paginated query: use borm to implement LIMIT and OFFSET
+	// Get total count using borm
 	conds := []interface{}{
 		b.Eq("pkg_id", 0),
 		b.Gt("o_size", 0),
 		b.Lt("o_size", maxSize),
 	}
+	if _, err = b.TableContext(c, db, DATA_TBL).Select(&total,
+		b.Fields("count(1)"),
+		b.Where(conds...)); err != nil {
+		return nil, 0, ERR_QUERY_DB
+	}
+
+	// Paginated query: use borm to implement LIMIT and OFFSET
 	if limit > 0 {
 		_, err = b.TableContext(c, db, DATA_TBL).Select(&d,
 			b.Where(conds...),
@@ -878,29 +1124,14 @@ func (dma *DefaultMetadataAdapter) ListUsers(c Ctx) (o []*UserInfo, err error) {
 	}
 	defer db.Close()
 
-	// Use raw SQL query directly to avoid borm issues
-	query := "SELECT id, role, usr, pwd, name, avatar, key FROM " + USR_TBL
-	rows, err := db.Query(query)
-	if err != nil {
+	// Use borm to query all users
+	if _, err = b.TableContext(c, db, USR_TBL).Select(&o); err != nil {
 		return nil, ERR_QUERY_DB
 	}
-	defer rows.Close()
 
-	o = []*UserInfo{}
-	for rows.Next() {
-		u := &UserInfo{}
-		if err = rows.Scan(&u.ID, &u.Role, &u.Usr, &u.Pwd, &u.Name, &u.Avatar, &u.Key); err != nil {
-			continue
-		}
-		o = append(o, u)
-	}
-	if err != nil && err != rows.Err() {
-		return nil, ERR_QUERY_DB
-	}
 	// 清除敏感信息
 	for i := range o {
 		o[i].Pwd = ""
-		o[i].Key = ""
 	}
 	return
 }
@@ -924,6 +1155,17 @@ func (dma *DefaultMetadataAdapter) PutBkt(c Ctx, o []*BucketInfo) error {
 		return ERR_OPEN_DB
 	}
 	defer db.Close()
+
+	// 同步CmprWay和WiseCmpr：如果CmprWay有值，同步到WiseCmpr；如果WiseCmpr有值，同步到CmprWay
+	for _, bucket := range o {
+		if bucket != nil {
+			if bucket.CmprWay > 0 && bucket.WiseCmpr == 0 {
+				bucket.WiseCmpr = bucket.CmprWay
+			} else if bucket.WiseCmpr > 0 && bucket.CmprWay == 0 {
+				bucket.CmprWay = bucket.WiseCmpr
+			}
+		}
+	}
 
 	if _, err = b.TableContext(c, db, BKT_TBL).ReplaceInto(&o); err != nil {
 		return ERR_EXEC_DB

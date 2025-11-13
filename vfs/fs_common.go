@@ -13,26 +13,41 @@ type OrcasFS struct {
 	c         core.Ctx
 	bktID     int64
 	root      *OrcasNode
-	sdkCfg    *sdk.Config
+	bucket    *core.BucketInfo // Bucket configuration (includes compression/encryption settings)
 	chunkSize int64
 	// Batch writer is now managed globally by SDK, accessed via GetBatchWriterForBucket
 }
 
 // NewOrcasFS creates a new ORCAS filesystem
 // This function is available on all platforms
+// sdkCfg parameter is deprecated, configuration is now read from bucket
 func NewOrcasFS(h core.Handler, c core.Ctx, bktID int64, sdkCfg *sdk.Config) *OrcasFS {
-	// Get bucket's chunkSize
+	// Get bucket configuration (includes chunkSize, compression, encryption settings)
 	var chunkSize int64 = 4 << 20 // Default 4MB
 	bucket, err := h.GetBktInfo(c, bktID)
-	if err == nil && bucket != nil && bucket.ChunkSize > 0 {
-		chunkSize = bucket.ChunkSize
+	if err == nil && bucket != nil {
+		if bucket.ChunkSize > 0 {
+			chunkSize = bucket.ChunkSize
+		}
+		// If bucket config is empty but sdkCfg is provided, migrate config to bucket
+		// This is for backward compatibility during migration
+		if sdkCfg != nil && bucket.CmprWay == 0 && bucket.EndecWay == 0 {
+			// Note: This migration should be done at bucket creation time, not here
+			// But we keep it for backward compatibility
+		}
+	} else {
+		// If GetBktInfo fails, create a default bucket info
+		bucket = &core.BucketInfo{
+			ID:        bktID,
+			ChunkSize: chunkSize,
+		}
 	}
 
-	// Register SDK config to Handler for ConvertWritingVersions job
+	// Register bucket config to Handler for ConvertWritingVersions job
 	// This allows the scheduled job to access compression/encryption settings
-	if sdkCfg != nil {
+	if bucket != nil {
 		if lh, ok := h.(*core.LocalHandler); ok {
-			lh.SetSDKConfig(bktID, sdkCfg.WiseCmpr, sdkCfg.CmprQlty, sdkCfg.EndecWay, sdkCfg.EndecKey)
+			lh.SetBucketConfig(bktID, bucket)
 		}
 	}
 
@@ -40,7 +55,7 @@ func NewOrcasFS(h core.Handler, c core.Ctx, bktID int64, sdkCfg *sdk.Config) *Or
 		h:         h,
 		c:         c,
 		bktID:     bktID,
-		sdkCfg:    sdkCfg,
+		bucket:    bucket,
 		chunkSize: chunkSize,
 	}
 
@@ -51,4 +66,22 @@ func NewOrcasFS(h core.Handler, c core.Ctx, bktID int64, sdkCfg *sdk.Config) *Or
 	ofs.initRootNode()
 
 	return ofs
+}
+
+// getBucketConfig gets bucket configuration, refreshing from database if needed
+func (fs *OrcasFS) getBucketConfig() *core.BucketInfo {
+	if fs.bucket != nil {
+		return fs.bucket
+	}
+	// Refresh bucket config from database
+	bucket, err := fs.h.GetBktInfo(fs.c, fs.bktID)
+	if err == nil && bucket != nil {
+		fs.bucket = bucket
+		return bucket
+	}
+	// Return default config if bucket not found
+	return &core.BucketInfo{
+		ID:        fs.bktID,
+		ChunkSize: fs.chunkSize,
+	}
 }

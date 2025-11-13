@@ -463,3 +463,52 @@ func init() {
 func Now() int64 {
 	return atomic.LoadInt64(&clock) / 1e9 // Convert nanoseconds to seconds
 }
+
+// InstantUploadConfig stores instant upload (deduplication) configuration
+type InstantUploadConfig struct {
+	RefLevel uint32 // Instant upload level: 0=OFF, 1=FULL, 2=FAST
+}
+
+// GetBucketInstantUploadConfig extracts instant upload config from bucket info
+// Returns nil if bucket is nil or config is not set
+func GetBucketInstantUploadConfig(bucket *BucketInfo) *InstantUploadConfig {
+	if bucket == nil {
+		return nil
+	}
+	// For now, instant upload is controlled by environment variable
+	// In the future, this could be stored in bucket.Extra or a separate field
+	return &InstantUploadConfig{
+		RefLevel: getInstantUploadRefLevel(),
+	}
+}
+
+// IsInstantUploadEnabled checks if instant upload is enabled via environment variable
+func IsInstantUploadEnabled() bool {
+	enabled := os.Getenv("ORCAS_INSTANT_UPLOAD_ENABLED")
+	return enabled == "true" || enabled == "1"
+}
+
+// IsInstantUploadEnabledWithConfig checks if instant upload is enabled with given config
+func IsInstantUploadEnabledWithConfig(cfg *InstantUploadConfig) bool {
+	if cfg == nil {
+		return IsInstantUploadEnabled()
+	}
+	return cfg.RefLevel > 0
+}
+
+// getInstantUploadRefLevel gets instant upload ref level from environment variable
+// Returns 0 (OFF), 1 (FULL), or 2 (FAST)
+func getInstantUploadRefLevel() uint32 {
+	refLevel := os.Getenv("ORCAS_INSTANT_UPLOAD_REF_LEVEL")
+	if refLevel == "" {
+		if IsInstantUploadEnabled() {
+			return 1 // FULL by default if enabled
+		}
+		return 0 // OFF by default
+	}
+	level, err := strconv.ParseUint(refLevel, 10, 32)
+	if err != nil {
+		return 0
+	}
+	return uint32(level)
+}

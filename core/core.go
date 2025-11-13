@@ -182,6 +182,9 @@ type LocalHandler struct {
 	// SDK config registry: map[bktID] -> SDK config
 	// This allows ConvertWritingVersions to access SDK config for compression/encryption
 	sdkConfigs sync.Map // map[int64]*SDKConfigInfo
+	// Bucket config registry: map[bktID] -> BucketInfo
+	// This allows access to bucket configuration for compression/encryption
+	bucketConfigs sync.Map // map[int64]*BucketInfo
 }
 
 // SDKConfigInfo stores SDK configuration for a bucket
@@ -245,6 +248,20 @@ func (lh *LocalHandler) GetSDKConfig(bktID int64) *SDKConfigInfo {
 	return nil
 }
 
+// SetBucketConfig sets bucket configuration for a bucket
+// This allows ConvertWritingVersions and other operations to access bucket config
+func (lh *LocalHandler) SetBucketConfig(bktID int64, bucket *BucketInfo) {
+	if bucket != nil {
+		lh.bucketConfigs.Store(bktID, bucket)
+		// Also sync to SDKConfig
+		cmprWay := bucket.CmprWay
+		if cmprWay == 0 {
+			cmprWay = bucket.WiseCmpr
+		}
+		lh.SetSDKConfig(bktID, cmprWay, bucket.CmprQlty, bucket.EndecWay, bucket.EndecKey)
+	}
+}
+
 func (lh *LocalHandler) Login(c Ctx, usr, pwd string) (Ctx, *UserInfo, []*BucketInfo, error) {
 	// pwd from db or cache
 	u, err := lh.ma.GetUsr2(c, usr)
@@ -274,8 +291,20 @@ func (lh *LocalHandler) Login(c Ctx, usr, pwd string) (Ctx, *UserInfo, []*Bucket
 	// list buckets
 	b, _ := lh.ma.ListBkt(c, u.ID)
 
-	// set uid & key to ctx
-	c, u.Pwd, u.Key = UserInfo2Ctx(c, u), "", ""
+	// 同步每个bucket的配置到SDKConfig
+	for _, bucket := range b {
+		if bucket != nil {
+			// 使用CmprWay或WiseCmpr（CmprWay优先）
+			cmprWay := bucket.CmprWay
+			if cmprWay == 0 {
+				cmprWay = bucket.WiseCmpr
+			}
+			lh.SetSDKConfig(bucket.ID, cmprWay, bucket.CmprQlty, bucket.EndecWay, bucket.EndecKey)
+		}
+	}
+
+	// set uid to ctx
+	c, u.Pwd = UserInfo2Ctx(c, u), ""
 	return c, u, b, nil
 }
 
@@ -903,7 +932,17 @@ func (lh *LocalHandler) GetBktInfo(c Ctx, bktID int64) (*BucketInfo, error) {
 	if len(buckets) == 0 {
 		return nil, ERR_QUERY_DB
 	}
-	return buckets[0], nil
+	bucket := buckets[0]
+	// 同步bucket配置到SDKConfig
+	if bucket != nil {
+		// 使用CmprWay或WiseCmpr（CmprWay优先）
+		cmprWay := bucket.CmprWay
+		if cmprWay == 0 {
+			cmprWay = bucket.WiseCmpr
+		}
+		lh.SetSDKConfig(bktID, cmprWay, bucket.CmprQlty, bucket.EndecWay, bucket.EndecKey)
+	}
+	return bucket, nil
 }
 
 func (lh *LocalHandler) UpdateFileLatestVersion(c Ctx, bktID int64) error {
@@ -1010,7 +1049,6 @@ func (la *LocalAdmin) CreateUser(c Ctx, username, password, name string, role ui
 		Pwd:    hashedPwd,
 		Name:   name,
 		Role:   role,
-		Key:    "",
 		Avatar: "",
 	}
 
@@ -1020,7 +1058,6 @@ func (la *LocalAdmin) CreateUser(c Ctx, username, password, name string, role ui
 
 	// Clear sensitive information before returning
 	user.Pwd = ""
-	user.Key = ""
 	return user, nil
 }
 

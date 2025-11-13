@@ -132,8 +132,29 @@ func (dacm *DefaultAccessCtrlMgr) CheckOwn(c Ctx, bktID int64) error {
 func UserInfo2Ctx(c Ctx, u *UserInfo) Ctx {
 	return context.WithValue(c, "o", map[string]interface{}{
 		"uid": u.ID,
-		"key": u.Key,
 	})
+}
+
+// BucketInfo2Ctx sets bucket information to context, including bucket key
+// This allows GetDB to use bucket's key for database encryption
+func BucketInfo2Ctx(c Ctx, bkt *BucketInfo) Ctx {
+	if bkt == nil {
+		return c
+	}
+	// Get existing context values
+	o := make(map[string]interface{})
+	if v, ok := c.Value("o").(map[string]interface{}); ok {
+		for k, val := range v {
+			o[k] = val
+		}
+	}
+	// Set bucket key (bucket key takes precedence over user key for bucket database)
+	if bkt.Key != "" {
+		o["key"] = bkt.Key
+	}
+	// Set bucket ID for reference
+	o["bktID"] = bkt.ID
+	return context.WithValue(c, "o", o)
 }
 
 func getUID(c Ctx) int64 {
@@ -147,6 +168,7 @@ func getUID(c Ctx) int64 {
 
 func getKey(c Ctx) string {
 	if v, ok := c.Value("o").(map[string]interface{}); ok {
+		// Get key from context (could be user key or bucket key set via BucketInfo2Ctx)
 		if key, okk := v["key"].(string); okk {
 			return key
 		}

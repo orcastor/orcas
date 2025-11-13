@@ -44,409 +44,12 @@ var (
 	fileObjCache = ecache.NewLRUCache(16, 512, 30*time.Second)
 )
 
-// Note: vfs now uses sdk.BatchWriter instead of its own implementation
-// The following types and functions are kept for reference but are no longer used:
-/*
-// Batch write buffer object pool: reuse buffers to reduce memory allocation
-// Note: buffer is used long-term, only returned when BatchWriter is no longer used
-// Object pool uses default 4MB size, will reallocate if chunkSize differs
-batchBufferPool = sync.Pool{
-	New: func() interface{} {
-		// Create default 4MB buffer
-		return make([]byte, 4<<20)
-	},
-}
-
-// BatchWriter manages batch writes, supporting packaging multiple small files' data blocks into a single data block
-// Deprecated: This type is kept for reference only, vfs now uses sdk.BatchWriter
-// Uses lock-free buffer management with atomic operations to acquire write positions
-type BatchWriteManager struct {
-	// Filesystem (all files share the same bucket)
-	fs *OrcasFS
-
-	// Shared buffer (lock-free)
-	buffer      []byte // Shared buffer (size is chunkSize)
-	writeOffset int64  // Current write position (atomic operation, use atomic.LoadInt64/StoreInt64/AddInt64)
-	bufferSize  int64  // Buffer size (equals chunkSize)
-
-	// File info list (lock-free, managed with atomic operations)
-	fileInfos     []*BatchFileInfo // File info list (fixed size, pre-allocated)
-	fileInfoIndex int64            // Current file info index (atomic operation, use atomic.LoadInt64/StoreInt64/AddInt64)
-	maxFileInfos  int64            // Maximum number of file infos
-
-	// Flush control
-	flushWindow    time.Duration
-	maxPackageSize int64 // Maximum packaged data block size (default 4MB)
-}
-
-// BatchFileInfo file info for batch writes (lock-free)
-type BatchFileInfo struct {
-	FileID   int64
-	DataID   int64  // Data ID (generated when adding file)
-	Offset   int64  // Offset position in buffer
-	Size     int64  // Processed data size (after compression/encryption)
-	OrigSize int64  // Original data size
-	Kind     uint32 // Compression/encryption flags
-}
-
-// PackagedDataBlock packaged data block information
-type PackagedDataBlock struct {
-	PkgID     int64               // Packaged data block ID
-	Data      []byte              // Packaged data
-	FileInfos []*PackagedFileInfo // File info list
-}
-
-// PackagedFileInfo packaged file information
-type PackagedFileInfo struct {
-	FileID    int64  // File ID
-	DataID    int64  // Data ID
-	PkgOffset uint32 // Offset position in packaged data block
-	Size      int64  // Data size (after compression/encryption)
-	OrigSize  int64  // Original data size
-	Kind      uint32 // Data status (compression/encryption, etc.)
-}
-*/
-
 // getBatchWriteManager gets the batch writer for the specified bucket (thread-safe)
 // Returns nil if batch write is disabled
 // Uses SDK's global batch writer registry
 func (fs *OrcasFS) getBatchWriteManager() *sdk.BatchWriter {
 	return sdk.GetBatchWriterForBucket(fs.h, fs.bktID)
 }
-
-/*
-// flushLoop periodic flush loop
-func (bwm *BatchWriteManager) flushLoop() {
-	ticker := time.NewTicker(bwm.flushWindow)
-	defer ticker.Stop()
-
-	for range ticker.C {
-		// Periodic flush (every flushWindow seconds)
-		bwm.flush()
-	}
-}
-
-// flushAll flushes all pending write data
-func (bwm *BatchWriteManager) flushAll() {
-	bwm.flush()
-}
-
-// flush flushes all pending write data (lock-free)
-// Atomically gets current write position and file info, then packages and writes
-func (bwm *BatchWriteManager) flush() {
-	// Atomically swap write position to 0 (reset and get old value)
-	oldOffset := atomic.SwapInt64(&bwm.writeOffset, 0)
-
-	// Atomically swap file index to 0 (reset and get old value)
-	oldIndex := atomic.SwapInt64(&bwm.fileInfoIndex, 0)
-
-	if oldOffset == 0 || oldIndex == 0 {
-		return // No pending write data
-	}
-
-	// Note: No need to zero used buffer portion because:
-	// 1. New data will write from writeOffset=0, overwriting old data
-	// 2. We only read data from fileInfo.Offset to fileInfo.Offset+fileInfo.Size
-	// 3. Old data won't affect correctness of new data
-
-	// Copy current file infos (avoid modification during packaging)
-	// Only collect non-nil file infos (skip failed operations)
-	fileInfos := make([]*BatchFileInfo, 0, oldIndex)
-	for i := int64(0); i < oldIndex; i++ {
-		if bwm.fileInfos[i] != nil {
-			// Shallow copy file info (data itself is in buffer, no need for deep copy)
-			fileInfos = append(fileInfos, bwm.fileInfos[i])
-		}
-	}
-
-	if len(fileInfos) == 0 {
-		return
-	}
-
-	// Package data blocks
-	packages := bwm.packageDataBlocks(fileInfos)
-
-	// Batch write packaged data blocks, DataInfo and ObjectInfo
-	for _, pkg := range packages {
-		bwm.flushPackage(pkg)
-	}
-}
-*/
-
-// packageDataBlocks packages data blocks (using processed data)
-// Reads data from shared buffer and packages it
-/*
-func (bwm *BatchWriteManager) packageDataBlocks(fileInfos []*BatchFileInfo) []*PackagedDataBlock {
-	var packages []*PackagedDataBlock
-	var currentPkg *PackagedDataBlock
-	var currentPkgOffset uint32
-
-	for _, fileInfo := range fileInfos {
-		if fileInfo == nil || fileInfo.Size == 0 {
-			continue
-		}
-
-		// Read data from shared buffer
-		data := bwm.buffer[fileInfo.Offset : fileInfo.Offset+fileInfo.Size]
-
-		// If current package is empty or data is too large, create new package
-		if currentPkg == nil || int64(len(currentPkg.Data))+fileInfo.Size > bwm.maxPackageSize {
-			// If current package is not empty, save it first
-			if currentPkg != nil {
-				packages = append(packages, currentPkg)
-			}
-
-			// Create new package
-			currentPkg = &PackagedDataBlock{
-				Data:      make([]byte, 0, bwm.maxPackageSize),
-				FileInfos: make([]*PackagedFileInfo, 0),
-			}
-			currentPkgOffset = 0
-		}
-
-		// Add processed data to current package
-		pkgFileInfo := &PackagedFileInfo{
-			FileID:    fileInfo.FileID,
-			DataID:    fileInfo.DataID, // Use pre-generated DataID
-			PkgOffset: currentPkgOffset,
-			Size:      fileInfo.Size,     // Size after compression/encryption
-			OrigSize:  fileInfo.OrigSize, // Original data size
-			Kind:      fileInfo.Kind,     // Compression and encryption flags
-		}
-
-		// Copy data to package
-		dataCopy := make([]byte, len(data))
-		copy(dataCopy, data)
-		currentPkg.Data = append(currentPkg.Data, dataCopy...)
-		currentPkg.FileInfos = append(currentPkg.FileInfos, pkgFileInfo)
-
-		// Update offset
-		currentPkgOffset += uint32(len(data))
-	}
-
-	// Save last package
-	if currentPkg != nil {
-		packages = append(packages, currentPkg)
-	}
-
-	return packages
-}
-*/
-
-// processFileData processes file data according to configuration (compression and encryption)
-// Returns: processed data, Kind flags, original size
-/*
-func (bwm *BatchWriteManager) processFileData(fs *OrcasFS, originalData []byte) ([]byte, uint32, int64) {
-	origSize := int64(len(originalData))
-	kind := uint32(0)
-	cfg := fs.sdkCfg
-
-	// Set compression and encryption flags
-	if cfg != nil {
-		if cfg.WiseCmpr > 0 {
-			kind |= cfg.WiseCmpr
-		}
-		if cfg.EndecWay > 0 {
-			kind |= cfg.EndecWay
-		}
-	}
-
-	if kind == 0 {
-		// No compression or encryption, return original data directly
-		return originalData, kind, origSize
-	}
-
-	data := originalData
-	compressedData := originalData // Save compressed data (if compression succeeds)
-	var err error
-
-	// 1. Compression (if enabled)
-	hasCmpr := kind&core.DATA_CMPR_MASK != 0
-	if hasCmpr && cfg != nil && cfg.WiseCmpr > 0 {
-		var cmpr archiver.Compressor
-		if cfg.WiseCmpr&core.DATA_CMPR_SNAPPY != 0 {
-			cmpr = &archiver.Snappy{}
-		} else if cfg.WiseCmpr&core.DATA_CMPR_ZSTD != 0 {
-			cmpr = &archiver.Zstd{EncoderOptions: []zstd.EOption{zstd.WithEncoderLevel(zstd.EncoderLevelFromZstd(int(cfg.CmprQlty)))}}
-		} else if cfg.WiseCmpr&core.DATA_CMPR_GZIP != 0 {
-			cmpr = &archiver.Gz{CompressionLevel: int(cfg.CmprQlty)}
-		} else if cfg.WiseCmpr&core.DATA_CMPR_BR != 0 {
-			cmpr = &archiver.Brotli{Quality: int(cfg.CmprQlty)}
-		}
-
-		if cmpr != nil {
-			var cmprBuf bytes.Buffer
-			err := cmpr.Compress(bytes.NewBuffer(data), &cmprBuf)
-			if err == nil && cmprBuf.Len() < len(data) {
-				// Compression succeeded and compressed size is smaller
-				compressedData = cmprBuf.Bytes()
-				data = compressedData
-			} else {
-				// Compression failed or compressed size is larger, remove compression flag
-				kind &= ^core.DATA_CMPR_MASK
-				compressedData = originalData
-				data = originalData
-			}
-		}
-	}
-
-	// 2. Encryption (if enabled)
-	hasEnc := kind&core.DATA_ENDEC_MASK != 0
-	if hasEnc && cfg != nil {
-		if kind&core.DATA_ENDEC_AES256 != 0 {
-			data, err = aes256.Encrypt(cfg.EndecKey, data)
-			if err != nil {
-				// Encryption failed, remove encryption flag, use compressed data (if compressed) or original data
-				kind &= ^core.DATA_ENDEC_MASK
-				data = compressedData
-			}
-		} else if kind&core.DATA_ENDEC_SM4 != 0 {
-			data, err = sm4.Sm4Cbc([]byte(cfg.EndecKey), data, true)
-			if err != nil {
-				// Encryption failed, remove encryption flag, use compressed data (if compressed) or original data
-				kind &= ^core.DATA_ENDEC_MASK
-				data = compressedData
-			}
-		}
-	}
-
-	return data, kind, origSize
-}
-*/
-
-// flushPackage flushes a single packaged data block (batch writes data block, DataInfo and ObjectInfo)
-/*
-func (bwm *BatchWriteManager) flushPackage(pkg *PackagedDataBlock) error {
-	if len(pkg.FileInfos) == 0 || len(pkg.Data) == 0 {
-		return nil
-	}
-
-		// Get fs and handler from BatchWriter
-	if bwm.fs == nil {
-		return fmt.Errorf("invalid batch write manager: fs is nil")
-	}
-
-	fs := bwm.fs
-	lh := fs.h
-	bktID := fs.bktID
-	ctx := fs.c
-
-	// 1. Generate packaged data block ID
-	pkgID := core.NewID()
-	if pkgID <= 0 {
-		return fmt.Errorf("failed to generate package ID")
-	}
-	pkg.PkgID = pkgID
-
-	// 2. Write packaged data block
-	_, err := lh.PutData(ctx, bktID, pkgID, 0, pkg.Data)
-	if err != nil {
-		return fmt.Errorf("failed to write package data: %v", err)
-	}
-
-	// 3. Create DataInfo for each file (using PkgID and PkgOffset)
-	var dataInfos []*core.DataInfo
-	var objectInfos []*core.ObjectInfo
-
-	for _, fileInfo := range pkg.FileInfos {
-		// Use pre-generated DataID (generated in addFile)
-		dataID := fileInfo.DataID
-		if dataID <= 0 {
-			// If DataID is not set (should not happen), generate one
-			dataID = core.NewID()
-			if dataID <= 0 {
-				continue
-			}
-			fileInfo.DataID = dataID
-		}
-
-		// Create DataInfo
-		dataInfo := &core.DataInfo{
-			ID:        dataID,
-			Size:      fileInfo.Size,
-			OrigSize:  fileInfo.OrigSize,
-			Kind:      fileInfo.Kind,
-			PkgID:     pkgID,
-			PkgOffset: fileInfo.PkgOffset,
-		}
-		dataInfos = append(dataInfos, dataInfo)
-
-		// Get file object, update DataID and Size
-		// Note: File size should use original size (OrigSize), not compressed/encrypted size
-		// Optimization: Try to get from cache first to avoid database query
-		cacheKey := formatCacheKey(bktID, fileInfo.FileID)
-		var fileObj *core.ObjectInfo
-		if cached, ok := fileObjCache.Get(cacheKey); ok {
-			if obj, ok := cached.(*core.ObjectInfo); ok && obj != nil {
-				fileObj = obj
-			}
-		}
-		if fileObj == nil {
-			// Cache miss, query from database
-			fileObjs, err := lh.Get(ctx, bktID, []int64{fileInfo.FileID})
-			if err != nil || len(fileObjs) == 0 {
-				fileObj = nil
-			} else {
-				fileObj = fileObjs[0]
-				// Update cache
-				fileObjCache.Put(cacheKey, fileObj)
-			}
-		}
-
-		if fileObj == nil {
-			// File object doesn't exist, create new one
-			objectInfo := &core.ObjectInfo{
-				ID:     fileInfo.FileID,
-				DataID: dataID,
-				Size:   fileInfo.OrigSize, // Use original size
-				MTime:  core.Now(),
-				Type:   core.OBJ_TYPE_FILE,
-			}
-			objectInfos = append(objectInfos, objectInfo)
-		} else {
-			// Update existing file object
-			objectInfo := &core.ObjectInfo{
-				ID:     fileObj.ID,
-				PID:    fileObj.PID,
-				DataID: dataID,
-				Size:   fileInfo.OrigSize, // Use original size
-				MTime:  core.Now(),
-				Type:   fileObj.Type,
-				Name:   fileObj.Name,
-			}
-			objectInfos = append(objectInfos, objectInfo)
-		}
-	}
-
-	// 4. Batch write DataInfo
-	if len(dataInfos) > 0 {
-		_, err = lh.PutDataInfo(ctx, bktID, dataInfos)
-		if err != nil {
-			return fmt.Errorf("failed to write data infos: %v", err)
-		}
-	}
-
-	// 5. Batch write ObjectInfo
-	if len(objectInfos) > 0 {
-		_, err = lh.Put(ctx, bktID, objectInfos)
-		if err != nil {
-			return fmt.Errorf("failed to write object infos: %v", err)
-		}
-
-		// Update fileObj cache for each file to ensure reads can access latest data
-		for _, objInfo := range objectInfos {
-			if objInfo != nil && objInfo.ID > 0 {
-				cacheKey := formatCacheKey(bktID, objInfo.ID)
-				fileObjCache.Put(cacheKey, objInfo)
-				// Note: We can't update RandomAccessor's atomic value here as we don't have access to it
-				// But cache update is sufficient for getFileObj to work correctly
-			}
-		}
-	}
-
-	return nil
-}
-*/
 
 // processFileDataForBatchWrite processes file data (compression/encryption) for batch write
 // This is a helper function to process data before passing to SDK's BatchWriter
@@ -457,24 +60,25 @@ func processFileDataForBatchWrite(fs *OrcasFS, originalData []byte) ([]byte, int
 	}
 
 	// Process compression and encryption according to configuration
-	cfg := fs.sdkCfg
+	// Get bucket configuration
+	bucket := fs.getBucketConfig()
 	kind := uint32(0)
 	data := originalData
 	compressedData := originalData
 	var err error
 
 	// 1. Compression (if enabled)
-	if cfg != nil && cfg.WiseCmpr > 0 {
-		kind |= cfg.WiseCmpr
+	if bucket != nil && bucket.CmprWay > 0 {
+		kind |= bucket.CmprWay
 		var cmpr archiver.Compressor
-		if cfg.WiseCmpr&core.DATA_CMPR_SNAPPY != 0 {
+		if bucket.CmprWay&core.DATA_CMPR_SNAPPY != 0 {
 			cmpr = &archiver.Snappy{}
-		} else if cfg.WiseCmpr&core.DATA_CMPR_ZSTD != 0 {
-			cmpr = &archiver.Zstd{EncoderOptions: []zstd.EOption{zstd.WithEncoderLevel(zstd.EncoderLevelFromZstd(int(cfg.CmprQlty)))}}
-		} else if cfg.WiseCmpr&core.DATA_CMPR_GZIP != 0 {
-			cmpr = &archiver.Gz{CompressionLevel: int(cfg.CmprQlty)}
-		} else if cfg.WiseCmpr&core.DATA_CMPR_BR != 0 {
-			cmpr = &archiver.Brotli{Quality: int(cfg.CmprQlty)}
+		} else if bucket.CmprWay&core.DATA_CMPR_ZSTD != 0 {
+			cmpr = &archiver.Zstd{EncoderOptions: []zstd.EOption{zstd.WithEncoderLevel(zstd.EncoderLevelFromZstd(int(bucket.CmprQlty)))}}
+		} else if bucket.CmprWay&core.DATA_CMPR_GZIP != 0 {
+			cmpr = &archiver.Gz{CompressionLevel: int(bucket.CmprQlty)}
+		} else if bucket.CmprWay&core.DATA_CMPR_BR != 0 {
+			cmpr = &archiver.Brotli{Quality: int(bucket.CmprQlty)}
 		}
 
 		if cmpr != nil {
@@ -492,16 +96,16 @@ func processFileDataForBatchWrite(fs *OrcasFS, originalData []byte) ([]byte, int
 	}
 
 	// 2. Encryption (if enabled)
-	if cfg != nil && cfg.EndecWay > 0 {
-		kind |= cfg.EndecWay
+	if bucket != nil && bucket.EndecWay > 0 {
+		kind |= bucket.EndecWay
 		if kind&core.DATA_ENDEC_AES256 != 0 {
-			data, err = aes256.Encrypt(cfg.EndecKey, data)
+			data, err = aes256.Encrypt(bucket.EndecKey, data)
 			if err != nil {
 				kind &= ^core.DATA_ENDEC_MASK
 				data = compressedData
 			}
 		} else if kind&core.DATA_ENDEC_SM4 != 0 {
-			data, err = sm4.Sm4Cbc([]byte(cfg.EndecKey), data, true)
+			data, err = sm4.Sm4Cbc([]byte(bucket.EndecKey), data, true)
 			if err != nil {
 				kind &= ^core.DATA_ENDEC_MASK
 				data = compressedData
@@ -520,31 +124,40 @@ func addFileToBatchWrite(ra *RandomAccessor, data []byte) (bool, int64, error) {
 	}
 
 	// Try instant upload (deduplication) before processing
-	// Calculate checksums from original data (before compression/encryption)
+	// Check configuration: bucket config > environment variable
 	origSize := int64(len(data))
-	instantDataID, err := tryInstantUpload(ra.fs, data, origSize, core.DATA_NORMAL)
-	if err == nil && instantDataID > 0 {
-		// Instant upload succeeded, use existing DataID
-		// Update file object with instant upload DataID
-		fileObj, err := ra.getFileObj()
-		if err == nil && fileObj != nil {
-			updateFileObj := &core.ObjectInfo{
-				ID:     fileObj.ID,
-				PID:    fileObj.PID,
-				DataID: instantDataID,
-				Size:   origSize,
-				MTime:  core.Now(),
-				Type:   fileObj.Type,
-				Name:   fileObj.Name,
-			}
-			// Update file object in database
-			_, err := ra.fs.h.Put(ra.fs.c, ra.fs.bktID, []*core.ObjectInfo{updateFileObj})
-			if err == nil {
-				// Update cache
-				fileObjCache.Put(ra.fileObjKey, updateFileObj)
-				ra.fileObj.Store(updateFileObj)
-				// Return success with instant upload DataID
-				return true, instantDataID, nil
+
+	// Create unified config from bucket config
+	var instantUploadCfg *core.InstantUploadConfig
+	bucket := ra.fs.getBucketConfig()
+	instantUploadCfg = core.GetBucketInstantUploadConfig(bucket)
+
+	if core.IsInstantUploadEnabledWithConfig(instantUploadCfg) {
+		// Try instant upload (deduplication)
+		instantDataID, err := tryInstantUpload(ra.fs, data, origSize, core.DATA_NORMAL)
+		if err == nil && instantDataID > 0 {
+			// Instant upload succeeded, use existing DataID
+			// Update file object with instant upload DataID
+			fileObj, err := ra.getFileObj()
+			if err == nil && fileObj != nil {
+				updateFileObj := &core.ObjectInfo{
+					ID:     fileObj.ID,
+					PID:    fileObj.PID,
+					DataID: instantDataID,
+					Size:   origSize,
+					MTime:  core.Now(),
+					Type:   fileObj.Type,
+					Name:   fileObj.Name,
+				}
+				// Update file object in database
+				_, err := ra.fs.h.Put(ra.fs.c, ra.fs.bktID, []*core.ObjectInfo{updateFileObj})
+				if err == nil {
+					// Update cache
+					fileObjCache.Put(ra.fileObjKey, updateFileObj)
+					ra.fileObj.Store(updateFileObj)
+					// Return success with instant upload DataID
+					return true, instantDataID, nil
+				}
 			}
 		}
 		// If update failed, continue with normal write
@@ -840,13 +453,13 @@ func (ra *RandomAccessor) initSequentialBuffer() error {
 	}
 
 	// Set compression and encryption flags (if enabled)
-	cfg := ra.fs.sdkCfg
-	if cfg != nil {
-		if cfg.WiseCmpr > 0 {
-			dataInfo.Kind |= cfg.WiseCmpr
+	bucket := ra.fs.getBucketConfig()
+	if bucket != nil {
+		if bucket.CmprWay > 0 {
+			dataInfo.Kind |= bucket.CmprWay
 		}
-		if cfg.EndecWay > 0 {
-			dataInfo.Kind |= cfg.EndecWay
+		if bucket.EndecWay > 0 {
+			dataInfo.Kind |= bucket.EndecWay
 		}
 	}
 
@@ -917,12 +530,12 @@ func (ra *RandomAccessor) flushSequentialChunk() error {
 		return nil
 	}
 
-	cfg := ra.fs.sdkCfg
+	bucket := ra.fs.getBucketConfig()
 	chunkData := ra.seqBuffer.buffer
 
 	// Process first chunk: check file type and compression effect
 	isFirstChunk := ra.seqBuffer.sn == 0
-	if isFirstChunk && cfg != nil && cfg.WiseCmpr > 0 && len(chunkData) > 0 {
+	if isFirstChunk && bucket != nil && bucket.CmprWay > 0 && len(chunkData) > 0 {
 		kind, _ := filetype.Match(chunkData)
 		if kind != filetype.Unknown {
 			// Not unknown type, don't compress
@@ -937,16 +550,16 @@ func (ra *RandomAccessor) flushSequentialChunk() error {
 	// Compression (if enabled)
 	var processedChunk []byte
 	hasCmpr := ra.seqBuffer.dataInfo.Kind&core.DATA_CMPR_MASK != 0
-	if hasCmpr && cfg != nil && cfg.WiseCmpr > 0 {
+	if hasCmpr && bucket != nil && bucket.CmprWay > 0 {
 		var cmpr archiver.Compressor
-		if cfg.WiseCmpr&core.DATA_CMPR_SNAPPY != 0 {
+		if bucket.CmprWay&core.DATA_CMPR_SNAPPY != 0 {
 			cmpr = &archiver.Snappy{}
-		} else if cfg.WiseCmpr&core.DATA_CMPR_ZSTD != 0 {
-			cmpr = &archiver.Zstd{EncoderOptions: []zstd.EOption{zstd.WithEncoderLevel(zstd.EncoderLevelFromZstd(int(cfg.CmprQlty)))}}
-		} else if cfg.WiseCmpr&core.DATA_CMPR_GZIP != 0 {
-			cmpr = &archiver.Gz{CompressionLevel: int(cfg.CmprQlty)}
-		} else if cfg.WiseCmpr&core.DATA_CMPR_BR != 0 {
-			cmpr = &archiver.Brotli{Quality: int(cfg.CmprQlty)}
+		} else if bucket.CmprWay&core.DATA_CMPR_ZSTD != 0 {
+			cmpr = &archiver.Zstd{EncoderOptions: []zstd.EOption{zstd.WithEncoderLevel(zstd.EncoderLevelFromZstd(int(bucket.CmprQlty)))}}
+		} else if bucket.CmprWay&core.DATA_CMPR_GZIP != 0 {
+			cmpr = &archiver.Gz{CompressionLevel: int(bucket.CmprQlty)}
+		} else if bucket.CmprWay&core.DATA_CMPR_BR != 0 {
+			cmpr = &archiver.Brotli{Quality: int(bucket.CmprQlty)}
 		}
 
 		if cmpr != nil {
@@ -977,10 +590,10 @@ func (ra *RandomAccessor) flushSequentialChunk() error {
 	// Encryption (if enabled)
 	var encodedChunk []byte
 	var err error
-	if cfg != nil && ra.seqBuffer.dataInfo.Kind&core.DATA_ENDEC_AES256 != 0 {
-		encodedChunk, err = aes256.Encrypt(cfg.EndecKey, processedChunk)
-	} else if cfg != nil && ra.seqBuffer.dataInfo.Kind&core.DATA_ENDEC_SM4 != 0 {
-		encodedChunk, err = sm4.Sm4Cbc([]byte(cfg.EndecKey), processedChunk, true)
+	if bucket != nil && ra.seqBuffer.dataInfo.Kind&core.DATA_ENDEC_AES256 != 0 {
+		encodedChunk, err = aes256.Encrypt(bucket.EndecKey, processedChunk)
+	} else if bucket != nil && ra.seqBuffer.dataInfo.Kind&core.DATA_ENDEC_SM4 != 0 {
+		encodedChunk, err = sm4.Sm4Cbc([]byte(bucket.EndecKey), processedChunk, true)
 	} else {
 		encodedChunk = processedChunk
 	}
@@ -1022,38 +635,45 @@ func (ra *RandomAccessor) flushSequentialBuffer() error {
 	totalSize := ra.seqBuffer.dataInfo.OrigSize
 	if totalSize > 0 && totalSize < 1<<20 && ra.seqBuffer.sn == 0 {
 		// Small file and all data is still in buffer (no chunks written yet)
-		// Try instant upload first (before batch write)
+		// Try instant upload first (before batch write) if enabled
 		allData := ra.seqBuffer.buffer
 		if len(allData) > 0 {
-			// Try instant upload (deduplication)
-			instantDataID, err := tryInstantUpload(ra.fs, allData, totalSize, core.DATA_NORMAL)
-			if err == nil && instantDataID > 0 {
-				// Instant upload succeeded, use existing DataID
-				// Update file object with instant upload DataID
-				fileObj, err := ra.getFileObj()
-				if err == nil && fileObj != nil {
-					updateFileObj := &core.ObjectInfo{
-						ID:     fileObj.ID,
-						PID:    fileObj.PID,
-						DataID: instantDataID,
-						Size:   totalSize,
-						MTime:  core.Now(),
-						Type:   fileObj.Type,
-						Name:   fileObj.Name,
+			// Create unified config from bucket config
+			var instantUploadCfg *core.InstantUploadConfig
+			bucket := ra.fs.getBucketConfig()
+			instantUploadCfg = core.GetBucketInstantUploadConfig(bucket)
+
+			if core.IsInstantUploadEnabledWithConfig(instantUploadCfg) {
+				// Try instant upload (deduplication)
+				instantDataID, err := tryInstantUpload(ra.fs, allData, totalSize, core.DATA_NORMAL)
+				if err == nil && instantDataID > 0 {
+					// Instant upload succeeded, use existing DataID
+					// Update file object with instant upload DataID
+					fileObj, err := ra.getFileObj()
+					if err == nil && fileObj != nil {
+						updateFileObj := &core.ObjectInfo{
+							ID:     fileObj.ID,
+							PID:    fileObj.PID,
+							DataID: instantDataID,
+							Size:   totalSize,
+							MTime:  core.Now(),
+							Type:   fileObj.Type,
+							Name:   fileObj.Name,
+						}
+						// Update file object in database
+						_, err := ra.fs.h.Put(ra.fs.c, ra.fs.bktID, []*core.ObjectInfo{updateFileObj})
+						if err == nil {
+							// Update cache
+							fileObjCache.Put(ra.fileObjKey, updateFileObj)
+							ra.fileObj.Store(updateFileObj)
+							// Clear sequential buffer
+							ra.seqBuffer.hasData = false
+							ra.seqBuffer.buffer = ra.seqBuffer.buffer[:0]
+							return nil
+						}
 					}
-					// Update file object in database
-					_, err := ra.fs.h.Put(ra.fs.c, ra.fs.bktID, []*core.ObjectInfo{updateFileObj})
-					if err == nil {
-						// Update cache
-						fileObjCache.Put(ra.fileObjKey, updateFileObj)
-						ra.fileObj.Store(updateFileObj)
-						// Clear sequential buffer
-						ra.seqBuffer.hasData = false
-						ra.seqBuffer.buffer = ra.seqBuffer.buffer[:0]
-						return nil
-					}
+					// If update failed, continue with batch write or normal write
 				}
-				// If update failed, continue with batch write or normal write
 			}
 
 			// If instant upload failed, try batch write
@@ -1238,8 +858,9 @@ func (ra *RandomAccessor) Read(offset int64, size int) ([]byte, error) {
 	} else {
 		// Compressed/encrypted: use decodingChunkReader (will automatically decrypt and decompress)
 		var endecKey string
-		if ra.fs.sdkCfg != nil {
-			endecKey = ra.fs.sdkCfg.EndecKey
+		bucket := ra.fs.getBucketConfig()
+		if bucket != nil {
+			endecKey = bucket.EndecKey
 		}
 		reader = newDecodingChunkReader(ra.fs.c, ra.fs.h, ra.fs.bktID, dataInfo, endecKey)
 	}
@@ -1822,8 +1443,9 @@ func (ra *RandomAccessor) applyWritesStreamingCompressed(oldDataInfo *core.DataI
 	// Directly read by chunk, decrypt, decompress, don't use DataReader
 
 	var endecKey string
-	if ra.fs.sdkCfg != nil {
-		endecKey = ra.fs.sdkCfg.EndecKey
+	bucket := ra.fs.getBucketConfig()
+	if bucket != nil {
+		endecKey = bucket.EndecKey
 	}
 
 	// Create a reader to read, decrypt, and decompress by chunk
@@ -1872,8 +1494,9 @@ func (ra *RandomAccessor) applyWritesStreamingUncompressed(fileObj *core.ObjectI
 	// For uncompressed and unencrypted data, can stream process by chunk
 	// Optimization: pre-calculate write operations for each chunk to reduce repeated checks in loops
 
-	// If no SDK configuration, directly stream write
-	if ra.fs.sdkCfg == nil {
+	// If no bucket configuration, directly stream write
+	bucket := ra.fs.getBucketConfig()
+	if bucket == nil {
 		dataInfo.Size = newSize
 		dataInfo.OrigSize = newSize
 
@@ -2042,31 +1665,31 @@ func (ra *RandomAccessor) processWritesStreaming(
 	newSize int64,
 	chunkCount int,
 ) (int64, error) {
-	cfg := ra.fs.sdkCfg
+	bucket := ra.fs.getBucketConfig()
 
 	// Initialize compressor (if smart compression is enabled)
 	var cmpr archiver.Compressor
 	var hasCmpr bool
-	if cfg != nil && cfg.WiseCmpr > 0 {
+	if bucket != nil && bucket.CmprWay > 0 {
 		// Compressor will be determined when processing the first chunk (needs to check file type)
 		hasCmpr = true
-		if cfg.WiseCmpr&core.DATA_CMPR_SNAPPY != 0 {
+		if bucket.CmprWay&core.DATA_CMPR_SNAPPY != 0 {
 			cmpr = &archiver.Snappy{}
-		} else if cfg.WiseCmpr&core.DATA_CMPR_ZSTD != 0 {
-			cmpr = &archiver.Zstd{EncoderOptions: []zstd.EOption{zstd.WithEncoderLevel(zstd.EncoderLevelFromZstd(int(cfg.CmprQlty)))}}
-		} else if cfg.WiseCmpr&core.DATA_CMPR_GZIP != 0 {
-			cmpr = &archiver.Gz{CompressionLevel: int(cfg.CmprQlty)}
-		} else if cfg.WiseCmpr&core.DATA_CMPR_BR != 0 {
-			cmpr = &archiver.Brotli{Quality: int(cfg.CmprQlty)}
+		} else if bucket.CmprWay&core.DATA_CMPR_ZSTD != 0 {
+			cmpr = &archiver.Zstd{EncoderOptions: []zstd.EOption{zstd.WithEncoderLevel(zstd.EncoderLevelFromZstd(int(bucket.CmprQlty)))}}
+		} else if bucket.CmprWay&core.DATA_CMPR_GZIP != 0 {
+			cmpr = &archiver.Gz{CompressionLevel: int(bucket.CmprQlty)}
+		} else if bucket.CmprWay&core.DATA_CMPR_BR != 0 {
+			cmpr = &archiver.Brotli{Quality: int(bucket.CmprQlty)}
 		}
 		if cmpr != nil {
-			dataInfo.Kind |= cfg.WiseCmpr
+			dataInfo.Kind |= bucket.CmprWay
 		}
 	}
 
 	// If encryption is set, set encryption flag
-	if cfg != nil && cfg.EndecWay > 0 {
-		dataInfo.Kind |= cfg.EndecWay
+	if bucket != nil && bucket.EndecWay > 0 {
+		dataInfo.Kind |= bucket.EndecWay
 	}
 
 	// Calculate CRC32 (original data)
@@ -2156,7 +1779,7 @@ func (ra *RandomAccessor) processWritesStreaming(
 		}
 
 		// 3. If it's the first chunk, check file type to determine if compression is needed
-		if firstChunk && cfg != nil && cfg.WiseCmpr > 0 && len(chunkData) > 0 {
+		if firstChunk && bucket != nil && bucket.CmprWay > 0 && len(chunkData) > 0 {
 			kind, _ := filetype.Match(chunkData)
 			if kind != filetype.Unknown {
 				// Not unknown type, don't compress
@@ -2203,10 +1826,10 @@ func (ra *RandomAccessor) processWritesStreaming(
 		// 6. Encrypt (if enabled)
 		var encodedChunk []byte
 		var err error
-		if cfg != nil && dataInfo.Kind&core.DATA_ENDEC_AES256 != 0 {
-			encodedChunk, err = aes256.Encrypt(cfg.EndecKey, processedChunk)
-		} else if cfg != nil && dataInfo.Kind&core.DATA_ENDEC_SM4 != 0 {
-			encodedChunk, err = sm4.Sm4Cbc([]byte(cfg.EndecKey), processedChunk, true)
+		if bucket != nil && dataInfo.Kind&core.DATA_ENDEC_AES256 != 0 {
+			encodedChunk, err = aes256.Encrypt(bucket.EndecKey, processedChunk)
+		} else if bucket != nil && dataInfo.Kind&core.DATA_ENDEC_SM4 != 0 {
+			encodedChunk, err = sm4.Sm4Cbc([]byte(bucket.EndecKey), processedChunk, true)
 		} else {
 			encodedChunk = processedChunk
 		}

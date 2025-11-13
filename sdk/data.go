@@ -30,8 +30,7 @@ const (
 
 const (
 	PKG_ALIGN     = 4096
-	PKG_SIZE      = 4194304 // Default chunk size, used if configuration is not set
-	HDR_SIZE      = 102400
+	PKG_SIZE      = 4194304         // Default chunk size, used if configuration is not set
 	DEFAULT_CHUNK = 4 * 1024 * 1024 // Default 4MB
 )
 
@@ -89,8 +88,8 @@ func (l *listener) encode(src []byte) (dst []byte, err error) {
 func (l *listener) OnData(c core.Ctx, h core.Handler, dp *dataPkger, buf []byte) (once bool, err error) {
 	if l.cnt == 0 {
 		if l.action&HDR_CRC32 != 0 {
-			if len(buf) > HDR_SIZE {
-				l.d.HdrCRC32 = crc32.ChecksumIEEE(buf[0:HDR_SIZE])
+			if len(buf) > HdrSize {
+				l.d.HdrCRC32 = crc32.ChecksumIEEE(buf[0:HdrSize])
 			} else {
 				l.d.HdrCRC32 = crc32.ChecksumIEEE(buf)
 			}

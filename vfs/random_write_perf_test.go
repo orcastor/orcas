@@ -186,11 +186,17 @@ func TestRandomWriteSparseFile(t *testing.T) {
 		}
 		So(dma.PutBkt(context.TODO(), []*core.BucketInfo{bucket}), ShouldBeNil)
 
+		// Create context with user info (bypass login)
+		ctx := core.UserInfo2Ctx(context.TODO(), &core.UserInfo{
+			ID:   testBktID,
+			Role: core.USER,
+		})
+
 		// Create test file system
 		fs := &OrcasFS{
 			h:         lh,
 			bktID:     testBktID,
-			c:         context.TODO(),
+			c:         ctx,
 			chunkSize: 4 << 20, // 4MB chunks
 		}
 
@@ -206,7 +212,7 @@ func TestRandomWriteSparseFile(t *testing.T) {
 			Size:   0,
 			MTime:  core.Now(),
 		}
-		_, err := lh.Put(context.TODO(), testBktID, []*core.ObjectInfo{fileObj})
+		_, err := lh.Put(ctx, testBktID, []*core.ObjectInfo{fileObj})
 		So(err, ShouldBeNil)
 
 		// Create RandomAccessor and mark as sparse

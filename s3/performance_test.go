@@ -80,7 +80,7 @@ func setupTestEnvironment(t testHelper) (int64, *gin.Engine) {
 		core.ORCAS_DATA = tmpDir
 	}
 
-	core.InitDB()
+	core.InitDB("")
 	ensureTestUser(t)
 
 	// 创建测试bucket
@@ -512,4 +512,67 @@ func TestMissingData(t *testing.T) {
 				formatSize(size), concurrency, metrics.OpsPerSecond, metrics.ThroughputMBps, metrics.AvgLatency)
 		}
 	}
+}
+
+// TestComprehensivePerformance 全面的性能测试：1KB、4KB、64KB在不同并发级别下的性能
+func TestComprehensivePerformance(t *testing.T) {
+	sizes := []int64{1024, 4 * 1024, 64 * 1024} // 1KB, 4KB, 64KB
+	operations := 200                           // 每个并发级别的操作数
+
+	t.Logf("=== S3 性能测试报告 ===\n")
+	t.Logf("测试文件大小: 1KB, 4KB, 64KB")
+	t.Logf("并发级别: 1, 10, 50, 100")
+	t.Logf("批量写入: 开启和关闭对比\n")
+
+	// 测试批量写入开启和关闭
+	for _, batchEnabled := range []bool{true, false} {
+		batchStatus := "开启"
+		if !batchEnabled {
+			batchStatus = "关闭"
+		}
+		os.Setenv("ORCAS_BATCH_WRITE_ENABLED", fmt.Sprintf("%v", batchEnabled))
+
+		t.Logf("\n--- 批量写入%s ---", batchStatus)
+
+		for _, size := range sizes {
+			t.Logf("\n文件大小: %s", formatSize(size))
+
+			// 单线程测试
+			_, router := setupTestEnvironment(t)
+			bucketName := "test-bucket"
+			testData := generateTestData(size)
+
+			start := time.Now()
+			ops := 100
+			for i := 0; i < ops; i++ {
+				key := fmt.Sprintf("test-object-%d", i)
+				req := httptest.NewRequest("PUT", fmt.Sprintf("/%s/%s", bucketName, key), bytes.NewReader(testData))
+				req.Header.Set("Content-Type", "application/octet-stream")
+				w := httptest.NewRecorder()
+				router.ServeHTTP(w, req)
+				if w.Code != http.StatusOK {
+					t.Errorf("PutObject failed: status=%d", w.Code)
+				}
+			}
+			duration := time.Since(start)
+			opsPerSec := float64(ops) / duration.Seconds()
+			avgLatency := duration / time.Duration(ops)
+			throughput := float64(size*int64(ops)) / duration.Seconds() / (1024 * 1024)
+
+			t.Logf("  单线程: %.2f ops/sec, %v avg latency, %.2f MB/s",
+				opsPerSec, avgLatency, throughput)
+
+			// 并发测试
+			for _, concurrency := range []int{10, 50, 100} {
+				metrics := runConcurrentTest(t,
+					fmt.Sprintf("%s-Concurrency-%d-Batch-%v", formatSize(size), concurrency, batchEnabled),
+					"PUT", size, concurrency, operations)
+
+				t.Logf("  并发%d: %.2f ops/sec, %.2f MB/s, %v avg latency",
+					concurrency, metrics.OpsPerSecond, metrics.ThroughputMBps, metrics.AvgLatency)
+			}
+		}
+	}
+
+	t.Logf("\n=== 测试完成 ===")
 }

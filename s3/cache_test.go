@@ -37,7 +37,7 @@ func setupTestEnvironmentForCache(t *testing.T) (int64, *gin.Engine) {
 		core.ORCAS_DATA = tmpDir
 	}
 
-	core.InitDB()
+	core.InitDB("")
 	ensureTestUserForCache(t)
 
 	// 创建测试bucket

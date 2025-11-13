@@ -2,14 +2,10 @@ package main
 
 import (
 	"context"
-	"crypto/md5"
-	"encoding/binary"
 	"encoding/xml"
 	"fmt"
-	"hash/crc32"
 	"io"
 	"net/http"
-	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -24,38 +20,10 @@ import (
 	"github.com/orcastor/orcas/sdk"
 )
 
-const (
-	HDR_SIZE = 102400 // First 100KB for HdrCRC32
-)
-
 // calculateChecksumsForInstantUpload calculates HdrCRC32, CRC32, and MD5 checksums from data
-// Returns HdrCRC32, CRC32, MD5 (as int64), and error
+// Delegates to sdk.CalculateChecksums for consistency and code reuse
 func calculateChecksumsForInstantUpload(data []byte) (uint32, uint32, int64, error) {
-	if len(data) == 0 {
-		return 0, 0, 0, nil
-	}
-
-	// Calculate HdrCRC32 (first 100KB or entire file if smaller)
-	var hdrCRC32 uint32
-	if len(data) > HDR_SIZE {
-		hdrCRC32 = crc32.ChecksumIEEE(data[0:HDR_SIZE])
-	} else {
-		hdrCRC32 = crc32.ChecksumIEEE(data)
-	}
-
-	// Calculate CRC32 for entire file
-	crc32Hash := crc32.NewIEEE()
-	if _, err := crc32Hash.Write(data); err != nil {
-		return 0, 0, 0, err
-	}
-	fullCRC32 := crc32Hash.Sum32()
-
-	// Calculate MD5 for entire file
-	md5Hash := md5.Sum(data)
-	// Extract middle 8 bytes and convert to int64 (same as SDK)
-	md5Int64 := int64(binary.BigEndian.Uint64(md5Hash[4:12]))
-
-	return hdrCRC32, fullCRC32, md5Int64, nil
+	return sdk.CalculateChecksums(data)
 }
 
 var (
@@ -80,6 +48,10 @@ var (
 	// bucketCache caches bucket by name and user ID
 	// key: "<uid>:<bucketName>", value: *core.BucketInfo
 	bucketCache = ecache.NewLRUCache(16, 512, 30*time.Second)
+
+	// bucketInfoCache caches bucket info by bucket ID to avoid repeated GetBktInfo calls
+	// key: "<bktID>", value: *core.BucketInfo
+	bucketInfoCache = ecache.NewLRUCache(16, 512, 30*time.Second)
 
 	// multipartUploads stores ongoing multipart uploads
 	// key: "<bktID>:<uploadId>", value: *MultipartUpload
@@ -108,28 +80,33 @@ type Part struct {
 }
 
 // formatPathCacheKey formats cache key for path lookup
+// Optimized: uses fast formatting function
 func formatPathCacheKey(bktID int64, path string) string {
-	return fmt.Sprintf("%d:%s", bktID, path)
+	return util.FormatCacheKeyString(bktID, path)
 }
 
 // formatDirListCacheKey formats cache key for directory listing
+// Optimized: uses fast formatting function
 func formatDirListCacheKey(bktID, pid int64) string {
-	return fmt.Sprintf("%d:%d", bktID, pid)
+	return util.FormatCacheKeyInt(bktID, pid)
 }
 
 // formatObjectCacheKey formats cache key for object by ID
+// Optimized: uses fast formatting function
 func formatObjectCacheKey(bktID, objectID int64) string {
-	return fmt.Sprintf("%d:%d", bktID, objectID)
+	return util.FormatCacheKeyInt(bktID, objectID)
 }
 
 // formatBucketListCacheKey formats cache key for bucket list
+// Optimized: uses fixed 8-byte binary encoding
 func formatBucketListCacheKey(uid int64) string {
-	return fmt.Sprintf("%d", uid)
+	return util.FormatCacheKeySingleInt(uid)
 }
 
 // formatBucketCacheKey formats cache key for bucket by name
+// Optimized: uses fast formatting function
 func formatBucketCacheKey(uid int64, bucketName string) string {
-	return fmt.Sprintf("%d:%s", uid, bucketName)
+	return util.FormatCacheKeyString(uid, bucketName)
 }
 
 // invalidatePathCache invalidates cache for a path and its parent directories
@@ -138,7 +115,7 @@ func invalidatePathCache(bktID int64, path string) {
 	pathCache.Del(formatPathCacheKey(bktID, path))
 
 	// Invalidate all parent directories
-	parts := strings.Split(strings.Trim(path, "/"), "/")
+	parts := util.FastSplitPath(path)
 	for i := len(parts); i > 0; i-- {
 		parentPath := strings.Join(parts[:i], "/")
 		pathCache.Del(formatPathCacheKey(bktID, parentPath))
@@ -255,7 +232,8 @@ func getBucketIDByName(c *gin.Context, name string) (int64, error) {
 // findObjectByPath finds object by path in bucket (with cache)
 func findObjectByPath(c *gin.Context, bktID int64, key string) (*core.ObjectInfo, error) {
 	ctx := c.Request.Context()
-	parts := strings.Split(strings.Trim(key, "/"), "/")
+	// Optimized: use fast path splitting
+	parts := util.FastSplitPath(key)
 	if len(parts) == 0 || (len(parts) == 1 && parts[0] == "") {
 		// Root directory
 		return &core.ObjectInfo{
@@ -421,8 +399,8 @@ func listAllObjectsRecursively(c *gin.Context, bktID int64, prefix string, delim
 					// It's a file, add to contents
 					contents = append(contents, Content{
 						Key:          key,
-						LastModified: time.Unix(obj.MTime, 0).UTC().Format(time.RFC1123),
-						ETag:         fmt.Sprintf(`"%x"`, obj.DataID),
+						LastModified: util.FormatLastModified(obj.MTime),
+						ETag:         util.FormatETag(obj.DataID),
 						Size:         obj.Size,
 						StorageClass: "STANDARD",
 					})
@@ -476,7 +454,8 @@ func listAllObjectsRecursively(c *gin.Context, bktID int64, prefix string, delim
 // ensurePath ensures the path exists, creating directories as needed (with cache)
 func ensurePath(c *gin.Context, bktID int64, key string) (int64, error) {
 	ctx := c.Request.Context()
-	parts := strings.Split(strings.Trim(key, "/"), "/")
+	// Optimized: use fast path splitting
+	parts := util.FastSplitPath(key)
 	if len(parts) == 0 || (len(parts) == 1 && parts[0] == "") {
 		return 0, nil
 	}
@@ -813,8 +792,8 @@ func listObjects(c *gin.Context) {
 			// Add to contents
 			contents = append(contents, Content{
 				Key:          key,
-				LastModified: time.Unix(core.Now(), 0).UTC().Format(time.RFC1123),
-				ETag:         fmt.Sprintf(`"%x"`, fileInfo.DataID),
+				LastModified: util.FormatLastModified(core.Now()),
+				ETag:         util.FormatETag(fileInfo.DataID),
 				Size:         fileInfo.Size,
 				StorageClass: "STANDARD",
 			})
@@ -902,7 +881,7 @@ func buildPathFromPID(ctx context.Context, bktID int64, pid int64, name string) 
 func getObject(c *gin.Context) {
 	bucketName := c.Param("bucket")
 	key := c.Param("key")
-	key = strings.TrimPrefix(key, "/")
+	key = util.FastTrimPrefix(key, "/")
 
 	if bucketName == "" || key == "" {
 		util.S3ErrorResponse(c, http.StatusBadRequest, "InvalidRequest", "Bucket name and key are required")
@@ -922,8 +901,8 @@ func getObject(c *gin.Context) {
 		batchMgr := sdk.GetBatchWriterForBucket(handler, bktID)
 		if batchMgr != nil {
 			// Try to find object in pending objects by name
-			fileName := filepath.Base(key)
-			parentPath := filepath.Dir(key)
+			fileName := util.FastBase(key)
+			parentPath := util.FastDir(key)
 			var pid int64 = 0
 			if parentPath != "." && parentPath != "/" {
 				parentObj, err := findObjectByPath(c, bktID, parentPath)
@@ -1020,12 +999,8 @@ func getObject(c *gin.Context) {
 				readSize = int64(len(data))
 			}
 
-			// Set response headers
-			c.Header("Content-Type", "application/octet-stream")
-			c.Header("Content-Length", strconv.FormatInt(readSize, 10))
-			c.Header("ETag", fmt.Sprintf(`"%x"`, obj.DataID))
-			c.Header("Last-Modified", time.Unix(obj.MTime, 0).UTC().Format(time.RFC1123))
-			c.Header("Accept-Ranges", "bytes")
+			// Set response headers (optimized: batch header setting)
+			util.SetObjectHeadersWithContentType(c, "application/octet-stream", readSize, obj.DataID, obj.MTime, "bytes")
 
 			if rangeSpec != nil && rangeSpec.Valid {
 				// Return 206 Partial Content
@@ -1182,12 +1157,8 @@ func getObject(c *gin.Context) {
 		}
 	}
 
-	// Set response headers
-	c.Header("Content-Type", "application/octet-stream")
-	c.Header("Content-Length", strconv.FormatInt(readSize, 10))
-	c.Header("ETag", fmt.Sprintf(`"%x"`, obj.DataID))
-	c.Header("Last-Modified", time.Unix(obj.MTime, 0).UTC().Format(time.RFC1123))
-	c.Header("Accept-Ranges", "bytes")
+	// Set response headers (optimized: batch header setting)
+	util.SetObjectHeadersWithContentType(c, "application/octet-stream", readSize, obj.DataID, obj.MTime, "bytes")
 
 	if rangeSpec != nil && rangeSpec.Valid {
 		// Return 206 Partial Content
@@ -1212,7 +1183,7 @@ func putObject(c *gin.Context) {
 
 	bucketName := c.Param("bucket")
 	key := c.Param("key")
-	key = strings.TrimPrefix(key, "/")
+	key = util.FastTrimPrefix(key, "/")
 
 	if bucketName == "" || key == "" {
 		util.S3ErrorResponse(c, http.StatusBadRequest, "InvalidRequest", "Bucket name and key are required")
@@ -1234,10 +1205,13 @@ func putObject(c *gin.Context) {
 		return
 	}
 
-	// Ensure parent directory exists
-	parentPath := filepath.Dir(key)
+	// Extract file name early for reuse
+	fileName := util.FastBase(key)
+
+	// Ensure parent directory exists (only if not root)
 	var pid int64 = 0
-	if parentPath != "." && parentPath != "/" {
+	parentPath := util.FastDir(key)
+	if parentPath != "." && parentPath != "/" && parentPath != "" {
 		pid, err = ensurePath(c, bktID, parentPath)
 		if err != nil {
 			util.S3ErrorResponse(c, http.StatusInternalServerError, "InternalError", err.Error())
@@ -1245,50 +1219,66 @@ func putObject(c *gin.Context) {
 		}
 	}
 
-	// Check if object exists
-	fileName := filepath.Base(key)
-	obj, err := findObjectByPath(c, bktID, key)
+	// Check if object exists to determine if this is an update or new upload
+	// This check is necessary for S3 API compliance (PUT can update existing objects)
 	var objID int64
+	var isUpdate bool
+	obj, err := findObjectByPath(c, bktID, key)
 	if err == nil && obj != nil {
-		// Object exists, update it
+		// Object exists, this is an update
 		objID = obj.ID
+		isUpdate = true
 		// Invalidate object cache as it will be updated
 		invalidateObjectCache(bktID, objID)
 	} else {
-		// Create new object
+		// New object, create ID early
 		objID = core.NewID()
+		isUpdate = false
 	}
 
 	dataSize := int64(len(data))
 	var dataID int64
 	var objInfo *core.ObjectInfo
 
-	// Try instant upload (deduplication) before uploading data
-	// Calculate checksums and check if data already exists
-	if dataSize > 0 {
-		// Calculate checksums for instant upload
-		hdrCRC32, crc32Val, md5Val, err := calculateChecksumsForInstantUpload(data)
-		if err == nil {
-			// Create DataInfo for Ref
-			dataInfo := &core.DataInfo{
-				OrigSize: dataSize,
-				HdrCRC32: hdrCRC32,
-				CRC32:    crc32Val,
-				MD5:      md5Val,
-				Kind:     core.DATA_NORMAL, // Default: no compression/encryption
-			}
+	// Pre-calculate checksums once for both instant upload and normal upload paths
+	// This avoids redundant calculation if instant upload fails
+	// Only calculate checksums if instant upload is enabled or if we need them for DataInfo
+	var hdrCRC32 uint32
+	var crc32Val uint32
+	var md5Val int64
+	var checksumsCalculated bool
+	instantUploadEnabled := core.IsInstantUploadEnabled()
 
-			// Try instant upload
-			refIDs, err := handler.Ref(ctx, bktID, []*core.DataInfo{dataInfo})
-			if err == nil && len(refIDs) > 0 && refIDs[0] != 0 {
-				if refIDs[0] > 0 {
-					// Instant upload succeeded, use existing DataID from database
-					dataID = refIDs[0]
-				} else {
-					// Negative ID means reference to another element in current batch
-					// This should not happen in S3 PutObject (single file upload)
-					// But we handle it for completeness: skip instant upload, use normal upload
-					// The negative reference will be resolved in PutDataInfo
+	if dataSize > 0 {
+		var calcErr error
+		hdrCRC32, crc32Val, md5Val, calcErr = calculateChecksumsForInstantUpload(data)
+		if calcErr == nil {
+			checksumsCalculated = true
+
+			// Try instant upload (deduplication) before uploading data
+			// Only if instant upload is enabled via configuration
+			if instantUploadEnabled {
+				// Create DataInfo for Ref
+				dataInfo := &core.DataInfo{
+					OrigSize: dataSize,
+					HdrCRC32: hdrCRC32,
+					CRC32:    crc32Val,
+					MD5:      md5Val,
+					Kind:     core.DATA_NORMAL, // Default: no compression/encryption
+				}
+
+				// Try instant upload
+				refIDs, err := handler.Ref(ctx, bktID, []*core.DataInfo{dataInfo})
+				if err == nil && len(refIDs) > 0 && refIDs[0] != 0 {
+					if refIDs[0] > 0 {
+						// Instant upload succeeded, use existing DataID from database
+						dataID = refIDs[0]
+					} else {
+						// Negative ID means reference to another element in current batch
+						// This should not happen in S3 PutObject (single file upload)
+						// But we handle it for completeness: skip instant upload, use normal upload
+						// The negative reference will be resolved in PutDataInfo
+					}
 				}
 			}
 		}
@@ -1303,9 +1293,10 @@ func putObject(c *gin.Context) {
 	// Optimal threshold: 64KB for best overall performance
 	config := core.GetWriteBufferConfig()
 	// Use MaxBatchWriteFileSize from config (default 64KB) instead of MaxBufferSize (8MB)
+	// Only use batch write for new files (not updates) to avoid complexity
 	useBatchWrite := config.BatchWriteEnabled &&
 		dataSize <= config.MaxBatchWriteFileSize &&
-		obj == nil // Only for new files
+		!isUpdate // Only for new files, not updates
 
 	if useBatchWrite {
 		// Try to use batch writer
@@ -1407,30 +1398,48 @@ func putObject(c *gin.Context) {
 		// Only upload if instant upload failed (dataID == 0)
 		if dataID == 0 {
 			// Get chunk size from bucket configuration
-			// If GetBktInfo fails, use default chunkSize (4MB)
+			// Use cache to avoid repeated GetBktInfo queries
 			chunkSize := int64(4 * 1024 * 1024) // Default 4MB
-			bktInfo, err := handler.GetBktInfo(ctx, bktID)
-			if err == nil && bktInfo != nil && bktInfo.ChunkSize > 0 {
-				chunkSize = bktInfo.ChunkSize
+			cacheKey := fmt.Sprintf("%d", bktID)
+			if cached, ok := bucketInfoCache.Get(cacheKey); ok {
+				if bktInfo, ok := cached.(*core.BucketInfo); ok && bktInfo != nil && bktInfo.ChunkSize > 0 {
+					chunkSize = bktInfo.ChunkSize
+				}
+			} else {
+				// Cache miss, query database
+				bktInfo, err := handler.GetBktInfo(ctx, bktID)
+				if err == nil && bktInfo != nil {
+					// Cache the result
+					bucketInfoCache.Put(cacheKey, bktInfo)
+					if bktInfo.ChunkSize > 0 {
+						chunkSize = bktInfo.ChunkSize
+					}
+				}
+				// If GetBktInfo fails, continue with default chunkSize
 			}
-			// If GetBktInfo fails, continue with default chunkSize
 
 			// Upload data according to chunkSize
 			// If data size is larger than chunkSize, split into multiple chunks
 			if dataSize <= chunkSize {
 				// Data fits in one chunk, upload directly with sn=0
 				dataID, err = handler.PutData(ctx, bktID, 0, 0, data)
+				if err != nil {
+					util.S3ErrorResponse(c, http.StatusInternalServerError, "InternalError", err.Error())
+					return
+				}
 			} else {
 				// Data is larger than chunkSize, split into multiple chunks
 				dataID = core.NewID()
 				chunkCount := int((dataSize + chunkSize - 1) / chunkSize) // Ceiling division
 
+				// Pre-calculate chunk boundaries to avoid repeated calculations in loop
 				for chunkIdx := 0; chunkIdx < chunkCount; chunkIdx++ {
 					chunkStart := int64(chunkIdx) * chunkSize
 					chunkEnd := chunkStart + chunkSize
 					if chunkEnd > dataSize {
 						chunkEnd = dataSize
 					}
+					// Use slice directly without copying (data is already in memory)
 					chunkData := data[chunkStart:chunkEnd]
 
 					// Upload chunk with sn=chunkIdx (starting from 0)
@@ -1440,44 +1449,18 @@ func putObject(c *gin.Context) {
 						return
 					}
 				}
-
-				// Create DataInfo for multi-chunk file
-				// Calculate checksums from full data for instant upload
-				if dataID > 0 && dataID != core.EmptyDataID {
-					hdrCRC32, crc32Val, md5Val, calcErr := calculateChecksumsForInstantUpload(data)
-					if calcErr == nil {
-						dataInfo := &core.DataInfo{
-							ID:       dataID,
-							Size:     dataSize, // Total size of all chunks
-							OrigSize: dataSize,
-							HdrCRC32: hdrCRC32,
-							CRC32:    crc32Val,
-							MD5:      md5Val,
-							Kind:     core.DATA_NORMAL, // Default: no compression/encryption
-						}
-						_, putErr := handler.PutDataInfo(ctx, bktID, []*core.DataInfo{dataInfo})
-						if putErr != nil {
-							// Log error but don't fail the request
-							// DataInfo creation failure doesn't prevent object creation
-							_ = putErr // Suppress unused variable warning
-						}
-					}
-				}
-			}
-			if err != nil {
-				util.S3ErrorResponse(c, http.StatusInternalServerError, "InternalError", err.Error())
-				return
 			}
 
-			// Create DataInfo for single-chunk file (batch write creates DataInfo in flushPackage)
+			// Create DataInfo for uploaded file (both single and multi-chunk)
 			// This is needed for instant upload (Ref) to work correctly
-			if dataSize <= chunkSize && dataID > 0 && dataID != core.EmptyDataID {
-				// Calculate checksums for DataInfo
-				hdrCRC32, crc32Val, md5Val, calcErr := calculateChecksumsForInstantUpload(data)
-				if calcErr == nil {
+			// Reuse pre-calculated checksums to avoid redundant calculation
+			if dataID > 0 && dataID != core.EmptyDataID {
+				// Only create DataInfo if we have checksums (either pre-calculated or can calculate)
+				if checksumsCalculated {
+					// Use pre-calculated checksums - most common path
 					dataInfo := &core.DataInfo{
 						ID:       dataID,
-						Size:     dataSize, // For single chunk, size equals dataSize
+						Size:     dataSize,
 						OrigSize: dataSize,
 						HdrCRC32: hdrCRC32,
 						CRC32:    crc32Val,
@@ -1491,6 +1474,27 @@ func putObject(c *gin.Context) {
 						// Instant upload may not work for this file, but normal upload will work
 						_ = putErr // Suppress unused variable warning
 					}
+				} else if dataSize > 0 {
+					// Fallback: calculate checksums if not already calculated
+					// Only calculate if we have data (dataSize > 0)
+					calcHdrCRC32, calcCRC32Val, calcMD5Val, calcErr := calculateChecksumsForInstantUpload(data)
+					if calcErr == nil {
+						dataInfo := &core.DataInfo{
+							ID:       dataID,
+							Size:     dataSize,
+							OrigSize: dataSize,
+							HdrCRC32: calcHdrCRC32,
+							CRC32:    calcCRC32Val,
+							MD5:      calcMD5Val,
+							Kind:     core.DATA_NORMAL, // Default: no compression/encryption
+						}
+						_, putErr := handler.PutDataInfo(ctx, bktID, []*core.DataInfo{dataInfo})
+						if putErr != nil {
+							_ = putErr // Suppress unused variable warning
+						}
+					}
+					// If checksum calculation fails, skip DataInfo creation
+					// This won't prevent object creation, but instant upload won't work
 				}
 			}
 		}
@@ -1511,13 +1515,11 @@ func putObject(c *gin.Context) {
 			util.S3ErrorResponse(c, http.StatusInternalServerError, "InternalError", err.Error())
 			return
 		}
-		// Update object cache
-		objectCache.Put(formatObjectCacheKey(bktID, objID), objInfo)
 	}
 
-	// Update directory listing cache with new/updated object
+	// Update caches with new/updated object
 	if objInfo != nil {
-		// Update object cache
+		// Update object cache (only once, avoid duplicate)
 		objectCache.Put(formatObjectCacheKey(bktID, objID), objInfo)
 
 		// Update directory listing cache
@@ -1526,19 +1528,16 @@ func putObject(c *gin.Context) {
 		// we invalidate and let next query refresh from database
 		invalidateDirListCache(bktID, pid)
 
-		// Also invalidate path cache to ensure consistency
+		// Invalidate path caches to ensure consistency
+		// Invalidate the object's path cache
 		invalidatePathCache(bktID, key)
+		// Also invalidate parent path cache if not root
+		if parentPath != "." && parentPath != "/" && parentPath != "" {
+			invalidatePathCache(bktID, parentPath)
+		}
 	}
 
-	// Invalidate path cache
-	invalidatePathCache(bktID, key)
-	// Also invalidate parent path cache
-	parentPath = filepath.Dir(key)
-	if parentPath != "." && parentPath != "/" {
-		invalidatePathCache(bktID, parentPath)
-	}
-
-	c.Header("ETag", fmt.Sprintf(`"%x"`, dataID))
+	c.Header("ETag", util.FormatETag(dataID))
 	c.Status(http.StatusOK)
 }
 
@@ -1546,7 +1545,7 @@ func putObject(c *gin.Context) {
 func deleteObject(c *gin.Context) {
 	bucketName := c.Param("bucket")
 	key := c.Param("key")
-	key = strings.TrimPrefix(key, "/")
+	key = util.FastTrimPrefix(key, "/")
 
 	if bucketName == "" || key == "" {
 		util.S3ErrorResponse(c, http.StatusBadRequest, "InvalidRequest", "Bucket name and key are required")
@@ -1572,7 +1571,7 @@ func deleteObject(c *gin.Context) {
 	}
 
 	// Update directory listing cache by removing deleted object
-	parentPath := filepath.Dir(key)
+	parentPath := util.FastDir(key)
 	if parentPath != "." && parentPath != "/" {
 		parentObj, err := findObjectByPath(c, bktID, parentPath)
 		if err == nil && parentObj != nil {
@@ -1626,7 +1625,7 @@ func deleteObject(c *gin.Context) {
 func copyObject(c *gin.Context) {
 	bucketName := c.Param("bucket")
 	destKey := c.Param("key")
-	destKey = strings.TrimPrefix(destKey, "/")
+	destKey = util.FastTrimPrefix(destKey, "/")
 
 	if bucketName == "" || destKey == "" {
 		util.S3ErrorResponse(c, http.StatusBadRequest, "InvalidRequest", "Bucket name and destination key are required")
@@ -1641,7 +1640,7 @@ func copyObject(c *gin.Context) {
 	}
 
 	// Parse source: /bucket/key or bucket/key
-	source = strings.TrimPrefix(source, "/")
+	source = util.FastTrimPrefix(source, "/")
 	parts := strings.SplitN(source, "/", 2)
 	if len(parts) != 2 {
 		util.S3ErrorResponse(c, http.StatusBadRequest, "InvalidRequest", "Invalid x-amz-copy-source format")
@@ -1701,7 +1700,7 @@ func copyObject(c *gin.Context) {
 	}
 
 	// Ensure parent directory exists for destination
-	parentPath := filepath.Dir(destKey)
+	parentPath := util.FastDir(destKey)
 	var pid int64 = 0
 	if parentPath != "." && parentPath != "/" {
 		pid, err = ensurePath(c, destBktID, parentPath)
@@ -1712,7 +1711,7 @@ func copyObject(c *gin.Context) {
 	}
 
 	// Check if destination object exists
-	fileName := filepath.Base(destKey)
+	fileName := util.FastBase(destKey)
 	destObj, err := findObjectByPath(c, destBktID, destKey)
 	var destObjID int64
 	if err == nil && destObj != nil {
@@ -1736,7 +1735,8 @@ func copyObject(c *gin.Context) {
 
 	// Try instant upload (deduplication) before uploading data
 	// Calculate checksums and check if data already exists in destination bucket
-	if dataSize > 0 {
+	// Only if instant upload is enabled via configuration
+	if dataSize > 0 && core.IsInstantUploadEnabled() {
 		// Calculate checksums for instant upload
 		hdrCRC32, crc32Val, md5Val, err := calculateChecksumsForInstantUpload(sourceData)
 		if err == nil {
@@ -1831,7 +1831,7 @@ func copyObject(c *gin.Context) {
 	}
 
 	result := CopyObjectResult{
-		ETag:         fmt.Sprintf(`"%x"`, dataID),
+		ETag:         util.FormatETag(dataID),
 		LastModified: time.Now().UTC().Format(time.RFC3339),
 	}
 
@@ -1843,7 +1843,7 @@ func copyObject(c *gin.Context) {
 func moveObject(c *gin.Context) {
 	bucketName := c.Param("bucket")
 	destKey := c.Param("key")
-	destKey = strings.TrimPrefix(destKey, "/")
+	destKey = util.FastTrimPrefix(destKey, "/")
 
 	if bucketName == "" || destKey == "" {
 		util.S3ErrorResponse(c, http.StatusBadRequest, "InvalidRequest", "Bucket name and destination key are required")
@@ -1858,7 +1858,7 @@ func moveObject(c *gin.Context) {
 	}
 
 	// Parse source: /bucket/key or bucket/key
-	source = strings.TrimPrefix(source, "/")
+	source = util.FastTrimPrefix(source, "/")
 	parts := strings.SplitN(source, "/", 2)
 	if len(parts) != 2 {
 		util.S3ErrorResponse(c, http.StatusBadRequest, "InvalidRequest", "Invalid x-amz-move-source format")
@@ -1891,7 +1891,7 @@ func moveObject(c *gin.Context) {
 	}
 
 	// Ensure parent directory exists for destination
-	parentPath := filepath.Dir(destKey)
+	parentPath := util.FastDir(destKey)
 	var pid int64 = 0
 	if parentPath != "." && parentPath != "/" {
 		pid, err = ensurePath(c, destBktID, parentPath)
@@ -1902,7 +1902,7 @@ func moveObject(c *gin.Context) {
 	}
 
 	// Check if destination object exists
-	fileName := filepath.Base(destKey)
+	fileName := util.FastBase(destKey)
 	destObj, err := findObjectByPath(c, destBktID, destKey)
 	var destObjID int64
 	if err == nil && destObj != nil {
@@ -1968,7 +1968,8 @@ func moveObject(c *gin.Context) {
 
 		// Try instant upload (deduplication) before uploading data
 		// Calculate checksums and check if data already exists in destination bucket
-		if dataSize > 0 {
+		// Only if instant upload is enabled via configuration
+		if dataSize > 0 && core.IsInstantUploadEnabled() {
 			// Calculate checksums for instant upload
 			hdrCRC32, crc32Val, md5Val, err := calculateChecksumsForInstantUpload(sourceData)
 			if err == nil {
@@ -2060,7 +2061,7 @@ func moveObject(c *gin.Context) {
 		invalidatePathCache(destBktID, parentPath)
 	}
 	// Invalidate source directory cache
-	sourceParentPath := filepath.Dir(sourceKey)
+	sourceParentPath := util.FastDir(sourceKey)
 	if sourceParentPath != "." && sourceParentPath != "/" {
 		sourceParentObj, err := findObjectByPath(c, sourceBktID, sourceParentPath)
 		if err == nil && sourceParentObj != nil {
@@ -2070,7 +2071,7 @@ func moveObject(c *gin.Context) {
 		invalidateDirListCache(sourceBktID, 0)
 	}
 
-	c.Header("ETag", fmt.Sprintf(`"%x"`, destObjID))
+	c.Header("ETag", util.FormatETag(destObjID))
 	c.Status(http.StatusOK)
 }
 
@@ -2078,7 +2079,7 @@ func moveObject(c *gin.Context) {
 func headObject(c *gin.Context) {
 	bucketName := c.Param("bucket")
 	key := c.Param("key")
-	key = strings.TrimPrefix(key, "/")
+	key = util.FastTrimPrefix(key, "/")
 
 	if bucketName == "" || key == "" {
 		c.Status(http.StatusBadRequest)
@@ -2102,11 +2103,8 @@ func headObject(c *gin.Context) {
 		return
 	}
 
-	c.Header("Content-Type", "application/octet-stream")
-	c.Header("Content-Length", strconv.FormatInt(obj.Size, 10))
-	c.Header("ETag", fmt.Sprintf(`"%x"`, obj.DataID))
-	c.Header("Last-Modified", time.Unix(obj.MTime, 0).UTC().Format(time.RFC1123))
-	c.Header("Accept-Ranges", "bytes")
+	// Set response headers (optimized: batch header setting)
+	util.SetObjectHeadersWithContentType(c, "application/octet-stream", obj.Size, obj.DataID, obj.MTime, "bytes")
 	c.Status(http.StatusOK)
 }
 
@@ -2119,7 +2117,7 @@ func formatMultipartUploadKey(bktID int64, uploadID string) string {
 func initiateMultipartUpload(c *gin.Context) {
 	bucketName := c.Param("bucket")
 	key := c.Param("key")
-	key = strings.TrimPrefix(key, "/")
+	key = util.FastTrimPrefix(key, "/")
 
 	if bucketName == "" || key == "" {
 		util.S3ErrorResponse(c, http.StatusBadRequest, "InvalidRequest", "Bucket name and key are required")
@@ -2188,7 +2186,7 @@ func initiateMultipartUpload(c *gin.Context) {
 func uploadPart(c *gin.Context) {
 	bucketName := c.Param("bucket")
 	key := c.Param("key")
-	key = strings.TrimPrefix(key, "/")
+	key = util.FastTrimPrefix(key, "/")
 
 	if bucketName == "" || key == "" {
 		util.S3ErrorResponse(c, http.StatusBadRequest, "InvalidRequest", "Bucket name and key are required")
@@ -2322,7 +2320,7 @@ func uploadPart(c *gin.Context) {
 func completeMultipartUpload(c *gin.Context) {
 	bucketName := c.Param("bucket")
 	key := c.Param("key")
-	key = strings.TrimPrefix(key, "/")
+	key = util.FastTrimPrefix(key, "/")
 
 	if bucketName == "" || key == "" {
 		util.S3ErrorResponse(c, http.StatusBadRequest, "InvalidRequest", "Bucket name and key are required")
@@ -2450,7 +2448,7 @@ func completeMultipartUpload(c *gin.Context) {
 	}
 
 	// Ensure parent directory exists
-	parentPath := filepath.Dir(key)
+	parentPath := util.FastDir(key)
 	var pid int64 = 0
 	if parentPath != "." && parentPath != "/" {
 		pid, err = ensurePath(c, bktID, parentPath)
@@ -2461,7 +2459,7 @@ func completeMultipartUpload(c *gin.Context) {
 	}
 
 	// Create final object
-	fileName := filepath.Base(key)
+	fileName := util.FastBase(key)
 	objID := core.NewID()
 
 	// Upload concatenated data according to chunkSize
@@ -2561,7 +2559,7 @@ func completeMultipartUpload(c *gin.Context) {
 func abortMultipartUpload(c *gin.Context) {
 	bucketName := c.Param("bucket")
 	key := c.Param("key")
-	key = strings.TrimPrefix(key, "/")
+	key = util.FastTrimPrefix(key, "/")
 
 	if bucketName == "" || key == "" {
 		util.S3ErrorResponse(c, http.StatusBadRequest, "InvalidRequest", "Bucket name and key are required")
@@ -2721,7 +2719,7 @@ func listMultipartUploads(c *gin.Context) {
 func listParts(c *gin.Context) {
 	bucketName := c.Param("bucket")
 	key := c.Param("key")
-	key = strings.TrimPrefix(key, "/")
+	key = util.FastTrimPrefix(key, "/")
 
 	if bucketName == "" || key == "" {
 		util.S3ErrorResponse(c, http.StatusBadRequest, "InvalidRequest", "Bucket name and key are required")

@@ -13,22 +13,24 @@ import (
 )
 
 // ORCAS_BASE=/tmp/test ORCAS_DATA=/tmp/test ORCAS_SECRET=xxxxxxxx go test . -run=TestUpload -v
-var mntPath = "/tmp/test/"
-var path = "/home/semaphore/go/"
-var cfg = Config{
-	UserName: "orcas",
-	Password: "orcas",
-	DataSync: true,
-	RefLevel: FULL,
-	EndecWay: core.DATA_ENDEC_AES256,
-	EndecKey: "1234567890abcdef12345678",
-	WiseCmpr: core.DATA_CMPR_GZIP,
-	CmprQlty: 5,
-	DontSync: ".*",
-}
+var (
+	mntPath = "/tmp/test/"
+	path    = "/home/semaphore/go/"
+	cfg     = Config{
+		UserName: "orcas",
+		Password: "orcas",
+		DataSync: true,
+		RefLevel: FULL,
+		EndecWay: core.DATA_ENDEC_AES256,
+		EndecKey: "1234567890abcdef12345678",
+		WiseCmpr: core.DATA_CMPR_GZIP,
+		CmprQlty: 5,
+		DontSync: ".*",
+	}
+)
 
 func init() {
-	core.InitDB()
+	core.InitDB("")
 
 	sdk := New(core.NewLocalHandler())
 	defer sdk.Close()

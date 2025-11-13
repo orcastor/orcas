@@ -59,7 +59,7 @@ func setupTestEnvironmentForListObjects(t *testing.T) (int64, *gin.Engine) {
 		core.ORCAS_DATA = tmpDir
 	}
 
-	core.InitDB()
+	core.InitDB("")
 	ensureTestUserForListObjects(t)
 
 	// Create test bucket

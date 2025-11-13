@@ -54,7 +54,7 @@ func setupTestEnvironmentForBatchWrite(t *testing.T, batchWriteEnabled bool) (in
 		core.ORCAS_DATA = tmpDir
 	}
 
-	core.InitDB()
+	core.InitDB("")
 	ensureTestUserForBatchWrite(t)
 
 	// 创建测试bucket
@@ -373,7 +373,7 @@ func generateBatchWritePerformanceReport(t *testing.T, results []BatchWritePerfo
 
 	// 写入报告文件
 	reportFile := "BATCH_WRITE_PERFORMANCE_REPORT.md"
-	if err := os.WriteFile(reportFile, []byte(report), 0644); err != nil {
+	if err := os.WriteFile(reportFile, []byte(report), 0o644); err != nil {
 		t.Logf("Failed to write report: %v", err)
 	} else {
 		t.Logf("Performance report written to %s", reportFile)

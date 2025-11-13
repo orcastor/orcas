@@ -30,7 +30,6 @@ var (
     clock, p, n = time.Now().UnixNano(), uint16(0), uint16(1)
 )
 
-func now() int64 { return atomic.LoadInt64(&clock) }
 func init() {
     go func() { // internal counter that reduce GC caused by `time.Now()`
         for {

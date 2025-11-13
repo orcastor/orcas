@@ -37,7 +37,6 @@ func TestRandomWriteRedundancy(t *testing.T) {
 	// Create context with user info (bypass login)
 	ctx := core.UserInfo2Ctx(context.TODO(), &core.UserInfo{
 		ID:   testUID,
-		Key:  "",
 		Role: core.USER,
 	})
 
