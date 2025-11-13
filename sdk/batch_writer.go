@@ -386,19 +386,13 @@ func (bwm *BatchWriter) flushPackage(ctx context.Context, fileInfos []*PackagedF
 		objectInfos = append(objectInfos, objectInfo)
 	}
 
-	// 4. Batch write DataInfo
-	if len(dataInfos) > 0 {
-		_, err = bwm.handler.PutDataInfo(ctx, bwm.bktID, dataInfos)
+	// 4. Batch write DataInfo and ObjectInfo together in a single transaction
+	// Optimization: Use PutDataInfoAndObj to reduce database round trips
+	if len(dataInfos) > 0 || len(objectInfos) > 0 {
+		// Both DataInfo and ObjectInfo exist, use combined write
+		err = bwm.handler.PutDataInfoAndObj(ctx, bwm.bktID, dataInfos, objectInfos)
 		if err != nil {
-			return fmt.Errorf("failed to write data infos: %v", err)
-		}
-	}
-
-	// 5. Batch write ObjectInfo
-	if len(objectInfos) > 0 {
-		_, err = bwm.handler.Put(ctx, bwm.bktID, objectInfos)
-		if err != nil {
-			return fmt.Errorf("failed to write object infos: %v", err)
+			return fmt.Errorf("failed to write data and object infos: %v", err)
 		}
 	}
 

@@ -31,6 +31,7 @@ type BucketInfo struct {
 	CmprQlty     uint32 `borm:"cmpr_qlty" json:"cq,omitempty"`     // Compression quality
 	EndecWay     uint32 `borm:"endec_way" json:"ew,omitempty"`     // Encryption method (DATA_ENDEC_MASK)
 	EndecKey     string `borm:"endec_key" json:"ek,omitempty"`     // Encryption key
+	RefLevel     uint32 `borm:"ref_level" json:"rl,omitempty"`     // Instant upload level: 0=OFF, 1=FULL, 2=FAST
 	// SnapshotID int64 // Latest snapshot version ID
 }
 
@@ -188,6 +189,9 @@ type DataMetadataAdapter interface {
 	RefData(c Ctx, bktID int64, d []*DataInfo) ([]int64, error)
 	PutData(c Ctx, bktID int64, d []*DataInfo) error
 	GetData(c Ctx, bktID, id int64) (*DataInfo, error)
+	// PutDataAndObj writes both DataInfo and ObjectInfo in a single transaction
+	// This optimization reduces database round trips
+	PutDataAndObj(c Ctx, bktID int64, d []*DataInfo, o []*ObjectInfo) error
 	ListAllData(c Ctx, bktID int64, offset, limit int) ([]*DataInfo, int64, error) // offset: offset, limit: page size, returns data and total count
 	// Find duplicate data: returns DataID groups with same checksums (OrigSize, HdrCRC32, CRC32, MD5 all same)
 	FindDuplicateData(c Ctx, bktID int64, offset, limit int) ([]DuplicateGroup, int64, error) // Returns duplicate data groups and total count
@@ -512,11 +516,20 @@ func InitDB(key ...string) error {
 		dbKey = key[0]
 	}
 
-	db, err := GetDBWithKey(dbKey)
+	// Initialize connection pool if not already initialized
+	InitDBPool(10, 5, 5, 0)
+
+	// For initialization, use write connection
+	db, err := GetWriteDB()
 	if err != nil {
-		return ERR_OPEN_DB
+		// Fallback to old method if pool not available
+		db, err = GetDBWithKey(dbKey)
+		if err != nil {
+			return ERR_OPEN_DB
+		}
+		defer db.Close()
 	}
-	defer db.Close()
+	// Note: If using pool, don't close the connection
 
 	db.Exec(`CREATE TABLE IF NOT EXISTS bkt (id BIGINT PRIMARY KEY NOT NULL,
 		uid BIGINT NOT NULL,
@@ -529,6 +542,7 @@ func InitDB(key ...string) error {
 		name TEXT NOT NULL,
 		chunk_size BIGINT NOT NULL DEFAULT 0,
 		key TEXT NOT NULL DEFAULT '',
+		ref_level INTEGER NOT NULL DEFAULT 0,
 		cmpr_way INTEGER NOT NULL DEFAULT 0,
 		wise_cmpr INTEGER NOT NULL DEFAULT 0,
 		cmpr_qlty INTEGER NOT NULL DEFAULT 0,
@@ -596,11 +610,20 @@ func initDefaultAdmin(db *sql.DB) {
 }
 
 func InitBucketDB(c Ctx, bktID int64) error {
-	db, err := GetDB(c, bktID)
+	// Initialize connection pool if not already initialized
+	InitDBPool(10, 5, 5, 0)
+
+	// For initialization, use write connection
+	db, err := GetWriteDB(c, bktID)
 	if err != nil {
-		return fmt.Errorf("%w: %v", ERR_OPEN_DB, err)
+		// Fallback to old method if pool not available
+		db, err = GetDB(c, bktID)
+		if err != nil {
+			return fmt.Errorf("%w: %v", ERR_OPEN_DB, err)
+		}
+		defer db.Close()
 	}
-	defer db.Close()
+	// Note: If using pool, don't close the connection
 
 	_, err = db.Exec(`CREATE TABLE IF NOT EXISTS obj (id BIGINT PRIMARY KEY NOT NULL,
 		pid BIGINT NOT NULL,
@@ -651,11 +674,13 @@ func (dma *DefaultMetadataAdapter) Close() {
 }
 
 func (dma *DefaultMetadataAdapter) RefData(c Ctx, bktID int64, d []*DataInfo) ([]int64, error) {
-	db, err := GetDB(c, bktID)
+	// Use write connection because we need to create temporary table
+	// Temporary tables require write access
+	db, err := GetWriteDB(c, bktID)
 	if err != nil {
 		return nil, ERR_OPEN_DB
 	}
-	defer db.Close()
+	// Note: Don't close the connection, it's from the pool
 
 	tbl := fmt.Sprintf("tmp_%x", time.Now().UnixNano())
 	// 创建临时表
@@ -727,11 +752,12 @@ func (dma *DefaultMetadataAdapter) RefData(c Ctx, bktID int64, d []*DataInfo) ([
 }
 
 func (dma *DefaultMetadataAdapter) PutData(c Ctx, bktID int64, d []*DataInfo) error {
-	db, err := GetDB(c, bktID)
+	// Use write connection for data insertion
+	db, err := GetWriteDB(c, bktID)
 	if err != nil {
 		return ERR_OPEN_DB
 	}
-	defer db.Close()
+	// Note: Don't close the connection, it's from the pool
 
 	if _, err = b.TableContext(c, db, DATA_TBL).ReplaceInto(&d); err != nil {
 		return ERR_EXEC_DB
@@ -740,11 +766,12 @@ func (dma *DefaultMetadataAdapter) PutData(c Ctx, bktID int64, d []*DataInfo) er
 }
 
 func (dma *DefaultMetadataAdapter) GetData(c Ctx, bktID, id int64) (d *DataInfo, err error) {
-	db, err := GetDB(c, bktID)
+	// Use read connection for data retrieval
+	db, err := GetReadDB(c, bktID)
 	if err != nil {
 		return nil, ERR_OPEN_DB
 	}
-	defer db.Close()
+	// Note: Don't close the connection, it's from the pool
 
 	d = &DataInfo{}
 	if _, err = b.TableContext(c, db, DATA_TBL).Select(d, b.Where(b.Eq("id", id))); err != nil {
@@ -754,11 +781,12 @@ func (dma *DefaultMetadataAdapter) GetData(c Ctx, bktID, id int64) (d *DataInfo,
 }
 
 func (dma *DefaultMetadataAdapter) ListAllData(c Ctx, bktID int64, offset, limit int) (d []*DataInfo, total int64, err error) {
-	db, err := GetDB(c, bktID)
+	// Use read connection for listing data
+	db, err := GetReadDB(c, bktID)
 	if err != nil {
 		return nil, 0, ERR_OPEN_DB
 	}
-	defer db.Close()
+	// Note: Don't close the connection, it's from the pool
 
 	// Get total count
 	if _, err = b.TableContext(c, db, DATA_TBL).Select(&total, b.Fields("count(1)")); err != nil {
@@ -783,11 +811,12 @@ func (dma *DefaultMetadataAdapter) ListAllData(c Ctx, bktID int64, offset, limit
 }
 
 func (dma *DefaultMetadataAdapter) FindDuplicateData(c Ctx, bktID int64, offset, limit int) (groups []DuplicateGroup, total int64, err error) {
-	db, err := GetDB(c, bktID)
+	// Use read connection for duplicate data search
+	db, err := GetReadDB(c, bktID)
 	if err != nil {
 		return nil, 0, ERR_OPEN_DB
 	}
-	defer db.Close()
+	// Note: Don't close the connection, it's from the pool
 
 	// 定义结构体来接收GROUP BY的结果
 	type duplicateGroupResult struct {
@@ -871,11 +900,12 @@ func (dma *DefaultMetadataAdapter) FindDuplicateData(c Ctx, bktID int64, offset,
 }
 
 func (dma *DefaultMetadataAdapter) UpdateObjDataID(c Ctx, bktID int64, oldDataID, newDataID int64) error {
-	db, err := GetDB(c, bktID)
+	// Use write connection for update operation
+	db, err := GetWriteDB(c, bktID)
 	if err != nil {
 		return ERR_OPEN_DB
 	}
-	defer db.Close()
+	// Note: Don't close the connection, it's from the pool
 
 	// 更新所有引用oldDataID的对象，将其DataID改为newDataID
 	// 使用borm进行批量更新
@@ -894,11 +924,12 @@ func (dma *DefaultMetadataAdapter) DeleteData(c Ctx, bktID int64, dataIDs []int6
 	if len(dataIDs) == 0 {
 		return nil
 	}
-	db, err := GetDB(c, bktID)
+	// Use write connection for delete operation
+	db, err := GetWriteDB(c, bktID)
 	if err != nil {
 		return ERR_OPEN_DB
 	}
-	defer db.Close()
+	// Note: Don't close the connection, it's from the pool
 
 	// 批量删除数据元信息
 	_, err = b.TableContext(c, db, DATA_TBL).Delete(b.Where(b.In("id", dataIDs)))
@@ -909,11 +940,12 @@ func (dma *DefaultMetadataAdapter) DeleteData(c Ctx, bktID int64, dataIDs []int6
 }
 
 func (dma *DefaultMetadataAdapter) FindSmallPackageData(c Ctx, bktID int64, maxSize int64, offset, limit int) (d []*DataInfo, total int64, err error) {
-	db, err := GetDB(c, bktID)
+	// Use read connection for query operation
+	db, err := GetReadDB(c, bktID)
 	if err != nil {
 		return nil, 0, ERR_OPEN_DB
 	}
-	defer db.Close()
+	// Note: Don't close the connection, it's from the pool
 
 	// Find small file data: pkg_id=0 (not packaged), o_size < maxSize
 	// Get total count using borm
@@ -950,11 +982,12 @@ func (dma *DefaultMetadataAdapter) FindSmallPackageData(c Ctx, bktID int64, maxS
 }
 
 func (dma *DefaultMetadataAdapter) PutObj(c Ctx, bktID int64, o []*ObjectInfo) (ids []int64, err error) {
-	db, err := GetDB(c, bktID)
+	// Use write connection for object insertion
+	db, err := GetWriteDB(c, bktID)
 	if err != nil {
 		return nil, ERR_OPEN_DB
 	}
-	defer db.Close()
+	// Note: Don't close the connection, it's from the pool
 
 	for _, x := range o {
 		ids = append(ids, x.ID)
@@ -984,12 +1017,52 @@ func (dma *DefaultMetadataAdapter) PutObj(c Ctx, bktID int64, o []*ObjectInfo) (
 	return
 }
 
+// PutDataAndObj writes both DataInfo and ObjectInfo in a single transaction
+// This optimization reduces database round trips by combining two separate writes
+func (dma *DefaultMetadataAdapter) PutDataAndObj(c Ctx, bktID int64, d []*DataInfo, o []*ObjectInfo) error {
+	// Use write connection for combined write operation
+	db, err := GetWriteDB(c, bktID)
+	if err != nil {
+		return ERR_OPEN_DB
+	}
+	// Note: Don't close the connection, it's from the pool
+
+	// Use transaction to ensure atomicity
+	tx, err := db.Begin()
+	if err != nil {
+		return ERR_EXEC_DB
+	}
+	defer tx.Rollback()
+
+	// Write DataInfo first
+	if len(d) > 0 {
+		if _, err = b.TableContext(c, tx, DATA_TBL).ReplaceInto(&d); err != nil {
+			return ERR_EXEC_DB
+		}
+	}
+
+	// Write ObjectInfo
+	if len(o) > 0 {
+		if _, err = b.TableContext(c, tx, OBJ_TBL).InsertIgnore(&o); err != nil {
+			return ERR_EXEC_DB
+		}
+	}
+
+	// Commit transaction
+	if err = tx.Commit(); err != nil {
+		return ERR_EXEC_DB
+	}
+
+	return nil
+}
+
 func (dma *DefaultMetadataAdapter) GetObj(c Ctx, bktID int64, ids []int64) (o []*ObjectInfo, err error) {
-	db, err := GetDB(c, bktID)
+	// Use read connection for object retrieval
+	db, err := GetReadDB(c, bktID)
 	if err != nil {
 		return nil, ERR_OPEN_DB
 	}
-	defer db.Close()
+	// Note: Don't close the connection, it's from the pool
 
 	if _, err = b.TableContext(c, db, OBJ_TBL).Select(&o, b.Where(b.In("id", ids))); err != nil {
 		return nil, ERR_QUERY_DB
@@ -998,11 +1071,12 @@ func (dma *DefaultMetadataAdapter) GetObj(c Ctx, bktID int64, ids []int64) (o []
 }
 
 func (dma *DefaultMetadataAdapter) SetObj(c Ctx, bktID int64, fields []string, o *ObjectInfo) error {
-	db, err := GetDB(c, bktID)
+	// Use write connection for update operation
+	db, err := GetWriteDB(c, bktID)
 	if err != nil {
 		return ERR_OPEN_DB
 	}
-	defer db.Close()
+	// Note: Don't close the connection, it's from the pool
 
 	if _, err = b.TableContext(c, db, OBJ_TBL).Update(o, b.Fields(fields...), b.Where(b.Eq("id", o.ID))); err != nil {
 		// 如果存在同名文件，会报错：Error: stepping, UNIQUE constraint failed: obj.name (19)
@@ -1078,11 +1152,12 @@ func (dma *DefaultMetadataAdapter) ListObj(c Ctx, bktID, pid int64,
 		}
 	}
 
-	db, err := GetDB(c, bktID)
+	// Use read connection for listing objects
+	db, err := GetReadDB(c, bktID)
 	if err != nil {
 		return nil, 0, "", ERR_OPEN_DB
 	}
-	defer db.Close()
+	// Note: Don't close the connection, it's from the pool
 
 	if _, err = b.TableContext(c, db, OBJ_TBL).Select(&cnt,
 		b.Fields("count(1)"),
@@ -1108,11 +1183,12 @@ func (dma *DefaultMetadataAdapter) ListObj(c Ctx, bktID, pid int64,
 }
 
 func (dma *DefaultMetadataAdapter) PutUsr(c Ctx, u *UserInfo) error {
-	db, err := GetDB()
+	// Use write connection for user creation/update
+	db, err := GetWriteDB()
 	if err != nil {
 		return ERR_OPEN_DB
 	}
-	defer db.Close()
+	// Note: Don't close the connection, it's from the pool
 
 	if _, err = b.TableContext(c, db, USR_TBL).ReplaceInto(&u); err != nil {
 		return ERR_EXEC_DB
@@ -1121,11 +1197,12 @@ func (dma *DefaultMetadataAdapter) PutUsr(c Ctx, u *UserInfo) error {
 }
 
 func (dma *DefaultMetadataAdapter) GetUsr(c Ctx, ids []int64) (o []*UserInfo, err error) {
-	db, err := GetDB()
+	// Use read connection for user retrieval
+	db, err := GetReadDB()
 	if err != nil {
 		return nil, ERR_OPEN_DB
 	}
-	defer db.Close()
+	// Note: Don't close the connection, it's from the pool
 
 	if _, err = b.TableContext(c, db, USR_TBL).Select(&o, b.Where(b.In("id", ids))); err != nil {
 		return nil, ERR_QUERY_DB
@@ -1134,11 +1211,12 @@ func (dma *DefaultMetadataAdapter) GetUsr(c Ctx, ids []int64) (o []*UserInfo, er
 }
 
 func (dma *DefaultMetadataAdapter) GetUsr2(c Ctx, usr string) (o *UserInfo, err error) {
-	db, err := GetDB()
+	// Use read connection for user lookup
+	db, err := GetReadDB()
 	if err != nil {
 		return nil, ERR_OPEN_DB
 	}
-	defer db.Close()
+	// Note: Don't close the connection, it's from the pool
 
 	o = &UserInfo{}
 	if _, err = b.TableContext(c, db, USR_TBL).Select(o, b.Where(b.Eq("usr", usr))); err != nil {
@@ -1148,11 +1226,12 @@ func (dma *DefaultMetadataAdapter) GetUsr2(c Ctx, usr string) (o *UserInfo, err 
 }
 
 func (dma *DefaultMetadataAdapter) SetUsr(c Ctx, fields []string, u *UserInfo) error {
-	db, err := GetDB()
+	// Use write connection for user update
+	db, err := GetWriteDB()
 	if err != nil {
 		return ERR_OPEN_DB
 	}
-	defer db.Close()
+	// Note: Don't close the connection, it's from the pool
 
 	if _, err = b.TableContext(c, db, USR_TBL).Update(&u,
 		b.Fields(fields...), b.Where(b.Eq("id", u.ID))); err != nil {
@@ -1162,11 +1241,12 @@ func (dma *DefaultMetadataAdapter) SetUsr(c Ctx, fields []string, u *UserInfo) e
 }
 
 func (dma *DefaultMetadataAdapter) ListUsers(c Ctx) (o []*UserInfo, err error) {
-	db, err := GetDB()
+	// Use read connection for listing users
+	db, err := GetReadDB()
 	if err != nil {
 		return nil, ERR_OPEN_DB
 	}
-	defer db.Close()
+	// Note: Don't close the connection, it's from the pool
 
 	// Use borm to query all users
 	if _, err = b.TableContext(c, db, USR_TBL).Select(&o); err != nil {
@@ -1181,11 +1261,12 @@ func (dma *DefaultMetadataAdapter) ListUsers(c Ctx) (o []*UserInfo, err error) {
 }
 
 func (dma *DefaultMetadataAdapter) DeleteUser(c Ctx, userID int64) error {
-	db, err := GetDB()
+	// Use write connection for user deletion
+	db, err := GetWriteDB()
 	if err != nil {
 		return ERR_OPEN_DB
 	}
-	defer db.Close()
+	// Note: Don't close the connection, it's from the pool
 
 	if _, err = b.TableContext(c, db, USR_TBL).Delete(b.Where(b.Eq("id", userID))); err != nil {
 		return ERR_EXEC_DB
@@ -1194,11 +1275,12 @@ func (dma *DefaultMetadataAdapter) DeleteUser(c Ctx, userID int64) error {
 }
 
 func (dma *DefaultMetadataAdapter) PutBkt(c Ctx, o []*BucketInfo) error {
-	db, err := GetDB()
+	// Use write connection for bucket creation/update
+	db, err := GetWriteDB()
 	if err != nil {
 		return ERR_OPEN_DB
 	}
-	defer db.Close()
+	// Note: Don't close the connection, it's from the pool
 
 	// 同步CmprWay和WiseCmpr：如果CmprWay有值，同步到WiseCmpr；如果WiseCmpr有值，同步到CmprWay
 	for _, bucket := range o {
@@ -1221,11 +1303,12 @@ func (dma *DefaultMetadataAdapter) PutBkt(c Ctx, o []*BucketInfo) error {
 }
 
 func (dma *DefaultMetadataAdapter) GetBkt(c Ctx, ids []int64) (o []*BucketInfo, err error) {
-	db, err := GetDB()
+	// Use read connection for bucket retrieval
+	db, err := GetReadDB()
 	if err != nil {
 		return nil, ERR_OPEN_DB
 	}
-	defer db.Close()
+	// Note: Don't close the connection, it's from the pool
 
 	if _, err = b.TableContext(c, db, BKT_TBL).Select(&o, b.Where(b.In("id", ids))); err != nil {
 		return nil, ERR_QUERY_DB
@@ -1234,11 +1317,12 @@ func (dma *DefaultMetadataAdapter) GetBkt(c Ctx, ids []int64) (o []*BucketInfo, 
 }
 
 func (dma *DefaultMetadataAdapter) ListBkt(c Ctx, uid int64) (o []*BucketInfo, err error) {
-	db, err := GetDB()
+	// Use read connection for bucket listing
+	db, err := GetReadDB()
 	if err != nil {
 		return nil, ERR_OPEN_DB
 	}
-	defer db.Close()
+	// Note: Don't close the connection, it's from the pool
 
 	if _, err = b.TableContext(c, db, BKT_TBL).Select(&o, b.Where(b.Eq("uid", uid))); err != nil {
 		return nil, ERR_QUERY_DB
@@ -1247,11 +1331,12 @@ func (dma *DefaultMetadataAdapter) ListBkt(c Ctx, uid int64) (o []*BucketInfo, e
 }
 
 func (dma *DefaultMetadataAdapter) ListAllBuckets(c Ctx) (o []*BucketInfo, err error) {
-	db, err := GetDB()
+	// Use read connection for listing all buckets
+	db, err := GetReadDB()
 	if err != nil {
 		return nil, ERR_OPEN_DB
 	}
-	defer db.Close()
+	// Note: Don't close the connection, it's from the pool
 
 	if _, err = b.TableContext(c, db, BKT_TBL).Select(&o); err != nil {
 		return nil, ERR_QUERY_DB
@@ -1260,11 +1345,12 @@ func (dma *DefaultMetadataAdapter) ListAllBuckets(c Ctx) (o []*BucketInfo, err e
 }
 
 func (dma *DefaultMetadataAdapter) DeleteBkt(c Ctx, bktID int64) error {
-	db, err := GetDB()
+	// Use write connection for bucket deletion
+	db, err := GetWriteDB()
 	if err != nil {
 		return ERR_OPEN_DB
 	}
-	defer db.Close()
+	// Note: Don't close the connection, it's from the pool
 
 	if _, err = b.TableContext(c, db, BKT_TBL).Delete(b.Where(b.Eq("id", bktID))); err != nil {
 		return ERR_EXEC_DB
@@ -1273,11 +1359,12 @@ func (dma *DefaultMetadataAdapter) DeleteBkt(c Ctx, bktID int64) error {
 }
 
 func (dma *DefaultMetadataAdapter) UpdateBktQuota(c Ctx, bktID int64, quota int64) error {
-	db, err := GetDB()
+	// Use write connection for quota update
+	db, err := GetWriteDB()
 	if err != nil {
 		return ERR_OPEN_DB
 	}
-	defer db.Close()
+	// Note: Don't close the connection, it's from the pool
 
 	if _, err = b.TableContext(c, db, BKT_TBL).Update(&BucketInfo{Quota: quota},
 		b.Fields("quota"), b.Where(b.Eq("id", bktID))); err != nil {
@@ -1335,11 +1422,12 @@ func (dma *DefaultMetadataAdapter) DecBktDedupSavings(c Ctx, bktID int64, size i
 }
 
 func (dma *DefaultMetadataAdapter) CountDataRefs(c Ctx, bktID int64, dataIDs []int64) (map[int64]int64, error) {
-	db, err := GetDB(c, bktID)
+	// Use read connection for counting references
+	db, err := GetReadDB(c, bktID)
 	if err != nil {
 		return nil, ERR_OPEN_DB
 	}
-	defer db.Close()
+	// Note: Don't close the connection, it's from the pool
 
 	if len(dataIDs) == 0 {
 		return make(map[int64]int64), nil
@@ -1374,11 +1462,12 @@ func (dma *DefaultMetadataAdapter) CountDataRefs(c Ctx, bktID int64, dataIDs []i
 }
 
 func (dma *DefaultMetadataAdapter) ListObjsByType(c Ctx, bktID int64, objType int, offset, limit int) ([]*ObjectInfo, int64, error) {
-	db, err := GetDB(c, bktID)
+	// Use read connection for listing objects by type
+	db, err := GetReadDB(c, bktID)
 	if err != nil {
 		return nil, 0, ERR_OPEN_DB
 	}
-	defer db.Close()
+	// Note: Don't close the connection, it's from the pool
 
 	// Get total count
 	var cnt int64
@@ -1404,11 +1493,12 @@ func (dma *DefaultMetadataAdapter) ListObjsByType(c Ctx, bktID int64, objType in
 }
 
 func (dma *DefaultMetadataAdapter) ListChildren(c Ctx, bktID int64, pid int64, offset, limit int) ([]*ObjectInfo, int64, error) {
-	db, err := GetDB(c, bktID)
+	// Use read connection for listing children
+	db, err := GetReadDB(c, bktID)
 	if err != nil {
 		return nil, 0, ERR_OPEN_DB
 	}
-	defer db.Close()
+	// Note: Don't close the connection, it's from the pool
 
 	// Get total count
 	var cnt int64
@@ -1434,11 +1524,12 @@ func (dma *DefaultMetadataAdapter) ListChildren(c Ctx, bktID int64, pid int64, o
 }
 
 func (dma *DefaultMetadataAdapter) GetObjByDataID(c Ctx, bktID int64, dataID int64) ([]*ObjectInfo, error) {
-	db, err := GetDB(c, bktID)
+	// Use read connection for querying objects by DataID
+	db, err := GetReadDB(c, bktID)
 	if err != nil {
 		return nil, ERR_OPEN_DB
 	}
-	defer db.Close()
+	// Note: Don't close the connection, it's from the pool
 
 	var objs []*ObjectInfo
 	_, err = b.TableContext(c, db, OBJ_TBL).Select(&objs,
@@ -1450,11 +1541,12 @@ func (dma *DefaultMetadataAdapter) GetObjByDataID(c Ctx, bktID int64, dataID int
 }
 
 func (dma *DefaultMetadataAdapter) ListVersions(c Ctx, bktID int64, fileID int64, excludeWriting bool) ([]*ObjectInfo, error) {
-	db, err := GetDB(c, bktID)
+	// Use read connection for listing versions
+	db, err := GetReadDB(c, bktID)
 	if err != nil {
 		return nil, ERR_OPEN_DB
 	}
-	defer db.Close()
+	// Note: Don't close the connection, it's from the pool
 
 	var versions []*ObjectInfo
 	// Query all version objects (type=3, pid=fileID, not deleted pid>=0)
@@ -1473,13 +1565,14 @@ func (dma *DefaultMetadataAdapter) ListVersions(c Ctx, bktID int64, fileID int64
 }
 
 func (dma *DefaultMetadataAdapter) DeleteObj(c Ctx, bktID int64, id int64) error {
-	db, err := GetDB(c, bktID)
+	// Use write connection for delete operation
+	db, err := GetWriteDB(c, bktID)
 	if err != nil {
 		return ERR_OPEN_DB
 	}
-	defer db.Close()
+	// Note: Don't close the connection, it's from the pool
 
-	// Get object information
+	// Get object information (read operation, but using same connection for consistency)
 	obj := &ObjectInfo{}
 	if _, err = b.TableContext(c, db, OBJ_TBL).Select(obj, b.Where(b.Eq("id", id))); err != nil {
 		return ERR_QUERY_DB

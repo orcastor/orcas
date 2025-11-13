@@ -58,6 +58,41 @@ var (
 	multipartUploads sync.Map
 )
 
+// getStorageClass returns StorageClass based on bucket's instant upload (deduplication) configuration
+// REDUCED_REDUNDANCY: bucket supports instant upload (RefLevel > 0), data may be deduplicated (reduces redundancy)
+// STANDARD: bucket does not support instant upload (RefLevel = 0), data is unique (standard redundancy)
+func getStorageClass(ctx context.Context, bktID int64) string {
+	// Get bucket info from cache or database
+	cacheKey := fmt.Sprintf("%d", bktID)
+	var bucket *core.BucketInfo
+	if cached, ok := bucketInfoCache.Get(cacheKey); ok {
+		if bktInfo, ok := cached.(*core.BucketInfo); ok && bktInfo != nil {
+			bucket = bktInfo
+		}
+	}
+
+	// If cache miss, query database
+	if bucket == nil {
+		bktInfo, err := handler.GetBktInfo(ctx, bktID)
+		if err == nil && bktInfo != nil {
+			bucket = bktInfo
+			// Update cache
+			bucketInfoCache.Put(cacheKey, bucket)
+		}
+	}
+
+	// Get instant upload config from bucket
+	instantUploadCfg := core.GetBucketInstantUploadConfig(bucket)
+	if core.IsInstantUploadEnabledWithConfig(instantUploadCfg) {
+		// Bucket supports instant upload (deduplication), data may be deduplicated
+		// Deduplication reduces redundancy, return REDUCED_REDUNDANCY
+		return "REDUCED_REDUNDANCY"
+	}
+	// Bucket does not support instant upload, data is unique (no deduplication)
+	// Unique data has standard redundancy, return STANDARD
+	return "STANDARD"
+}
+
 // MultipartUpload represents an ongoing multipart upload
 type MultipartUpload struct {
 	UploadID    string            // Upload ID
@@ -397,12 +432,14 @@ func listAllObjectsRecursively(c *gin.Context, bktID int64, prefix string, delim
 
 				if obj.Type == core.OBJ_TYPE_FILE {
 					// It's a file, add to contents
+					// Get StorageClass based on bucket's instant upload configuration
+					storageClass := getStorageClass(ctx, bktID)
 					contents = append(contents, Content{
 						Key:          key,
 						LastModified: util.FormatLastModified(obj.MTime),
 						ETag:         util.FormatETag(obj.DataID),
 						Size:         obj.Size,
-						StorageClass: "STANDARD",
+						StorageClass: storageClass,
 					})
 				} else if obj.Type == core.OBJ_TYPE_DIR {
 					// It's a directory
@@ -452,6 +489,7 @@ func listAllObjectsRecursively(c *gin.Context, bktID int64, prefix string, delim
 }
 
 // ensurePath ensures the path exists, creating directories as needed (with cache)
+// Optimization: Batch create missing directories to reduce database round trips
 func ensurePath(c *gin.Context, bktID int64, key string) (int64, error) {
 	ctx := c.Request.Context()
 	// Optimized: use fast path splitting
@@ -461,6 +499,10 @@ func ensurePath(c *gin.Context, bktID int64, key string) (int64, error) {
 	}
 
 	var pid int64 = 0
+	var dirsToCreate []*core.ObjectInfo
+	var createPIDs []int64
+
+	// First pass: check existing directories and collect missing ones
 	for i, part := range parts {
 		if part == "" {
 			continue
@@ -499,25 +541,20 @@ func ensurePath(c *gin.Context, bktID int64, key string) (int64, error) {
 		}
 
 		if found == nil {
-			// Create directory
+			// Directory doesn't exist, prepare to create it
 			if i < len(parts)-1 {
-				// Not the last part, create directory
+				// Not the last part, will create directory
+				newPID := core.NewID()
 				dirObj := &core.ObjectInfo{
-					ID:    core.NewID(),
+					ID:    newPID,
 					PID:   pid,
 					Type:  core.OBJ_TYPE_DIR,
 					Name:  part,
 					MTime: core.Now(),
 				}
-				ids, err := handler.Put(ctx, bktID, []*core.ObjectInfo{dirObj})
-				if err != nil {
-					return 0, err
-				}
-				pid = ids[0]
-				// Invalidate cache after creating directory
-				invalidateDirListCache(bktID, pid)
-				parentPath := strings.Join(parts[:i+1], "/")
-				invalidatePathCache(bktID, parentPath)
+				dirsToCreate = append(dirsToCreate, dirObj)
+				createPIDs = append(createPIDs, newPID)
+				pid = newPID
 			} else {
 				// Last part, will be created by caller
 				return pid, nil
@@ -532,6 +569,30 @@ func ensurePath(c *gin.Context, bktID int64, key string) (int64, error) {
 				// Last part exists
 				return pid, nil
 			}
+		}
+	}
+
+	// Batch create all missing directories in one database operation
+	if len(dirsToCreate) > 0 {
+		ids, err := handler.Put(ctx, bktID, dirsToCreate)
+		if err != nil {
+			return 0, err
+		}
+
+		// Invalidate caches for all created directories
+		for i, dirObj := range dirsToCreate {
+			if i < len(ids) && ids[i] > 0 {
+				invalidateDirListCache(bktID, dirObj.PID)
+				// Build parent path for cache invalidation
+				pathParts := parts[:i+1]
+				parentPath := strings.Join(pathParts, "/")
+				invalidatePathCache(bktID, parentPath)
+			}
+		}
+
+		// Return the last created directory's PID
+		if len(ids) > 0 {
+			return ids[len(ids)-1], nil
 		}
 	}
 
@@ -813,12 +874,14 @@ func listObjects(c *gin.Context) {
 			}
 
 			// Add to contents
+			// Get StorageClass based on bucket's instant upload configuration
+			storageClass := getStorageClass(ctx, bktID)
 			contents = append(contents, Content{
 				Key:          key,
 				LastModified: util.FormatLastModified(core.Now()),
 				ETag:         util.FormatETag(fileInfo.DataID),
 				Size:         fileInfo.Size,
-				StorageClass: "STANDARD",
+				StorageClass: storageClass,
 			})
 		}
 
@@ -1230,6 +1293,10 @@ func getObject(c *gin.Context) {
 	// Set response headers (optimized: batch header setting)
 	util.SetObjectHeadersWithContentType(c, "application/octet-stream", readSize, obj.DataID, obj.MTime, "bytes")
 
+	// Set StorageClass header based on bucket's instant upload configuration
+	storageClass := getStorageClass(ctx, bktID)
+	c.Header("x-amz-storage-class", storageClass)
+
 	if rangeSpec != nil && rangeSpec.Valid {
 		// Return 206 Partial Content
 		c.Header("Content-Range", util.FormatContentRangeHeader(startOffset, startOffset+readSize-1, objectSize))
@@ -1279,6 +1346,7 @@ func putObject(c *gin.Context) {
 	fileName := util.FastBase(key)
 
 	// Ensure parent directory exists (only if not root)
+	// Optimization: Skip ensurePath for root directory files to reduce database queries
 	var pid int64 = 0
 	parentPath := util.FastDir(key)
 	if parentPath != "." && parentPath != "/" && parentPath != "" {
@@ -1289,19 +1357,31 @@ func putObject(c *gin.Context) {
 		}
 	}
 
-	// Check if object exists to determine if this is an update or new upload
-	// This check is necessary for S3 API compliance (PUT can update existing objects)
+	// Optimization: Skip object existence check for new uploads (most common case)
+	// Only check if conditional headers are present (If-Match, If-None-Match, etc.)
+	// This avoids unnecessary database queries for new file uploads
 	var objID int64
 	var isUpdate bool
-	obj, err := findObjectByPath(c, bktID, key)
-	if err == nil && obj != nil {
-		// Object exists, this is an update
-		objID = obj.ID
-		isUpdate = true
-		// Invalidate object cache as it will be updated
-		invalidateObjectCache(bktID, objID)
+	hasConditionalHeader := c.GetHeader("If-Match") != "" || c.GetHeader("If-None-Match") != "" ||
+		c.GetHeader("If-Modified-Since") != "" || c.GetHeader("If-Unmodified-Since") != ""
+
+	if hasConditionalHeader {
+		// Only check object existence when conditional headers are present
+		obj, err := findObjectByPath(c, bktID, key)
+		if err == nil && obj != nil {
+			// Object exists, this is an update
+			objID = obj.ID
+			isUpdate = true
+			// Invalidate object cache as it will be updated
+			invalidateObjectCache(bktID, objID)
+		} else {
+			// New object, create ID early
+			objID = core.NewID()
+			isUpdate = false
+		}
 	} else {
-		// New object, create ID early
+		// No conditional headers, assume new upload (most common case)
+		// Create new ID, let database handle conflicts with INSERT OR REPLACE semantics
 		objID = core.NewID()
 		isUpdate = false
 	}
@@ -1521,14 +1601,25 @@ func putObject(c *gin.Context) {
 				}
 			}
 
-			// Create DataInfo for uploaded file (both single and multi-chunk)
-			// This is needed for instant upload (Ref) to work correctly
-			// Reuse pre-calculated checksums to avoid redundant calculation
+			// Optimization: Combine DataInfo and ObjectInfo writes into a single transaction
+			// This reduces database round trips and improves performance
 			if dataID > 0 && dataID != core.EmptyDataID {
-				// Only create DataInfo if we have checksums (either pre-calculated or can calculate)
+				// Prepare ObjectInfo
+				objInfo = &core.ObjectInfo{
+					ID:     objID,
+					PID:    pid,
+					Name:   fileName,
+					Type:   core.OBJ_TYPE_FILE,
+					DataID: dataID,
+					Size:   dataSize,
+					MTime:  core.Now(),
+				}
+
+				// Prepare DataInfo if we have checksums
+				var dataInfo *core.DataInfo
 				if checksumsCalculated {
 					// Use pre-calculated checksums - most common path
-					dataInfo := &core.DataInfo{
+					dataInfo = &core.DataInfo{
 						ID:       dataID,
 						Size:     dataSize,
 						OrigSize: dataSize,
@@ -1537,19 +1628,11 @@ func putObject(c *gin.Context) {
 						MD5:      md5Val,
 						Kind:     core.DATA_NORMAL, // Default: no compression/encryption
 					}
-					_, putErr := handler.PutDataInfo(ctx, bktID, []*core.DataInfo{dataInfo})
-					if putErr != nil {
-						// Log error but don't fail the request
-						// DataInfo creation failure doesn't prevent object creation
-						// Instant upload may not work for this file, but normal upload will work
-						_ = putErr // Suppress unused variable warning
-					}
 				} else if dataSize > 0 {
 					// Fallback: calculate checksums if not already calculated
-					// Only calculate if we have data (dataSize > 0)
 					calcHdrCRC32, calcCRC32Val, calcMD5Val, calcErr := calculateChecksumsForInstantUpload(data)
 					if calcErr == nil {
-						dataInfo := &core.DataInfo{
+						dataInfo = &core.DataInfo{
 							ID:       dataID,
 							Size:     dataSize,
 							OrigSize: dataSize,
@@ -1558,32 +1641,42 @@ func putObject(c *gin.Context) {
 							MD5:      calcMD5Val,
 							Kind:     core.DATA_NORMAL, // Default: no compression/encryption
 						}
-						_, putErr := handler.PutDataInfo(ctx, bktID, []*core.DataInfo{dataInfo})
-						if putErr != nil {
-							_ = putErr // Suppress unused variable warning
-						}
 					}
-					// If checksum calculation fails, skip DataInfo creation
-					// This won't prevent object creation, but instant upload won't work
+				}
+
+				// Use combined write method if we have DataInfo, otherwise fallback to separate writes
+				if dataInfo != nil {
+					// Combined write: DataInfo and ObjectInfo in one transaction
+					err = handler.PutDataInfoAndObj(ctx, bktID, []*core.DataInfo{dataInfo}, []*core.ObjectInfo{objInfo})
+					if err != nil {
+						util.S3ErrorResponse(c, http.StatusInternalServerError, "InternalError", err.Error())
+						return
+					}
+				} else {
+					// Fallback: write ObjectInfo only (DataInfo creation failed, but object creation should still work)
+					_, err = handler.Put(ctx, bktID, []*core.ObjectInfo{objInfo})
+					if err != nil {
+						util.S3ErrorResponse(c, http.StatusInternalServerError, "InternalError", err.Error())
+						return
+					}
+				}
+			} else {
+				// No dataID (should not happen in normal flow), create ObjectInfo only
+				objInfo = &core.ObjectInfo{
+					ID:     objID,
+					PID:    pid,
+					Name:   fileName,
+					Type:   core.OBJ_TYPE_FILE,
+					DataID: dataID,
+					Size:   dataSize,
+					MTime:  core.Now(),
+				}
+				_, err = handler.Put(ctx, bktID, []*core.ObjectInfo{objInfo})
+				if err != nil {
+					util.S3ErrorResponse(c, http.StatusInternalServerError, "InternalError", err.Error())
+					return
 				}
 			}
-		}
-
-		// Create or update object metadata
-		objInfo = &core.ObjectInfo{
-			ID:     objID,
-			PID:    pid,
-			Name:   fileName,
-			Type:   core.OBJ_TYPE_FILE,
-			DataID: dataID,
-			Size:   dataSize,
-			MTime:  core.Now(),
-		}
-
-		_, err = handler.Put(ctx, bktID, []*core.ObjectInfo{objInfo})
-		if err != nil {
-			util.S3ErrorResponse(c, http.StatusInternalServerError, "InternalError", err.Error())
-			return
 		}
 	}
 
@@ -2201,6 +2294,12 @@ func headObject(c *gin.Context) {
 
 	// Set response headers (optimized: batch header setting)
 	util.SetObjectHeadersWithContentType(c, "application/octet-stream", obj.Size, obj.DataID, obj.MTime, "bytes")
+
+	// Set StorageClass header based on bucket's instant upload configuration
+	ctx := c.Request.Context()
+	storageClass := getStorageClass(ctx, bktID)
+	c.Header("x-amz-storage-class", storageClass)
+
 	c.Status(http.StatusOK)
 }
 
@@ -2798,12 +2897,15 @@ func listMultipartUploads(c *gin.Context) {
 		Uploads:     make([]Upload, 0, len(uploads)),
 	}
 
+	ctx := c.Request.Context()
 	for _, upload := range uploads {
+		// Get StorageClass based on bucket's instant upload configuration
+		storageClass := getStorageClass(ctx, upload.BucketID)
 		result.Uploads = append(result.Uploads, Upload{
 			Key:          upload.Key,
 			UploadID:     upload.UploadID,
 			Initiated:    upload.Initiated,
-			StorageClass: "STANDARD",
+			StorageClass: storageClass,
 		})
 	}
 

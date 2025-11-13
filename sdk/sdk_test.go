@@ -12,22 +12,20 @@ import (
 	. "github.com/smartystreets/goconvey/convey"
 )
 
-// ORCAS_BASE=/tmp/test ORCAS_DATA=/tmp/test ORCAS_SECRET=xxxxxxxx go test . -run=TestUpload -v
-var (
-	mntPath = "/tmp/test/"
-	path    = "/home/semaphore/go/"
-	cfg     = Config{
-		UserName: "orcas",
-		Password: "orcas",
-		DataSync: true,
-		RefLevel: FULL,
-		EndecWay: core.DATA_ENDEC_AES256,
-		EndecKey: "1234567890abcdef12345678",
-		WiseCmpr: core.DATA_CMPR_GZIP,
-		CmprQlty: 5,
-		DontSync: ".*",
-	}
-)
+// ORCAS_BASE=/opt/orcas ORCAS_DATA=/opt/orcas_disk ORCAS_SECRET=xxxxxxxx go test . -run=TestUpload -v
+var mntPath = "/opt/orcas_disk/"
+var path = "/mnt/e/Download/media_new/"
+var cfg = Config{
+	UserName: "orcas",
+	Password: "orcas",
+	DataSync: true,
+	RefLevel: FULL,
+	//	EndecWay: core.DATA_ENDEC_AES256,
+	//	EndecKey: "1234567890abcdef12345678",
+	WiseCmpr: core.DATA_CMPR_GZIP,
+	CmprQlty: 5,
+	DontSync: ".*",
+}
 
 func init() {
 	core.InitDB("")
@@ -39,7 +37,7 @@ func init() {
 	if len(b) <= 0 {
 		bktID, _ := idgen.NewIDGen(nil, 0).New()
 		core.InitBucketDB(c, bktID)
-		core.NewLocalAdmin().PutBkt(c, []*core.BucketInfo{{ID: bktID, Name: "备份测试", UID: 1, Type: 1}})
+		core.NewLocalAdmin().PutBkt(c, []*core.BucketInfo{{ID: bktID, Name: "下载", UID: 1, Type: 1}})
 	}
 }
 

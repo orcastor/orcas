@@ -1030,11 +1030,12 @@ func CleanRecycleBin(c Ctx, bktID int64, h Handler, ma MetadataAdapter, da DataA
 
 // listChildrenDirectly directly queries child objects (including deleted ones)
 func listChildrenDirectly(c Ctx, bktID, pid int64, ma MetadataAdapter) ([]*ObjectInfo, error) {
-	db, err := GetDB(c, bktID)
+	// Use read connection for query operations
+	db, err := GetReadDB(c, bktID)
 	if err != nil {
 		return nil, ERR_OPEN_DB
 	}
-	defer db.Close()
+	// Note: Don't close the connection, it's from the pool
 
 	var children []*ObjectInfo
 	// Directly query all child objects, don't exclude deleted ones
@@ -1058,11 +1059,12 @@ func listChildrenDirectly(c Ctx, bktID, pid int64, ma MetadataAdapter) ([]*Objec
 
 // deleteObjFromDB deletes object from database (physical deletion)
 func deleteObjFromDB(c Ctx, bktID, id int64) error {
-	db, err := GetDB(c, bktID)
+	// Use write connection for delete operation
+	db, err := GetWriteDB(c, bktID)
 	if err != nil {
 		return ERR_OPEN_DB
 	}
-	defer db.Close()
+	// Note: Don't close the connection, it's from the pool
 
 	// Use raw SQL to delete
 	_, err = db.Exec("DELETE FROM obj WHERE id = ?", id)

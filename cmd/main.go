@@ -34,8 +34,9 @@ var (
 	// Bucket configuration parameters (for update-bucket)
 	bucketCmprWay  = flag.String("cmprway", "", "Compression method: SNAPPY, ZSTD, GZIP, BR (for update-bucket)")
 	bucketCmprQlty = flag.Int("cmprqlty", 0, "Compression quality/level (for update-bucket)")
-	bucketEndecWay = flag.String("endecway", "", "Encryption method: AES256, SM4 (for update -bucket)")
+	bucketEndecWay = flag.String("endecway", "", "Encryption method: AES256, SM4 (for update-bucket)")
 	bucketEndecKey = flag.String("endeckey", "", "Encryption key (for update-bucket)")
+	bucketRefLevel = flag.String("reflevel", "", "Instant upload level: OFF, FULL, FAST (for create-bucket and update-bucket)")
 
 	//  Configuration parameters (can be set via command line arguments or configuration file)
 	userName = flag.String("user", "", "Username")
@@ -722,6 +723,18 @@ func handleBucketManagement() {
 			bucket.EndecKey = *bucketEndecKey
 		}
 
+		// Set instant upload (deduplication) configuration if provided
+		if *bucketRefLevel != "" {
+			switch *bucketRefLevel {
+			case "FULL":
+				bucket.RefLevel = 1
+			case "FAST":
+				bucket.RefLevel = 2
+			case "OFF", "NONE", "":
+				bucket.RefLevel = 0
+			}
+		}
+
 		err := admin.PutBkt(ctx, []*core.BucketInfo{bucket})
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Failed to create bucket: %v\n", err)
@@ -744,6 +757,12 @@ func handleBucketManagement() {
 		if bucket.EndecWay > 0 {
 			endecStr := getEncryptionString(bucket.EndecWay)
 			fmt.Printf("  Encryption: %s\n", endecStr)
+		}
+		if bucket.RefLevel > 0 {
+			refLevelStr := getRefLevelString(bucket.RefLevel)
+			fmt.Printf("  Instant Upload: %s\n", refLevelStr)
+		} else {
+			fmt.Printf("  Instant Upload: OFF\n")
 		}
 
 	case "delete-bucket":
@@ -800,6 +819,12 @@ func handleBucketManagement() {
 				endecStr := getEncryptionString(bkt.EndecWay)
 				fmt.Printf("  Encryption: %s\n", endecStr)
 			}
+			if bkt.RefLevel > 0 {
+				refLevelStr := getRefLevelString(bkt.RefLevel)
+				fmt.Printf("  Instant Upload: %s\n", refLevelStr)
+			} else {
+				fmt.Printf("  Instant Upload: OFF\n")
+			}
 			fmt.Println()
 		}
 
@@ -855,8 +880,21 @@ func handleBucketManagement() {
 			updated = true
 		}
 
+		// Update instant upload (deduplication) configuration if provided
+		if *bucketRefLevel != "" {
+			switch *bucketRefLevel {
+			case "FULL":
+				bucket.RefLevel = 1
+			case "FAST":
+				bucket.RefLevel = 2
+			case "OFF", "NONE", "":
+				bucket.RefLevel = 0
+			}
+			updated = true
+		}
+
 		if !updated {
-			fmt.Fprintf(os.Stderr, "Error: No configuration changes specified. Use -cmprway, -cmprqlty, -endecway, or -endeckey to update bucket configuration.\n")
+			fmt.Fprintf(os.Stderr, "Error: No configuration changes specified. Use -cmprway, -cmprqlty, -endecway, -endeckey, or -reflevel to update bucket configuration.\n")
 			os.Exit(1)
 		}
 
@@ -879,6 +917,12 @@ func handleBucketManagement() {
 			fmt.Printf("  Encryption: %s\n", endecStr)
 		} else {
 			fmt.Printf("  Encryption: None\n")
+		}
+		if bucket.RefLevel > 0 {
+			refLevelStr := getRefLevelString(bucket.RefLevel)
+			fmt.Printf("  Instant Upload: %s\n", refLevelStr)
+		} else {
+			fmt.Printf("  Instant Upload: OFF\n")
 		}
 
 	default:
@@ -929,6 +973,17 @@ func getEncryptionString(endecWay uint32) string {
 		return "SM4"
 	default:
 		return "NONE"
+	}
+}
+
+func getRefLevelString(refLevel uint32) string {
+	switch refLevel {
+	case 1:
+		return "FULL"
+	case 2:
+		return "FAST"
+	default:
+		return "OFF"
 	}
 }
 

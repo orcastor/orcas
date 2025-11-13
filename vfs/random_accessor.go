@@ -715,15 +715,7 @@ func (ra *RandomAccessor) flushSequentialBuffer() error {
 		ra.seqBuffer.dataInfo.Cksum = ra.seqBuffer.dataInfo.CRC32
 	}
 
-	// Save DataInfo
-	if _, err := ra.fs.h.PutDataInfo(ra.fs.c, ra.fs.bktID, []*core.DataInfo{ra.seqBuffer.dataInfo}); err != nil {
-		return err
-	}
-
-	// Update cache
-	dataInfoCache.Put(formatCacheKey(ra.fs.bktID, ra.seqBuffer.dataID), ra.seqBuffer.dataInfo)
-
-	// Update file object
+	// Get file object first to prepare for combined write
 	fileObj, err := ra.getFileObj()
 	if err != nil {
 		return err
@@ -732,12 +724,15 @@ func (ra *RandomAccessor) flushSequentialBuffer() error {
 	fileObj.DataID = ra.seqBuffer.dataID
 	fileObj.Size = ra.seqBuffer.dataInfo.OrigSize
 
-	// Update file object (using Handler's Put method)
-	if _, err := ra.fs.h.Put(ra.fs.c, ra.fs.bktID, []*core.ObjectInfo{fileObj}); err != nil {
+	// Optimization: Use PutDataInfoAndObj to write DataInfo and ObjectInfo together in a single transaction
+	// This reduces database round trips and improves performance
+	err = ra.fs.h.PutDataInfoAndObj(ra.fs.c, ra.fs.bktID, []*core.DataInfo{ra.seqBuffer.dataInfo}, []*core.ObjectInfo{fileObj})
+	if err != nil {
 		return err
 	}
 
-	// Update cache
+	// Update caches
+	dataInfoCache.Put(formatCacheKey(ra.fs.bktID, ra.seqBuffer.dataID), ra.seqBuffer.dataInfo)
 	fileObjCache.Put(ra.fileObjKey, fileObj)
 	ra.fileObj.Store(fileObj)
 
@@ -2558,16 +2553,6 @@ func (ra *RandomAccessor) Truncate(newSize int64) (int64, error) {
 		}
 	}
 
-	// Save new DataInfo
-	if newDataInfo != nil && newDataID != core.EmptyDataID {
-		_, err = ra.fs.h.PutDataInfo(ra.fs.c, ra.fs.bktID, []*core.DataInfo{newDataInfo})
-		if err != nil {
-			return 0, fmt.Errorf("failed to save DataInfo: %v", err)
-		}
-		// Update cache
-		dataInfoCache.Put(formatCacheKey(ra.fs.bktID, newDataID), newDataInfo)
-	}
-
 	// Create new version object
 	mTime := core.Now()
 	newVersion := &core.ObjectInfo{
@@ -2587,11 +2572,28 @@ func (ra *RandomAccessor) Truncate(newSize int64) (int64, error) {
 		MTime:  mTime,
 	}
 
-	// Batch write version and update file object
+	// Optimization: Use PutDataInfoAndObj to write DataInfo, version object, and file object update together
+	// This reduces database round trips and improves performance
+	var dataInfos []*core.DataInfo
+	if newDataInfo != nil && newDataID != core.EmptyDataID {
+		dataInfos = []*core.DataInfo{newDataInfo}
+	}
 	objectsToPut := []*core.ObjectInfo{newVersion, updateFileObj}
-	_, err = lh.Put(ra.fs.c, ra.fs.bktID, objectsToPut)
-	if err != nil {
-		return 0, fmt.Errorf("failed to update file object: %v", err)
+
+	if len(dataInfos) > 0 {
+		// Write DataInfo and ObjectInfo together
+		err = lh.PutDataInfoAndObj(ra.fs.c, ra.fs.bktID, dataInfos, objectsToPut)
+		if err != nil {
+			return 0, fmt.Errorf("failed to save DataInfo and update objects: %v", err)
+		}
+		// Update cache
+		dataInfoCache.Put(formatCacheKey(ra.fs.bktID, newDataID), newDataInfo)
+	} else {
+		// Only write ObjectInfo (no DataInfo to write)
+		_, err = lh.Put(ra.fs.c, ra.fs.bktID, objectsToPut)
+		if err != nil {
+			return 0, fmt.Errorf("failed to update file object: %v", err)
+		}
 	}
 
 	// Update cache

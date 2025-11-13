@@ -105,11 +105,12 @@ func flushBucketStats(key string, delta *BucketStatsDelta) {
 	delta.Reset()
 
 	// Batch update database
-	db, err := GetDB()
+	// Use write connection for statistics update
+	db, err := GetWriteDB()
 	if err != nil {
 		return
 	}
-	defer db.Close()
+	// Note: Don't close the connection, it's from the pool
 
 	// Batch execute updates (merge updates for multiple fields)
 	if used != 0 {

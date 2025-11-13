@@ -119,6 +119,9 @@ type Handler interface {
 	GetData(c Ctx, bktID, id int64, sn int, offsetOrSize ...int) ([]byte, error)
 	// 上传元数据
 	PutDataInfo(c Ctx, bktID int64, d []*DataInfo) ([]int64, error)
+	// PutDataInfoAndObj writes both DataInfo and ObjectInfo in a single transaction
+	// This optimization reduces database round trips for better performance
+	PutDataInfoAndObj(c Ctx, bktID int64, d []*DataInfo, o []*ObjectInfo) error
 	// 获取数据信息
 	GetDataInfo(c Ctx, bktID, id int64) (*DataInfo, error)
 
@@ -353,15 +356,27 @@ func (lh *LocalHandler) PutData(c Ctx, bktID, dataID int64, sn int, buf []byte) 
 	// Check quota and update usage (each data block write needs to check)
 	dataSize := int64(len(buf))
 	if dataSize > 0 {
-		// Get bucket info and check quota
-		buckets, err := lh.ma.GetBkt(c, []int64{bktID})
-		if err != nil {
-			return 0, err
+		// Optimization: Use bucket cache to avoid database query on every write
+		var bucket *BucketInfo
+		if cached, ok := lh.bucketConfigs.Load(bktID); ok {
+			if bktInfo, ok := cached.(*BucketInfo); ok && bktInfo != nil {
+				bucket = bktInfo
+			}
 		}
-		if len(buckets) == 0 {
-			return 0, ERR_QUERY_DB
+
+		// If cache miss, query database and update cache
+		if bucket == nil {
+			buckets, err := lh.ma.GetBkt(c, []int64{bktID})
+			if err != nil {
+				return 0, err
+			}
+			if len(buckets) == 0 {
+				return 0, ERR_QUERY_DB
+			}
+			bucket = buckets[0]
+			// Update cache for future use
+			lh.SetBucketConfig(bktID, bucket)
 		}
-		bucket := buckets[0]
 
 		// If quota >= 0, check if it exceeds quota
 		if bucket.Quota >= 0 {
@@ -409,6 +424,44 @@ func (lh *LocalHandler) PutDataInfo(c Ctx, bktID int64, d []*DataInfo) (ids []in
 		}
 	}
 	return ids, lh.ma.PutData(c, bktID, n)
+}
+
+// PutDataInfoAndObj writes both DataInfo and ObjectInfo in a single transaction
+// This optimization reduces database round trips for better performance
+func (lh *LocalHandler) PutDataInfoAndObj(c Ctx, bktID int64, d []*DataInfo, o []*ObjectInfo) error {
+	if err := lh.acm.CheckPermission(c, MDW, bktID); err != nil {
+		return err
+	}
+
+	// Prepare DataInfo
+	var dataInfos []*DataInfo
+	for _, x := range d {
+		if x.ID == 0 {
+			x.ID = NewID()
+		}
+		if x.ID > 0 {
+			dataInfos = append(dataInfos, x)
+		}
+	}
+
+	// Prepare ObjectInfo (same logic as Put method)
+	for _, x := range o {
+		if x.ID == 0 {
+			x.ID = NewID()
+		}
+		// Auto-generate name if empty (writing versions with name="0" keep their name)
+		if x.Name == "" {
+			x.Name = strconv.FormatInt(x.ID, 10)
+		}
+	}
+	for _, x := range o {
+		if x.PID < 0 && int(^x.PID) <= len(o) {
+			x.PID = o[^x.PID].ID
+		}
+	}
+
+	// Use combined write method
+	return lh.ma.PutDataAndObj(c, bktID, dataInfos, o)
 }
 
 func (lh *LocalHandler) GetDataInfo(c Ctx, bktID, id int64) (*DataInfo, error) {
@@ -753,11 +806,8 @@ func (lh *LocalHandler) Put(c Ctx, bktID int64, o []*ObjectInfo) ([]int64, error
 		if x.ID == 0 {
 			x.ID = NewID()
 		}
-		// Writing versions (name="0") keep their name, don't auto-generate
-		if x.Name == "" && x.Type != OBJ_TYPE_VERSION {
-			x.Name = strconv.FormatInt(x.ID, 10)
-		} else if x.Name == "" {
-			// For version objects without name, use ID as name (normal versions)
+		// Auto-generate name if empty (writing versions with name="0" keep their name)
+		if x.Name == "" {
 			x.Name = strconv.FormatInt(x.ID, 10)
 		}
 	}
