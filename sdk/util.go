@@ -85,8 +85,11 @@ func FormatLastModified(mtime int64) string {
 		return cached.(string)
 	}
 
-	// Format time
-	formatted := time.Unix(roundedTime, 0).UTC().Format(time.RFC1123)
+	// Format time using RFC1123 format with GMT (HTTP standard requires GMT, not UTC)
+	// Use custom format string to ensure "GMT" is used instead of "UTC"
+	// Format: "Mon, 02 Jan 2006 15:04:05 GMT"
+	const httpTimeFormat = "Mon, 02 Jan 2006 15:04:05 GMT"
+	formatted := time.Unix(roundedTime, 0).UTC().Format(httpTimeFormat)
 
 	// Cache the result (with size limit to prevent unbounded growth)
 	// Use LoadOrStore to avoid race condition

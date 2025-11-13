@@ -252,12 +252,26 @@ func GetDB(c ...interface{}) (*sql.DB, error) {
 				dbKey = key
 			}
 			c = c[1:] // Remove context from remaining params
+		} else if _, ok := c[0].(context.Context); ok {
+			// Handle standard context.Context (shouldn't happen, but be safe)
+			// Try to convert to Ctx and extract key
+			if key := getKey(Ctx(c[0].(context.Context))); key != "" {
+				dbKey = key
+			}
+			c = c[1:] // Remove context from remaining params
 		}
 	}
 
 	if len(c) > 0 {
-		// Next parameter is bucket ID
-		dirPath = filepath.Join(ORCAS_DATA, fmt.Sprint(c[0]))
+		// Next parameter should be bucket ID (int64)
+		// Ensure it's actually an int64, not accidentally a context
+		if bktID, ok := c[0].(int64); ok {
+			dirPath = filepath.Join(ORCAS_DATA, fmt.Sprint(bktID))
+		} else {
+			// Invalid parameter type - this should not happen
+			// Log error but try to continue with default path
+			return nil, fmt.Errorf("invalid bucket ID type: expected int64, got %T", c[0])
+		}
 		if len(c) > 1 {
 			if ctx, ok := c[1].(Ctx); ok {
 				if key := getKey(ctx); key != "" {
