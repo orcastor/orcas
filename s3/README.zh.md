@@ -341,9 +341,9 @@ export ORCAS_MAX_WRITE_BUFFER_COUNT=2048
 
 详细的性能测试用例和报告请参考：
 
-- `performance_test.go` - 性能测试实现
-- `multipart_and_range_test.go` - 分片上传和范围读取测试用例
-- [性能测试报告（中文）](PERFORMANCE_TEST_REPORT.zh.md) - 完整的性能分析
+- `test/performance_test.go` - 性能测试实现
+- `test/multipart_and_range_test.go` - 分片上传和范围读取测试用例
+- [性能测试报告（中文）](docs/PERFORMANCE_TEST_REPORT.zh.md) - 完整的性能分析
 
 ### 快速运行测试
 

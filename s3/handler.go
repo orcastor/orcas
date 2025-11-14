@@ -1,4 +1,4 @@
-package main
+package s3
 
 import (
 	"context"
@@ -19,12 +19,6 @@ import (
 	"github.com/orcastor/orcas/s3/util"
 	"github.com/orcastor/orcas/sdk"
 )
-
-// calculateChecksumsForInstantUpload calculates HdrCRC32, CRC32, and MD5 checksums from data
-// Delegates to sdk.CalculateChecksums for consistency and code reuse
-func calculateChecksumsForInstantUpload(data []byte) (uint32, uint32, int64, error) {
-	return sdk.CalculateChecksums(data)
-}
 
 var (
 	handler = core.NewLocalHandler()
@@ -643,8 +637,9 @@ type CommonPrefix struct {
 	Prefix string `xml:"Prefix"`
 }
 
-// listBuckets handles GET / - ListBuckets (with cache)
-func listBuckets(c *gin.Context) {
+// ListBuckets handles GET / - ListBuckets (with cache)
+// Exported for testing purposes
+func ListBuckets(c *gin.Context) {
 	uid := middleware.GetUID(c)
 	if uid == 0 {
 		util.S3ErrorResponse(c, http.StatusForbidden, "AccessDenied", "Access Denied")
@@ -680,8 +675,9 @@ func listBuckets(c *gin.Context) {
 	c.XML(http.StatusOK, result)
 }
 
-// createBucket handles PUT /{bucket} - CreateBucket
-func createBucket(c *gin.Context) {
+// CreateBucket handles PUT /{bucket} - CreateBucket
+// Exported for testing purposes
+func CreateBucket(c *gin.Context) {
 	bucketName := c.Param("bucket")
 	if bucketName == "" {
 		util.S3ErrorResponse(c, http.StatusBadRequest, "InvalidBucketName", "Bucket name is required")
@@ -725,8 +721,9 @@ func createBucket(c *gin.Context) {
 	c.Status(http.StatusOK)
 }
 
-// deleteBucket handles DELETE /{bucket} - DeleteBucket
-func deleteBucket(c *gin.Context) {
+// DeleteBucket handles DELETE /{bucket} - DeleteBucket
+// Exported for testing purposes
+func DeleteBucket(c *gin.Context) {
 	bucketName := c.Param("bucket")
 	if bucketName == "" {
 		util.S3ErrorResponse(c, http.StatusBadRequest, "InvalidBucketName", "Bucket name is required")
@@ -759,8 +756,9 @@ func deleteBucket(c *gin.Context) {
 	c.Status(http.StatusNoContent)
 }
 
-// listObjects handles GET /{bucket} - ListObjects
-func listObjects(c *gin.Context) {
+// ListObjects handles GET /{bucket} - ListObjects
+// Exported for testing purposes
+func ListObjects(c *gin.Context) {
 	bucketName := c.Param("bucket")
 	if bucketName == "" {
 		util.S3ErrorResponse(c, http.StatusBadRequest, "InvalidBucketName", "Bucket name is required")
@@ -963,8 +961,9 @@ func buildPathFromPID(ctx context.Context, bktID int64, pid int64, name string) 
 	return strings.Join(parts, "/"), nil
 }
 
-// getObject handles GET /{bucket}/{key} - GetObject
-func getObject(c *gin.Context) {
+// GetObject handles GET /{bucket}/{key} - GetObject
+// Exported for testing purposes
+func GetObject(c *gin.Context) {
 	bucketName := c.Param("bucket")
 	key := c.Param("key")
 	key = util.FastTrimPrefix(key, "/")
@@ -1006,8 +1005,8 @@ func getObject(c *gin.Context) {
 
 		// Check if this is a ListObjectsV2 request (list-type=2)
 		if listType := c.Query("list-type"); listType == "2" || c.Query("prefix") != "" || c.Query("delimiter") != "" {
-			// Delegate to listObjects function
-			listObjects(c)
+			// Delegate to ListObjects function
+			ListObjects(c)
 			return
 		}
 
@@ -1306,8 +1305,9 @@ func getObject(c *gin.Context) {
 	}
 }
 
-// putObject handles PUT /{bucket}/{key} - PutObject
-func putObject(c *gin.Context) {
+// PutObject handles PUT /{bucket}/{key} - PutObject
+// Exported for testing purposes
+func PutObject(c *gin.Context) {
 	// Check for copy or move operations
 	if c.GetHeader("x-amz-copy-source") != "" {
 		copyObject(c)
@@ -1401,7 +1401,7 @@ func putObject(c *gin.Context) {
 
 	if dataSize > 0 {
 		var calcErr error
-		hdrCRC32, crc32Val, md5Val, calcErr = calculateChecksumsForInstantUpload(data)
+		hdrCRC32, crc32Val, md5Val, calcErr = sdk.CalculateChecksums(data)
 		if calcErr == nil {
 			checksumsCalculated = true
 
@@ -1630,7 +1630,7 @@ func putObject(c *gin.Context) {
 					}
 				} else if dataSize > 0 {
 					// Fallback: calculate checksums if not already calculated
-					calcHdrCRC32, calcCRC32Val, calcMD5Val, calcErr := calculateChecksumsForInstantUpload(data)
+					calcHdrCRC32, calcCRC32Val, calcMD5Val, calcErr := sdk.CalculateChecksums(data)
 					if calcErr == nil {
 						dataInfo = &core.DataInfo{
 							ID:       dataID,
@@ -1704,8 +1704,9 @@ func putObject(c *gin.Context) {
 	c.Status(http.StatusOK)
 }
 
-// deleteObject handles DELETE /{bucket}/{key} - DeleteObject
-func deleteObject(c *gin.Context) {
+// DeleteObject handles DELETE /{bucket}/{key} - DeleteObject
+// Exported for testing purposes
+func DeleteObject(c *gin.Context) {
 	bucketName := c.Param("bucket")
 	key := c.Param("key")
 	key = util.FastTrimPrefix(key, "/")
@@ -1901,7 +1902,7 @@ func copyObject(c *gin.Context) {
 	// Only if instant upload is enabled via configuration
 	if dataSize > 0 && core.IsInstantUploadEnabled() {
 		// Calculate checksums for instant upload
-		hdrCRC32, crc32Val, md5Val, err := calculateChecksumsForInstantUpload(sourceData)
+		hdrCRC32, crc32Val, md5Val, err := sdk.CalculateChecksums(sourceData)
 		if err == nil {
 			// Create DataInfo for Ref
 			dataInfo := &core.DataInfo{
@@ -2134,7 +2135,7 @@ func moveObject(c *gin.Context) {
 		// Only if instant upload is enabled via configuration
 		if dataSize > 0 && core.IsInstantUploadEnabled() {
 			// Calculate checksums for instant upload
-			hdrCRC32, crc32Val, md5Val, err := calculateChecksumsForInstantUpload(sourceData)
+			hdrCRC32, crc32Val, md5Val, err := sdk.CalculateChecksums(sourceData)
 			if err == nil {
 				// Create DataInfo for Ref
 				dataInfo := &core.DataInfo{
@@ -2257,8 +2258,9 @@ func headBucket(c *gin.Context) {
 	c.Status(http.StatusOK)
 }
 
-// headObject handles HEAD /{bucket}/{key} - HeadObject
-func headObject(c *gin.Context) {
+// HeadObject handles HEAD /{bucket}/{key} - HeadObject
+// Exported for testing purposes
+func HeadObject(c *gin.Context) {
 	bucketName := c.Param("bucket")
 	key := c.Param("key")
 	key = util.FastTrimPrefix(key, "/")

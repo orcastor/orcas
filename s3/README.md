@@ -341,9 +341,9 @@ export ORCAS_MAX_WRITE_BUFFER_COUNT=2048
 
 For detailed performance test cases and reports, please refer to:
 
-- `performance_test.go` - Performance test implementation
-- `multipart_and_range_test.go` - Multipart upload and range read test cases
-- [Performance Test Report (English)](PERFORMANCE_TEST_REPORT.md) - Comprehensive performance analysis
+- `test/performance_test.go` - Performance test implementation
+- `test/multipart_and_range_test.go` - Multipart upload and range read test cases
+- [Performance Test Report (English)](docs/PERFORMANCE_TEST_REPORT.md) - Comprehensive performance analysis
 
 ### Quick Run Tests
 
