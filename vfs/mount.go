@@ -25,8 +25,6 @@ type MountOptions struct {
 	Foreground bool
 	// Allow other users to access
 	AllowOther bool
-	// Allow root access
-	AllowRoot bool
 	// Default permissions
 	DefaultPermissions bool
 	// SDK configuration (for encryption, compression, instant upload, etc.)
@@ -73,9 +71,11 @@ func Mount(h core.Handler, c core.Ctx, bktID int64, opts *MountOptions) (*fuse.S
 	if opts.AllowOther {
 		fuseOpts.Options = append(fuseOpts.Options, "allow_other")
 	}
-	if opts.AllowRoot {
-		fuseOpts.Options = append(fuseOpts.Options, "allow_root")
-	}
+	// Note: allow_root is not a standard FUSE option and is not supported by fusermount3
+	// If root access is needed, use allow_other instead (requires user_allow_other in /etc/fuse.conf)
+	// if opts.AllowRoot {
+	// 	fuseOpts.Options = append(fuseOpts.Options, "allow_root")
+	// }
 	if opts.DefaultPermissions {
 		fuseOpts.Options = append(fuseOpts.Options, "default_permissions")
 	}
@@ -91,29 +91,38 @@ func Mount(h core.Handler, c core.Ctx, bktID int64, opts *MountOptions) (*fuse.S
 		return nil, fmt.Errorf("failed to mount: %w", err)
 	}
 
+	// Note: fs.Mount() returns a server that needs to be started with server.Serve()
+	// Do not call Serve() here, let the caller handle it
 	return server, nil
 }
 
 // Serve runs filesystem service (blocks until unmount)
+// Note: fs.Mount() already starts server.Serve() in a goroutine,
+// so we should NOT call server.Serve() again. We just need to wait
+// for the signal to unmount.
 func Serve(server *fuse.Server, foreground bool) error {
 	if foreground {
 		// Run in foreground, wait for signal
+		// Note: fs.Mount() already started server.Serve() in a goroutine,
+		// so we just need to wait for the signal to unmount
 		sigChan := make(chan os.Signal, 1)
 		signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
 
-		// Start service
-		go func() {
-			server.Serve()
-		}()
-
 		// Wait for signal
-		<-sigChan
+		sig := <-sigChan
+		fmt.Printf("\nReceived signal: %v, unmounting...\n", sig)
 
-		// Unmount
-		return server.Unmount()
+		// Unmount (this will cause the server to stop)
+		err := server.Unmount()
+		if err != nil {
+			return fmt.Errorf("failed to unmount: %w", err)
+		}
+
+		return nil
 	} else {
-		// Run in background
-		server.Serve()
+		// Run in background - fs.Mount() already started the server in a goroutine,
+		// so we just wait for the server to finish (which happens when unmounted)
+		server.Wait()
 		return nil
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"hash/crc32"
 	"io"
+	"log"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -360,8 +361,13 @@ func (ra *RandomAccessor) Write(offset int64, data []byte) error {
 		// Exceeds capacity, need to force flush
 		// Don't rollback writeIndex (already incremented, space is allocated)
 		// Force flush current buffer (synchronous execution, ensure data is persisted)
+		log.Printf("[VFS RandomAccessor Write] Buffer full, forcing flush for fileID=%d", ra.fileID)
 		_, err := ra.Flush()
 		if err != nil {
+			log.Printf("[VFS RandomAccessor Write] ERROR: Failed to flush buffer for fileID=%d: %v", ra.fileID, err)
+			if err == core.ERR_QUOTA_EXCEED {
+				log.Printf("[VFS RandomAccessor Write] ERROR: Quota exceeded during flush for fileID=%d", ra.fileID)
+			}
 			return err
 		}
 	}
@@ -611,6 +617,10 @@ func (ra *RandomAccessor) flushSequentialChunk() error {
 
 	// Write data block
 	if _, err := ra.fs.h.PutData(ra.fs.c, ra.fs.bktID, ra.seqBuffer.dataID, ra.seqBuffer.sn, encodedChunk); err != nil {
+		log.Printf("[VFS flushSequentialChunk] ERROR: Failed to put data for fileID=%d, dataID=%d, sn=%d, size=%d: %v", ra.fileID, ra.seqBuffer.dataID, ra.seqBuffer.sn, len(encodedChunk), err)
+		if err == core.ERR_QUOTA_EXCEED {
+			log.Printf("[VFS flushSequentialChunk] ERROR: Quota exceeded for fileID=%d", ra.fileID)
+		}
 		return err
 	}
 
@@ -1167,8 +1177,13 @@ func (ra *RandomAccessor) applyRandomWritesWithSDK(fileObj *core.ObjectInfo, wri
 	// If original data is compressed or encrypted, must read completely (unavoidable)
 	// But can stream write, avoid processing all data at once
 	if hasCompression || hasEncryption {
+		log.Printf("[VFS applyRandomWritesWithSDK] Processing compressed/encrypted data for fileID=%d, newDataID=%d", ra.fileID, newDataID)
 		newVersionID, err := ra.applyWritesStreamingCompressed(oldDataInfo, writes, dataInfo, chunkSize, newSize)
 		if err != nil {
+			log.Printf("[VFS applyRandomWritesWithSDK] ERROR: Failed to apply writes (compressed/encrypted) for fileID=%d: %v", ra.fileID, err)
+			if err == core.ERR_QUOTA_EXCEED {
+				log.Printf("[VFS applyRandomWritesWithSDK] ERROR: Quota exceeded for fileID=%d", ra.fileID)
+			}
 			return 0, err
 		}
 

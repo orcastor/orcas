@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log"
 	"sync/atomic"
 	"syscall"
 
@@ -45,8 +46,12 @@ func (ofs *OrcasFS) Mount(mountPoint string, opts *fuse.MountOptions) (*fuse.Ser
 	}
 
 	// Mount filesystem, directly use root node as root Inode
+	// Note: fs.Mount() does NOT automatically start the server
+	// The caller must call server.Serve() to start the service
 	server, err := fs.Mount(mountPoint, ofs.root, &fs.Options{
 		MountOptions: *opts,
+		// Explicitly set to not auto-start the server
+		// The server will be started by the caller via server.Serve()
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to mount: %w", err)
@@ -62,8 +67,12 @@ type OrcasNode struct {
 	objID  int64
 	obj    atomic.Value // *core.ObjectInfo
 	isRoot bool
-	ra     atomic.Value // *RandomAccessor
+	ra     atomic.Value // *RandomAccessor (nil means not initialized, releasedMarker means released)
 }
+
+// releasedMarker is a special marker to indicate that RandomAccessor has been released
+// atomic.Value cannot store nil, so we use this marker instead
+var releasedMarker = &RandomAccessor{}
 
 var (
 	_ fs.InodeEmbedder = (*OrcasNode)(nil)
@@ -637,6 +646,7 @@ func (n *OrcasNode) Write(ctx context.Context, data []byte, off int64) (written 
 	// Get or create RandomAccessor (has internal lock, but releases quickly)
 	ra, err := n.getRandomAccessor()
 	if err != nil {
+		log.Printf("[VFS Write] ERROR: Failed to get RandomAccessor for file objID=%d: %v", obj.ID, err)
 		return 0, syscall.EIO
 	}
 
@@ -659,7 +669,7 @@ func (n *OrcasNode) Write(ctx context.Context, data []byte, off int64) (written 
 func (n *OrcasNode) Flush(ctx context.Context) syscall.Errno {
 	// Atomically read ra
 	val := n.ra.Load()
-	if val == nil {
+	if val == nil || val == releasedMarker {
 		return 0
 	}
 
@@ -840,7 +850,10 @@ func (n *OrcasNode) truncateFile(newSize int64) syscall.Errno {
 func (n *OrcasNode) getRandomAccessor() (*RandomAccessor, error) {
 	// First check: atomic read (fast path)
 	if val := n.ra.Load(); val != nil {
-		if ra, ok := val.(*RandomAccessor); ok && ra != nil {
+		// Check if it's the released marker
+		if val == releasedMarker {
+			// Was released, need to create new one
+		} else if ra, ok := val.(*RandomAccessor); ok && ra != nil {
 			return ra, nil
 		}
 	}
@@ -862,14 +875,18 @@ func (n *OrcasNode) getRandomAccessor() (*RandomAccessor, error) {
 	}
 
 	// Try to atomically set ra (if already set by other goroutine, use existing)
-	if !n.ra.CompareAndSwap(nil, newRA) {
+	// Try swapping from nil or releasedMarker
+	oldVal := n.ra.Load()
+	if !n.ra.CompareAndSwap(oldVal, newRA) {
 		// Other goroutine already created, close what we created, use existing
 		newRA.Close()
-		if val := n.ra.Load(); val != nil {
+		if val := n.ra.Load(); val != nil && val != releasedMarker {
 			if ra, ok := val.(*RandomAccessor); ok && ra != nil {
 				return ra, nil
 			}
 		}
+		// If we get here, something unexpected happened, try again
+		return n.getRandomAccessor()
 	}
 
 	return newRA, nil
@@ -878,14 +895,28 @@ func (n *OrcasNode) getRandomAccessor() (*RandomAccessor, error) {
 // Release releases file handle (closes file)
 // Optimization: use atomic operations, completely lock-free
 func (n *OrcasNode) Release(ctx context.Context) syscall.Errno {
-	// Atomically get and clear ra
-	val := n.ra.Swap(nil)
+	// Atomically get and swap with released marker
+	// atomic.Value cannot store nil, so we use releasedMarker instead
+	val := n.ra.Load()
 	if val == nil {
+		// Already released or never initialized
 		return 0
 	}
 
 	ra, ok := val.(*RandomAccessor)
 	if !ok || ra == nil {
+		return 0
+	}
+
+	// Check if already released (compare with marker)
+	if ra == releasedMarker {
+		return 0
+	}
+
+	// Try to atomically swap with released marker
+	// If swap fails, another goroutine already released it
+	if !n.ra.CompareAndSwap(ra, releasedMarker) {
+		// Another goroutine already released it, just return
 		return 0
 	}
 

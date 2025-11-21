@@ -15,13 +15,15 @@ import (
 
 	"github.com/orcastor/orcas/core"
 	"github.com/orcastor/orcas/sdk"
+	"github.com/orcastor/orcas/vfs"
 )
 
 var (
 	configFile  = flag.String("config", "", "Configuration file path (JSON format)")
-	action      = flag.String("action", "", "Operation type: upload, download, add-user, update-user, delete-user, list-users, create-bucket, delete-bucket, list-buckets, update-bucket, change-db-key")
+	action      = flag.String("action", "", "Operation type: upload, download, mount, add-user, update-user, delete-user, list-users, create-bucket, delete-bucket, list-buckets, update-bucket, change-db-key")
 	localPath   = flag.String("local", "", "Local file or directory path")
 	remotePath  = flag.String("remote", "", "Remote path (relative to bucket root directory)")
+	mountPoint  = flag.String("mountpoint", "", "Mount point path (for mount action)")
 	bucketID    = flag.Int64("bucket", 0, "Bucket ID (if not specified, use first bucket)")
 	bucketName  = flag.String("bucketname", "", "Bucket name (for create-bucket)")
 	bucketQuota = flag.Int64("quota", -1, "Bucket quota in bytes (-1 for unlimited, for create-bucket)")
@@ -30,13 +32,6 @@ var (
 	// Database key parameters
 	dbKey    = flag.String("dbkey", "", "Main database encryption key (for InitDB and change-db-key, used as old    key)")
 	newDbKey = flag.String("newdbkey", "", "New database encryption key (for change-db   -key)")
-
-	// Bucket configuration parameters (for update-bucket)
-	bucketCmprWay  = flag.String("cmprway", "", "Compression method: SNAPPY, ZSTD, GZIP, BR (for update-bucket)")
-	bucketCmprQlty = flag.Int("cmprqlty", 0, "Compression quality/level (for update-bucket)")
-	bucketEndecWay = flag.String("endecway", "", "Encryption method: AES256, SM4 (for update-bucket)")
-	bucketEndecKey = flag.String("endeckey", "", "Encryption key (for update-bucket)")
-	bucketRefLevel = flag.String("reflevel", "", "Instant upload level: OFF, FULL, FAST (for create-bucket and update-bucket)")
 
 	//  Configuration parameters (can be set via command line arguments or configuration file)
 	userName = flag.String("user", "", "Username")
@@ -101,6 +96,12 @@ func main() {
 		return
 	}
 
+	// Handle mount operation
+	if *action == "mount" {
+		handleMount()
+		return
+	}
+
 	// Load configuration for upload/download operations
 	cfg, err := loadConfig()
 	if err != nil {
@@ -118,11 +119,11 @@ func main() {
 		os.Exit(1)
 	}
 	if *action == "" {
-		fmt.Fprintf(os.Stderr, "Error: Must specify operation type (use -action upload or -action download)\n")
+		fmt.Fprintf(os.Stderr, "Error: Must specify operation type (use -action upload, download, or mount)\n")
 		flag.Usage()
 		os.Exit(1)
 	}
-	if *localPath == "" {
+	if *action != "mount" && *localPath == "" {
 		fmt.Fprintf(os.Stderr, "Error: Must specify local path (use -local parameter)\n")
 		flag.Usage()
 		os.Exit(1)
@@ -213,9 +214,147 @@ func main() {
 		}
 		fmt.Println("Download completed!")
 	} else {
-		fmt.Fprintf(os.Stderr, "Error: Unknown operation type %s (supported: upload, download)\n", *action)
+		fmt.Fprintf(os.Stderr, "Error: Unknown operation type %s (supported: upload, download, mount)\n", *action)
 		os.Exit(1)
 	}
+}
+
+func handleMount() {
+	// Load configuration
+	cfg, err := loadConfig()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to load configuration: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Validate required parameters
+	if cfg.UserName == "" {
+		fmt.Fprintf(os.Stderr, "Error: Username cannot be empty (use -user parameter or configuration file)\n")
+		os.Exit(1)
+	}
+	if cfg.Password == "" {
+		fmt.Fprintf(os.Stderr, "Error: Password cannot be empty (use -pass parameter or configuration file)\n")
+		os.Exit(1)
+	}
+	if *mountPoint == "" {
+		fmt.Fprintf(os.Stderr, "Error: Mount point cannot be empty (use -mountpoint parameter)\n")
+		os.Exit(1)
+	}
+
+	// Convert configuration to SDK Config
+	sdkCfg := convertToSDKConfig(cfg)
+
+	// Ensure encryption and smart compression are enabled
+	if sdkCfg.EndecWay == 0 {
+		// Default to AES256 if not specified
+		sdkCfg.EndecWay = core.DATA_ENDEC_AES256
+		if sdkCfg.EndecKey == "" {
+			// Generate a default key or prompt user
+			fmt.Fprintf(os.Stderr, "Warning: Encryption enabled but no key provided. Using default key (not secure for production!)\n")
+			sdkCfg.EndecKey = "default-encryption-key-12345678901234567890" // 32 chars for AES256
+		}
+	}
+	if sdkCfg.WiseCmpr == 0 {
+		// Default to ZSTD if not specified
+		sdkCfg.WiseCmpr = core.DATA_CMPR_ZSTD
+		if sdkCfg.CmprQlty == 0 {
+			sdkCfg.CmprQlty = 5 // Default compression level
+		}
+	}
+
+	// Validate encryption key length
+	if sdkCfg.EndecWay == core.DATA_ENDEC_AES256 && len(sdkCfg.EndecKey) <= 16 {
+		fmt.Fprintf(os.Stderr, "Error: AES256 encryption key must be longer than 16 characters (current length: %d)\n", len(sdkCfg.EndecKey))
+		os.Exit(1)
+	}
+	if sdkCfg.EndecWay == core.DATA_ENDEC_SM4 && len(sdkCfg.EndecKey) != 16 {
+		fmt.Fprintf(os.Stderr, "Error: SM4 encryption key must be exactly 16 characters (current length: %d)\n", len(sdkCfg.EndecKey))
+		os.Exit(1)
+	}
+
+	// Create handler
+	handler := core.NewLocalHandler()
+	defer handler.Close()
+
+	// Login
+	ctx, userInfo, buckets, err := handler.Login(context.Background(), cfg.UserName, cfg.Password)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Login failed: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Printf("Login successful: User %s (ID: %d)\n", userInfo.Name, userInfo.ID)
+	if len(buckets) == 0 {
+		fmt.Fprintf(os.Stderr, "Error: No available bucket\n")
+		os.Exit(1)
+	}
+
+	// Select bucket
+	var selectedBktID int64
+	if *bucketID > 0 {
+		selectedBktID = *bucketID
+		// Verify bucket exists
+		found := false
+		for _, b := range buckets {
+			if b.ID == selectedBktID {
+				found = true
+				break
+			}
+		}
+		if !found {
+			fmt.Fprintf(os.Stderr, "Error: Bucket ID %d does not exist\n", *bucketID)
+			os.Exit(1)
+		}
+	} else {
+		selectedBktID = buckets[0].ID
+		fmt.Printf("Using Bucket: %s (ID: %d)\n", buckets[0].Name, buckets[0].ID)
+	}
+
+	// Display configuration
+	fmt.Printf("\nMount Configuration:\n")
+	fmt.Printf("  Mount Point: %s\n", *mountPoint)
+	if sdkCfg.EndecWay == core.DATA_ENDEC_AES256 {
+		fmt.Printf("  Encryption: AES256\n")
+	} else if sdkCfg.EndecWay == core.DATA_ENDEC_SM4 {
+		fmt.Printf("  Encryption: SM4\n")
+	}
+	if sdkCfg.WiseCmpr == core.DATA_CMPR_SNAPPY {
+		fmt.Printf("  Smart Compression: SNAPPY (level: %d)\n", sdkCfg.CmprQlty)
+	} else if sdkCfg.WiseCmpr == core.DATA_CMPR_ZSTD {
+		fmt.Printf("  Smart Compression: ZSTD (level: %d)\n", sdkCfg.CmprQlty)
+	} else if sdkCfg.WiseCmpr == core.DATA_CMPR_GZIP {
+		fmt.Printf("  Smart Compression: GZIP (level: %d)\n", sdkCfg.CmprQlty)
+	} else if sdkCfg.WiseCmpr == core.DATA_CMPR_BR {
+		fmt.Printf("  Smart Compression: BROTLI (level: %d)\n", sdkCfg.CmprQlty)
+	}
+	fmt.Printf("\n")
+
+	// Mount filesystem
+	// Note: AllowRoot is not supported by fusermount3, use AllowOther instead if needed
+	// (requires user_allow_other in /etc/fuse.conf for non-root users)
+	server, err := vfs.Mount(handler, ctx, selectedBktID, &vfs.MountOptions{
+		MountPoint:         *mountPoint,
+		Foreground:         true,
+		AllowOther:         true, // Set to true only if you need other users to access (requires user_allow_other in /etc/fuse.conf)
+		DefaultPermissions: true,
+		SDKConfig:          &sdkCfg,
+	})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to mount filesystem: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Printf("Filesystem mounted successfully at %s\n", *mountPoint)
+	fmt.Printf("Press Ctrl+C to unmount\n\n")
+
+	// Run service (blocks until unmount)
+	err = vfs.Serve(server, true)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Mount service error: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Println("Filesystem unmounted successfully")
 }
 
 func loadConfig() (*Config, error) {
@@ -694,8 +833,8 @@ func handleBucketManagement() {
 		}
 
 		// Set compression configuration if provided
-		if *bucketCmprWay != "" {
-			switch *bucketCmprWay {
+		if *wiseCmpr != "" {
+			switch *wiseCmpr {
 			case "SNAPPY":
 				bucket.CmprWay = core.DATA_CMPR_SNAPPY
 			case "ZSTD":
@@ -706,26 +845,26 @@ func handleBucketManagement() {
 				bucket.CmprWay = core.DATA_CMPR_BR
 			}
 		}
-		if *bucketCmprQlty > 0 {
-			bucket.CmprQlty = uint32(*bucketCmprQlty)
+		if *cmprQlty > 0 {
+			bucket.CmprQlty = uint32(*cmprQlty)
 		}
 
 		// Set encryption configuration if provided
-		if *bucketEndecWay != "" {
-			switch *bucketEndecWay {
+		if *endecWay != "" {
+			switch *endecWay {
 			case "AES256":
 				bucket.EndecWay = core.DATA_ENDEC_AES256
 			case "SM4":
 				bucket.EndecWay = core.DATA_ENDEC_SM4
 			}
 		}
-		if *bucketEndecKey != "" {
-			bucket.EndecKey = *bucketEndecKey
+		if *endecKey != "" {
+			bucket.EndecKey = *endecKey
 		}
 
 		// Set instant upload (deduplication) configuration if provided
-		if *bucketRefLevel != "" {
-			switch *bucketRefLevel {
+		if *refLevel != "" {
+			switch *refLevel {
 			case "FULL":
 				bucket.RefLevel = 1
 			case "FAST":
@@ -843,8 +982,8 @@ func handleBucketManagement() {
 
 		// Update compression configuration if provided
 		updated := false
-		if *bucketCmprWay != "" {
-			switch *bucketCmprWay {
+		if *wiseCmpr != "" {
+			switch *wiseCmpr {
 			case "SNAPPY":
 				bucket.CmprWay = core.DATA_CMPR_SNAPPY
 			case "ZSTD":
@@ -858,14 +997,14 @@ func handleBucketManagement() {
 			}
 			updated = true
 		}
-		if *bucketCmprQlty > 0 {
-			bucket.CmprQlty = uint32(*bucketCmprQlty)
+		if *cmprQlty > 0 {
+			bucket.CmprQlty = uint32(*cmprQlty)
 			updated = true
 		}
 
 		// Update encryption configuration if provided
-		if *bucketEndecWay != "" {
-			switch *bucketEndecWay {
+		if *endecWay != "" {
+			switch *endecWay {
 			case "AES256":
 				bucket.EndecWay = core.DATA_ENDEC_AES256
 			case "SM4":
@@ -875,14 +1014,14 @@ func handleBucketManagement() {
 			}
 			updated = true
 		}
-		if *bucketEndecKey != "" {
-			bucket.EndecKey = *bucketEndecKey
+		if *endecKey != "" {
+			bucket.EndecKey = *endecKey
 			updated = true
 		}
 
 		// Update instant upload (deduplication) configuration if provided
-		if *bucketRefLevel != "" {
-			switch *bucketRefLevel {
+		if *refLevel != "" {
+			switch *refLevel {
 			case "FULL":
 				bucket.RefLevel = 1
 			case "FAST":
