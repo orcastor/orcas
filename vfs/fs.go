@@ -136,6 +136,37 @@ func (n *OrcasNode) invalidateObj() {
 	n.obj.Store((*core.ObjectInfo)(nil))
 }
 
+// getDirChildren gets directory children list (with cache)
+// Optimization: check cache first, then query database if cache miss
+func (n *OrcasNode) getDirChildren(dirID int64) ([]*core.ObjectInfo, error) {
+	// Check cache first
+	cacheKey := formatCacheKey(n.fs.bktID, dirID)
+	if cached, ok := dirChildrenCache.Get(cacheKey); ok {
+		if children, ok := cached.([]*core.ObjectInfo); ok && children != nil {
+			return children, nil
+		}
+	}
+
+	// Cache miss, query from database
+	children, _, _, err := n.fs.h.List(n.fs.c, n.fs.bktID, dirID, core.ListOptions{
+		Count: core.DefaultListPageSize,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	// Update cache
+	dirChildrenCache.Put(cacheKey, children)
+
+	return children, nil
+}
+
+// invalidateDirChildrenCache invalidates directory children cache
+func (n *OrcasNode) invalidateDirChildrenCache(dirID int64) {
+	cacheKey := formatCacheKey(n.fs.bktID, dirID)
+	dirChildrenCache.Del(cacheKey)
+}
+
 // Getattr gets file/directory attributes
 func (n *OrcasNode) Getattr(ctx context.Context, f fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
 	obj, err := n.getObj()
@@ -176,10 +207,8 @@ func (n *OrcasNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut)
 		return nil, syscall.ENOTDIR
 	}
 
-	// List directory contents
-	children, _, _, err := n.fs.h.List(n.fs.c, n.fs.bktID, obj.ID, core.ListOptions{
-		Count: core.DefaultListPageSize,
-	})
+	// List directory contents (with cache)
+	children, err := n.getDirChildren(obj.ID)
 	if err != nil {
 		return nil, syscall.EIO
 	}
@@ -236,10 +265,8 @@ func (n *OrcasNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
 		return nil, syscall.ENOTDIR
 	}
 
-	// List directory contents
-	children, _, _, err := n.fs.h.List(n.fs.c, n.fs.bktID, obj.ID, core.ListOptions{
-		Count: core.DefaultListPageSize,
-	})
+	// List directory contents (with cache)
+	children, err := n.getDirChildren(obj.ID)
 	if err != nil {
 		return nil, syscall.EIO
 	}
@@ -323,6 +350,7 @@ func (n *OrcasNode) Create(ctx context.Context, name string, flags uint32, mode 
 
 	// Invalidate parent directory cache
 	n.invalidateObj()
+	n.invalidateDirChildrenCache(obj.ID)
 
 	return fileInode, fileNode, fuse.FOPEN_DIRECT_IO, 0
 }
@@ -379,6 +407,7 @@ func (n *OrcasNode) Mkdir(ctx context.Context, name string, mode uint32, out *fu
 
 	// Invalidate parent directory cache
 	n.invalidateObj()
+	n.invalidateDirChildrenCache(obj.ID)
 
 	return dirInode, 0
 }
@@ -394,10 +423,8 @@ func (n *OrcasNode) Unlink(ctx context.Context, name string) syscall.Errno {
 		return syscall.ENOTDIR
 	}
 
-	// Find child object
-	children, _, _, err := n.fs.h.List(n.fs.c, n.fs.bktID, obj.ID, core.ListOptions{
-		Count: core.DefaultListPageSize,
-	})
+	// Find child object (with cache)
+	children, err := n.getDirChildren(obj.ID)
 	if err != nil {
 		return syscall.EIO
 	}
@@ -422,6 +449,7 @@ func (n *OrcasNode) Unlink(ctx context.Context, name string) syscall.Errno {
 
 	// Invalidate parent directory cache
 	n.invalidateObj()
+	n.invalidateDirChildrenCache(obj.ID)
 
 	return 0
 }
@@ -437,10 +465,8 @@ func (n *OrcasNode) Rmdir(ctx context.Context, name string) syscall.Errno {
 		return syscall.ENOTDIR
 	}
 
-	// Find child directory
-	children, _, _, err := n.fs.h.List(n.fs.c, n.fs.bktID, obj.ID, core.ListOptions{
-		Count: core.DefaultListPageSize,
-	})
+	// Find child directory (with cache)
+	children, err := n.getDirChildren(obj.ID)
 	if err != nil {
 		return syscall.EIO
 	}
@@ -457,10 +483,8 @@ func (n *OrcasNode) Rmdir(ctx context.Context, name string) syscall.Errno {
 		return syscall.ENOENT
 	}
 
-	// Check if directory is empty
-	dirChildren, _, _, err := n.fs.h.List(n.fs.c, n.fs.bktID, targetID, core.ListOptions{
-		Count: 1,
-	})
+	// Check if directory is empty (with cache)
+	dirChildren, err := n.getDirChildren(targetID)
 	if err != nil {
 		return syscall.EIO
 	}
@@ -476,6 +500,7 @@ func (n *OrcasNode) Rmdir(ctx context.Context, name string) syscall.Errno {
 
 	// Invalidate parent directory cache
 	n.invalidateObj()
+	n.invalidateDirChildrenCache(obj.ID)
 
 	return 0
 }
@@ -492,17 +517,28 @@ func (n *OrcasNode) Rename(ctx context.Context, name string, newParent fs.InodeE
 	}
 
 	// Find source object
-	children, _, _, err := n.fs.h.List(n.fs.c, n.fs.bktID, obj.ID, core.ListOptions{
-		Count: core.DefaultListPageSize,
-	})
+	// First, try to find from cache by checking all cached objects with matching PID and name
+	var sourceID int64
+
+	// Check cache first: iterate through potential cached objects
+	// Note: We can't directly search cache by name, so we still need List, but we'll prefer cached version
+	children, err := n.getDirChildren(obj.ID)
 	if err != nil {
 		return syscall.EIO
 	}
 
-	var sourceID int64
+	// Find source object ID from List, but prefer cached version if available
 	for _, child := range children {
 		if child.Name == name {
 			sourceID = child.ID
+			// Check if this object is in cache, prefer cached version (may have updated information)
+			fileObjKey := formatCacheKey(n.fs.bktID, sourceID)
+			if cached, ok := fileObjCache.Get(fileObjKey); ok {
+				if cachedObj, ok := cached.(*core.ObjectInfo); ok && cachedObj != nil {
+					// Cache has the object, we'll use it when updating cache later
+					// For now, we have the sourceID, which is what we need
+				}
+			}
 			break
 		}
 	}
@@ -544,9 +580,28 @@ func (n *OrcasNode) Rename(ctx context.Context, name string, newParent fs.InodeE
 		}
 	}
 
+	// Update cache after rename: directly update cached ObjectInfo's Name field
+	// This is critical for files that are being written (e.g., .tmp files that are immediately renamed)
+	// The cache key is based on fileID, so we need to update the cached ObjectInfo with the new name
+	fileObjKey := formatCacheKey(n.fs.bktID, sourceID)
+	if cached, ok := fileObjCache.Get(fileObjKey); ok {
+		if cachedObj, ok := cached.(*core.ObjectInfo); ok && cachedObj != nil {
+			// Directly update the Name field in the cached object
+			cachedObj.Name = newName
+			// Also update PID if moved to different directory
+			if newParentObj.ID != obj.ID {
+				cachedObj.PID = newParentObj.ID
+			}
+			// Put back to cache to ensure it's updated
+			fileObjCache.Put(fileObjKey, cachedObj)
+		}
+	}
+
 	// Invalidate both directories' cache
 	n.invalidateObj()
 	newParentNode.invalidateObj()
+	n.invalidateDirChildrenCache(obj.ID)
+	newParentNode.invalidateDirChildrenCache(newParentObj.ID)
 
 	return 0
 }

@@ -644,6 +644,23 @@ func dokanyMoveFile(ofs *OrcasFS, fileName, newFileName string, replaceIfExistin
 		}
 	}
 
+	// Update cache after rename: directly update cached ObjectInfo's Name field
+	// This is critical for files that are being written (e.g., .tmp files that are immediately renamed)
+	// The cache key is based on fileID, so we need to update the cached ObjectInfo with the new name
+	fileObjKey := formatCacheKey(ofs.bktID, srcObj.ID)
+	if cached, ok := fileObjCache.Get(fileObjKey); ok {
+		if cachedObj, ok := cached.(*core.ObjectInfo); ok && cachedObj != nil {
+			// Directly update the Name field in the cached object
+			cachedObj.Name = dstName
+			// Also update PID if moved to different directory
+			if dstParentID != srcObj.PID {
+				cachedObj.PID = dstParentID
+			}
+			// Put back to cache to ensure it's updated
+			fileObjCache.Put(fileObjKey, cachedObj)
+		}
+	}
+
 	return DOKAN_SUCCESS
 }
 

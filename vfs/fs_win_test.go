@@ -687,3 +687,368 @@ func TestDokanyWriteAndRead(t *testing.T) {
 		t.Fatalf("Read data mismatch: expected '%s', got '%s' (size=%d, dataID=%d)", string(writeData), string(readBuffer[:bytesRead2]), updatedObj.Size, updatedObj.DataID)
 	}
 }
+
+// TestTmpFileRenameCacheUpdate tests the scenario where a .tmp file is uploaded
+// and immediately renamed, ensuring cache is updated correctly
+// This test reproduces the bug where cache name update fails for files being written
+func TestTmpFileRenameCacheUpdate(t *testing.T) {
+	// Setup test environment
+	ensureTestUser(t)
+	handler := core.NewLocalHandler()
+	ctx := context.Background()
+	ctx, _, _, err := handler.Login(ctx, "orcas", "orcas")
+	if err != nil {
+		t.Fatalf("Login failed: %v", err)
+	}
+
+	ig := idgen.NewIDGen(nil, 0)
+	testBktID, _ := ig.New()
+	err = core.InitBucketDB(ctx, testBktID)
+	if err != nil {
+		t.Fatalf("InitBucketDB failed: %v", err)
+	}
+
+	// Get user info for bucket creation
+	_, userInfo, _, err := handler.Login(ctx, "orcas", "orcas")
+	if err != nil {
+		t.Fatalf("Login failed: %v", err)
+	}
+
+	// Create bucket
+	admin := core.NewLocalAdmin()
+	bkt := &core.BucketInfo{
+		ID:        testBktID,
+		Name:      "test-bucket",
+		UID:       userInfo.ID,
+		Type:      1,
+		Quota:     -1,
+		ChunkSize: 4 * 1024 * 1024,
+	}
+	err = admin.PutBkt(ctx, []*core.BucketInfo{bkt})
+	if err != nil {
+		t.Fatalf("PutBkt failed: %v", err)
+	}
+
+	// Create filesystem
+	sdkCfg := &sdk.Config{}
+	ofs := NewOrcasFS(handler, ctx, testBktID, sdkCfg)
+
+	// Step 1: Create a .tmp file (simulating file upload)
+	tmpFileName := "/test-file.tmp"
+	finalFileName := "/test-file.txt"
+
+	// Create file object with .tmp extension
+	tmpFileObj := &core.ObjectInfo{
+		ID:    core.NewID(),
+		PID:   core.ROOT_OID,
+		Type:  core.OBJ_TYPE_FILE,
+		Name:  "test-file.tmp",
+		Size:  0,
+		MTime: core.Now(),
+	}
+
+	// Create object in database
+	_, err = handler.Put(ctx, testBktID, []*core.ObjectInfo{tmpFileObj})
+	if err != nil {
+		t.Fatalf("Put failed: %v", err)
+	}
+
+	// Step 2: Get RandomAccessor and start writing data (simulating active upload)
+	ra, err := getOrCreateRandomAccessor(ofs, tmpFileObj.ID)
+	if err != nil {
+		t.Fatalf("getOrCreateRandomAccessor failed: %v", err)
+	}
+
+	// Write some data to the file
+	testData := []byte("Test data for tmp file rename")
+	err = ra.Write(0, testData)
+	if err != nil {
+		t.Fatalf("ra.Write failed: %v", err)
+	}
+
+	// Get fileObj before rename to verify it has old name
+	fileObjBeforeRename, err := ra.getFileObj()
+	if err != nil {
+		t.Fatalf("getFileObj failed: %v", err)
+	}
+	if fileObjBeforeRename.Name != "test-file.tmp" {
+		t.Fatalf("Expected name 'test-file.tmp' before rename, got '%s'", fileObjBeforeRename.Name)
+	}
+	t.Logf("Before rename: fileObj.Name='%s'", fileObjBeforeRename.Name)
+
+	// Step 3: Immediately rename the file (simulating rename after upload)
+	status := dokanyMoveFile(ofs, tmpFileName, finalFileName, false, 0)
+	if status != DOKAN_SUCCESS {
+		t.Fatalf("dokanyMoveFile failed with status %d", status)
+	}
+
+	// Step 4: Verify cache is updated with new name
+	fileObjKey := formatCacheKey(ofs.bktID, tmpFileObj.ID)
+	cachedObj, ok := fileObjCache.Get(fileObjKey)
+	if !ok {
+		t.Fatalf("File object not found in cache after rename")
+	}
+	cachedFileObj, ok := cachedObj.(*core.ObjectInfo)
+	if !ok {
+		t.Fatalf("Cached object is not *core.ObjectInfo")
+	}
+	if cachedFileObj.Name != "test-file.txt" {
+		t.Fatalf("Cache has wrong name: expected 'test-file.txt', got '%s'", cachedFileObj.Name)
+	}
+	t.Logf("Cache after rename: fileObj.Name='%s'", cachedFileObj.Name)
+
+	// Step 5: Verify RandomAccessor can get updated name from cache
+	// This is the critical test: RandomAccessor should pick up the new name
+	// even though it already has the old name cached in atomic.Value
+	fileObjAfterRename, err := ra.getFileObj()
+	if err != nil {
+		t.Fatalf("getFileObj failed after rename: %v", err)
+	}
+	if fileObjAfterRename.Name != "test-file.txt" {
+		t.Fatalf("RandomAccessor has wrong name after rename: expected 'test-file.txt', got '%s'", fileObjAfterRename.Name)
+	}
+	t.Logf("RandomAccessor after rename: fileObj.Name='%s'", fileObjAfterRename.Name)
+
+	// Step 6: Verify the file can still be accessed with new name
+	obj, err := findObjectByPath(ofs, finalFileName)
+	if err != nil {
+		t.Fatalf("findObjectByPath failed for renamed file: %v", err)
+	}
+	if obj.Name != "test-file.txt" {
+		t.Fatalf("findObjectByPath returned wrong name: expected 'test-file.txt', got '%s'", obj.Name)
+	}
+	if obj.ID != tmpFileObj.ID {
+		t.Fatalf("File ID changed after rename: expected %d, got %d", tmpFileObj.ID, obj.ID)
+	}
+
+	// Step 7: Continue writing to the file (should work with new name)
+	moreData := []byte(" - additional data")
+	err = ra.Write(int64(len(testData)), moreData)
+	if err != nil {
+		t.Fatalf("ra.Write failed after rename: %v", err)
+	}
+
+	// Verify the fileObj still has correct name after additional write
+	fileObjAfterWrite, err := ra.getFileObj()
+	if err != nil {
+		t.Fatalf("getFileObj failed after additional write: %v", err)
+	}
+	if fileObjAfterWrite.Name != "test-file.txt" {
+		t.Fatalf("RandomAccessor lost correct name after additional write: expected 'test-file.txt', got '%s'", fileObjAfterWrite.Name)
+	}
+
+	// Cleanup
+	err = ra.Close()
+	if err != nil {
+		t.Logf("Close failed: %v", err)
+	}
+}
+
+// TestRenameBeforeFlush tests the scenario where a new file is created and renamed
+// before the cache is flushed (data is still in write buffer)
+// This ensures rename works correctly even when file is actively being written
+func TestRenameBeforeFlush(t *testing.T) {
+	// Setup test environment
+	ensureTestUser(t)
+	handler := core.NewLocalHandler()
+	ctx := context.Background()
+	ctx, _, _, err := handler.Login(ctx, "orcas", "orcas")
+	if err != nil {
+		t.Fatalf("Login failed: %v", err)
+	}
+
+	ig := idgen.NewIDGen(nil, 0)
+	testBktID, _ := ig.New()
+	err = core.InitBucketDB(ctx, testBktID)
+	if err != nil {
+		t.Fatalf("InitBucketDB failed: %v", err)
+	}
+
+	// Get user info for bucket creation
+	_, userInfo, _, err := handler.Login(ctx, "orcas", "orcas")
+	if err != nil {
+		t.Fatalf("Login failed: %v", err)
+	}
+
+	// Create bucket
+	admin := core.NewLocalAdmin()
+	bkt := &core.BucketInfo{
+		ID:        testBktID,
+		Name:      "test-bucket",
+		UID:       userInfo.ID,
+		Type:      1,
+		Quota:     -1,
+		ChunkSize: 4 * 1024 * 1024,
+	}
+	err = admin.PutBkt(ctx, []*core.BucketInfo{bkt})
+	if err != nil {
+		t.Fatalf("PutBkt failed: %v", err)
+	}
+
+	// Create filesystem
+	sdkCfg := &sdk.Config{}
+	ofs := NewOrcasFS(handler, ctx, testBktID, sdkCfg)
+
+	// Step 1: Create a new file (simulating new file upload)
+	originalFileName := "/new-file.tmp"
+	finalFileName := "/new-file.txt"
+
+	// Create file object
+	newFileObj := &core.ObjectInfo{
+		ID:    core.NewID(),
+		PID:   core.ROOT_OID,
+		Type:  core.OBJ_TYPE_FILE,
+		Name:  "new-file.tmp",
+		Size:  0,
+		MTime: core.Now(),
+	}
+
+	// Create object in database
+	_, err = handler.Put(ctx, testBktID, []*core.ObjectInfo{newFileObj})
+	if err != nil {
+		t.Fatalf("Put failed: %v", err)
+	}
+
+	// Step 2: Get RandomAccessor and start writing data (but don't flush yet)
+	ra, err := getOrCreateRandomAccessor(ofs, newFileObj.ID)
+	if err != nil {
+		t.Fatalf("getOrCreateRandomAccessor failed: %v", err)
+	}
+	defer ra.Close()
+
+	// Write data to buffer (data is in buffer, not flushed yet)
+	testData := []byte("This is test data written before flush and rename")
+	err = ra.Write(0, testData)
+	if err != nil {
+		t.Fatalf("ra.Write failed: %v", err)
+	}
+
+	// Verify data is in buffer (not flushed)
+	// Check writeIndex to confirm data is buffered
+	writeIndex := atomic.LoadInt64(&ra.buffer.writeIndex)
+	if writeIndex == 0 && (ra.seqBuffer == nil || !ra.seqBuffer.hasData) {
+		t.Fatalf("Data should be in buffer, but writeIndex=%d", writeIndex)
+	}
+	t.Logf("Data written to buffer, writeIndex=%d (not flushed yet)", writeIndex)
+
+	// Step 3: Verify fileObj is in cache with original name
+	fileObjBeforeRename, err := ra.getFileObj()
+	if err != nil {
+		t.Fatalf("getFileObj failed: %v", err)
+	}
+	if fileObjBeforeRename.Name != "new-file.tmp" {
+		t.Fatalf("Expected name 'new-file.tmp' before rename, got '%s'", fileObjBeforeRename.Name)
+	}
+	t.Logf("Before rename: fileObj.Name='%s', DataID=%d (should be 0 or empty, not flushed)",
+		fileObjBeforeRename.Name, fileObjBeforeRename.DataID)
+
+	// Verify file is in cache
+	fileObjKey := formatCacheKey(ofs.bktID, newFileObj.ID)
+	cachedObj, ok := fileObjCache.Get(fileObjKey)
+	if !ok {
+		t.Fatalf("File object should be in cache before rename")
+	}
+	cachedFileObj, ok := cachedObj.(*core.ObjectInfo)
+	if !ok {
+		t.Fatalf("Cached object is not *core.ObjectInfo")
+	}
+	if cachedFileObj.Name != "new-file.tmp" {
+		t.Fatalf("Cache has wrong name before rename: expected 'new-file.tmp', got '%s'", cachedFileObj.Name)
+	}
+
+	// Step 4: Rename the file BEFORE flushing (critical test: rename while data is in buffer)
+	status := dokanyMoveFile(ofs, originalFileName, finalFileName, false, 0)
+	if status != DOKAN_SUCCESS {
+		t.Fatalf("dokanyMoveFile failed with status %d", status)
+	}
+	t.Logf("Rename completed before flush")
+
+	// Step 5: Verify cache is updated with new name (even though data is not flushed)
+	cachedObjAfterRename, ok := fileObjCache.Get(fileObjKey)
+	if !ok {
+		t.Fatalf("File object should still be in cache after rename")
+	}
+	cachedFileObjAfterRename, ok := cachedObjAfterRename.(*core.ObjectInfo)
+	if !ok {
+		t.Fatalf("Cached object is not *core.ObjectInfo")
+	}
+	if cachedFileObjAfterRename.Name != "new-file.txt" {
+		t.Fatalf("Cache has wrong name after rename: expected 'new-file.txt', got '%s'", cachedFileObjAfterRename.Name)
+	}
+	t.Logf("Cache after rename: fileObj.Name='%s'", cachedFileObjAfterRename.Name)
+
+	// Step 6: Verify RandomAccessor can get updated name from cache
+	fileObjAfterRename, err := ra.getFileObj()
+	if err != nil {
+		t.Fatalf("getFileObj failed after rename: %v", err)
+	}
+	if fileObjAfterRename.Name != "new-file.txt" {
+		t.Fatalf("RandomAccessor has wrong name after rename: expected 'new-file.txt', got '%s'", fileObjAfterRename.Name)
+	}
+	t.Logf("RandomAccessor after rename: fileObj.Name='%s'", fileObjAfterRename.Name)
+
+	// Step 7: Continue writing more data (should work with new name)
+	moreData := []byte(" - additional data before flush")
+	err = ra.Write(int64(len(testData)), moreData)
+	if err != nil {
+		t.Fatalf("ra.Write failed after rename: %v", err)
+	}
+
+	// Step 8: Now flush the data (after rename)
+	versionID, err := ra.Flush()
+	if err != nil {
+		t.Fatalf("Flush failed: %v", err)
+	}
+	if versionID == 0 {
+		t.Fatalf("Flush should return versionID")
+	}
+	t.Logf("Flush completed after rename, versionID=%d", versionID)
+
+	// Step 9: Verify fileObj still has correct name after flush
+	fileObjAfterFlush, err := ra.getFileObj()
+	if err != nil {
+		t.Fatalf("getFileObj failed after flush: %v", err)
+	}
+	if fileObjAfterFlush.Name != "new-file.txt" {
+		t.Fatalf("RandomAccessor lost correct name after flush: expected 'new-file.txt', got '%s'", fileObjAfterFlush.Name)
+	}
+	t.Logf("After flush: fileObj.Name='%s', DataID=%d, Size=%d",
+		fileObjAfterFlush.Name, fileObjAfterFlush.DataID, fileObjAfterFlush.Size)
+
+	// Step 10: Verify the file can be accessed with new name
+	obj, err := findObjectByPath(ofs, finalFileName)
+	if err != nil {
+		t.Fatalf("findObjectByPath failed for renamed file: %v", err)
+	}
+	if obj.Name != "new-file.txt" {
+		t.Fatalf("findObjectByPath returned wrong name: expected 'new-file.txt', got '%s'", obj.Name)
+	}
+	if obj.ID != newFileObj.ID {
+		t.Fatalf("File ID changed after rename: expected %d, got %d", newFileObj.ID, obj.ID)
+	}
+
+	// Step 11: Verify data was written correctly (read back)
+	readData, err := ra.Read(0, len(testData)+len(moreData))
+	if err != nil {
+		t.Fatalf("Read failed: %v", err)
+	}
+	expectedData := append(testData, moreData...)
+	if string(readData) != string(expectedData) {
+		t.Fatalf("Read data mismatch: expected '%s', got '%s'", string(expectedData), string(readData))
+	}
+	t.Logf("Data read back correctly: '%s'", string(readData))
+
+	// Step 12: Verify cache still has correct name after all operations
+	finalCachedObj, ok := fileObjCache.Get(fileObjKey)
+	if !ok {
+		t.Fatalf("File object should still be in cache after all operations")
+	}
+	finalCachedFileObj, ok := finalCachedObj.(*core.ObjectInfo)
+	if !ok {
+		t.Fatalf("Cached object is not *core.ObjectInfo")
+	}
+	if finalCachedFileObj.Name != "new-file.txt" {
+		t.Fatalf("Cache lost correct name: expected 'new-file.txt', got '%s'", finalCachedFileObj.Name)
+	}
+	t.Logf("Final cache check: fileObj.Name='%s'", finalCachedFileObj.Name)
+}

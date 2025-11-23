@@ -531,7 +531,7 @@ func InitDB(key ...string) error {
 	}
 	// Note: If using pool, don't close the connection
 
-	db.Exec(`CREATE TABLE IF NOT EXISTS bkt (id BIGINT PRIMARY KEY NOT NULL,
+	_, err = db.Exec(`CREATE TABLE IF NOT EXISTS bkt (id BIGINT PRIMARY KEY NOT NULL,
 		uid BIGINT NOT NULL,
 		quota BIGINT NOT NULL,
 		used BIGINT NOT NULL,
@@ -549,18 +549,33 @@ func InitDB(key ...string) error {
 		endec_way INTEGER NOT NULL DEFAULT 0,
 		endec_key TEXT NOT NULL DEFAULT ''
 	)`)
+	if err != nil {
+		return fmt.Errorf("%w: create bkt table: %v", ERR_EXEC_DB, err)
+	}
 
-	db.Exec(`CREATE TABLE usr (id BIGINT PRIMARY KEY NOT NULL,
+	_, err = db.Exec(`CREATE TABLE IF NOT EXISTS usr (id BIGINT PRIMARY KEY NOT NULL,
 		role TINYINT NOT NULL,
 		usr TEXT NOT NULL,
 		pwd TEXT NOT NULL,
 		name TEXT NOT NULL,
 		avatar TEXT NOT NULL
 	)`)
+	if err != nil {
+		return fmt.Errorf("%w: create usr table: %v", ERR_EXEC_DB, err)
+	}
 
-	db.Exec(`CREATE INDEX ix_uid on bkt (uid)`)
-	db.Exec(`CREATE UNIQUE INDEX uk_name on bkt (name)`)
-	db.Exec(`CREATE UNIQUE INDEX uk_usr on usr (usr)`)
+	_, err = db.Exec(`CREATE INDEX IF NOT EXISTS ix_uid on bkt (uid)`)
+	if err != nil {
+		return fmt.Errorf("%w: create index ix_uid: %v", ERR_EXEC_DB, err)
+	}
+	_, err = db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS uk_name on bkt (name)`)
+	if err != nil {
+		return fmt.Errorf("%w: create index uk_name: %v", ERR_EXEC_DB, err)
+	}
+	_, err = db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS uk_usr on usr (usr)`)
+	if err != nil {
+		return fmt.Errorf("%w: create index uk_usr: %v", ERR_EXEC_DB, err)
+	}
 
 	// Create default admin user if no admin exists
 	initDefaultAdmin(db)

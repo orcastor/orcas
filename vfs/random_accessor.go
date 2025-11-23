@@ -43,6 +43,10 @@ var (
 	// ecache cache: cache file object information to reduce database queries
 	// key: "<bktID>_<fileID>", value: *core.ObjectInfo
 	fileObjCache = ecache.NewLRUCache(16, 512, 30*time.Second)
+
+	// ecache cache: cache directory children list to reduce database queries
+	// key: "<bktID>_<dirID>", value: []*core.ObjectInfo
+	dirChildrenCache = ecache.NewLRUCache(16, 512, 30*time.Second)
 )
 
 // getBatchWriteManager gets the batch writer for the specified bucket (thread-safe)
@@ -751,17 +755,37 @@ func (ra *RandomAccessor) flushSequentialBuffer() error {
 
 func (ra *RandomAccessor) getFileObj() (*core.ObjectInfo, error) {
 	fileObjValue := ra.fileObj.Load()
+	var cachedObj *core.ObjectInfo
 	if fileObjValue != nil {
 		if obj, ok := fileObjValue.(*core.ObjectInfo); ok && obj != nil {
-			return obj, nil
+			cachedObj = obj
 		}
 	}
+
+	// Check cache for potentially updated object (e.g., after rename)
 	// Optimization: use pre-computed key (avoid repeated conversion)
 	if cached, ok := fileObjCache.Get(ra.fileObjKey); ok {
 		if obj, ok := cached.(*core.ObjectInfo); ok && obj != nil {
-			return obj, nil
+			// If we have a cached object in atomic.Value, check if cache has newer name
+			// This handles the case where file was renamed while RandomAccessor is active
+			if cachedObj != nil && cachedObj.Name != obj.Name {
+				// Cache has updated name, use it and update atomic.Value
+				ra.fileObj.Store(obj)
+				return obj, nil
+			}
+			// If no cached object or names match, use cache
+			if cachedObj == nil {
+				ra.fileObj.Store(obj)
+				return obj, nil
+			}
 		}
 	}
+
+	// If we have cached object and cache doesn't have update, return cached
+	if cachedObj != nil {
+		return cachedObj, nil
+	}
+
 	// If cache miss, get from database
 	objs, err := ra.fs.h.Get(ra.fs.c, ra.fs.bktID, []int64{ra.fileID})
 	if err != nil {

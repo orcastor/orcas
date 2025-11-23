@@ -475,8 +475,13 @@ func GetBucketInstantUploadConfig(bucket *BucketInfo) *InstantUploadConfig {
 	if bucket == nil {
 		return nil
 	}
-	// For now, instant upload is controlled by environment variable
-	// In the future, this could be stored in bucket.Extra or a separate field
+	// First check if bucket has RefLevel configured
+	if bucket.RefLevel > 0 {
+		return &InstantUploadConfig{
+			RefLevel: bucket.RefLevel,
+		}
+	}
+	// Fallback to environment variable if bucket doesn't have RefLevel configured
 	return &InstantUploadConfig{
 		RefLevel: getInstantUploadRefLevel(),
 	}
