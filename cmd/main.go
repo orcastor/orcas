@@ -36,7 +36,6 @@ var (
 	//  Configuration parameters (can be set via command line arguments or configuration file)
 	userName = flag.String("user", "", "Username")
 	password = flag.String("pass", "", "Password")
-	dataSync = flag.String("datasync", "", "Data sync (power failure protection): true or false")
 	refLevel = flag.String("reflevel", "", "Instant upload level: OFF, FULL, FAST")
 	wiseCmpr = flag.String("wisecmpr", "", "Smart compression: SNAPPY, ZSTD, GZIP, BR")
 	cmprQlty = flag.Int("cmprqlty", 0, "Compression level")
@@ -58,7 +57,6 @@ var (
 type Config struct {
 	UserName string `json:"user_name"`
 	Password string `json:"password"`
-	DataSync bool   `json:"data_sync"`
 	RefLevel string `json:"ref_level"`
 	WiseCmpr string `json:"wise_cmpr"`
 	CmprQlty int    `json:"cmpr_qlty"`
@@ -381,14 +379,6 @@ func loadConfig() (*Config, error) {
 			cfg.Password = pwd
 		}
 	}
-	// datasync is a boolean value, if command line provides a value, parse and override
-	if *dataSync != "" {
-		if *dataSync == "true" || *dataSync == "1" {
-			cfg.DataSync = true
-		} else {
-			cfg.DataSync = false
-		}
-	}
 	if *refLevel != "" {
 		cfg.RefLevel = *refLevel
 	}
@@ -513,7 +503,6 @@ func convertToSDKConfig(cfg *Config) sdk.Config {
 	sdkCfg := sdk.Config{
 		UserName: cfg.UserName,
 		Password: cfg.Password,
-		DataSync: cfg.DataSync,
 		DontSync: cfg.DontSync,
 		NameTmpl: cfg.NameTmpl,
 	}

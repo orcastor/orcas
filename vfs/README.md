@@ -24,7 +24,6 @@ ORCAS VFS uses FUSE (Filesystem in Userspace) technology to map the ORCAS object
   - **Compression**: Support smart compression (automatically decide based on file type)
   - **Compression Algorithms**: Support Snappy, Zstd, Gzip, Brotli
   - **Instant Upload**: Support instant upload (via RefLevel configuration)
-  - **Data Sync**: Support power failure protection strategy (DataSync)
 
 ## Usage
 
@@ -57,7 +56,6 @@ func main() {
         CmprQlty:  5,                           // Compression level: 5
         EndecWay:  core.DATA_ENDEC_AES256,      // Encryption method: AES256
         EndecKey:  "your-encryption-key-here",   // Encryption key (AES256 requires >16 characters)
-        DataSync:  true,                        // Power failure protection: flush to disk after each write
     }
     
     // Mount filesystem
@@ -90,7 +88,6 @@ func main() {
   - `CmprQlty`: Compression level
   - `EndecWay`: Encryption method (AES256/SM4)
   - `EndecKey`: Encryption key
-  - `DataSync`: Power failure protection strategy
 
 ## Implementation Details
 

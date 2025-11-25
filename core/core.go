@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"fmt"
+	"log"
 	"os"
 	"strconv"
 	"strings"
@@ -93,9 +94,7 @@ type FixScrubIssuesResult struct {
 	Errors                  []string `json:"errors"`                    // 修复过程中的错误信息
 }
 
-type Options struct {
-	Sync bool // Force flush to disk after each data write
-}
+type Options struct{}
 
 type Handler interface {
 	// 传入underlying，返回当前的，构成链式调用
@@ -398,7 +397,14 @@ func (lh *LocalHandler) PutData(c Ctx, bktID, dataID int64, sn int, buf []byte) 
 			dataID = NewID()
 		}
 	}
-	return dataID, lh.da.Write(c, bktID, dataID, sn, buf)
+	log.Printf("[Core PutData] Writing data to disk: bktID=%d, dataID=%d, sn=%d, size=%d", bktID, dataID, sn, len(buf))
+	err := lh.da.Write(c, bktID, dataID, sn, buf)
+	if err != nil {
+		log.Printf("[Core PutData] ERROR: Failed to write data to disk: bktID=%d, dataID=%d, sn=%d, size=%d, error=%v", bktID, dataID, sn, len(buf), err)
+		return dataID, err
+	}
+	log.Printf("[Core PutData] Successfully wrote data to disk: bktID=%d, dataID=%d, sn=%d, size=%d", bktID, dataID, sn, len(buf))
+	return dataID, nil
 }
 
 // PutDataInfo creates metadata after data is uploaded
@@ -434,13 +440,9 @@ func (lh *LocalHandler) PutDataInfoAndObj(c Ctx, bktID int64, d []*DataInfo, o [
 	}
 
 	// Prepare DataInfo
-	var dataInfos []*DataInfo
 	for _, x := range d {
 		if x.ID == 0 {
 			x.ID = NewID()
-		}
-		if x.ID > 0 {
-			dataInfos = append(dataInfos, x)
 		}
 	}
 
@@ -461,7 +463,14 @@ func (lh *LocalHandler) PutDataInfoAndObj(c Ctx, bktID int64, d []*DataInfo, o [
 	}
 
 	// Use combined write method
-	return lh.ma.PutDataAndObj(c, bktID, dataInfos, o)
+	log.Printf("[Core PutDataInfoAndObj] Writing DataInfo and ObjectInfo to database: bktID=%d, dataInfos=%d, objects=%d", bktID, len(d), len(o))
+	err := lh.ma.PutDataAndObj(c, bktID, d, o)
+	if err != nil {
+		log.Printf("[Core PutDataInfoAndObj] ERROR: Failed to write to database: bktID=%d, error=%v", bktID, err)
+		return err
+	}
+	log.Printf("[Core PutDataInfoAndObj] Successfully wrote to database: bktID=%d, dataInfos=%d, objects=%d", bktID, len(d), len(o))
+	return nil
 }
 
 func (lh *LocalHandler) GetDataInfo(c Ctx, bktID, id int64) (*DataInfo, error) {
@@ -929,6 +938,56 @@ func (lh *LocalHandler) Rename(c Ctx, bktID, id int64, name string) error {
 		return err
 	}
 	return lh.ma.SetObj(c, bktID, []string{"name"}, &ObjectInfo{ID: id, Name: name})
+}
+
+// CreateVersionFromFile creates a new version from an existing file
+// This is used when renaming a file to a name that already exists
+// The existing file becomes a version, and the version's parent is the existing file itself
+// After creating the version, the existing file can be replaced by the renamed file
+func (lh *LocalHandler) CreateVersionFromFile(c Ctx, bktID, existingFileID int64) error {
+	if err := lh.acm.CheckPermission(c, MDW, bktID); err != nil {
+		return err
+	}
+
+	// Get the existing file object
+	fileObjs, err := lh.ma.GetObj(c, bktID, []int64{existingFileID})
+	if err != nil {
+		return fmt.Errorf("failed to get existing file: %w", err)
+	}
+	if len(fileObjs) == 0 {
+		return fmt.Errorf("file %d not found", existingFileID)
+	}
+	existingFile := fileObjs[0]
+
+	// Only create version for files, not directories
+	if existingFile.Type != OBJ_TYPE_FILE {
+		return fmt.Errorf("object %d is not a file", existingFileID)
+	}
+
+	// Create a new version object from the existing file
+	// The version will have the same DataID and Size as the existing file
+	// The version's parent (PID) is the existing file itself
+	versionTime := Now()
+	newVersion := &ObjectInfo{
+		ID:     NewID(),
+		PID:    existingFileID, // Parent is the existing file (the file itself)
+		Type:   OBJ_TYPE_VERSION,
+		Name:   strconv.FormatInt(versionTime, 10), // Use timestamp as version name
+		DataID: existingFile.DataID,
+		Size:   existingFile.Size,
+		MTime:  versionTime,
+	}
+
+	// Put the version (this will trigger version retention policy)
+	ids, err := lh.Put(c, bktID, []*ObjectInfo{newVersion})
+	if err != nil {
+		return fmt.Errorf("failed to create version: %w", err)
+	}
+	if len(ids) == 0 || ids[0] == 0 {
+		return fmt.Errorf("failed to create version: no ID returned")
+	}
+
+	return nil
 }
 
 func (lh *LocalHandler) MoveTo(c Ctx, bktID, id, pid int64) error {

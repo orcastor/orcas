@@ -90,7 +90,7 @@ func runPerformanceTest(t *testing.T, name string, dataSize, chunkSize int64, wr
 
 	dma := &core.DefaultMetadataAdapter{}
 	dda := &core.DefaultDataAdapter{}
-	dda.SetOptions(core.Options{Sync: true})
+	dda.SetOptions(core.Options{})
 
 	lh := core.NewLocalHandler().(*core.LocalHandler)
 	lh.SetAdapter(dma, dda)
@@ -453,7 +453,7 @@ func runSequentialWriteTest(t *testing.T, name string, totalSize, chunkSize int6
 
 	dma := &core.DefaultMetadataAdapter{}
 	dda := &core.DefaultDataAdapter{}
-	dda.SetOptions(core.Options{Sync: true})
+	dda.SetOptions(core.Options{})
 
 	lh := core.NewLocalHandler().(*core.LocalHandler)
 	lh.SetAdapter(dma, dda)
@@ -604,7 +604,7 @@ func runRandomWriteTest(t *testing.T, name string, totalSize, chunkSize int64, s
 
 	dma := &core.DefaultMetadataAdapter{}
 	dda := &core.DefaultDataAdapter{}
-	dda.SetOptions(core.Options{Sync: true})
+	dda.SetOptions(core.Options{})
 
 	lh := core.NewLocalHandler().(*core.LocalHandler)
 	lh.SetAdapter(dma, dda)
@@ -754,7 +754,7 @@ func runRandomWriteOverlappingTest(t *testing.T, name string, totalSize, chunkSi
 
 	dma := &core.DefaultMetadataAdapter{}
 	dda := &core.DefaultDataAdapter{}
-	dda.SetOptions(core.Options{Sync: true})
+	dda.SetOptions(core.Options{})
 
 	lh := core.NewLocalHandler().(*core.LocalHandler)
 	lh.SetAdapter(dma, dda)
@@ -894,7 +894,7 @@ func runRandomWriteSmallChunksTest(t *testing.T, name string, totalSize, chunkSi
 
 	dma := &core.DefaultMetadataAdapter{}
 	dda := &core.DefaultDataAdapter{}
-	dda.SetOptions(core.Options{Sync: true})
+	dda.SetOptions(core.Options{})
 
 	lh := core.NewLocalHandler().(*core.LocalHandler)
 	lh.SetAdapter(dma, dda)
@@ -1149,7 +1149,7 @@ func runInstantUploadPerformanceTest(t *testing.T) {
 
 	dma := &core.DefaultMetadataAdapter{}
 	dda := &core.DefaultDataAdapter{}
-	dda.SetOptions(core.Options{Sync: true})
+	dda.SetOptions(core.Options{})
 
 	lh := core.NewLocalHandler().(*core.LocalHandler)
 	lh.SetAdapter(dma, dda)

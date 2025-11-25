@@ -21,7 +21,7 @@ func TestScrub(t *testing.T) {
 
 		dma := &DefaultMetadataAdapter{}
 		dda := &DefaultDataAdapter{}
-		dda.SetOptions(Options{Sync: true})
+		dda.SetOptions(Options{})
 
 		Convey("scrub normal data", func() {
 			// 创建测试数据
@@ -233,7 +233,7 @@ func TestDeleteAndRecycle(t *testing.T) {
 
 		dma := &DefaultMetadataAdapter{}
 		dda := &DefaultDataAdapter{}
-		dda.SetOptions(Options{Sync: true})
+		dda.SetOptions(Options{})
 
 		Convey("delete object", func() {
 			// 创建测试对象
@@ -743,7 +743,7 @@ func TestScanDirtyData(t *testing.T) {
 
 		dma := &DefaultMetadataAdapter{}
 		dda := &DefaultDataAdapter{}
-		dda.SetOptions(Options{Sync: true})
+		dda.SetOptions(Options{})
 
 		Convey("scan incomplete chunks (missing chunk)", func() {
 			// 创建分片数据，但故意缺少一个分片（模拟上传中断）
@@ -876,7 +876,7 @@ func TestPermanentlyDelete(t *testing.T) {
 
 		dma := &DefaultMetadataAdapter{}
 		dda := &DefaultDataAdapter{}
-		dda.SetOptions(Options{Sync: true})
+		dda.SetOptions(Options{})
 
 		Convey("permanently delete file", func() {
 			// 创建LocalHandler
@@ -1041,7 +1041,7 @@ func TestQuotaAndUsed(t *testing.T) {
 
 		dma := &DefaultMetadataAdapter{}
 		dda := &DefaultDataAdapter{}
-		dda.SetOptions(Options{Sync: true})
+		dda.SetOptions(Options{})
 
 		// 创建桶并设置配额
 		uid, _ := ig.New()
@@ -1297,7 +1297,7 @@ func TestDefragment(t *testing.T) {
 
 		dma := &DefaultMetadataAdapter{}
 		dda := &DefaultDataAdapter{}
-		dda.SetOptions(Options{Sync: true})
+		dda.SetOptions(Options{})
 
 		// Create bucket with chunk size
 		uid, _ := ig.New()

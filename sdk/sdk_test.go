@@ -13,19 +13,20 @@ import (
 )
 
 // ORCAS_BASE=/opt/orcas ORCAS_DATA=/opt/orcas_disk ORCAS_SECRET=xxxxxxxx go test . -run=TestUpload -v
-var mntPath = "/opt/orcas_disk/"
-var path = "/mnt/e/Download/media_new/"
-var cfg = Config{
-	UserName: "orcas",
-	Password: "orcas",
-	DataSync: true,
-	RefLevel: FULL,
-	//	EndecWay: core.DATA_ENDEC_AES256,
-	//	EndecKey: "1234567890abcdef12345678",
-	WiseCmpr: core.DATA_CMPR_GZIP,
-	CmprQlty: 5,
-	DontSync: ".*",
-}
+var (
+	mntPath = "/opt/orcas_disk/"
+	path    = "/mnt/e/Download/media_new/"
+	cfg     = Config{
+		UserName: "orcas",
+		Password: "orcas",
+		RefLevel: FULL,
+		//	EndecWay: core.DATA_ENDEC_AES256,
+		//	EndecKey: "1234567890abcdef12345678",
+		WiseCmpr: core.DATA_CMPR_GZIP,
+		CmprQlty: 5,
+		DontSync: ".*",
+	}
+)
 
 func init() {
 	core.InitDB("")

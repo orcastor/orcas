@@ -51,7 +51,7 @@ func TestVFSRandomAccessor(t *testing.T) {
 
 		dma := &core.DefaultMetadataAdapter{}
 		dda := &core.DefaultDataAdapter{}
-		dda.SetOptions(core.Options{Sync: true})
+		dda.SetOptions(core.Options{})
 
 		// 创建LocalHandler
 		lh := core.NewLocalHandler().(*core.LocalHandler)
@@ -232,7 +232,7 @@ func TestVFSRandomAccessorWithSDK(t *testing.T) {
 
 		dma := &core.DefaultMetadataAdapter{}
 		dda := &core.DefaultDataAdapter{}
-		dda.SetOptions(core.Options{Sync: true})
+		dda.SetOptions(core.Options{})
 
 		// 创建LocalHandler
 		lh := core.NewLocalHandler().(*core.LocalHandler)
@@ -682,7 +682,7 @@ func TestRandomAccessorReadWithEncryption(t *testing.T) {
 
 		dma := &core.DefaultMetadataAdapter{}
 		dda := &core.DefaultDataAdapter{}
-		dda.SetOptions(core.Options{Sync: true})
+		dda.SetOptions(core.Options{})
 
 		// 创建LocalHandler
 		lh := core.NewLocalHandler().(*core.LocalHandler)
@@ -770,7 +770,7 @@ func TestRandomAccessorReadOptimization(t *testing.T) {
 
 		dma := &core.DefaultMetadataAdapter{}
 		dda := &core.DefaultDataAdapter{}
-		dda.SetOptions(core.Options{Sync: true})
+		dda.SetOptions(core.Options{})
 
 		// 创建LocalHandler
 		lh := core.NewLocalHandler().(*core.LocalHandler)
@@ -1089,7 +1089,7 @@ func TestSequentialWriteFallbackToRandom(t *testing.T) {
 
 		dma := &core.DefaultMetadataAdapter{}
 		dda := &core.DefaultDataAdapter{}
-		dda.SetOptions(core.Options{Sync: true})
+		dda.SetOptions(core.Options{})
 
 		lh := core.NewLocalHandler().(*core.LocalHandler)
 		lh.SetAdapter(dma, dda)
@@ -1191,7 +1191,7 @@ func TestMultipleFlush(t *testing.T) {
 
 		dma := &core.DefaultMetadataAdapter{}
 		dda := &core.DefaultDataAdapter{}
-		dda.SetOptions(core.Options{Sync: true})
+		dda.SetOptions(core.Options{})
 
 		lh := core.NewLocalHandler().(*core.LocalHandler)
 		lh.SetAdapter(dma, dda)
@@ -1266,7 +1266,7 @@ func TestWriteToExistingFile(t *testing.T) {
 
 		dma := &core.DefaultMetadataAdapter{}
 		dda := &core.DefaultDataAdapter{}
-		dda.SetOptions(core.Options{Sync: true})
+		dda.SetOptions(core.Options{})
 
 		lh := core.NewLocalHandler().(*core.LocalHandler)
 		lh.SetAdapter(dma, dda)
@@ -1385,7 +1385,7 @@ func TestDifferentCompressionAlgorithms(t *testing.T) {
 
 		dma := &core.DefaultMetadataAdapter{}
 		dda := &core.DefaultDataAdapter{}
-		dda.SetOptions(core.Options{Sync: true})
+		dda.SetOptions(core.Options{})
 
 		lh := core.NewLocalHandler().(*core.LocalHandler)
 		lh.SetAdapter(dma, dda)
@@ -1468,7 +1468,7 @@ func TestDifferentEncryptionMethods(t *testing.T) {
 
 		dma := &core.DefaultMetadataAdapter{}
 		dda := &core.DefaultDataAdapter{}
-		dda.SetOptions(core.Options{Sync: true})
+		dda.SetOptions(core.Options{})
 
 		lh := core.NewLocalHandler().(*core.LocalHandler)
 		lh.SetAdapter(dma, dda)
@@ -1549,7 +1549,7 @@ func TestLargeFileOperations(t *testing.T) {
 
 		dma := &core.DefaultMetadataAdapter{}
 		dda := &core.DefaultDataAdapter{}
-		dda.SetOptions(core.Options{Sync: true})
+		dda.SetOptions(core.Options{})
 
 		lh := core.NewLocalHandler().(*core.LocalHandler)
 		lh.SetAdapter(dma, dda)
@@ -1632,7 +1632,7 @@ func TestConcurrentReadWrite(t *testing.T) {
 
 		dma := &core.DefaultMetadataAdapter{}
 		dda := &core.DefaultDataAdapter{}
-		dda.SetOptions(core.Options{Sync: true})
+		dda.SetOptions(core.Options{})
 
 		lh := core.NewLocalHandler().(*core.LocalHandler)
 		lh.SetAdapter(dma, dda)
@@ -1722,7 +1722,7 @@ func TestEmptyWrite(t *testing.T) {
 
 		dma := &core.DefaultMetadataAdapter{}
 		dda := &core.DefaultDataAdapter{}
-		dda.SetOptions(core.Options{Sync: true})
+		dda.SetOptions(core.Options{})
 
 		lh := core.NewLocalHandler().(*core.LocalHandler)
 		lh.SetAdapter(dma, dda)
@@ -1788,7 +1788,7 @@ func TestReadAfterClose(t *testing.T) {
 
 		dma := &core.DefaultMetadataAdapter{}
 		dda := &core.DefaultDataAdapter{}
-		dda.SetOptions(core.Options{Sync: true})
+		dda.SetOptions(core.Options{})
 
 		lh := core.NewLocalHandler().(*core.LocalHandler)
 		lh.SetAdapter(dma, dda)
@@ -1857,7 +1857,7 @@ func TestTruncate(t *testing.T) {
 
 		dma := &core.DefaultMetadataAdapter{}
 		dda := &core.DefaultDataAdapter{}
-		dda.SetOptions(core.Options{Sync: true})
+		dda.SetOptions(core.Options{})
 
 		lh := core.NewLocalHandler().(*core.LocalHandler)
 		lh.SetAdapter(dma, dda)
@@ -2075,7 +2075,7 @@ func TestTruncateAndWrite(t *testing.T) {
 
 		dma := &core.DefaultMetadataAdapter{}
 		dda := &core.DefaultDataAdapter{}
-		dda.SetOptions(core.Options{Sync: true})
+		dda.SetOptions(core.Options{})
 
 		lh := core.NewLocalHandler().(*core.LocalHandler)
 		lh.SetAdapter(dma, dda)
@@ -2147,7 +2147,7 @@ func TestTruncateWithCompression(t *testing.T) {
 
 		dma := &core.DefaultMetadataAdapter{}
 		dda := &core.DefaultDataAdapter{}
-		dda.SetOptions(core.Options{Sync: true})
+		dda.SetOptions(core.Options{})
 
 		lh := core.NewLocalHandler().(*core.LocalHandler)
 		lh.SetAdapter(dma, dda)
@@ -2226,7 +2226,7 @@ func TestBatchWriteManagerSmallFile(t *testing.T) {
 
 		dma := &core.DefaultMetadataAdapter{}
 		dda := &core.DefaultDataAdapter{}
-		dda.SetOptions(core.Options{Sync: true})
+		dda.SetOptions(core.Options{})
 
 		lh := core.NewLocalHandler().(*core.LocalHandler)
 		lh.SetAdapter(dma, dda)
@@ -2298,7 +2298,7 @@ func TestSequentialWriteLargeFile(t *testing.T) {
 
 		dma := &core.DefaultMetadataAdapter{}
 		dda := &core.DefaultDataAdapter{}
-		dda.SetOptions(core.Options{Sync: true})
+		dda.SetOptions(core.Options{})
 
 		lh := core.NewLocalHandler().(*core.LocalHandler)
 		lh.SetAdapter(dma, dda)
@@ -2381,7 +2381,7 @@ func TestTruncateReferenceDataBlock(t *testing.T) {
 
 		dma := &core.DefaultMetadataAdapter{}
 		dda := &core.DefaultDataAdapter{}
-		dda.SetOptions(core.Options{Sync: true})
+		dda.SetOptions(core.Options{})
 
 		lh := core.NewLocalHandler().(*core.LocalHandler)
 		lh.SetAdapter(dma, dda)

@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"testing"
-	"time"
 
 	"github.com/orca-zhang/idgen"
 	. "github.com/smartystreets/goconvey/convey"
@@ -20,25 +19,18 @@ func TestWrite(t *testing.T) {
 	Convey("normal", t, func() {
 		Convey("sync write one file", func() {
 			dda := &DefaultDataAdapter{}
-			dda.SetOptions(Options{
-				Sync: true,
-			})
+			dda.SetOptions(Options{})
 			So(dda.Write(c, bktID, 4701534814223, 0, []byte("xxxxx")), ShouldBeNil)
 		})
 		Convey("async write one file", func() {
 			dda := &DefaultDataAdapter{}
 			So(dda.Write(c, bktID, 4701535862800, 0, []byte("yyyyy")), ShouldBeNil)
-			for HasInflight() {
-				time.Sleep(time.Second)
-			}
 		})
 	})
 	Convey("empty file", t, func() {
 		Convey("write one empty file", func() {
 			dda := &DefaultDataAdapter{}
-			dda.SetOptions(Options{
-				Sync: true,
-			})
+			dda.SetOptions(Options{})
 			So(dda.Write(c, bktID, 4701534814288, 0, nil), ShouldBeNil)
 		})
 	})
@@ -48,9 +40,7 @@ func TestRead(t *testing.T) {
 	Convey("normal", t, func() {
 		Convey("read one file", func() {
 			dda := &DefaultDataAdapter{}
-			dda.SetOptions(Options{
-				Sync: true,
-			})
+			dda.SetOptions(Options{})
 			key, _ := idgen.NewIDGen(nil, 0).New()
 			value := []byte("test_read")
 			So(dda.Write(c, bktID, key, 0, []byte(value)), ShouldBeNil)
@@ -65,9 +55,7 @@ func TestRead(t *testing.T) {
 func TestReadBytes(t *testing.T) {
 	Convey("normal", t, func() {
 		dda := &DefaultDataAdapter{}
-		dda.SetOptions(Options{
-			Sync: true,
-		})
+		dda.SetOptions(Options{})
 		key, _ := idgen.NewIDGen(nil, 0).New()
 		value := []byte("test_read")
 		So(dda.Write(c, bktID, key, 0, []byte(value)), ShouldBeNil)
@@ -109,9 +97,7 @@ func TestWriteSyncConcurrent(t *testing.T) {
 		Convey("sync write files", func() {
 			ig := idgen.NewIDGen(nil, 0)
 			dda := &DefaultDataAdapter{}
-			dda.SetOptions(Options{
-				Sync: true,
-			})
+			dda.SetOptions(Options{})
 			bid, _ := ig.New()
 			for i := 0; i < 20000; i++ {
 				id, _ := ig.New()
@@ -131,9 +117,6 @@ func TestWriteAsyncConcurrent(t *testing.T) {
 				id, _ := ig.New()
 				dda.Write(c, bid, id, 0, []byte(fmt.Sprint(i)))
 			}
-			for HasInflight() {
-				time.Sleep(time.Second)
-			}
 		})
 	})
 }
@@ -141,9 +124,7 @@ func TestWriteAsyncConcurrent(t *testing.T) {
 func TestUpdate(t *testing.T) {
 	Convey("Update data chunk", t, func() {
 		dda := &DefaultDataAdapter{}
-		dda.SetOptions(Options{
-			Sync: true,
-		})
+		dda.SetOptions(Options{})
 		key, _ := idgen.NewIDGen(nil, 0).New()
 
 		Convey("create new chunk with Update", func() {

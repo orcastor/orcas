@@ -32,7 +32,6 @@ const (
 type Config struct {
 	UserName string // Username
 	Password string // Password
-	DataSync bool   // Power failure protection policy, force flush to disk after each data write
 	RefLevel uint32 // Instant upload level setting: OFF (default) / FULL: Ref / FAST: TryRef+Ref
 	PkgThres uint32 // Package count limit, default 1000 if not set
 	WiseCmpr uint32 // Smart compression, decide whether to compress based on file type, see core.DATA_CMPR_MASK
@@ -89,7 +88,7 @@ func (osi *OrcasSDKImpl) Login(cfg Config) (core.Ctx, *core.UserInfo, []*core.Bu
 	if cfg.PkgThres <= 0 {
 		cfg.PkgThres = 1000
 	}
-	osi.h.SetOptions(core.Options{Sync: cfg.DataSync})
+	osi.h.SetOptions(core.Options{})
 	osi.bl = strings.Split(cfg.DontSync, ";")
 	if cfg.WorkersN < 16 {
 		cfg.WorkersN = 16

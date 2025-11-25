@@ -7,7 +7,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"log"
 	"sync/atomic"
 	"syscall"
 
@@ -84,6 +83,7 @@ var (
 	_                  = fs.NodeRmdirer(&OrcasNode{})
 	_                  = fs.NodeRenamer(&OrcasNode{})
 	_                  = fs.NodeGetattrer(&OrcasNode{})
+	_                  = fs.NodeOpener(&OrcasNode{})
 	_                  = fs.FileReader(&OrcasNode{})
 	_                  = fs.FileWriter(&OrcasNode{})
 	_                  = fs.FileReleaser(&OrcasNode{})
@@ -91,10 +91,24 @@ var (
 
 // getObj gets object information (with cache)
 // Optimization: use atomic operations, completely lock-free
+// For file objects, also checks global fileObjCache to get latest size
 func (n *OrcasNode) getObj() (*core.ObjectInfo, error) {
 	// First check: atomic read
 	if val := n.obj.Load(); val != nil {
 		if obj, ok := val.(*core.ObjectInfo); ok && obj != nil {
+			// For file objects, also check global fileObjCache to get latest size
+			// This ensures we get the most up-to-date file size after writes
+			if obj.Type == core.OBJ_TYPE_FILE {
+				cacheKey := formatCacheKey(obj.ID)
+				if cached, ok := fileObjCache.Get(cacheKey); ok {
+					if cachedObj, ok := cached.(*core.ObjectInfo); ok && cachedObj != nil {
+						// Use cached object (has latest size from RandomAccessor updates)
+						// Also update local cache for consistency
+						n.obj.Store(cachedObj)
+						return cachedObj, nil
+					}
+				}
+			}
 			return obj, nil
 		}
 	}
@@ -109,24 +123,52 @@ func (n *OrcasNode) getObj() (*core.ObjectInfo, error) {
 		}, nil
 	}
 
+	// Check global fileObjCache first (before database query) for both files and directories
+	// This ensures we get cached information from Readdir/Lookup operations
+	if !n.isRoot {
+		cacheKey := formatCacheKey(n.objID)
+		if cached, ok := fileObjCache.Get(cacheKey); ok {
+			if cachedObj, ok := cached.(*core.ObjectInfo); ok && cachedObj != nil {
+				// Update local cache for consistency
+				n.obj.Store(cachedObj)
+				DebugLog("[VFS getObj] Found in global cache: objID=%d, type=%d, size=%d", cachedObj.ID, cachedObj.Type, cachedObj.Size)
+				return cachedObj, nil
+			}
+		}
+	}
+
 	// Query object (executed outside lock)
+	DebugLog("[VFS getObj] Querying database: objID=%d", n.objID)
 	objs, err := n.fs.h.Get(n.fs.c, n.fs.bktID, []int64{n.objID})
 	if err != nil {
+		DebugLog("[VFS getObj] ERROR: Failed to query database: objID=%d, error=%v", n.objID, err)
 		return nil, err
 	}
 	if len(objs) == 0 {
+		DebugLog("[VFS getObj] ERROR: Object not found in database: objID=%d", n.objID)
 		return nil, syscall.ENOENT
 	}
+
+	DebugLog("[VFS getObj] Got from database: objID=%d, type=%d, size=%d, DataID=%d",
+		objs[0].ID, objs[0].Type, objs[0].Size, objs[0].DataID)
 
 	// Double check: check cache again (may have been updated by other goroutine)
 	if val := n.obj.Load(); val != nil {
 		if obj, ok := val.(*core.ObjectInfo); ok && obj != nil {
+			DebugLog("[VFS getObj] Found in local cache (after DB query): objID=%d, type=%d, size=%d",
+				obj.ID, obj.Type, obj.Size)
 			return obj, nil
 		}
 	}
 
-	// Update cache (atomic operation)
+	// Update both local and global cache (atomic operation)
 	n.obj.Store(objs[0])
+	// Update global fileObjCache for both files and directories
+	// This allows GetAttr to use cached information from Readdir/Lookup
+	cacheKey := formatCacheKey(n.objID)
+	fileObjCache.Put(cacheKey, objs[0])
+	DebugLog("[VFS getObj] Updated caches: objID=%d, type=%d, size=%d",
+		objs[0].ID, objs[0].Type, objs[0].Size)
 
 	return objs[0], nil
 }
@@ -136,41 +178,18 @@ func (n *OrcasNode) invalidateObj() {
 	n.obj.Store((*core.ObjectInfo)(nil))
 }
 
-// getDirChildren gets directory children list (with cache)
-// Optimization: check cache first, then query database if cache miss
-func (n *OrcasNode) getDirChildren(dirID int64) ([]*core.ObjectInfo, error) {
-	// Check cache first
-	cacheKey := formatCacheKey(n.fs.bktID, dirID)
-	if cached, ok := dirChildrenCache.Get(cacheKey); ok {
-		if children, ok := cached.([]*core.ObjectInfo); ok && children != nil {
-			return children, nil
-		}
-	}
-
-	// Cache miss, query from database
-	children, _, _, err := n.fs.h.List(n.fs.c, n.fs.bktID, dirID, core.ListOptions{
-		Count: core.DefaultListPageSize,
-	})
-	if err != nil {
-		return nil, err
-	}
-
-	// Update cache
-	dirChildrenCache.Put(cacheKey, children)
-
-	return children, nil
-}
-
-// invalidateDirChildrenCache invalidates directory children cache
-func (n *OrcasNode) invalidateDirChildrenCache(dirID int64) {
-	cacheKey := formatCacheKey(n.fs.bktID, dirID)
-	dirChildrenCache.Del(cacheKey)
+// invalidateDirListCache invalidates directory listing cache
+func (n *OrcasNode) invalidateDirListCache(dirID int64) {
+	cacheKey := formatCacheKey(dirID)
+	dirListCache.Del(cacheKey)
+	DebugLog("[VFS invalidateDirListCache] Invalidated directory listing cache: dirID=%d", dirID)
 }
 
 // Getattr gets file/directory attributes
 func (n *OrcasNode) Getattr(ctx context.Context, f fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
 	obj, err := n.getObj()
 	if err != nil {
+		DebugLog("[VFS Getattr] ERROR: Failed to get object: objID=%d, error=%v", n.objID, err)
 		return syscall.ENOENT
 	}
 
@@ -180,7 +199,6 @@ func (n *OrcasNode) Getattr(ctx context.Context, f fs.FileHandle, out *fuse.Attr
 	out.Ctime = out.Mtime
 	out.Atime = out.Mtime
 	out.Nlink = 1
-
 	return 0
 }
 
@@ -207,15 +225,19 @@ func (n *OrcasNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut)
 		return nil, syscall.ENOTDIR
 	}
 
-	// List directory contents (with cache)
-	children, err := n.getDirChildren(obj.ID)
-	if err != nil {
-		return nil, syscall.EIO
+	// Get directory listing with cache and singleflight
+	children, errno := n.getDirListWithCache(obj.ID)
+	if errno != 0 {
+		return nil, errno
 	}
 
 	// Find matching child object
 	for _, child := range children {
 		if child.Name == name {
+			// Cache child object information for GetAttr optimization
+			cacheKey := formatCacheKey(child.ID)
+			fileObjCache.Put(cacheKey, child)
+
 			// Create child node
 			childNode := &OrcasNode{
 				fs:    n.fs,
@@ -265,10 +287,10 @@ func (n *OrcasNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
 		return nil, syscall.ENOTDIR
 	}
 
-	// List directory contents (with cache)
-	children, err := n.getDirChildren(obj.ID)
-	if err != nil {
-		return nil, syscall.EIO
+	// Get directory listing with cache and singleflight
+	children, errno := n.getDirListWithCache(obj.ID)
+	if errno != 0 {
+		return nil, errno
 	}
 
 	// Build directory stream
@@ -285,7 +307,7 @@ func (n *OrcasNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
 		Ino:  uint64(obj.PID),
 	})
 
-	// Add child objects
+	// Add child objects and cache their information for GetAttr optimization
 	for _, child := range children {
 		mode := getMode(child.Type)
 		entries = append(entries, fuse.DirEntry{
@@ -293,23 +315,243 @@ func (n *OrcasNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
 			Mode: mode,
 			Ino:  uint64(child.ID),
 		})
+
+		// Cache child object information for GetAttr optimization
+		// This significantly speeds up directory listing operations
+		cacheKey := formatCacheKey(child.ID)
+		fileObjCache.Put(cacheKey, child)
 	}
 
+	// Asynchronously preload child directories
+	go n.preloadChildDirs(children)
+
 	return fs.NewListDirStream(entries), 0
+}
+
+// getDirListWithCache gets directory listing with cache and singleflight
+// Uses singleflight to prevent duplicate concurrent requests for the same directory
+func (n *OrcasNode) getDirListWithCache(dirID int64) ([]*core.ObjectInfo, syscall.Errno) {
+	// Check cache first
+	cacheKey := formatCacheKey(dirID)
+	if cached, ok := dirListCache.Get(cacheKey); ok {
+		if children, ok := cached.([]*core.ObjectInfo); ok && children != nil {
+			DebugLog("[VFS getDirListWithCache] Found in cache: dirID=%d, count=%d", dirID, len(children))
+			return children, 0
+		}
+	}
+
+	// Use singleflight to prevent duplicate concurrent requests
+	// Convert dirID to string for singleflight key
+	key := fmt.Sprintf("%d", dirID)
+	result, err, _ := dirListSingleFlight.Do(key, func() (interface{}, error) {
+		// Double-check cache after acquiring singleflight lock
+		if cached, ok := dirListCache.Get(cacheKey); ok {
+			if children, ok := cached.([]*core.ObjectInfo); ok && children != nil {
+				DebugLog("[VFS getDirListWithCache] Found in cache (after singleflight): dirID=%d, count=%d", dirID, len(children))
+				return children, nil
+			}
+		}
+
+		// List directory contents from database
+		DebugLog("[VFS getDirListWithCache] Querying database: dirID=%d", dirID)
+		children, _, _, err := n.fs.h.List(n.fs.c, n.fs.bktID, dirID, core.ListOptions{
+			Count: core.DefaultListPageSize,
+		})
+		if err != nil {
+			DebugLog("[VFS getDirListWithCache] ERROR: Failed to list directory: dirID=%d, error=%v", dirID, err)
+			return nil, err
+		}
+
+		// Cache the result
+		dirListCache.Put(cacheKey, children)
+		DebugLog("[VFS getDirListWithCache] Cached directory listing: dirID=%d, count=%d", dirID, len(children))
+
+		return children, nil
+	})
+
+	if err != nil {
+		return nil, syscall.EIO
+	}
+
+	children, ok := result.([]*core.ObjectInfo)
+	if !ok {
+		return nil, syscall.EIO
+	}
+
+	return children, 0
+}
+
+// preloadChildDirs asynchronously preloads child directories
+// This improves performance when navigating through directory trees
+func (n *OrcasNode) preloadChildDirs(children []*core.ObjectInfo) {
+	for _, child := range children {
+		// Only preload directories, not files
+		if child.Type != core.OBJ_TYPE_DIR {
+			continue
+		}
+
+		// Check if already cached
+		cacheKey := formatCacheKey(child.ID)
+		if _, ok := dirListCache.Get(cacheKey); ok {
+			// Already cached, skip
+			continue
+		}
+
+		// Preload directory listing asynchronously
+		// Use singleflight to prevent duplicate requests
+		key := fmt.Sprintf("%d", child.ID)
+		go func(dirID int64, cacheKey string, key string) {
+			_, err, _ := dirListSingleFlight.Do(key, func() (interface{}, error) {
+				// Double-check cache
+				if _, ok := dirListCache.Get(cacheKey); ok {
+					return nil, nil
+				}
+
+				// List directory contents
+				DebugLog("[VFS preloadChildDirs] Preloading directory: dirID=%d", dirID)
+				children, _, _, err := n.fs.h.List(n.fs.c, n.fs.bktID, dirID, core.ListOptions{
+					Count: core.DefaultListPageSize,
+				})
+				if err != nil {
+					DebugLog("[VFS preloadChildDirs] ERROR: Failed to preload directory: dirID=%d, error=%v", dirID, err)
+					return nil, err
+				}
+
+				// Cache the result
+				dirListCache.Put(cacheKey, children)
+				DebugLog("[VFS preloadChildDirs] Preloaded directory: dirID=%d, count=%d", dirID, len(children))
+
+				// Cache child objects for GetAttr optimization
+				for _, grandchild := range children {
+					grandchildCacheKey := formatCacheKey(grandchild.ID)
+					fileObjCache.Put(grandchildCacheKey, grandchild)
+				}
+
+				return nil, nil
+			})
+			if err != nil {
+				DebugLog("[VFS preloadChildDirs] ERROR: Singleflight error: dirID=%d, error=%v", dirID, err)
+			}
+		}(child.ID, cacheKey, key)
+	}
 }
 
 // Create creates a file
 func (n *OrcasNode) Create(ctx context.Context, name string, flags uint32, mode uint32, out *fuse.EntryOut) (node *fs.Inode, fh fs.FileHandle, fuseFlags uint32, errno syscall.Errno) {
 	obj, err := n.getObj()
 	if err != nil {
+		DebugLog("[VFS Create] ERROR: Failed to get parent directory object: %v", err)
 		return nil, nil, 0, syscall.ENOENT
 	}
 
 	if obj.Type != core.OBJ_TYPE_DIR {
+		DebugLog("[VFS Create] ERROR: Parent is not a directory (type=%d)", obj.Type)
 		return nil, nil, 0, syscall.ENOTDIR
 	}
 
-	// Create file object
+	DebugLog("[VFS Create] Creating file: name=%s, parentID=%d, flags=0x%x, mode=0%o", name, obj.ID, flags, mode)
+
+	// Check if file already exists
+	children, _, _, err := n.fs.h.List(n.fs.c, n.fs.bktID, obj.ID, core.ListOptions{
+		Count: core.DefaultListPageSize,
+	})
+	if err != nil {
+		DebugLog("[VFS Create] ERROR: Failed to list directory children for parentID=%d: %v", obj.ID, err)
+		return nil, nil, 0, syscall.EIO
+	}
+
+	var existingFileID int64
+	var existingFileObj *core.ObjectInfo
+	for _, child := range children {
+		if child.Name == name {
+			if child.Type == core.OBJ_TYPE_FILE {
+				existingFileID = child.ID
+				existingFileObj = child
+				break
+			} else if child.Type == core.OBJ_TYPE_DIR {
+				// A directory with the same name exists, cannot create a file
+				DebugLog("[VFS Create] ERROR: A directory with the same name already exists: name=%s, dirID=%d", name, child.ID)
+				return nil, nil, 0, syscall.EISDIR
+			}
+		}
+	}
+
+	// If file exists, check flags
+	if existingFileID > 0 {
+		// Check if O_EXCL is set (exclusive create, fail if exists)
+		if flags&syscall.O_EXCL != 0 {
+			return nil, nil, 0, syscall.EEXIST
+		}
+
+		// File exists and O_EXCL is not set, open existing file
+		// Try to get from cache first
+		cacheKey := formatCacheKey(existingFileID)
+		if cached, ok := fileObjCache.Get(cacheKey); ok {
+			if cachedObj, ok := cached.(*core.ObjectInfo); ok && cachedObj != nil {
+				existingFileObj = cachedObj
+			}
+		}
+
+		// If cache miss, get from database
+		if existingFileObj == nil {
+			objs, err := n.fs.h.Get(n.fs.c, n.fs.bktID, []int64{existingFileID})
+			if err != nil {
+				DebugLog("[VFS Create] ERROR: Failed to get existing file object: fileID=%d, error=%v", existingFileID, err)
+				return nil, nil, 0, syscall.EIO
+			}
+			if len(objs) == 0 {
+				DebugLog("[VFS Create] ERROR: Get returned empty result for existing file: fileID=%d", existingFileID)
+				return nil, nil, 0, syscall.EIO
+			}
+			existingFileObj = objs[0]
+		}
+
+		// If O_TRUNC is set, truncate the file
+		if flags&syscall.O_TRUNC != 0 {
+			// Truncate file to size 0
+			existingFileObj.Size = 0
+			existingFileObj.DataID = 0
+			existingFileObj.MTime = core.Now()
+			_, err := n.fs.h.Put(n.fs.c, n.fs.bktID, []*core.ObjectInfo{existingFileObj})
+			if err != nil {
+				DebugLog("[VFS Create] ERROR: Failed to truncate existing file: fileID=%d, error=%v", existingFileID, err)
+				return nil, nil, 0, syscall.EIO
+			}
+		}
+
+		// Create file node for existing file
+		fileNode := &OrcasNode{
+			fs:    n.fs,
+			objID: existingFileObj.ID,
+		}
+		fileNode.obj.Store(existingFileObj)
+
+		stableAttr := fs.StableAttr{
+			Mode: syscall.S_IFREG,
+			Ino:  uint64(existingFileObj.ID),
+		}
+
+		fileInode := n.NewInode(ctx, fileNode, stableAttr)
+
+		// Fill EntryOut
+		out.Mode = syscall.S_IFREG | 0o644
+		out.Size = uint64(existingFileObj.Size)
+		out.Mtime = uint64(existingFileObj.MTime)
+		out.Ctime = out.Mtime
+		out.Atime = out.Mtime
+		out.Ino = uint64(existingFileObj.ID)
+
+		return fileInode, fileNode, 0, 0
+	}
+
+	// File doesn't exist, check if O_CREAT is set
+	// O_CREAT is required to create a new file
+	if flags&syscall.O_CREAT == 0 {
+		// O_CREAT not set, cannot create file
+		return nil, nil, 0, syscall.ENOENT
+	}
+
+	// File doesn't exist and O_CREAT is set, create new file
 	fileObj := &core.ObjectInfo{
 		ID:    core.NewID(),
 		PID:   obj.ID,
@@ -320,11 +562,21 @@ func (n *OrcasNode) Create(ctx context.Context, name string, flags uint32, mode 
 	}
 
 	ids, err := n.fs.h.Put(n.fs.c, n.fs.bktID, []*core.ObjectInfo{fileObj})
-	if err != nil || len(ids) == 0 || ids[0] == 0 {
+	if err != nil {
+		DebugLog("[VFS Create] ERROR: Failed to put file object to database: name=%s, parentID=%d, error=%v", name, obj.ID, err)
+		return nil, nil, 0, syscall.EIO
+	}
+	if len(ids) == 0 || ids[0] == 0 {
+		DebugLog("[VFS Create] ERROR: Put returned empty or zero ID: name=%s, parentID=%d, ids=%v", name, obj.ID, ids)
 		return nil, nil, 0, syscall.EIO
 	}
 
 	fileObj.ID = ids[0]
+	DebugLog("[VFS Create] Successfully created file: name=%s, fileID=%d, parentID=%d", name, fileObj.ID, obj.ID)
+
+	// Cache new file object for GetAttr optimization
+	cacheKey := formatCacheKey(fileObj.ID)
+	fileObjCache.Put(cacheKey, fileObj)
 
 	// Create file node
 	fileNode := &OrcasNode{
@@ -350,9 +602,38 @@ func (n *OrcasNode) Create(ctx context.Context, name string, flags uint32, mode 
 
 	// Invalidate parent directory cache
 	n.invalidateObj()
-	n.invalidateDirChildrenCache(obj.ID)
+	// Invalidate parent directory listing cache
+	n.invalidateDirListCache(obj.ID)
 
-	return fileInode, fileNode, fuse.FOPEN_DIRECT_IO, 0
+	return fileInode, fileNode, 0, 0
+}
+
+// Open opens a file
+func (n *OrcasNode) Open(ctx context.Context, flags uint32) (fh fs.FileHandle, fuseFlags uint32, errno syscall.Errno) {
+	obj, err := n.getObj()
+	if err != nil {
+		return nil, 0, syscall.ENOENT
+	}
+
+	if obj.Type != core.OBJ_TYPE_FILE {
+		return nil, 0, syscall.EISDIR
+	}
+
+	// Get or create RandomAccessor and increment reference count
+	// This ensures reference count is managed correctly (Open/Release pairs)
+	ra, err := n.getRandomAccessorForOpen()
+	if err != nil {
+		DebugLog("[VFS Open] ERROR: Failed to get RandomAccessor: fileID=%d, error=%v", obj.ID, err)
+		return nil, 0, syscall.EIO
+	}
+
+	// Increment reference count when file is opened
+	ra.refCount.Add(1)
+	DebugLog("[VFS Open] Opened file: fileID=%d, refCount=%d", obj.ID, ra.refCount.Load())
+
+	// Return the node itself as FileHandle
+	// This allows Write/Read operations to work on the file
+	return n, 0, 0
 }
 
 // Mkdir creates a directory
@@ -364,6 +645,29 @@ func (n *OrcasNode) Mkdir(ctx context.Context, name string, mode uint32, out *fu
 
 	if obj.Type != core.OBJ_TYPE_DIR {
 		return nil, syscall.ENOTDIR
+	}
+
+	// Check if a file or directory with the same name already exists
+	children, _, _, err := n.fs.h.List(n.fs.c, n.fs.bktID, obj.ID, core.ListOptions{
+		Count: core.DefaultListPageSize,
+	})
+	if err != nil {
+		DebugLog("[VFS Mkdir] ERROR: Failed to list directory children for parentID=%d: %v", obj.ID, err)
+		return nil, syscall.EIO
+	}
+
+	for _, child := range children {
+		if child.Name == name {
+			if child.Type == core.OBJ_TYPE_DIR {
+				// Directory already exists
+				DebugLog("[VFS Mkdir] ERROR: Directory already exists: name=%s, dirID=%d", name, child.ID)
+				return nil, syscall.EEXIST
+			} else if child.Type == core.OBJ_TYPE_FILE {
+				// A file with the same name exists, cannot create a directory
+				DebugLog("[VFS Mkdir] ERROR: A file with the same name already exists: name=%s, fileID=%d", name, child.ID)
+				return nil, syscall.ENOTDIR
+			}
+		}
 	}
 
 	// Create directory object
@@ -382,6 +686,10 @@ func (n *OrcasNode) Mkdir(ctx context.Context, name string, mode uint32, out *fu
 	}
 
 	dirObj.ID = ids[0]
+
+	// Cache new directory object for GetAttr optimization
+	cacheKey := formatCacheKey(dirObj.ID)
+	fileObjCache.Put(cacheKey, dirObj)
 
 	// Create directory node
 	dirNode := &OrcasNode{
@@ -407,7 +715,8 @@ func (n *OrcasNode) Mkdir(ctx context.Context, name string, mode uint32, out *fu
 
 	// Invalidate parent directory cache
 	n.invalidateObj()
-	n.invalidateDirChildrenCache(obj.ID)
+	// Invalidate parent directory listing cache
+	n.invalidateDirListCache(obj.ID)
 
 	return dirInode, 0
 }
@@ -423,8 +732,10 @@ func (n *OrcasNode) Unlink(ctx context.Context, name string) syscall.Errno {
 		return syscall.ENOTDIR
 	}
 
-	// Find child object (with cache)
-	children, err := n.getDirChildren(obj.ID)
+	// Find child object
+	children, _, _, err := n.fs.h.List(n.fs.c, n.fs.bktID, obj.ID, core.ListOptions{
+		Count: core.DefaultListPageSize,
+	})
 	if err != nil {
 		return syscall.EIO
 	}
@@ -447,9 +758,14 @@ func (n *OrcasNode) Unlink(ctx context.Context, name string) syscall.Errno {
 		return syscall.EIO
 	}
 
+	// Remove from cache
+	cacheKey := formatCacheKey(targetID)
+	fileObjCache.Del(cacheKey)
+
 	// Invalidate parent directory cache
 	n.invalidateObj()
-	n.invalidateDirChildrenCache(obj.ID)
+	// Invalidate parent directory listing cache
+	n.invalidateDirListCache(obj.ID)
 
 	return 0
 }
@@ -465,8 +781,10 @@ func (n *OrcasNode) Rmdir(ctx context.Context, name string) syscall.Errno {
 		return syscall.ENOTDIR
 	}
 
-	// Find child directory (with cache)
-	children, err := n.getDirChildren(obj.ID)
+	// Find child directory
+	children, _, _, err := n.fs.h.List(n.fs.c, n.fs.bktID, obj.ID, core.ListOptions{
+		Count: core.DefaultListPageSize,
+	})
 	if err != nil {
 		return syscall.EIO
 	}
@@ -483,8 +801,10 @@ func (n *OrcasNode) Rmdir(ctx context.Context, name string) syscall.Errno {
 		return syscall.ENOENT
 	}
 
-	// Check if directory is empty (with cache)
-	dirChildren, err := n.getDirChildren(targetID)
+	// Check if directory is empty
+	dirChildren, _, _, err := n.fs.h.List(n.fs.c, n.fs.bktID, targetID, core.ListOptions{
+		Count: 1,
+	})
 	if err != nil {
 		return syscall.EIO
 	}
@@ -498,9 +818,16 @@ func (n *OrcasNode) Rmdir(ctx context.Context, name string) syscall.Errno {
 		return syscall.EIO
 	}
 
+	// Remove from cache
+	cacheKey := formatCacheKey(targetID)
+	fileObjCache.Del(cacheKey)
+	// Also remove directory listing cache for the deleted directory
+	dirListCache.Del(cacheKey)
+
 	// Invalidate parent directory cache
 	n.invalidateObj()
-	n.invalidateDirChildrenCache(obj.ID)
+	// Invalidate parent directory listing cache
+	n.invalidateDirListCache(obj.ID)
 
 	return 0
 }
@@ -516,34 +843,74 @@ func (n *OrcasNode) Rename(ctx context.Context, name string, newParent fs.InodeE
 		return syscall.ENOTDIR
 	}
 
-	// Find source object
-	// First, try to find from cache by checking all cached objects with matching PID and name
+	// First, try to find source object from cache (RandomAccessor or fileObjCache)
+	// This avoids unnecessary database queries if the file is already in cache
 	var sourceID int64
 
-	// Check cache first: iterate through potential cached objects
-	// Note: We can't directly search cache by name, so we still need List, but we'll prefer cached version
-	children, err := n.getDirChildren(obj.ID)
-	if err != nil {
-		return syscall.EIO
-	}
-
-	// Find source object ID from List, but prefer cached version if available
-	for _, child := range children {
-		if child.Name == name {
-			sourceID = child.ID
-			// Check if this object is in cache, prefer cached version (may have updated information)
-			fileObjKey := formatCacheKey(n.fs.bktID, sourceID)
-			if cached, ok := fileObjCache.Get(fileObjKey); ok {
-				if cachedObj, ok := cached.(*core.ObjectInfo); ok && cachedObj != nil {
-					// Cache has the object, we'll use it when updating cache later
-					// For now, we have the sourceID, which is what we need
-				}
+	// Try to find source file from RandomAccessor cache
+	// Check if this node has a RandomAccessor that matches the source file name
+	val := n.ra.Load()
+	if val != nil && val != releasedMarker {
+		if ra, ok := val.(*RandomAccessor); ok && ra != nil {
+			fileObj, err := ra.getFileObj()
+			if err == nil && fileObj != nil && fileObj.Name == name && fileObj.PID == obj.ID {
+				sourceID = fileObj.ID
 			}
-			break
 		}
 	}
 
+	// If not found in RandomAccessor, try to find from fileObjCache via List
+	// We call List but prioritize cache entries for each child
+	var sourceObj *core.ObjectInfo
 	if sourceID == 0 {
+		// Try to get from List result, but also check cache for each child
+		children, _, _, err := n.fs.h.List(n.fs.c, n.fs.bktID, obj.ID, core.ListOptions{
+			Count: core.DefaultListPageSize,
+		})
+		if err != nil {
+			return syscall.EIO
+		}
+
+		// First, try to find from cache for each child
+		for _, child := range children {
+			if child.Name == name {
+				// Found potential match, try to get from cache first
+				cacheKey := formatCacheKey(child.ID)
+				if cached, ok := fileObjCache.Get(cacheKey); ok {
+					if cachedObj, ok := cached.(*core.ObjectInfo); ok && cachedObj != nil {
+						// Use cached object (may have more up-to-date information)
+						sourceID = cachedObj.ID
+						sourceObj = cachedObj
+						break
+					}
+				}
+				// If cache miss, use child from List
+				if sourceID == 0 {
+					sourceID = child.ID
+					sourceObj = child
+					break
+				}
+			}
+		}
+	} else {
+		// If found from RandomAccessor, get source object info
+		// Try cache first
+		cacheKey := formatCacheKey(sourceID)
+		if cached, ok := fileObjCache.Get(cacheKey); ok {
+			if cachedObj, ok := cached.(*core.ObjectInfo); ok && cachedObj != nil {
+				sourceObj = cachedObj
+			}
+		}
+		// If cache miss, get from database
+		if sourceObj == nil {
+			objs, err := n.fs.h.Get(n.fs.c, n.fs.bktID, []int64{sourceID})
+			if err == nil && len(objs) > 0 {
+				sourceObj = objs[0]
+			}
+		}
+	}
+
+	if sourceID == 0 || sourceObj == nil {
 		return syscall.ENOENT
 	}
 
@@ -566,7 +933,96 @@ func (n *OrcasNode) Rename(ctx context.Context, name string, newParent fs.InodeE
 		return syscall.ENOTDIR
 	}
 
-	// Rename
+	// Check if target file already exists in the new parent directory
+	// First try to find from cache (RandomAccessor or fileObjCache) before calling List
+	var existingTargetID int64
+	var existingTargetObj *core.ObjectInfo
+
+	// Try to find target file from newParentNode's RandomAccessor cache
+	newParentVal := newParentNode.ra.Load()
+	if newParentVal != nil && newParentVal != releasedMarker {
+		if ra, ok := newParentVal.(*RandomAccessor); ok && ra != nil {
+			fileObj, err := ra.getFileObj()
+			if err == nil && fileObj != nil && fileObj.Name == newName && fileObj.PID == newParentObj.ID {
+				existingTargetID = fileObj.ID
+				existingTargetObj = fileObj
+			}
+		}
+	}
+
+	// If not found in RandomAccessor, call List and check cache for each child
+	if existingTargetID == 0 {
+		targetChildren, _, _, err := n.fs.h.List(n.fs.c, n.fs.bktID, newParentObj.ID, core.ListOptions{
+			Count: core.DefaultListPageSize,
+		})
+		if err != nil {
+			return syscall.EIO
+		}
+
+		// First, try to find from cache for each child
+		for _, child := range targetChildren {
+			if child.Name == newName {
+				// Found potential match, try to get from cache first
+				cacheKey := formatCacheKey(child.ID)
+				if cached, ok := fileObjCache.Get(cacheKey); ok {
+					if cachedObj, ok := cached.(*core.ObjectInfo); ok && cachedObj != nil {
+						// Use cached object (may have more up-to-date information)
+						existingTargetID = cachedObj.ID
+						existingTargetObj = cachedObj
+						break
+					}
+				}
+				// If cache miss, use child from List
+				if existingTargetID == 0 {
+					existingTargetID = child.ID
+					existingTargetObj = child
+					break
+				}
+			}
+		}
+	}
+
+	// First, try to update cache from RandomAccessor for source file
+	// Check if source file has an open RandomAccessor and update its cache
+	n.updateFileObjCache(sourceID, newName, newParentObj.ID)
+
+	// If target file exists and is a file (not directory), create a version from it
+	if existingTargetID > 0 {
+		// Get the existing target object to check its type (try cache first)
+		var existingObj *core.ObjectInfo
+		if existingTargetObj != nil && existingTargetObj.Type == core.OBJ_TYPE_FILE {
+			existingObj = existingTargetObj
+		} else {
+			// Try to get from cache first
+			targetCacheKey := formatCacheKey(existingTargetID)
+			if cached, ok := fileObjCache.Get(targetCacheKey); ok {
+				if obj, ok := cached.(*core.ObjectInfo); ok && obj != nil {
+					existingObj = obj
+				}
+			}
+			// If cache miss, get from database
+			if existingObj == nil {
+				existingObjs, err := n.fs.h.Get(n.fs.c, n.fs.bktID, []int64{existingTargetID})
+				if err == nil && len(existingObjs) > 0 {
+					existingObj = existingObjs[0]
+				}
+			}
+		}
+
+		if existingObj != nil && existingObj.Type == core.OBJ_TYPE_FILE {
+			// Create version from existing file
+			// Note: We need to check if handler supports CreateVersionFromFile
+			if lh, ok := n.fs.h.(*core.LocalHandler); ok {
+				err = lh.CreateVersionFromFile(n.fs.c, n.fs.bktID, existingTargetID)
+				if err != nil {
+					// Log error but continue with rename (don't fail the operation)
+					// The existing file will be overwritten
+				}
+			}
+		}
+	}
+
+	// Rename source file to target name
 	err = n.fs.h.Rename(n.fs.c, n.fs.bktID, sourceID, newName)
 	if err != nil {
 		return syscall.EIO
@@ -580,36 +1036,51 @@ func (n *OrcasNode) Rename(ctx context.Context, name string, newParent fs.InodeE
 		}
 	}
 
-	// Update cache after rename: directly update cached ObjectInfo's Name field
-	// This is critical for files that are being written (e.g., .tmp files that are immediately renamed)
-	// The cache key is based on fileID, so we need to update the cached ObjectInfo with the new name
-	fileObjKey := formatCacheKey(n.fs.bktID, sourceID)
-	if cached, ok := fileObjCache.Get(fileObjKey); ok {
-		if cachedObj, ok := cached.(*core.ObjectInfo); ok && cachedObj != nil {
-			// Directly update the Name field in the cached object
-			cachedObj.Name = newName
-			// Also update PID if moved to different directory
-			if newParentObj.ID != obj.ID {
-				cachedObj.PID = newParentObj.ID
+	// Update cache after database operations
+	// Update source file cache with new name and parent
+	n.updateFileObjCache(sourceID, newName, newParentObj.ID)
+
+	// Note: After creating the version from the existing target file,
+	// the existing target file (existingTargetID) now has a version.
+	// When we rename the source file to the target name, the source file
+	// will replace the existing target file (same name, same parent).
+	// The old target file's data is preserved as a version.
+
+	// Complete writing version if source is a file (rename indicates file is truly finished)
+	// This is the correct time to complete writing version, not when file handles are closed
+	if sourceObj.Type == core.OBJ_TYPE_FILE {
+		if lh, ok := n.fs.h.(*core.LocalHandler); ok {
+			DebugLog("[VFS Rename] Attempting to complete writing version for renamed file: fileID=%d", sourceID)
+			err := lh.CompleteWritingVersion(n.fs.c, n.fs.bktID, sourceID)
+			if err != nil {
+				// Writing version may not exist (e.g., file was never written to), this is OK
+				// Log but don't fail the rename operation
+				DebugLog("[VFS Rename] No writing version to complete or error: fileID=%d, error=%v", sourceID, err)
+			} else {
+				DebugLog("[VFS Rename] Successfully completed writing version: fileID=%d", sourceID)
 			}
-			// Put back to cache to ensure it's updated
-			fileObjCache.Put(fileObjKey, cachedObj)
 		}
 	}
 
 	// Invalidate both directories' cache
 	n.invalidateObj()
 	newParentNode.invalidateObj()
-	n.invalidateDirChildrenCache(obj.ID)
-	newParentNode.invalidateDirChildrenCache(newParentObj.ID)
+	// Invalidate both directories' listing cache
+	n.invalidateDirListCache(obj.ID)
+	newParentNode.invalidateDirListCache(newParentObj.ID)
 
 	return 0
 }
 
 // Read reads file content
 func (n *OrcasNode) Read(ctx context.Context, dest []byte, off int64) (fuse.ReadResult, syscall.Errno) {
+	// Force refresh object cache to get latest DataID (important after writes)
+	// This ensures we get the latest DataID from database or fileObjCache
+	n.invalidateObj()
+
 	obj, err := n.getObj()
 	if err != nil {
+		DebugLog("[VFS Read] ERROR: Failed to get object: objID=%d, error=%v", n.objID, err)
 		return nil, syscall.ENOENT
 	}
 
@@ -617,14 +1088,18 @@ func (n *OrcasNode) Read(ctx context.Context, dest []byte, off int64) (fuse.Read
 		return nil, syscall.EISDIR
 	}
 
+	DebugLog("[VFS Read] Reading file: objID=%d, DataID=%d, Size=%d, offset=%d, size=%d", obj.ID, obj.DataID, obj.Size, off, len(dest))
+
 	if obj.DataID == 0 || obj.DataID == core.EmptyDataID {
 		// Empty file
+		DebugLog("[VFS Read] Empty file (no DataID): objID=%d", obj.ID)
 		return fuse.ReadResultData(nil), 0
 	}
 
 	// Get or create DataReader (supports caching for performance)
 	reader, errno := n.getDataReader()
 	if errno != 0 {
+		DebugLog("[VFS Read] ERROR: Failed to get DataReader: objID=%d, DataID=%d, error=%v", obj.ID, obj.DataID, errno)
 		return nil, errno
 	}
 
@@ -646,9 +1121,11 @@ func (n *OrcasNode) Read(ctx context.Context, dest []byte, off int64) (fuse.Read
 	result := make([]byte, len(dest))
 	nRead, err := reader.Read(result)
 	if err != nil && err != io.EOF {
+		DebugLog("[VFS Read] ERROR: Failed to read data: objID=%d, DataID=%d, offset=%d, size=%d, error=%v", obj.ID, obj.DataID, off, len(dest), err)
 		return nil, syscall.EIO
 	}
 
+	DebugLog("[VFS Read] Successfully read data: objID=%d, DataID=%d, offset=%d, requested=%d, read=%d", obj.ID, obj.DataID, off, len(dest), nRead)
 	return fuse.ReadResultData(result[:nRead]), 0
 }
 
@@ -659,18 +1136,23 @@ func (n *OrcasNode) getDataReader() (io.Reader, syscall.Errno) {
 
 	obj, err := n.getObj()
 	if err != nil {
+		DebugLog("[VFS getDataReader] ERROR: Failed to get object: objID=%d, error=%v", n.objID, err)
 		return nil, syscall.ENOENT
 	}
 
 	if obj.DataID == 0 || obj.DataID == core.EmptyDataID {
+		DebugLog("[VFS getDataReader] ERROR: Empty DataID: objID=%d, DataID=%d", obj.ID, obj.DataID)
 		return nil, syscall.EIO
 	}
 
 	// Get DataInfo
+	DebugLog("[VFS getDataReader] Getting DataInfo: objID=%d, DataID=%d", obj.ID, obj.DataID)
 	dataInfo, err := n.fs.h.GetDataInfo(n.fs.c, n.fs.bktID, obj.DataID)
 	if err != nil {
+		DebugLog("[VFS getDataReader] ERROR: Failed to get DataInfo: objID=%d, DataID=%d, error=%v", obj.ID, obj.DataID, err)
 		return nil, syscall.EIO
 	}
+	DebugLog("[VFS getDataReader] Got DataInfo: objID=%d, DataID=%d, OrigSize=%d, Size=%d", obj.ID, obj.DataID, dataInfo.OrigSize, dataInfo.Size)
 
 	// Get encryption key
 	var endecKey string
@@ -701,14 +1183,16 @@ func (n *OrcasNode) Write(ctx context.Context, data []byte, off int64) (written 
 	// Get or create RandomAccessor (has internal lock, but releases quickly)
 	ra, err := n.getRandomAccessor()
 	if err != nil {
-		log.Printf("[VFS Write] ERROR: Failed to get RandomAccessor for file objID=%d: %v", obj.ID, err)
+		DebugLog("[VFS Write] ERROR: Failed to get RandomAccessor for file objID=%d: %v", obj.ID, err)
 		return 0, syscall.EIO
 	}
 
 	// Write data (don't flush immediately)
 	// ra.Write itself is thread-safe, don't need to hold raMu lock
+	DebugLog("[VFS Write] Writing data: fileID=%d, offset=%d, size=%d", obj.ID, off, len(data))
 	err = ra.Write(off, data)
 	if err != nil {
+		DebugLog("[VFS Write] ERROR: Failed to write data: fileID=%d, offset=%d, size=%d, error=%v", obj.ID, off, len(data), err)
 		return 0, syscall.EIO
 	}
 
@@ -716,6 +1200,7 @@ func (n *OrcasNode) Write(ctx context.Context, data []byte, off int64) (written 
 	// This operation is fast, but can be optimized to async
 	n.invalidateObj()
 
+	DebugLog("[VFS Write] Successfully wrote data: fileID=%d, offset=%d, size=%d, written=%d", obj.ID, off, len(data), len(data))
 	return uint32(len(data)), 0
 }
 
@@ -734,12 +1219,23 @@ func (n *OrcasNode) Flush(ctx context.Context) syscall.Errno {
 	}
 
 	// Execute Flush (ra.Flush is thread-safe)
-	_, err := ra.Flush()
+	obj, err := n.getObj()
+	if err == nil {
+		DebugLog("[VFS Flush] Flushing file: fileID=%d, currentSize=%d", obj.ID, obj.Size)
+	}
+	versionID, err := ra.Flush()
 	if err != nil {
+		DebugLog("[VFS Flush] ERROR: Failed to flush file: fileID=%d, error=%v", obj.ID, err)
 		return syscall.EIO
 	}
 	// After flush, invalidate object cache
 	n.invalidateObj()
+
+	// Get updated object to log final size
+	obj, err = n.getObj()
+	if err == nil {
+		DebugLog("[VFS Flush] Successfully flushed file: fileID=%d, versionID=%d, finalSize=%d", obj.ID, versionID, obj.Size)
+	}
 
 	return 0
 }
@@ -900,15 +1396,29 @@ func (n *OrcasNode) truncateFile(newSize int64) syscall.Errno {
 	return 0
 }
 
+// getRandomAccessorForOpen gets or creates RandomAccessor for Open operation
+// This is separate from getRandomAccessor to avoid incrementing refCount multiple times
+func (n *OrcasNode) getRandomAccessorForOpen() (*RandomAccessor, error) {
+	return n.getRandomAccessorInternal(false)
+}
+
 // getRandomAccessor gets or creates RandomAccessor (lazy loading)
 // Optimization: use atomic operations, completely lock-free
+// Note: This does NOT increment reference count - refCount is managed by Open/Release pairs
 func (n *OrcasNode) getRandomAccessor() (*RandomAccessor, error) {
+	return n.getRandomAccessorInternal(false)
+}
+
+// getRandomAccessorInternal gets or creates RandomAccessor
+// incrementRefCount: if true, increment refCount (only used internally, not exposed)
+func (n *OrcasNode) getRandomAccessorInternal(incrementRefCount bool) (*RandomAccessor, error) {
 	// First check: atomic read (fast path)
 	if val := n.ra.Load(); val != nil {
 		// Check if it's the released marker
 		if val == releasedMarker {
 			// Was released, need to create new one
 		} else if ra, ok := val.(*RandomAccessor); ok && ra != nil {
+			// Don't increment reference count here - it's managed by Open/Release pairs
 			return ra, nil
 		}
 	}
@@ -928,6 +1438,8 @@ func (n *OrcasNode) getRandomAccessor() (*RandomAccessor, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Initialize reference count to 0 (will be incremented by Open)
+	newRA.refCount.Store(0)
 
 	// Try to atomically set ra (if already set by other goroutine, use existing)
 	// Try swapping from nil or releasedMarker
@@ -937,14 +1449,65 @@ func (n *OrcasNode) getRandomAccessor() (*RandomAccessor, error) {
 		newRA.Close()
 		if val := n.ra.Load(); val != nil && val != releasedMarker {
 			if ra, ok := val.(*RandomAccessor); ok && ra != nil {
+				// Don't increment reference count here - it's managed by Open/Release pairs
 				return ra, nil
 			}
 		}
 		// If we get here, something unexpected happened, try again
-		return n.getRandomAccessor()
+		return n.getRandomAccessorInternal(incrementRefCount)
 	}
 
 	return newRA, nil
+}
+
+// updateFileObjCache updates file object cache from RandomAccessor if it exists
+// This is used to update cache before database operations to ensure consistency
+func (n *OrcasNode) updateFileObjCache(fileID int64, newName string, newPID int64) {
+	// Try to get RandomAccessor from cache (if file is open)
+	// First check if this node has a RandomAccessor for the source file
+	val := n.ra.Load()
+	if val != nil && val != releasedMarker {
+		if ra, ok := val.(*RandomAccessor); ok && ra != nil && ra.fileID == fileID {
+			// This node has the RandomAccessor for the file, update its cache
+			fileObj, err := ra.getFileObj()
+			if err == nil && fileObj != nil {
+				// Update file object with new name and parent
+				updatedFileObj := &core.ObjectInfo{
+					ID:     fileObj.ID,
+					PID:    newPID,
+					DataID: fileObj.DataID,
+					Size:   fileObj.Size,
+					MTime:  fileObj.MTime,
+					Type:   fileObj.Type,
+					Name:   newName,
+				}
+				// Update RandomAccessor's internal cache
+				ra.fileObj.Store(updatedFileObj)
+				// Update global file object cache
+				fileObjCache.Put(ra.fileObjKey, updatedFileObj)
+			}
+			return
+		}
+	}
+
+	// If this node doesn't have the RandomAccessor, try to update global cache
+	// by getting the file object and updating it
+	cacheKey := formatCacheKey(fileID)
+	if cached, ok := fileObjCache.Get(cacheKey); ok {
+		if fileObj, ok := cached.(*core.ObjectInfo); ok && fileObj != nil {
+			// Update cached object with new name and parent
+			updatedFileObj := &core.ObjectInfo{
+				ID:     fileObj.ID,
+				PID:    newPID,
+				DataID: fileObj.DataID,
+				Size:   fileObj.Size,
+				MTime:  fileObj.MTime,
+				Type:   fileObj.Type,
+				Name:   newName,
+			}
+			fileObjCache.Put(cacheKey, updatedFileObj)
+		}
+	}
 }
 
 // Release releases file handle (closes file)
@@ -975,18 +1538,47 @@ func (n *OrcasNode) Release(ctx context.Context) syscall.Errno {
 		return 0
 	}
 
+	// Decrement reference count
+	refCount := ra.refCount.Add(-1)
+
 	// Execute Flush and Close (these operations may take time)
 	// Flush buffer
-	_, err := ra.Flush()
+	obj, err := n.getObj()
+	fileID := ra.fileID // Use ra.fileID as fallback if obj is nil
+	if err == nil && obj != nil {
+		fileID = obj.ID
+		DebugLog("[VFS Release] Releasing file: fileID=%d, currentSize=%d, refCount=%d", fileID, obj.Size, refCount)
+	} else {
+		DebugLog("[VFS Release] Releasing file: fileID=%d, refCount=%d (failed to get obj: %v)", fileID, refCount, err)
+	}
+	versionID, err := ra.Flush()
 	if err != nil {
+		DebugLog("[VFS Release] ERROR: Failed to flush during release: fileID=%d, error=%v", fileID, err)
 		// Record error but don't prevent close
+	} else {
+		DebugLog("[VFS Release] Flushed during release: fileID=%d, versionID=%d", fileID, versionID)
 	}
 
-	// Close RandomAccessor
-	ra.Close()
+	// Close RandomAccessor (this will flush any remaining data)
+	err = ra.Close()
+	if err != nil {
+		DebugLog("[VFS Release] ERROR: Failed to close RandomAccessor: fileID=%d, error=%v", fileID, err)
+	}
+
+	// Note: We do NOT complete writing version here based on refCount
+	// Files are written in batches and wait, the true completion signal is when the file is renamed
+	// CompleteWritingVersion will be called in Rename operation instead
 
 	// After flush, invalidate object cache
 	n.invalidateObj()
+
+	// Get updated object to log final size
+	obj, err = n.getObj()
+	if err == nil && obj != nil {
+		DebugLog("[VFS Release] Successfully released file: fileID=%d, finalSize=%d, refCount=%d", obj.ID, obj.Size, refCount)
+	} else {
+		DebugLog("[VFS Release] Successfully released file: fileID=%d, refCount=%d (failed to get final obj: %v)", fileID, refCount, err)
+	}
 
 	return 0
 }

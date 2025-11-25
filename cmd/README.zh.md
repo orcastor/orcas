@@ -83,7 +83,6 @@ orcas-cli -action download -local /path/to/save -remote /remote/path -config con
 
 #### 高级配置参数
 
-- `-datasync`: 数据同步（断电保护），`true` 或 `false`
 - `-reflevel`: 秒传级别，`OFF`、`FULL`、`FAST`
 - `-wisecmpr`: 智能压缩，`SNAPPY`、`ZSTD`、`GZIP`、`BR`
 - `-cmprqlty`: 压缩级别（br: 0-11, gzip: -3-9, zstd: 0-10）

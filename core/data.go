@@ -8,9 +8,6 @@ import (
 	"io/ioutil"
 	"os"
 	"path/filepath"
-	"time"
-
-	"github.com/orca-zhang/ecache"
 )
 
 type DataAdapter interface {
@@ -28,55 +25,6 @@ type DataAdapter interface {
 	ReadBytes(c Ctx, bktID, dataID int64, sn, offset, size int) ([]byte, error)
 }
 
-const interval = time.Second
-
-var queue = ecache.NewLRUCache(16, 1024, interval)
-
-func init() {
-	queue.Inspect(func(action int, key string, iface *interface{}, bytes []byte, status int) {
-		// evicted / updated / deleted
-		if (action == ecache.PUT && status <= 0) || (action == ecache.DEL && status == 1) {
-			(*iface).(*AsyncHandle).Close()
-		}
-	})
-
-	go func() {
-		// manually evict expired items
-		for {
-			now := time.Now().UnixNano()
-			keys := []string{}
-			queue.Walk(func(key string, iface *interface{}, bytes []byte, expireAt int64) bool {
-				if expireAt < now {
-					keys = append(keys, key)
-				}
-				return true
-			})
-			for _, k := range keys {
-				queue.Del(k)
-			}
-			time.Sleep(interval)
-		}
-	}()
-}
-
-func HasInflight() (b bool) {
-	queue.Walk(func(key string, iface *interface{}, bytes []byte, expireAt int64) bool {
-		b = true
-		return false
-	})
-	return
-}
-
-type AsyncHandle struct {
-	F *os.File
-	B *bufio.Writer
-}
-
-func (ah AsyncHandle) Close() {
-	ah.B.Flush()
-	ah.F.Close()
-}
-
 type DefaultDataAdapter struct {
 	opt Options
 }
@@ -86,9 +34,6 @@ func (dda *DefaultDataAdapter) SetOptions(opt Options) {
 }
 
 func (dda *DefaultDataAdapter) Close() {
-	for HasInflight() {
-		time.Sleep(100 * time.Millisecond)
-	}
 }
 
 // path/<last 3 bytes of filename hash>/hash/<dataID>_<sn>
@@ -108,14 +53,7 @@ func (dda *DefaultDataAdapter) Write(c Ctx, bktID, dataID int64, sn int, buf []b
 		return ERR_OPEN_FILE
 	}
 
-	ah := &AsyncHandle{F: f, B: bufio.NewWriter(f)}
-	_, err = ah.B.Write(buf)
-	if dda.opt.Sync {
-		ah.Close()
-	} else {
-		go ah.B.Flush()
-		queue.Put(path, ah)
-	}
+	_, err = f.Write(buf)
 	return err
 }
 
@@ -173,27 +111,12 @@ func (dda *DefaultDataAdapter) Update(c Ctx, bktID, dataID int64, sn int, offset
 	}
 
 	// Use buffered writer for better performance
-	bw := bufio.NewWriter(f)
-	_, err = bw.Write(buf)
+	_, err = f.Write(buf)
 	if err != nil {
 		return err
 	}
 
-	if dda.opt.Sync {
-		if err := bw.Flush(); err != nil {
-			return err
-		}
-		if err := f.Sync(); err != nil {
-			return err
-		}
-	} else {
-		// Async flush
-		go func() {
-			bw.Flush()
-			f.Sync()
-		}()
-	}
-
+	f.Sync()
 	return nil
 }
 
@@ -215,7 +138,6 @@ func (dda *DefaultDataAdapter) ReadBytes(c Ctx, bktID, dataID int64, sn, offset,
 
 	path := toFilePath(ORCAS_DATA, bktID, dataID, sn)
 	f, err := os.Open(path)
-
 	// Only handle missing files for sparse files (handled by caller based on DataInfo)
 	// For non-sparse files, return error if file doesn't exist
 	if err != nil {

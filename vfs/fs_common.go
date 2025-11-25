@@ -2,9 +2,19 @@
 package vfs
 
 import (
+	"fmt"
+	"os"
+
 	"github.com/orcastor/orcas/core"
 	"github.com/orcastor/orcas/sdk"
 )
+
+// DebugLog logs debug messages (can be disabled by setting ORCAS_DEBUG=0)
+func DebugLog(format string, args ...interface{}) {
+	if os.Getenv("ORCAS_DEBUG") != "0" {
+		fmt.Printf("[VFS DEBUG] "+format+"\n", args...)
+	}
+}
 
 // OrcasFS implements ORCAS filesystem, mapping ORCAS object storage to filesystem
 // This struct is available on all platforms
@@ -23,7 +33,7 @@ type OrcasFS struct {
 // sdkCfg parameter is deprecated, configuration is now read from bucket
 func NewOrcasFS(h core.Handler, c core.Ctx, bktID int64, sdkCfg *sdk.Config) *OrcasFS {
 	// Get bucket configuration (includes chunkSize, compression, encryption settings)
-	var chunkSize int64 = 4 << 20 // Default 4MB
+	var chunkSize int64 = 10 << 20 // Default 10MB
 	bucket, err := h.GetBktInfo(c, bktID)
 	if err == nil && bucket != nil {
 		if bucket.ChunkSize > 0 {
@@ -58,6 +68,8 @@ func NewOrcasFS(h core.Handler, c core.Ctx, bktID int64, sdkCfg *sdk.Config) *Or
 		bucket:    bucket,
 		chunkSize: chunkSize,
 	}
+
+	DebugLog("NewOrcasFS: bucketID=%d, chunkSize=%d", bktID, chunkSize)
 
 	// Root node initialization
 	// Windows platform needs to initialize root node immediately, as it doesn't rely on FUSE (implemented in fs_win.go)

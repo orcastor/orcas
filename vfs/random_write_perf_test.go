@@ -19,7 +19,7 @@ func BenchmarkRandomWriteSparseFile(b *testing.B) {
 
 	dma := &core.DefaultMetadataAdapter{}
 	dda := &core.DefaultDataAdapter{}
-	dda.SetOptions(core.Options{Sync: false}) // Use async for better performance
+	dda.SetOptions(core.Options{}) // Use default options
 	lh := core.NewLocalHandler()
 	lh.SetAdapter(dma, dda)
 
@@ -107,7 +107,7 @@ func BenchmarkRandomWriteSparseFile(b *testing.B) {
 	// Statistics
 	var totalWrites int64
 	var totalBytesWritten int64
-	var uniqueOffsets = make(map[int64]bool)
+	uniqueOffsets := make(map[int64]bool)
 	var totalUniqueBytes int64
 
 	b.ResetTimer()
@@ -172,7 +172,7 @@ func TestRandomWriteSparseFile(t *testing.T) {
 
 		dma := &core.DefaultMetadataAdapter{}
 		dda := &core.DefaultDataAdapter{}
-		dda.SetOptions(core.Options{Sync: true})
+		dda.SetOptions(core.Options{})
 		lh := core.NewLocalHandler()
 		lh.SetAdapter(dma, dda)
 
@@ -332,7 +332,7 @@ func BenchmarkRandomWriteDeduplication(b *testing.B) {
 
 	dma := &core.DefaultMetadataAdapter{}
 	dda := &core.DefaultDataAdapter{}
-	dda.SetOptions(core.Options{Sync: false})
+	dda.SetOptions(core.Options{})
 	lh := core.NewLocalHandler()
 	lh.SetAdapter(dma, dda)
 

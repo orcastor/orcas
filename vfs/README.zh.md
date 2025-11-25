@@ -22,7 +22,6 @@ ORCAS VFS 使用 FUSE (Filesystem in Userspace) 技术，将 ORCAS 对象存储�
   - **压缩**：支持智能压缩（根据文件类型自动决定是否压缩）
   - **压缩算法**：支持Snappy、Zstd、Gzip、Brotli
   - **秒传**：支持文件秒传功能（通过RefLevel配置）
-  - **数据同步**：支持断电保护策略（DataSync）
 
 ## 使用方法
 
@@ -55,7 +54,6 @@ func main() {
         CmprQlty:  5,                           // 压缩级别：5
         EndecWay:  core.DATA_ENDEC_AES256,      // 加密方式：AES256
         EndecKey:  "your-encryption-key-here",   // 加密密钥（AES256需要>16字符）
-        DataSync:  true,                        // 断电保护：每次写入后刷盘
     }
     
     // 挂载文件系统
@@ -88,7 +86,6 @@ func main() {
   - `CmprQlty`: 压缩级别
   - `EndecWay`: 加密方式（AES256/SM4）
   - `EndecKey`: 加密密钥
-  - `DataSync`: 断电保护策略
 
 ## 实现细节
 

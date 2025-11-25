@@ -83,7 +83,6 @@ orcas-cli -action download -local /path/to/save -remote /remote/path -config con
 
 #### Advanced Configuration Parameters
 
-- `-datasync`: Data sync (power failure protection), `true` or `false`
 - `-reflevel`: Instant upload level, `OFF`, `FULL`, `FAST`
 - `-wisecmpr`: Smart compression, `SNAPPY`, `ZSTD`, `GZIP`, `BR`
 - `-cmprqlty`: Compression level (br: 0-11, gzip: -3-9, zstd: 0-10)

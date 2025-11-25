@@ -16,7 +16,7 @@ func TestGetOrCreateWritingVersion(t *testing.T) {
 
 		dma := &DefaultMetadataAdapter{}
 		dda := &DefaultDataAdapter{}
-		dda.SetOptions(Options{Sync: true})
+		dda.SetOptions(Options{})
 		lh := &LocalHandler{
 			ma:  dma,
 			da:  dda,
@@ -86,7 +86,7 @@ func TestCompleteWritingVersion(t *testing.T) {
 
 		dma := &DefaultMetadataAdapter{}
 		dda := &DefaultDataAdapter{}
-		dda.SetOptions(Options{Sync: true})
+		dda.SetOptions(Options{})
 		lh := &LocalHandler{
 			ma:  dma,
 			da:  dda,
@@ -157,7 +157,7 @@ func TestListVersionsExcludeWriting(t *testing.T) {
 
 		dma := &DefaultMetadataAdapter{}
 		dda := &DefaultDataAdapter{}
-		dda.SetOptions(Options{Sync: true})
+		dda.SetOptions(Options{})
 		lh := &LocalHandler{
 			ma:  dma,
 			da:  dda,
@@ -219,7 +219,7 @@ func TestUpdateData(t *testing.T) {
 
 		dma := &DefaultMetadataAdapter{}
 		dda := &DefaultDataAdapter{}
-		dda.SetOptions(Options{Sync: true})
+		dda.SetOptions(Options{})
 		lh := &LocalHandler{
 			ma:  dma,
 			da:  dda,
@@ -321,7 +321,7 @@ func TestSparseFileSupport(t *testing.T) {
 
 		dma := &DefaultMetadataAdapter{}
 		dda := &DefaultDataAdapter{}
-		dda.SetOptions(Options{Sync: true})
+		dda.SetOptions(Options{})
 		lh := &LocalHandler{
 			ma:  dma,
 			da:  dda,
