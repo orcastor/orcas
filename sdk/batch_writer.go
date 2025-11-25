@@ -59,6 +59,10 @@ type BatchWriter struct {
 	// Pending objects cache (for visibility before flush)
 	// Maps fileID -> fileInfo for objects that are in buffer but not yet flushed
 	pendingObjects sync.Map // map[int64]interface{} - fileID -> fileInfo
+
+	// Periodic flush control
+	lastFlushTime int64        // Last flush time (UnixNano, atomic access)
+	flushTimer    atomic.Value // *time.Timer for periodic flush
 }
 
 var (
@@ -187,6 +191,12 @@ func createBatchWriter(handler core.Handler, bktID int64) *BatchWriter {
 		enabled:        true,
 	}
 
+	// Initialize lastFlushTime to current time
+	atomic.StoreInt64(&mgr.lastFlushTime, time.Now().UnixNano())
+
+	// Initialize flushTimer with nil
+	mgr.flushTimer.Store((*time.Timer)(nil))
+
 	// Start with buf1 as current, buf2 as background
 	// Use atomic.StorePointer for atomic pointer assignment
 	atomic.StorePointer(&mgr.currentBuffer, unsafe.Pointer(buf1))
@@ -213,6 +223,9 @@ func (bwm *BatchWriter) flush(ctx context.Context) {
 	if oldOffset == 0 || oldIndex == 0 {
 		return // No pending write data
 	}
+
+	// Cancel existing timer and reset
+	bwm.cancelFlushTimer()
 
 	// Memory barrier: ensure all writes to old buffer are visible
 	runtime.Gosched()
@@ -299,7 +312,19 @@ func (bwm *BatchWriter) flush(ctx context.Context) {
 	// Flush package to disk (uses buffer slice directly, no data copying)
 	if err := bwm.flushPackage(ctx, pkgFileInfos, bufferSize, currentBuf.buffer); err != nil {
 		fmt.Printf("Error flushing package: %v\n", err)
+		// If flush failed, restore the offset and index to the buffer that was swapped
+		// Note: currentBuf is now bgBuffer after swap, but we need to restore to the original currentBuffer
+		// Since we already swapped, we need to restore to oldCurrentBuf (which is now bgBuffer)
+		// Actually, we should restore to the buffer that contains the data, which is currentBuf (old currentBuffer, now bgBuffer)
+		atomic.StoreInt64(&currentBuf.writeOffset, oldOffset)
+		atomic.StoreInt64(&currentBuf.fileIndex, oldIndex)
+		// Reschedule periodic flush
+		bwm.schedulePeriodicFlush()
+		return
 	}
+
+	// Update last flush time only after successful flush
+	atomic.StoreInt64(&bwm.lastFlushTime, time.Now().UnixNano())
 
 	// Clear the old buffer and file infos for reuse (zero out metadata)
 	// The actual buffer content will be overwritten on next writes
@@ -319,6 +344,9 @@ func (bwm *BatchWriter) flush(ctx context.Context) {
 	// Note: currentBuf is now bgBuffer after swap
 	atomic.StoreInt64(&currentBuf.writeOffset, 0)
 	atomic.StoreInt64(&currentBuf.fileIndex, 0)
+
+	// Schedule next periodic flush if there's pending data
+	bwm.schedulePeriodicFlush()
 }
 
 // getFileInfoOffsetSize extracts offset and size from file info
@@ -481,6 +509,9 @@ func (bwm *BatchWriter) AddFile(fileID int64, data []byte, pid int64, name strin
 		// Store in pending objects cache for visibility before flush
 		bwm.pendingObjects.Store(fileID, fileInfo)
 
+		// Schedule periodic flush if not already scheduled
+		bwm.schedulePeriodicFlush()
+
 		return true, dataID, nil
 	}
 
@@ -560,4 +591,84 @@ func (bwm *BatchWriter) createPackagedFileInfo(fileInfo PackagedFileInfo, pkgOff
 		PID:       fileInfo.PID,
 		Name:      fileInfo.Name,
 	}
+}
+
+// cancelFlushTimer cancels the existing flush timer
+func (bwm *BatchWriter) cancelFlushTimer() {
+	oldTimer := bwm.flushTimer.Swap((*time.Timer)(nil))
+	if oldTimer != nil {
+		if timer, ok := oldTimer.(*time.Timer); ok && timer != nil {
+			timer.Stop()
+		}
+	}
+}
+
+// schedulePeriodicFlush schedules a periodic flush based on BufferWindow
+// It ensures that if the last flush was recent (due to count threshold),
+// the timer will wait for the remaining time until BufferWindow expires
+func (bwm *BatchWriter) schedulePeriodicFlush() {
+	// Check if there's pending data to flush
+	currentBuf := (*BatchWriterBuffer)(atomic.LoadPointer(&bwm.currentBuffer))
+	currOffset := atomic.LoadInt64(&currentBuf.writeOffset)
+	currIndex := atomic.LoadInt64(&currentBuf.fileIndex)
+
+	// If no pending data, don't schedule
+	if currOffset == 0 || currIndex == 0 {
+		return
+	}
+
+	// Check if timer already exists
+	if timerVal := bwm.flushTimer.Load(); timerVal != nil {
+		if timer, ok := timerVal.(*time.Timer); ok && timer != nil {
+			// Timer already exists, don't create a new one
+			return
+		}
+	}
+
+	// Get last flush time
+	lastFlushNano := atomic.LoadInt64(&bwm.lastFlushTime)
+	lastFlushTime := time.Unix(0, lastFlushNano)
+	now := time.Now()
+
+	// Calculate time elapsed since last flush
+	elapsed := now.Sub(lastFlushTime)
+
+	// Calculate remaining time until BufferWindow expires
+	var delay time.Duration
+	if elapsed >= bwm.flushWindow {
+		// Already exceeded BufferWindow, flush immediately (with minimal delay)
+		delay = 10 * time.Millisecond
+	} else {
+		// Wait for remaining time
+		delay = bwm.flushWindow - elapsed
+	}
+
+	// Create new timer
+	newTimer := time.AfterFunc(delay, func() {
+		// Clear timer atomically
+		bwm.flushTimer.Store((*time.Timer)(nil))
+
+		// Check if we should flush
+		// Get last flush time again to ensure we haven't flushed recently
+		lastFlushNano := atomic.LoadInt64(&bwm.lastFlushTime)
+		lastFlushTime := time.Unix(0, lastFlushNano)
+		now := time.Now()
+		elapsed := now.Sub(lastFlushTime)
+
+		// Only flush if BufferWindow has elapsed since last flush
+		if elapsed >= bwm.flushWindow {
+			// Create a background context for flush
+			ctx := context.Background()
+			// Async flush, non-blocking
+			go func() {
+				bwm.flush(ctx)
+			}()
+		} else {
+			// Reschedule for remaining time
+			bwm.schedulePeriodicFlush()
+		}
+	})
+
+	// Store new timer atomically
+	bwm.flushTimer.Store(newTimer)
 }

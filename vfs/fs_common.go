@@ -4,16 +4,48 @@ package vfs
 import (
 	"fmt"
 	"os"
+	"sync/atomic"
+	"time"
 
 	"github.com/orcastor/orcas/core"
 	"github.com/orcastor/orcas/sdk"
 )
 
-// DebugLog logs debug messages (can be disabled by setting ORCAS_DEBUG=0)
-func DebugLog(format string, args ...interface{}) {
-	if os.Getenv("ORCAS_DEBUG") != "0" {
-		fmt.Printf("[VFS DEBUG] "+format+"\n", args...)
+// debugEnabled is a global flag to control debug logging
+// 0 = disabled, 1 = enabled
+var debugEnabled int32
+
+// SetDebugEnabled sets the debug mode (can be called from cmd/main.go)
+func SetDebugEnabled(enabled bool) {
+	if enabled {
+		atomic.StoreInt32(&debugEnabled, 1)
+	} else {
+		atomic.StoreInt32(&debugEnabled, 0)
 	}
+}
+
+// IsDebugEnabled returns whether debug mode is enabled
+func IsDebugEnabled() bool {
+	return atomic.LoadInt32(&debugEnabled) == 1
+}
+
+// DebugLog logs debug messages with timestamp
+// Debug mode can be controlled by:
+// 1. SetDebugEnabled() function (from cmd/main.go -debug parameter)
+// 2. ORCAS_DEBUG environment variable (for backward compatibility)
+func DebugLog(format string, args ...interface{}) {
+	// Check if debug is enabled via SetDebugEnabled() or environment variable
+	enabled := IsDebugEnabled() || os.Getenv("ORCAS_DEBUG") != "0"
+	if !enabled {
+		return
+	}
+
+	// Get current timestamp
+	timestamp := time.Now().Format("2006-01-02 15:04:05.000")
+
+	// Format message with timestamp
+	message := fmt.Sprintf(format, args...)
+	fmt.Printf("[%s] [VFS DEBUG] %s\n", timestamp, message)
 }
 
 // OrcasFS implements ORCAS filesystem, mapping ORCAS object storage to filesystem

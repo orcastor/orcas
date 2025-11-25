@@ -216,6 +216,7 @@ func getMode(objType int) uint32 {
 
 // Lookup looks up child node
 func (n *OrcasNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
+	DebugLog("[VFS Lookup] Looking up child node: name=%s, parentID=%d", name, n.objID)
 	obj, err := n.getObj()
 	if err != nil {
 		return nil, syscall.ENOENT
@@ -234,10 +235,6 @@ func (n *OrcasNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut)
 	// Find matching child object
 	for _, child := range children {
 		if child.Name == name {
-			// Cache child object information for GetAttr optimization
-			cacheKey := formatCacheKey(child.ID)
-			fileObjCache.Put(cacheKey, child)
-
 			// Create child node
 			childNode := &OrcasNode{
 				fs:    n.fs,
@@ -278,6 +275,7 @@ func (n *OrcasNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut)
 
 // Readdir reads directory contents
 func (n *OrcasNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
+	DebugLog("[VFS Readdir] Reading directory: objID=%d", n.objID)
 	obj, err := n.getObj()
 	if err != nil {
 		return nil, syscall.ENOENT
@@ -315,11 +313,6 @@ func (n *OrcasNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
 			Mode: mode,
 			Ino:  uint64(child.ID),
 		})
-
-		// Cache child object information for GetAttr optimization
-		// This significantly speeds up directory listing operations
-		cacheKey := formatCacheKey(child.ID)
-		fileObjCache.Put(cacheKey, child)
 	}
 
 	// Asynchronously preload child directories
@@ -392,6 +385,8 @@ func (n *OrcasNode) preloadChildDirs(children []*core.ObjectInfo) {
 
 		// Check if already cached
 		cacheKey := formatCacheKey(child.ID)
+		fileObjCache.Put(cacheKey, child)
+
 		if _, ok := dirListCache.Get(cacheKey); ok {
 			// Already cached, skip
 			continue
@@ -752,13 +747,14 @@ func (n *OrcasNode) Unlink(ctx context.Context, name string) syscall.Errno {
 		return syscall.ENOENT
 	}
 
-	// Delete object
-	err = n.fs.h.Delete(n.fs.c, n.fs.bktID, targetID)
+	// Step 1: Remove from parent directory first (mark as deleted)
+	// This makes the file disappear from parent's listing immediately
+	err = n.fs.h.Recycle(n.fs.c, n.fs.bktID, targetID)
 	if err != nil {
 		return syscall.EIO
 	}
 
-	// Remove from cache
+	// Step 2: Refresh cache immediately
 	cacheKey := formatCacheKey(targetID)
 	fileObjCache.Del(cacheKey)
 
@@ -766,6 +762,19 @@ func (n *OrcasNode) Unlink(ctx context.Context, name string) syscall.Errno {
 	n.invalidateObj()
 	// Invalidate parent directory listing cache
 	n.invalidateDirListCache(obj.ID)
+
+	// Step 3: Asynchronously delete and clean up (permanent deletion)
+	// This includes physical deletion of data files and metadata
+	go func() {
+		// Use background context for async operation
+		bgCtx := context.Background()
+		err := n.fs.h.Delete(bgCtx, n.fs.bktID, targetID)
+		if err != nil {
+			DebugLog("[VFS Unlink] ERROR: Failed to permanently delete file: fileID=%d, error=%v", targetID, err)
+		} else {
+			DebugLog("[VFS Unlink] Successfully permanently deleted file: fileID=%d", targetID)
+		}
+	}()
 
 	return 0
 }
@@ -812,13 +821,14 @@ func (n *OrcasNode) Rmdir(ctx context.Context, name string) syscall.Errno {
 		return syscall.ENOTEMPTY
 	}
 
-	// Delete directory
-	err = n.fs.h.Delete(n.fs.c, n.fs.bktID, targetID)
+	// Step 1: Remove from parent directory first (mark as deleted)
+	// This makes the directory disappear from parent's listing immediately
+	err = n.fs.h.Recycle(n.fs.c, n.fs.bktID, targetID)
 	if err != nil {
 		return syscall.EIO
 	}
 
-	// Remove from cache
+	// Step 2: Refresh cache immediately
 	cacheKey := formatCacheKey(targetID)
 	fileObjCache.Del(cacheKey)
 	// Also remove directory listing cache for the deleted directory
@@ -828,6 +838,19 @@ func (n *OrcasNode) Rmdir(ctx context.Context, name string) syscall.Errno {
 	n.invalidateObj()
 	// Invalidate parent directory listing cache
 	n.invalidateDirListCache(obj.ID)
+
+	// Step 3: Asynchronously delete and clean up (permanent deletion)
+	// This includes physical deletion of data files and metadata
+	go func() {
+		// Use background context for async operation
+		bgCtx := context.Background()
+		err := n.fs.h.Delete(bgCtx, n.fs.bktID, targetID)
+		if err != nil {
+			DebugLog("[VFS Rmdir] ERROR: Failed to permanently delete directory: dirID=%d, error=%v", targetID, err)
+		} else {
+			DebugLog("[VFS Rmdir] Successfully permanently deleted directory: dirID=%d", targetID)
+		}
+	}()
 
 	return 0
 }

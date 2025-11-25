@@ -42,7 +42,7 @@ read -sp "请输入密码: " PASSWORD
 echo ""
 
 # 构建挂载命令
-MOUNT_CMD="$ORCAS_CMD -action mount -mountpoint $MOUNT_POINT -user $USERNAME -pass $PASSWORD -endecway $ENCRYPTION_METHOD -endeckey $ENCRYPTION_KEY -wisecmpr $COMPRESSION_METHOD -cmprqlty $COMPRESSION_LEVEL"
+MOUNT_CMD="$ORCAS_CMD -action mount -mountpoint $MOUNT_POINT -user $USERNAME -pass $PASSWORD -endecway $ENCRYPTION_METHOD -endeckey $ENCRYPTION_KEY -wisecmpr $COMPRESSION_METHOD -cmprqlty $COMPRESSION_LEVEL -debug"
 
 echo "=========================================="
 echo "ORCAS VFS 挂载配置"

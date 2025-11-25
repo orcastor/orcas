@@ -1058,7 +1058,7 @@ func (dma *DefaultMetadataAdapter) PutDataAndObj(c Ctx, bktID int64, d []*DataIn
 
 	// Write ObjectInfo
 	if len(o) > 0 {
-		if _, err = b.TableContext(c, tx, OBJ_TBL).InsertIgnore(&o); err != nil {
+		if _, err = b.TableContext(c, tx, OBJ_TBL).ReplaceInto(&o); err != nil {
 			return ERR_EXEC_DB
 		}
 	}

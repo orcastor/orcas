@@ -463,13 +463,10 @@ func (lh *LocalHandler) PutDataInfoAndObj(c Ctx, bktID int64, d []*DataInfo, o [
 	}
 
 	// Use combined write method
-	log.Printf("[Core PutDataInfoAndObj] Writing DataInfo and ObjectInfo to database: bktID=%d, dataInfos=%d, objects=%d", bktID, len(d), len(o))
 	err := lh.ma.PutDataAndObj(c, bktID, d, o)
 	if err != nil {
-		log.Printf("[Core PutDataInfoAndObj] ERROR: Failed to write to database: bktID=%d, error=%v", bktID, err)
 		return err
 	}
-	log.Printf("[Core PutDataInfoAndObj] Successfully wrote to database: bktID=%d, dataInfos=%d, objects=%d", bktID, len(d), len(o))
 	return nil
 }
 

@@ -1383,11 +1383,32 @@ func (ra *RandomAccessor) Flush() (int64, error) {
 			return 0, err
 		}
 
-		// If file has existing data, don't use BatchWriter (fallback to normal write)
+		// Check if file has existing data in database (not just in local cache)
+		// If file was added to BatchWriter before, local cache may have DataID but database doesn't
+		// First check if file is in BatchWriter's pending objects (not yet flushed to database)
+		batchMgr := ra.fs.getBatchWriteManager()
+		isPendingInBatchWriter := false
+		if batchMgr != nil {
+			_, isPendingInBatchWriter = batchMgr.GetPendingObject(ra.fileID)
+		}
+
+		// If file is in BatchWriter's pending objects, it's not in database yet
+		// We should still use BatchWriter for this file (it will be merged with other pending files)
+		hasExistingDataInDB := false
+		if !isPendingInBatchWriter && fileObj.DataID > 0 && fileObj.DataID != core.EmptyDataID && fileObj.Size > 0 {
+			// File is not in BatchWriter, check if DataID exists in database
+			_, err := ra.fs.h.GetDataInfo(ra.fs.c, ra.fs.bktID, fileObj.DataID)
+			if err == nil {
+				// DataID exists in database, file has existing data
+				hasExistingDataInDB = true
+			}
+		}
+
+		// If file has existing data in database, don't use BatchWriter (fallback to normal write)
 		// BatchWriter is optimized for new files or complete overwrites
 		// For incremental updates, normal write path handles merging better
-		if fileObj.DataID > 0 && fileObj.DataID != core.EmptyDataID && fileObj.Size > 0 {
-			// File has existing data, skip BatchWriter and use normal write path
+		if hasExistingDataInDB {
+			// File has existing data in database, skip BatchWriter and use normal write path
 			// This ensures proper merging of existing data with new writes
 			// Continue to normal write path below
 		} else {
@@ -1407,6 +1428,16 @@ func (ra *RandomAccessor) Flush() (int64, error) {
 
 			// If data is continuous or can be merged into continuous data, use batch write
 			if mergedDataSize < 1<<20 && len(mergedOps) <= 10 { // Small file and not many write operations
+				// Check if file is already in BatchWriter's pending objects
+				// If so, don't add again, just wait for BatchWriter to auto-flush
+				if isPendingInBatchWriter {
+					// File is already in BatchWriter, just reset buffer and return
+					// BatchWriter will automatically flush when time window expires or buffer is full
+					DebugLog("[VFS RandomAccessor Flush] File already in BatchWriter pending objects, waiting for auto-flush: fileID=%d", ra.fileID)
+					atomic.StoreInt64(&ra.buffer.totalSize, 0)
+					return core.NewID(), nil
+				}
+
 				// Merge all data into a continuous data block
 				mergedData := make([]byte, mergedDataSize)
 				for _, op := range mergedOps {

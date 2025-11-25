@@ -217,6 +217,8 @@ type MountOptions struct {
 	ThreadCount uint16
 	// SDK configuration (for encryption, compression, instant upload, etc.)
 	SDKConfig *sdk.Config
+	// Enable debug mode (verbose output with timestamps)
+	Debug bool
 }
 
 // Mount mounts ORCAS filesystem using Dokany (Windows)
@@ -244,6 +246,11 @@ func Mount(h core.Handler, c core.Ctx, bktID int64, opts *MountOptions) (*Dokany
 		}
 	} else if !info.IsDir() {
 		return nil, fmt.Errorf("mount point is not a directory: %s", mountPoint)
+	}
+
+	// Set debug mode if specified
+	if opts.Debug {
+		SetDebugEnabled(true)
 	}
 
 	// Create filesystem, pass SDK configuration

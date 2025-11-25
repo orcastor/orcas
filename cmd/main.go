@@ -52,6 +52,9 @@ var (
 	newPass   = flag.String("newpass", "", "New password (for add-user and update-user)")
 	userName_ = flag.String("username", "", "User display name (for add-user and update-user)")
 	userRole  = flag.String("role", "", "User role: USER or ADMIN (for add-user and update-user)")
+
+	// Debug parameter
+	debug = flag.Bool("debug", false, "Enable debug mode (verbose output)")
 )
 
 type Config struct {
@@ -336,6 +339,7 @@ func handleMount() {
 		AllowOther:         true, // Set to true only if you need other users to access (requires user_allow_other in /etc/fuse.conf)
 		DefaultPermissions: true,
 		SDKConfig:          &sdkCfg,
+		Debug:              *debug,
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to mount filesystem: %v\n", err)
