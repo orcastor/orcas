@@ -4,6 +4,7 @@ package vfs
 import (
 	"fmt"
 	"os"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -58,6 +59,7 @@ type OrcasFS struct {
 	bucket    *core.BucketInfo // Bucket configuration (includes compression/encryption settings)
 	chunkSize int64
 	// Batch writer is now managed globally by SDK, accessed via GetBatchWriterForBucket
+	raRegistry sync.Map // map[fileID]*RandomAccessor
 }
 
 // NewOrcasFS creates a new ORCAS filesystem
@@ -128,4 +130,53 @@ func (fs *OrcasFS) getBucketConfig() *core.BucketInfo {
 		ID:        fs.bktID,
 		ChunkSize: fs.chunkSize,
 	}
+}
+
+// registerRandomAccessor tracks active RandomAccessor instances for a file
+func (fs *OrcasFS) registerRandomAccessor(fileID int64, ra *RandomAccessor) {
+	if fs == nil || ra == nil {
+		return
+	}
+
+	if existing, ok := fs.raRegistry.Load(fileID); ok {
+		if current, ok := existing.(*RandomAccessor); ok && current != nil {
+			// Preserve existing writer accessor so .tmp flushes keep working
+			if current == ra {
+				return
+			}
+			if current.hasTempFileWriter() && !ra.hasTempFileWriter() {
+				DebugLog("[VFS RA Registry] Skipping register of non-writer RA: fileID=%d, ra=%p, existing=%p", fileID, ra, current)
+				return
+			}
+		}
+	}
+
+	fs.raRegistry.Store(fileID, ra)
+	DebugLog("[VFS RA Registry] Registered RandomAccessor: fileID=%d, ra=%p", fileID, ra)
+}
+
+// unregisterRandomAccessor removes RandomAccessor tracking if it matches current entry
+func (fs *OrcasFS) unregisterRandomAccessor(fileID int64, ra *RandomAccessor) {
+	if fs == nil || ra == nil {
+		return
+	}
+	if current, ok := fs.raRegistry.Load(fileID); ok {
+		if current == ra {
+			fs.raRegistry.Delete(fileID)
+			DebugLog("[VFS RA Registry] Unregistered RandomAccessor: fileID=%d, ra=%p", fileID, ra)
+		}
+	}
+}
+
+// getRandomAccessorByFileID returns tracked RandomAccessor for given file ID (if any)
+func (fs *OrcasFS) getRandomAccessorByFileID(fileID int64) *RandomAccessor {
+	if fs == nil {
+		return nil
+	}
+	if val, ok := fs.raRegistry.Load(fileID); ok {
+		if ra, ok2 := val.(*RandomAccessor); ok2 && ra != nil {
+			return ra
+		}
+	}
+	return nil
 }

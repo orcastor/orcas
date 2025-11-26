@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"strings"
 	"sync/atomic"
 	"syscall"
 
@@ -614,17 +615,12 @@ func (n *OrcasNode) Open(ctx context.Context, flags uint32) (fh fs.FileHandle, f
 		return nil, 0, syscall.EISDIR
 	}
 
-	// Get or create RandomAccessor and increment reference count
-	// This ensures reference count is managed correctly (Open/Release pairs)
-	ra, err := n.getRandomAccessorForOpen()
-	if err != nil {
-		DebugLog("[VFS Open] ERROR: Failed to get RandomAccessor: fileID=%d, error=%v", obj.ID, err)
-		return nil, 0, syscall.EIO
-	}
+	// RandomAccessor is now created lazily on the first write.
+	// Even when the file is opened RDWR, we defer creation so that pure reads
+	// still go directly to the underlying data without touching RA state.
 
 	// Increment reference count when file is opened
-	ra.refCount.Add(1)
-	DebugLog("[VFS Open] Opened file: fileID=%d, refCount=%d", obj.ID, ra.refCount.Load())
+	DebugLog("[VFS Open] Opened file: fileID=%d", obj.ID)
 
 	// Return the node itself as FileHandle
 	// This allows Write/Read operations to work on the file
@@ -937,6 +933,20 @@ func (n *OrcasNode) Rename(ctx context.Context, name string, newParent fs.InodeE
 		return syscall.ENOENT
 	}
 
+	// Determine if source is .tmp file that will lose its .tmp suffix
+	isTmpFile := false
+	isRemovingTmp := false
+	if sourceObj.Type == core.OBJ_TYPE_FILE {
+		oldNameLower := strings.ToLower(sourceObj.Name)
+		newNameLower := strings.ToLower(newName)
+		isTmpFile = strings.HasSuffix(oldNameLower, ".tmp")
+		isRemovingTmp = isTmpFile && !strings.HasSuffix(newNameLower, ".tmp")
+
+		if isRemovingTmp {
+			n.forceFlushTempFileBeforeRename(sourceID, sourceObj.Name, newName)
+		}
+	}
+
 	// Get target parent directory
 	// Note: InodeEmbedder interface needs to be converted to specific node type
 	// Here assume newParent is OrcasNode type
@@ -1069,20 +1079,14 @@ func (n *OrcasNode) Rename(ctx context.Context, name string, newParent fs.InodeE
 	// will replace the existing target file (same name, same parent).
 	// The old target file's data is preserved as a version.
 
-	// Complete writing version if source is a file (rename indicates file is truly finished)
-	// This is the correct time to complete writing version, not when file handles are closed
 	if sourceObj.Type == core.OBJ_TYPE_FILE {
-		if lh, ok := n.fs.h.(*core.LocalHandler); ok {
-			DebugLog("[VFS Rename] Attempting to complete writing version for renamed file: fileID=%d", sourceID)
-			err := lh.CompleteWritingVersion(n.fs.c, n.fs.bktID, sourceID)
-			if err != nil {
-				// Writing version may not exist (e.g., file was never written to), this is OK
-				// Log but don't fail the rename operation
-				DebugLog("[VFS Rename] No writing version to complete or error: fileID=%d, error=%v", sourceID, err)
-			} else {
-				DebugLog("[VFS Rename] Successfully completed writing version: fileID=%d", sourceID)
-			}
+		if isRemovingTmp {
+			DebugLog("[VFS Rename] .tmp extension removed (flush already performed): fileID=%d, oldName=%s, newName=%s", sourceID, sourceObj.Name, newName)
 		}
+
+		// Writing versions are no longer maintained for .tmp rename flow
+		// Update cached source object name for future logic
+		sourceObj.Name = newName
 	}
 
 	// Invalidate both directories' cache
@@ -1419,35 +1423,19 @@ func (n *OrcasNode) truncateFile(newSize int64) syscall.Errno {
 	return 0
 }
 
-// getRandomAccessorForOpen gets or creates RandomAccessor for Open operation
-// This is separate from getRandomAccessor to avoid incrementing refCount multiple times
-func (n *OrcasNode) getRandomAccessorForOpen() (*RandomAccessor, error) {
-	return n.getRandomAccessorInternal(false)
-}
-
 // getRandomAccessor gets or creates RandomAccessor (lazy loading)
 // Optimization: use atomic operations, completely lock-free
-// Note: This does NOT increment reference count - refCount is managed by Open/Release pairs
 func (n *OrcasNode) getRandomAccessor() (*RandomAccessor, error) {
-	return n.getRandomAccessorInternal(false)
-}
-
-// getRandomAccessorInternal gets or creates RandomAccessor
-// incrementRefCount: if true, increment refCount (only used internally, not exposed)
-func (n *OrcasNode) getRandomAccessorInternal(incrementRefCount bool) (*RandomAccessor, error) {
 	// First check: atomic read (fast path)
 	if val := n.ra.Load(); val != nil {
 		// Check if it's the released marker
 		if val == releasedMarker {
 			// Was released, need to create new one
 		} else if ra, ok := val.(*RandomAccessor); ok && ra != nil {
-			// Don't increment reference count here - it's managed by Open/Release pairs
 			return ra, nil
 		}
 	}
 
-	// Need to create, use CompareAndSwap to ensure only one goroutine creates
-	// Create new RandomAccessor
 	obj, err := n.getObj()
 	if err != nil {
 		return nil, err
@@ -1461,8 +1449,6 @@ func (n *OrcasNode) getRandomAccessorInternal(incrementRefCount bool) (*RandomAc
 	if err != nil {
 		return nil, err
 	}
-	// Initialize reference count to 0 (will be incremented by Open)
-	newRA.refCount.Store(0)
 
 	// Try to atomically set ra (if already set by other goroutine, use existing)
 	// Try swapping from nil or releasedMarker
@@ -1470,14 +1456,21 @@ func (n *OrcasNode) getRandomAccessorInternal(incrementRefCount bool) (*RandomAc
 	if !n.ra.CompareAndSwap(oldVal, newRA) {
 		// Other goroutine already created, close what we created, use existing
 		newRA.Close()
+		if n.fs != nil {
+			n.fs.unregisterRandomAccessor(obj.ID, newRA)
+		}
 		if val := n.ra.Load(); val != nil && val != releasedMarker {
 			if ra, ok := val.(*RandomAccessor); ok && ra != nil {
-				// Don't increment reference count here - it's managed by Open/Release pairs
 				return ra, nil
 			}
 		}
 		// If we get here, something unexpected happened, try again
-		return n.getRandomAccessorInternal(incrementRefCount)
+		return n.getRandomAccessor()
+	}
+
+	// Register RandomAccessor globally for cross-node lookup (e.g., rename flush)
+	if n.fs != nil {
+		n.fs.registerRandomAccessor(obj.ID, newRA)
 	}
 
 	return newRA, nil
@@ -1491,24 +1484,15 @@ func (n *OrcasNode) updateFileObjCache(fileID int64, newName string, newPID int6
 	val := n.ra.Load()
 	if val != nil && val != releasedMarker {
 		if ra, ok := val.(*RandomAccessor); ok && ra != nil && ra.fileID == fileID {
-			// This node has the RandomAccessor for the file, update its cache
-			fileObj, err := ra.getFileObj()
-			if err == nil && fileObj != nil {
-				// Update file object with new name and parent
-				updatedFileObj := &core.ObjectInfo{
-					ID:     fileObj.ID,
-					PID:    newPID,
-					DataID: fileObj.DataID,
-					Size:   fileObj.Size,
-					MTime:  fileObj.MTime,
-					Type:   fileObj.Type,
-					Name:   newName,
-				}
-				// Update RandomAccessor's internal cache
-				ra.fileObj.Store(updatedFileObj)
-				// Update global file object cache
-				fileObjCache.Put(ra.fileObjKey, updatedFileObj)
-			}
+			n.updateFileObjCacheFromAccessor(ra, newName, newPID)
+			return
+		}
+	}
+
+	// Try registry for cross-node RandomAccessor
+	if n.fs != nil {
+		if ra := n.fs.getRandomAccessorByFileID(fileID); ra != nil {
+			n.updateFileObjCacheFromAccessor(ra, newName, newPID)
 			return
 		}
 	}
@@ -1530,6 +1514,57 @@ func (n *OrcasNode) updateFileObjCache(fileID int64, newName string, newPID int6
 			}
 			fileObjCache.Put(cacheKey, updatedFileObj)
 		}
+	}
+}
+
+func (n *OrcasNode) updateFileObjCacheFromAccessor(ra *RandomAccessor, newName string, newPID int64) {
+	if ra == nil {
+		return
+	}
+	fileObj, err := ra.getFileObj()
+	if err == nil && fileObj != nil {
+		updatedFileObj := &core.ObjectInfo{
+			ID:     fileObj.ID,
+			PID:    newPID,
+			DataID: fileObj.DataID,
+			Size:   fileObj.Size,
+			MTime:  fileObj.MTime,
+			Type:   fileObj.Type,
+			Name:   newName,
+		}
+		ra.fileObj.Store(updatedFileObj)
+		fileObjCache.Put(ra.fileObjKey, updatedFileObj)
+	}
+}
+
+// forceFlushTempFileBeforeRename ensures .tmp files flush pending data before renaming away from .tmp
+func (n *OrcasNode) forceFlushTempFileBeforeRename(fileID int64, oldName, newName string) {
+	DebugLog("[VFS Rename] .tmp file being renamed, forcing flush: fileID=%d, oldName=%s, newName=%s", fileID, oldName, newName)
+
+	var raToFlush *RandomAccessor
+	if val := n.ra.Load(); val != nil && val != releasedMarker {
+		if ra, ok := val.(*RandomAccessor); ok && ra != nil && ra.fileID == fileID {
+			raToFlush = ra
+		}
+	}
+	if raToFlush == nil && n.fs != nil {
+		raToFlush = n.fs.getRandomAccessorByFileID(fileID)
+	}
+
+	if raToFlush == nil {
+		DebugLog("[VFS Rename] WARNING: Unable to find RandomAccessor for .tmp file flush: fileID=%d", fileID)
+		return
+	}
+
+	if _, err := raToFlush.ForceFlush(); err != nil {
+		DebugLog("[VFS Rename] ERROR: Failed to force flush .tmp file: fileID=%d, error=%v", fileID, err)
+	} else {
+		DebugLog("[VFS Rename] Successfully forced flush .tmp file: fileID=%d", fileID)
+	}
+
+	// After forcing flush, unregister RandomAccessor to avoid stale references
+	if n.fs != nil {
+		n.fs.unregisterRandomAccessor(fileID, raToFlush)
 	}
 }
 
@@ -1561,18 +1596,15 @@ func (n *OrcasNode) Release(ctx context.Context) syscall.Errno {
 		return 0
 	}
 
-	// Decrement reference count
-	refCount := ra.refCount.Add(-1)
-
 	// Execute Flush and Close (these operations may take time)
 	// Flush buffer
 	obj, err := n.getObj()
 	fileID := ra.fileID // Use ra.fileID as fallback if obj is nil
 	if err == nil && obj != nil {
 		fileID = obj.ID
-		DebugLog("[VFS Release] Releasing file: fileID=%d, currentSize=%d, refCount=%d", fileID, obj.Size, refCount)
+		DebugLog("[VFS Release] Releasing file: fileID=%d, currentSize=%d", fileID, obj.Size)
 	} else {
-		DebugLog("[VFS Release] Releasing file: fileID=%d, refCount=%d (failed to get obj: %v)", fileID, refCount, err)
+		DebugLog("[VFS Release] Releasing file: fileID=%d (failed to get obj: %v)", fileID, err)
 	}
 	versionID, err := ra.Flush()
 	if err != nil {
@@ -1588,19 +1620,15 @@ func (n *OrcasNode) Release(ctx context.Context) syscall.Errno {
 		DebugLog("[VFS Release] ERROR: Failed to close RandomAccessor: fileID=%d, error=%v", fileID, err)
 	}
 
-	// Note: We do NOT complete writing version here based on refCount
-	// Files are written in batches and wait, the true completion signal is when the file is renamed
-	// CompleteWritingVersion will be called in Rename operation instead
-
 	// After flush, invalidate object cache
 	n.invalidateObj()
 
 	// Get updated object to log final size
 	obj, err = n.getObj()
 	if err == nil && obj != nil {
-		DebugLog("[VFS Release] Successfully released file: fileID=%d, finalSize=%d, refCount=%d", obj.ID, obj.Size, refCount)
+		DebugLog("[VFS Release] Successfully released file: fileID=%d, finalSize=%d", obj.ID, obj.Size)
 	} else {
-		DebugLog("[VFS Release] Successfully released file: fileID=%d, refCount=%d (failed to get final obj: %v)", fileID, refCount, err)
+		DebugLog("[VFS Release] Successfully released file: fileID=%d (failed to get final obj: %v)", fileID, err)
 	}
 
 	return 0
