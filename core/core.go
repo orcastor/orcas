@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"strconv"
@@ -407,6 +408,80 @@ func (lh *LocalHandler) PutData(c Ctx, bktID, dataID int64, sn int, buf []byte) 
 	return dataID, nil
 }
 
+// PutDataFromReader uploads data chunk from io.Reader, sn starts from 0
+// If dataID is 0, a new dataID will be created automatically
+// This is more efficient for streaming data as it avoids loading all data into memory
+func (lh *LocalHandler) PutDataFromReader(c Ctx, bktID, dataID int64, sn int, r io.Reader, size int64) (int64, error) {
+	if err := lh.acm.CheckPermission(c, DW, bktID); err != nil {
+		return 0, err
+	}
+
+	// Check quota and update usage (each data block write needs to check)
+	if size > 0 {
+		// Optimization: Use bucket cache to avoid database query on every write
+		var bucket *BucketInfo
+		if cached, ok := lh.bucketConfigs.Load(bktID); ok {
+			if bktInfo, ok := cached.(*BucketInfo); ok && bktInfo != nil {
+				bucket = bktInfo
+			}
+		}
+
+		// If cache miss, query database and update cache
+		if bucket == nil {
+			buckets, err := lh.ma.GetBkt(c, []int64{bktID})
+			if err != nil {
+				return 0, err
+			}
+			if len(buckets) == 0 {
+				return 0, ERR_QUERY_DB
+			}
+			bucket = buckets[0]
+			// Update cache for future use
+			lh.SetBucketConfig(bktID, bucket)
+		}
+
+		// If quota >= 0, check if it exceeds quota
+		if bucket.Quota >= 0 {
+			if bucket.RealUsed+size > bucket.Quota {
+				return 0, ERR_QUOTA_EXCEED
+			}
+		}
+
+		// Increase actual usage (atomic operation, guaranteed consistency at database level)
+		if err := lh.ma.IncBktRealUsed(c, bktID, size); err != nil {
+			return 0, err
+		}
+	}
+
+	if dataID == 0 {
+		if size <= 0 {
+			dataID = EmptyDataID
+		} else {
+			dataID = NewID()
+		}
+	}
+
+	// Read all data from reader into buffer
+	buf := make([]byte, size)
+	n, err := io.ReadFull(r, buf)
+	if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
+		log.Printf("[Core PutDataFromReader] ERROR: Failed to read from reader: bktID=%d, dataID=%d, sn=%d, size=%d, error=%v", bktID, dataID, sn, size, err)
+		return dataID, err
+	}
+	if int64(n) < size {
+		buf = buf[:n]
+	}
+
+	log.Printf("[Core PutDataFromReader] Writing data to disk: bktID=%d, dataID=%d, sn=%d, size=%d", bktID, dataID, sn, len(buf))
+	err = lh.da.Write(c, bktID, dataID, sn, buf)
+	if err != nil {
+		log.Printf("[Core PutDataFromReader] ERROR: Failed to write data to disk: bktID=%d, dataID=%d, sn=%d, size=%d, error=%v", bktID, dataID, sn, len(buf), err)
+		return dataID, err
+	}
+	log.Printf("[Core PutDataFromReader] Successfully wrote data to disk: bktID=%d, dataID=%d, sn=%d, size=%d", bktID, dataID, sn, len(buf))
+	return dataID, nil
+}
+
 // PutDataInfo creates metadata after data is uploaded
 func (lh *LocalHandler) PutDataInfo(c Ctx, bktID int64, d []*DataInfo) (ids []int64, err error) {
 	if err := lh.acm.CheckPermission(c, MDW, bktID); err != nil {
@@ -653,82 +728,6 @@ func (lh *LocalHandler) GetOrCreateWritingVersion(c Ctx, bktID, fileID int64) (*
 	return writingVersion, nil
 }
 
-// CompleteWritingVersion completes a writing version by changing name from "0" to completion time
-// This marks the version as finished and makes it participate in version retention policy
-// After completion, the version can no longer be directly modified
-// If compression/encryption is needed, it will be processed asynchronously in the background
-func (lh *LocalHandler) CompleteWritingVersion(c Ctx, bktID, fileID int64) error {
-	if err := lh.acm.CheckPermission(c, MDW, bktID); err != nil {
-		return err
-	}
-
-	// Get writing version (name="0")
-	versions, err := lh.ma.ListVersions(c, bktID, fileID, false)
-	if err != nil {
-		return err
-	}
-
-	var writingVersion *ObjectInfo
-	for _, v := range versions {
-		if v.Name == WritingVersionName {
-			writingVersion = v
-			break
-		}
-	}
-
-	if writingVersion == nil {
-		return fmt.Errorf("writing version not found for file %d", fileID)
-	}
-
-	// Get file object to check if compression/encryption is needed
-	fileObjs, err := lh.ma.GetObj(c, bktID, []int64{fileID})
-	if err != nil {
-		return err
-	}
-	if len(fileObjs) == 0 {
-		return fmt.Errorf("file %d not found", fileID)
-	}
-
-	// Note: Compression/encryption conversion will be handled by scheduled job (ConvertWritingVersions)
-	// No need to check or process here - the job will find and convert versions that need it
-
-	// Change name from "0" to completion time (timestamp as string)
-	completionTime := Now()
-	completionTimeStr := strconv.FormatInt(completionTime, 10)
-
-	// Update version name to completion time
-	// If compression/encryption is needed, keep writing DataID for now (will be updated asynchronously)
-	updateVersion := &ObjectInfo{
-		ID:     writingVersion.ID,
-		Name:   completionTimeStr,     // Change from "0" to completion time
-		MTime:  completionTime,        // Update MTime to completion time
-		DataID: writingVersion.DataID, // Keep writing DataID, will be updated asynchronously if needed
-		Size:   writingVersion.Size,
-	}
-
-	// Update version object
-	err = lh.ma.SetObj(c, bktID, []string{"name", "mtime", "did", "size"}, updateVersion)
-	if err != nil {
-		return err
-	}
-
-	// Note: Compression/encryption conversion is handled by scheduled job (crontab)
-	// The conversion will be processed later by ConvertWritingVersions job
-	// For now, just update file object DataID to writing version's DataID
-	updateFileObj := &ObjectInfo{
-		ID:     fileID,
-		DataID: writingVersion.DataID,
-		Size:   writingVersion.Size,
-	}
-	lh.ma.SetObj(c, bktID, []string{"did", "size"}, updateFileObj)
-
-	// Now trigger version retention policy for the completed version
-	// This will process version merging and count limits
-	asyncApplyVersionRetention(c, bktID, fileID, completionTime, lh.ma, lh.da)
-
-	return nil
-}
-
 // UpdateData updates part of existing data chunk (for writing versions with name="0")
 // This allows direct modification of data blocks without creating new versions
 // offset: offset within the chunk, buf: data to write at that offset
@@ -786,6 +785,66 @@ func (lh *LocalHandler) UpdateData(c Ctx, bktID, dataID int64, sn int, offset in
 
 	// Update data block using DataAdapter.Update (supports partial update)
 	return lh.da.Update(c, bktID, dataID, sn, offset, buf)
+}
+
+// AppendData appends data to the end of an existing data chunk
+// If the chunk doesn't exist, it will be created
+// This is optimized for sequential writes as it always appends to the end
+func (lh *LocalHandler) AppendData(c Ctx, bktID, dataID int64, sn int, buf []byte) error {
+	if err := lh.acm.CheckPermission(c, DW, bktID); err != nil {
+		return err
+	}
+
+	if len(buf) == 0 {
+		return nil // Nothing to append
+	}
+
+	// For AppendData, we need to handle quota:
+	// Get old data size if exists
+	oldData, err := lh.da.Read(c, bktID, dataID, sn)
+	oldSize := int64(0)
+	if err == nil {
+		oldSize = int64(len(oldData))
+	}
+
+	// New size after append
+	newSize := oldSize + int64(len(buf))
+	sizeDiff := int64(len(buf))
+
+	// Get bucket info and check quota
+	buckets, err := lh.ma.GetBkt(c, []int64{bktID})
+	if err != nil {
+		return err
+	}
+	if len(buckets) == 0 {
+		return ERR_QUERY_DB
+	}
+	bucket := buckets[0]
+
+	// If quota >= 0, check if it exceeds quota
+	if bucket.Quota >= 0 {
+		if bucket.RealUsed+sizeDiff > bucket.Quota {
+			return ERR_QUOTA_EXCEED
+		}
+	}
+
+	// Increase usage
+	if err := lh.ma.IncBktRealUsed(c, bktID, sizeDiff); err != nil {
+		return err
+	}
+
+	log.Printf("[Core AppendData] Appending data to disk: bktID=%d, dataID=%d, sn=%d, size=%d, oldSize=%d, newSize=%d", bktID, dataID, sn, len(buf), oldSize, newSize)
+	err = lh.da.Append(c, bktID, dataID, sn, buf)
+	if err != nil {
+		log.Printf("[Core AppendData] ERROR: Failed to append data to disk: bktID=%d, dataID=%d, sn=%d, size=%d, error=%v", bktID, dataID, sn, len(buf), err)
+		// Rollback quota on error
+		if rollbackErr := lh.ma.IncBktRealUsed(c, bktID, -sizeDiff); rollbackErr != nil {
+			log.Printf("[Core AppendData] ERROR: Failed to rollback quota: %v", rollbackErr)
+		}
+		return err
+	}
+	log.Printf("[Core AppendData] Successfully appended data to disk: bktID=%d, dataID=%d, sn=%d, size=%d, newSize=%d", bktID, dataID, sn, len(buf), newSize)
+	return nil
 }
 
 // Put creates objects

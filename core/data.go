@@ -20,6 +20,10 @@ type DataAdapter interface {
 	// If offset+len(buf) exceeds chunk size, the chunk will be extended
 	// This allows direct modification of data blocks without creating new versions
 	Update(c Ctx, bktID, dataID int64, sn int, offset int, buf []byte) error
+	// Append appends data to the end of an existing data chunk
+	// If the chunk doesn't exist, it will be created
+	// This is more efficient than Update for sequential writes as it doesn't need to calculate offset
+	Append(c Ctx, bktID, dataID int64, sn int, buf []byte) error
 
 	Read(c Ctx, bktID, dataID int64, sn int) ([]byte, error)
 	ReadBytes(c Ctx, bktID, dataID int64, sn, offset, size int) ([]byte, error)
@@ -54,6 +58,9 @@ func (dda *DefaultDataAdapter) Write(c Ctx, bktID, dataID int64, sn int, buf []b
 	}
 
 	_, err = f.Write(buf)
+	if err == nil && os.Getenv("ORCAS_DEBUG") != "0" {
+		fmt.Printf("[DATA WRITE] PutData bkt=%d data=%d sn=%d size=%d path=%s\n", bktID, dataID, sn, len(buf), path)
+	}
 	return err
 }
 
@@ -117,6 +124,44 @@ func (dda *DefaultDataAdapter) Update(c Ctx, bktID, dataID int64, sn int, offset
 	}
 
 	f.Sync()
+	if os.Getenv("ORCAS_DEBUG") != "0" {
+		fmt.Printf("[DATA UPDATE] UpdateData bkt=%d data=%d sn=%d offset=%d size=%d path=%s\n",
+			bktID, dataID, sn, offset, len(buf), path)
+	}
+	return nil
+}
+
+// Append appends data to the end of an existing data chunk
+// If the chunk doesn't exist, it will be created
+// This is optimized for sequential writes as it always appends to the end
+func (dda *DefaultDataAdapter) Append(c Ctx, bktID, dataID int64, sn int, buf []byte) error {
+	if len(buf) == 0 {
+		return nil // Nothing to append
+	}
+
+	path := toFilePath(ORCAS_DATA, bktID, dataID, sn)
+	// Ensure directory exists
+	os.MkdirAll(filepath.Dir(path), 0o766)
+
+	// Open file for read-write (create if not exists), append mode
+	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0o666)
+	if err != nil {
+		return ERR_OPEN_FILE
+	}
+	defer f.Close()
+
+	// Write data (file is already positioned at end due to O_APPEND)
+	_, err = f.Write(buf)
+	if err != nil {
+		return err
+	}
+
+	f.Sync()
+	if os.Getenv("ORCAS_DEBUG") != "0" {
+		fi, _ := f.Stat()
+		fmt.Printf("[DATA APPEND] AppendData bkt=%d data=%d sn=%d size=%d totalSize=%d path=%s\n",
+			bktID, dataID, sn, len(buf), fi.Size(), path)
+	}
 	return nil
 }
 

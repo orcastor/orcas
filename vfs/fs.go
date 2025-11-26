@@ -10,9 +10,11 @@ import (
 	"strings"
 	"sync/atomic"
 	"syscall"
+	"time"
 
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
+	"github.com/orca-zhang/ecache"
 	"github.com/orcastor/orcas/core"
 )
 
@@ -89,6 +91,14 @@ var (
 	_                  = fs.FileWriter(&OrcasNode{})
 	_                  = fs.FileReleaser(&OrcasNode{})
 )
+
+var streamingReaderCache = ecache.NewLRUCache(4, 256, 15*time.Second)
+
+type cachedReader struct {
+	reader     io.Reader
+	nextOffset int64
+	dataID     int64
+}
 
 // getObj gets object information (with cache)
 // Optimization: use atomic operations, completely lock-free
@@ -1123,37 +1133,63 @@ func (n *OrcasNode) Read(ctx context.Context, dest []byte, off int64) (fuse.Read
 		return fuse.ReadResultData(nil), 0
 	}
 
-	// Get or create DataReader (supports caching for performance)
-	reader, errno := n.getDataReader()
-	if errno != 0 {
-		DebugLog("[VFS Read] ERROR: Failed to get DataReader: objID=%d, DataID=%d, error=%v", obj.ID, obj.DataID, errno)
-		return nil, errno
-	}
+	var reader io.Reader
+	var errno syscall.Errno
+	var cachedEntry *cachedReader
 
-	// Use cached reader position to optimize seeking
-	// Note: Since DataReader is streaming, we need to read from beginning each time
-	// But can avoid repeated creation by caching reader
-
-	// Skip to specified offset
-	if off > 0 {
-		// Since DataReader is streaming, each read needs to start from beginning
-		// Use io.CopyN to skip
-		_, err := io.CopyN(io.Discard, reader, off)
-		if err != nil && err != io.EOF {
-			return nil, syscall.EIO
+	if entry := acquireStreamingReader(obj.DataID, off); entry != nil {
+		reader = entry.reader
+		cachedEntry = entry
+	} else {
+		reader, errno = n.getDataReader()
+		if errno != 0 {
+			DebugLog("[VFS Read] ERROR: Failed to get DataReader: objID=%d, DataID=%d, error=%v", obj.ID, obj.DataID, errno)
+			return nil, errno
 		}
 	}
 
-	// Read requested data
-	result := make([]byte, len(dest))
-	nRead, err := reader.Read(result)
+	if readerAt, ok := reader.(io.ReaderAt); ok {
+		if cachedEntry != nil {
+			// Shouldn't happen, but release just in case
+			releaseStreamingReader(obj.DataID, cachedEntry.nextOffset)
+			cachedEntry = nil
+		}
+		nRead, err := readerAt.ReadAt(dest, off)
+		if err != nil && err != io.EOF {
+			DebugLog("[VFS Read] ERROR: ReadAt failed: objID=%d, DataID=%d, offset=%d, size=%d, error=%v", obj.ID, obj.DataID, off, len(dest), err)
+			return nil, syscall.EIO
+		}
+		DebugLog("[VFS Read] Successfully read data: objID=%d, DataID=%d, offset=%d, requested=%d, read=%d", obj.ID, obj.DataID, off, len(dest), nRead)
+		return fuse.ReadResultData(dest[:nRead]), 0
+	}
+
+	nRead, err := reader.Read(dest)
 	if err != nil && err != io.EOF {
+		if cachedEntry != nil {
+			releaseStreamingReader(obj.DataID, cachedEntry.nextOffset)
+		}
 		DebugLog("[VFS Read] ERROR: Failed to read data: objID=%d, DataID=%d, offset=%d, size=%d, error=%v", obj.ID, obj.DataID, off, len(dest), err)
 		return nil, syscall.EIO
 	}
 
+	if cachedEntry != nil {
+		if err == nil && nRead > 0 {
+			cachedEntry.nextOffset = off + int64(nRead)
+			cachedEntry.reader = reader
+			storeStreamingReader(cachedEntry)
+		} else {
+			releaseStreamingReader(obj.DataID, cachedEntry.nextOffset)
+		}
+	} else if err == nil && nRead > 0 {
+		storeStreamingReader(&cachedReader{
+			reader:     reader,
+			nextOffset: off + int64(nRead),
+			dataID:     obj.DataID,
+		})
+	}
+
 	DebugLog("[VFS Read] Successfully read data: objID=%d, DataID=%d, offset=%d, requested=%d, read=%d", obj.ID, obj.DataID, off, len(dest), nRead)
-	return fuse.ReadResultData(result[:nRead]), 0
+	return fuse.ReadResultData(dest[:nRead]), 0
 }
 
 // getDataReader gets or creates DataReader (with cache)
@@ -1181,17 +1217,31 @@ func (n *OrcasNode) getDataReader() (io.Reader, syscall.Errno) {
 	}
 	DebugLog("[VFS getDataReader] Got DataInfo: objID=%d, DataID=%d, OrigSize=%d, Size=%d", obj.ID, obj.DataID, dataInfo.OrigSize, dataInfo.Size)
 
-	// Get encryption key
+	hasCompression := dataInfo.Kind&core.DATA_CMPR_MASK != 0
+	hasEncryption := dataInfo.Kind&core.DATA_ENDEC_MASK != 0
+
+	DebugLog("[VFS getDataReader] Has compression: %v, Has encryption: %v", hasCompression, hasEncryption)
+
+	chunkSize := core.GetChunkSizeFromObject(obj)
+	if chunkSize <= 0 {
+		chunkSize = n.fs.chunkSize
+		if chunkSize <= 0 {
+			chunkSize = 10 << 20 // Default
+		}
+	}
+
+	if !hasCompression && !hasEncryption {
+		reader := newPlainDataReader(n.fs.c, n.fs.h, n.fs.bktID, obj.DataID, chunkSize, dataInfo.OrigSize)
+		return reader, 0
+	}
+
+	// Compressed/encrypted path uses decoding reader (streaming)
 	var endecKey string
 	bucket := n.fs.getBucketConfig()
 	if bucket != nil {
 		endecKey = bucket.EndecKey
 	}
-
-	// Create new decodingChunkReader (create new one for each read, since FUSE reads are random access)
-	// Directly read by chunk, decrypt, decompress, don't use DataReader
 	reader := newDecodingChunkReader(n.fs.c, n.fs.h, n.fs.bktID, dataInfo, endecKey)
-
 	return reader, 0
 }
 
@@ -1632,4 +1682,31 @@ func (n *OrcasNode) Release(ctx context.Context) syscall.Errno {
 	}
 
 	return 0
+}
+
+func streamingReaderCacheKey(dataID int64, offset int64) string {
+	return fmt.Sprintf("stream_reader:%d:%d", dataID, offset)
+}
+
+func acquireStreamingReader(dataID int64, offset int64) *cachedReader {
+	key := streamingReaderCacheKey(dataID, offset)
+	if val, ok := streamingReaderCache.Get(key); ok {
+		if entry, ok := val.(*cachedReader); ok && entry != nil && entry.nextOffset == offset && entry.reader != nil {
+			streamingReaderCache.Del(key)
+			return entry
+		}
+		streamingReaderCache.Del(key)
+	}
+	return nil
+}
+
+func storeStreamingReader(entry *cachedReader) {
+	if entry == nil || entry.reader == nil {
+		return
+	}
+	streamingReaderCache.Put(streamingReaderCacheKey(entry.dataID, entry.nextOffset), entry)
+}
+
+func releaseStreamingReader(dataID int64, offset int64) {
+	streamingReaderCache.Del(streamingReaderCacheKey(dataID, offset))
 }

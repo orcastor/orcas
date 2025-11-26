@@ -498,7 +498,7 @@ func (tw *TempFileWriter) Write(offset int64, data []byte) error {
 		chunkComplete := buf.offsetInChunk >= tw.chunkSize
 		buf.mu.Unlock()
 
-		DebugLog("[VFS TempFileWriter Write] Chunk complete: fileID=%d, dataID=%d, sn=%d, chunkSize=%d, bufferProgress=%d",
+		DebugLog("[VFS TempFileWriter Write] Chunk complete: fileID=%d, dataID=%d, sn=%d, chunkSize=%d, bufferProgress=%d, remaining=%d",
 			tw.fileID, tw.dataID, sn, tw.chunkSize, buf.offsetInChunk, tw.chunkSize-buf.offsetInChunk)
 
 		if chunkComplete {
@@ -1602,7 +1602,7 @@ func (ra *RandomAccessor) Read(offset int64, size int) ([]byte, error) {
 	var reader dataReader
 	if !hasCompression && !hasEncryption {
 		// Uncompressed unencrypted: directly read by chunk
-		reader = newPlainDataReader(ra.fs.c, ra.fs.h, ra.fs.bktID, fileObj.DataID, chunkSize)
+		reader = newPlainDataReader(ra.fs.c, ra.fs.h, ra.fs.bktID, fileObj.DataID, chunkSize, fileObj.Size)
 	} else {
 		// Compressed/encrypted: use decodingChunkReader (will automatically decrypt and decompress)
 		var endecKey string
@@ -2610,7 +2610,7 @@ func (ra *RandomAccessor) applyWritesStreamingUncompressed(fileObj *core.ObjectI
 	oldDataID := fileObj.DataID
 	if oldDataID > 0 && oldDataID != core.EmptyDataID {
 		// Create plainDataReader to support reading by chunk
-		reader = newPlainDataReader(ra.fs.c, ra.fs.h, ra.fs.bktID, oldDataID, int64(chunkSizeInt))
+		reader = newPlainDataReader(ra.fs.c, ra.fs.h, ra.fs.bktID, oldDataID, int64(chunkSizeInt), fileObj.Size)
 	}
 
 	// Stream processing: read, process, and write by chunk
@@ -2959,13 +2959,14 @@ type plainDataReader struct {
 	bktID      int64
 	dataID     int64
 	chunkSize  int64
+	origSize   int64
 	currentPos int64
 	sn         int
 	buf        []byte
 	bufPos     int
 }
 
-func newPlainDataReader(c core.Ctx, h core.Handler, bktID, dataID int64, chunkSize int64) *plainDataReader {
+func newPlainDataReader(c core.Ctx, h core.Handler, bktID, dataID int64, chunkSize int64, origSize int64) *plainDataReader {
 	if chunkSize <= 0 {
 		chunkSize = 10 << 20 // Default 10MB
 	}
@@ -2975,6 +2976,7 @@ func newPlainDataReader(c core.Ctx, h core.Handler, bktID, dataID int64, chunkSi
 		bktID:     bktID,
 		dataID:    dataID,
 		chunkSize: chunkSize,
+		origSize:  origSize,
 	}
 }
 
@@ -3015,6 +3017,60 @@ func (pr *plainDataReader) Read(p []byte) (n int, err error) {
 		pr.currentPos += int64(copyLen)
 		totalRead += copyLen
 		p = p[copyLen:]
+	}
+
+	return totalRead, nil
+}
+
+// ReadAt implements random-access reads by directly addressing chunks
+func (pr *plainDataReader) ReadAt(p []byte, off int64) (int, error) {
+	if off < 0 {
+		return 0, fmt.Errorf("invalid offset")
+	}
+	if len(p) == 0 {
+		return 0, nil
+	}
+
+	totalRead := 0
+	currentOffset := off
+	remain := len(p)
+
+	for remain > 0 {
+		if pr.origSize > 0 && currentOffset >= pr.origSize {
+			if totalRead == 0 {
+				return 0, io.EOF
+			}
+			return totalRead, io.EOF
+		}
+
+		sn := int(currentOffset / pr.chunkSize)
+		offsetInChunk := int(currentOffset % pr.chunkSize)
+
+		chunkData, err := pr.h.GetData(pr.c, pr.bktID, pr.dataID, sn)
+		if err != nil {
+			if totalRead == 0 {
+				return 0, err
+			}
+			return totalRead, err
+		}
+		if len(chunkData) == 0 || offsetInChunk >= len(chunkData) {
+			if totalRead == 0 {
+				return 0, io.EOF
+			}
+			return totalRead, io.EOF
+		}
+
+		copyLen := len(chunkData) - offsetInChunk
+		if copyLen > remain {
+			copyLen = remain
+		}
+
+		start := totalRead
+		copy(p[start:start+copyLen], chunkData[offsetInChunk:offsetInChunk+copyLen])
+
+		totalRead += copyLen
+		currentOffset += int64(copyLen)
+		remain -= copyLen
 	}
 
 	return totalRead, nil

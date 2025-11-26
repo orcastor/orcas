@@ -136,6 +136,45 @@ func MarkSparseFile(dataInfo *DataInfo) {
 	}
 }
 
+// GetChunkSizeFromObject gets chunk size from ObjectInfo's Extra field
+// Returns 0 if not found or invalid, caller should use bucket's default chunk size
+func GetChunkSizeFromObject(obj *ObjectInfo) int64 {
+	if obj == nil || obj.Extra == "" {
+		return 0
+	}
+	// Parse JSON from Extra field: {"chunkSize": 10485760}
+	// Simple parsing: look for "chunkSize" followed by a number
+	// This is a simple implementation, can be enhanced with proper JSON parsing if needed
+	extra := obj.Extra
+	chunkSizeIdx := strings.Index(extra, `"chunkSize"`)
+	if chunkSizeIdx < 0 {
+		return 0
+	}
+	// Find the number after "chunkSize"
+	valueStart := chunkSizeIdx + len(`"chunkSize"`)
+	// Skip whitespace and colon
+	for valueStart < len(extra) && (extra[valueStart] == ' ' || extra[valueStart] == ':') {
+		valueStart++
+	}
+	// Parse the number
+	var chunkSize int64
+	_, err := fmt.Sscanf(extra[valueStart:], "%d", &chunkSize)
+	if err != nil {
+		return 0
+	}
+	return chunkSize
+}
+
+// SetChunkSizeToObject sets chunk size to ObjectInfo's Extra field
+// If Extra is empty or not valid JSON, creates a simple JSON object
+func SetChunkSizeToObject(obj *ObjectInfo, chunkSize int64) {
+	if obj == nil {
+		return
+	}
+	// Simple JSON format: {"chunkSize": 10485760}
+	obj.Extra = fmt.Sprintf(`{"chunkSize":%d}`, chunkSize)
+}
+
 const (
 	BKT_TBL = "bkt"
 	USR_TBL = "usr"
