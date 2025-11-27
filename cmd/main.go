@@ -546,6 +546,11 @@ func convertToSDKConfig(cfg *Config) sdk.Config {
 		sdkCfg.EndecWay = core.DATA_ENDEC_SM4
 		sdkCfg.EndecKey = cfg.EndecKey
 	}
+	// If EndecKey is provided but EndecWay is not specified, still set the key
+	// (it will be used if the data requires decryption)
+	if cfg.EndecKey != "" && sdkCfg.EndecKey == "" {
+		sdkCfg.EndecKey = cfg.EndecKey
+	}
 
 	// Convert Conflict
 	switch cfg.Conflict {

@@ -2,6 +2,7 @@ package vfs
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"hash/crc32"
 	"io"
@@ -301,7 +302,6 @@ type TempFileWriter struct {
 	fileID          int64
 	dataID          int64                // Data ID for this .tmp file
 	chunkSize       int64                // Chunk size for this file (always bucket chunk size)
-	sn              int                  // Current sequence number (max sn written)
 	size            atomic.Int64         // Total file size (atomic for concurrent access)
 	mu              sync.Mutex           // Mutex for thread-safe operations on chunks map
 	chunks          map[int]*chunkBuffer // Chunk buffers for each chunk (key: sn)
@@ -409,7 +409,6 @@ func (ra *RandomAccessor) getOrCreateTempWriter() (*TempFileWriter, error) {
 		fileID:          ra.fileID,
 		dataID:          dataID,
 		chunkSize:       chunkSize,
-		sn:              0,
 		size:            atomic.Int64{},
 		chunks:          make(map[int]*chunkBuffer),
 		dataInfo:        dataInfo,
@@ -521,9 +520,6 @@ func (tw *TempFileWriter) Write(offset int64, data []byte) error {
 		// Update tracking
 		currentOffset += int64(len(chunkData))
 		dataPos += int(len(chunkData))
-		if sn >= tw.sn {
-			tw.sn = sn + 1
-		}
 	}
 
 	// Remove completed chunks (after releasing all chunk locks)
@@ -542,8 +538,8 @@ func (tw *TempFileWriter) Write(offset int64, data []byte) error {
 			break
 		}
 		if tw.size.CompareAndSwap(currentSize, writeEnd) {
-			DebugLog("[VFS TempFileWriter Write] Updated file size: fileID=%d, dataID=%d, oldSize=%d, newSize=%d, totalChunks=%d",
-				tw.fileID, tw.dataID, currentSize, writeEnd, tw.sn)
+			DebugLog("[VFS TempFileWriter Write] Updated file size: fileID=%d, dataID=%d, oldSize=%d, newSize=%d",
+				tw.fileID, tw.dataID, currentSize, writeEnd)
 			break
 		}
 	}
@@ -718,8 +714,8 @@ func (tw *TempFileWriter) decideRealtimeProcessing(firstChunk []byte) {
 // Data chunks are already on disk via AppendData, so we only need to upload metadata
 func (tw *TempFileWriter) Flush() error {
 	size := tw.size.Load()
-	DebugLog("[VFS TempFileWriter Flush] Starting flush for large file: fileID=%d, dataID=%d, fileSize=%d, totalChunks=%d",
-		tw.fileID, tw.dataID, size, tw.sn)
+	DebugLog("[VFS TempFileWriter Flush] Starting flush for large file: fileID=%d, dataID=%d, fileSize=%d",
+		tw.fileID, tw.dataID, size)
 
 	if size == 0 {
 		// No data written, nothing to flush
@@ -759,10 +755,28 @@ func (tw *TempFileWriter) Flush() error {
 
 	// Use the DataInfo we've been tracking (with compression/encryption flags and sizes)
 	dataInfo := tw.dataInfo
+
+	// OrigSize should be the logical file size (max write offset), not the accumulated value
+	// The accumulated OrigSize in flushChunk tracks actual data written, but for files with holes,
+	// we need to use the logical size. However, for consistency, we should use the logical size.
+	// But note: if there are holes, the accumulated OrigSize might be less than size.
+	// For now, use size as OrigSize to match the file's logical size.
 	dataInfo.OrigSize = size
+
+	// For offline processing, Size should equal OrigSize (actual data size on disk)
+	// For real-time processing, Size is already accumulated (compressed/encrypted size)
 	if !tw.enableRealtime {
-		// For offline processing, Size = OrigSize initially (will be updated after offline processing)
-		dataInfo.Size = size
+		// For offline processing, Size should equal OrigSize (both are actual data size on disk)
+		// The accumulated Size in flushChunk should already equal OrigSize for offline processing
+		// But to be safe, ensure they match
+		if dataInfo.Size != dataInfo.OrigSize {
+			DebugLog("[VFS TempFileWriter Flush] WARNING: Size mismatch for offline processing: Size=%d, OrigSize=%d, correcting", dataInfo.Size, dataInfo.OrigSize)
+			dataInfo.Size = dataInfo.OrigSize
+		}
+	} else {
+		// For real-time processing, Size is already accumulated (compressed/encrypted size)
+		// Don't overwrite it
+		DebugLog("[VFS TempFileWriter Flush] Real-time processing: OrigSize=%d, Size=%d (compressed/encrypted)", dataInfo.OrigSize, dataInfo.Size)
 	}
 
 	// Save chunk size to file object's Extra field only if it differs from bucket's default
@@ -784,8 +798,8 @@ func (tw *TempFileWriter) Flush() error {
 	obj.MTime = core.Now()
 
 	// Upload DataInfo and ObjectInfo together
-	DebugLog("[VFS TempFileWriter Flush] Uploading metadata: fileID=%d, dataID=%d, fileName=%s, origSize=%d, size=%d, chunkSize=%d, totalChunks=%d, realtime=%v, hasCompression=%v, hasEncryption=%v",
-		tw.fileID, tw.dataID, obj.Name, dataInfo.OrigSize, dataInfo.Size, tw.chunkSize, tw.sn, tw.enableRealtime,
+	DebugLog("[VFS TempFileWriter Flush] Uploading metadata: fileID=%d, dataID=%d, fileName=%s, origSize=%d, size=%d, chunkSize=%d, realtime=%v, hasCompression=%v, hasEncryption=%v",
+		tw.fileID, tw.dataID, obj.Name, dataInfo.OrigSize, dataInfo.Size, tw.chunkSize, tw.enableRealtime,
 		dataInfo.Kind&core.DATA_CMPR_MASK != 0, dataInfo.Kind&core.DATA_ENDEC_MASK != 0)
 	err = tw.fs.h.PutDataInfoAndObj(tw.fs.c, tw.fs.bktID, []*core.DataInfo{dataInfo}, []*core.ObjectInfo{obj})
 	if err != nil {
@@ -803,8 +817,15 @@ func (tw *TempFileWriter) Flush() error {
 		compressionRatio = float64(dataInfo.Size) / float64(dataInfo.OrigSize)
 	}
 
-	DebugLog("[VFS TempFileWriter Flush] Successfully flushed large file: fileID=%d, dataID=%d, fileName=%s, origSize=%d, size=%d, chunkSize=%d, totalChunks=%d, compressionRatio=%.2f%%",
-		tw.fileID, tw.dataID, obj.Name, dataInfo.OrigSize, dataInfo.Size, tw.chunkSize, tw.sn, compressionRatio*100.0)
+	DebugLog("[VFS TempFileWriter Flush] Successfully flushed large file: fileID=%d, dataID=%d, fileName=%s, origSize=%d, size=%d, chunkSize=%d, compressionRatio=%.2f%%",
+		tw.fileID, tw.dataID, obj.Name, dataInfo.OrigSize, dataInfo.Size, tw.chunkSize, compressionRatio*100.0)
+
+	// Verify written data (for debugging - can be disabled in production)
+	//if err := tw.VerifyWriteData(); err != nil {
+	//	DebugLog("[VFS TempFileWriter Flush] WARNING: Write verification failed: fileID=%d, dataID=%d, error=%v", tw.fileID, tw.dataID, err)
+	// Don't return error - verification failure doesn't mean write failed
+	//}
+
 	return nil
 }
 
@@ -1918,10 +1939,16 @@ func (ra *RandomAccessor) flushInternal(force bool) (int64, error) {
 		}
 	}
 
-	// For all files, always use writing version path to allow continuous writing
-	// This avoids creating new versions when buffer is full, allowing data to be appended
-	// to the existing version by only updating the size information
-	return ra.applyWritesWithWritingVersion(fileObj, mergedOps, oldDataInfo)
+	// Prefer writing version path for efficient random writes, but fall back if DB access fails
+	newVersionID, err := ra.applyWritesWithWritingVersion(fileObj, mergedOps, oldDataInfo)
+	if err != nil {
+		if errors.Is(err, core.ERR_QUERY_DB) || errors.Is(err, core.ERR_OPEN_DB) {
+			DebugLog("[VFS RandomAccessor Flush] Writing version unavailable, falling back to SDK path: fileID=%d, error=%v", ra.fileID, err)
+			return ra.applyRandomWritesWithSDK(fileObj, mergedOps)
+		}
+		return 0, err
+	}
+	return newVersionID, nil
 }
 
 // applyRandomWritesWithSDK uses SDK's listener to handle compression and encryption, applies random writes
@@ -2138,7 +2165,7 @@ func (ra *RandomAccessor) applyWritesWithWritingVersion(fileObj *core.ObjectInfo
 	// Get or create writing version
 	writingVersion, err := lh.GetOrCreateWritingVersion(ra.fs.c, ra.fs.bktID, ra.fileID)
 	if err != nil {
-		return 0, fmt.Errorf("failed to get or create writing version: %v", err)
+		return 0, fmt.Errorf("failed to get or create writing version: %w", err)
 	}
 
 	// Use writing version's DataID (writing version always has its own DataID without compression/encryption)
@@ -3089,16 +3116,18 @@ type decodingChunkReader struct {
 	buf        []byte
 	bufPos     int
 	origSize   int64 // Original data size (decompressed size)
+	chunkSize  int64 // Chunk size for original data (used to calculate sn and offsetInChunk)
 }
 
 func newDecodingChunkReader(c core.Ctx, h core.Handler, bktID int64, dataInfo *core.DataInfo, endecKey string) *decodingChunkReader {
 	dr := &decodingChunkReader{
-		c:        c,
-		h:        h,
-		bktID:    bktID,
-		kind:     dataInfo.Kind,
-		endecKey: endecKey,
-		origSize: dataInfo.OrigSize, // Store original size (decompressed size)
+		c:         c,
+		h:         h,
+		bktID:     bktID,
+		kind:      dataInfo.Kind,
+		endecKey:  endecKey,
+		origSize:  dataInfo.OrigSize, // Store original size (decompressed size)
+		chunkSize: 0,                 // Will be set if needed
 	}
 	if dataInfo.PkgID > 0 {
 		dr.dataID = dataInfo.PkgID
@@ -3108,10 +3137,85 @@ func newDecodingChunkReader(c core.Ctx, h core.Handler, bktID int64, dataInfo *c
 	return dr
 }
 
+// newDecodingChunkReaderFromOffset creates a decoding reader starting from specified offset
+// For compressed/encrypted data, directly reads the target chunk and positions at the offset within that chunk
+func newDecodingChunkReaderFromOffset(c core.Ctx, h core.Handler, bktID int64, dataInfo *core.DataInfo, endecKey string, chunkSize int64, offset int64) *decodingChunkReader {
+	dr := newDecodingChunkReader(c, h, bktID, dataInfo, endecKey)
+	dr.chunkSize = chunkSize
+
+	if offset <= 0 || chunkSize <= 0 {
+		dr.currentPos = 0
+		dr.sn = 0
+		return dr
+	}
+
+	// Calculate starting chunk number and offset within chunk
+	// For independently compressed chunks, each chunk decompresses to chunkSize (except possibly the last)
+	sn := int(offset / chunkSize)
+	offsetInChunk := offset % chunkSize
+	dr.currentPos = offset
+	dr.sn = sn + 1 // Next chunk to read after current one
+
+	// Read the target chunk (compressed and encrypted data)
+	encryptedChunk, err := h.GetData(c, bktID, dr.dataID, sn)
+	if err != nil {
+		// If read fails, chunk may not exist (end of file)
+		dr.buf = nil
+		dr.bufPos = 0
+		return dr
+	}
+
+	// 1. Decrypt first (if enabled)
+	decodedChunk := encryptedChunk
+	if dr.kind&core.DATA_ENDEC_AES256 != 0 {
+		decodedChunk, err = aes256.Decrypt(endecKey, encryptedChunk)
+	} else if dr.kind&core.DATA_ENDEC_SM4 != 0 {
+		decodedChunk, err = sm4.Sm4Cbc([]byte(endecKey), encryptedChunk, false)
+	}
+	if err != nil {
+		decodedChunk = encryptedChunk
+	}
+
+	// 2. Decompress next (if enabled)
+	finalChunk := decodedChunk
+	if dr.kind&core.DATA_CMPR_MASK != 0 {
+		var decompressor archiver.Decompressor
+		if dr.kind&core.DATA_CMPR_SNAPPY != 0 {
+			decompressor = &archiver.Snappy{}
+		} else if dr.kind&core.DATA_CMPR_ZSTD != 0 {
+			decompressor = &archiver.Zstd{}
+		} else if dr.kind&core.DATA_CMPR_GZIP != 0 {
+			decompressor = &archiver.Gz{}
+		} else if dr.kind&core.DATA_CMPR_BR != 0 {
+			decompressor = &archiver.Brotli{}
+		}
+
+		if decompressor != nil {
+			var decompressedBuf bytes.Buffer
+			err := decompressor.Decompress(bytes.NewReader(decodedChunk), &decompressedBuf)
+			if err == nil {
+				finalChunk = decompressedBuf.Bytes()
+			}
+		}
+	}
+
+	// Position at the offset within the decompressed chunk
+	// Adjust offsetInChunk if it exceeds decompressed size (for last chunk)
+	decompressedSize := int64(len(finalChunk))
+	if offsetInChunk > decompressedSize {
+		offsetInChunk = decompressedSize
+	}
+
+	dr.buf = finalChunk
+	dr.bufPos = int(offsetInChunk)
+	return dr
+}
+
 func (dr *decodingChunkReader) Read(p []byte) (n int, err error) {
 	totalRead := 0
 	// Calculate remaining data based on current position and original size
 	remain := dr.origSize - dr.currentPos
+
 	for len(p) > 0 && remain > 0 {
 		// If buffer is empty or fully read, read next chunk
 		if dr.buf == nil || dr.bufPos >= len(dr.buf) {

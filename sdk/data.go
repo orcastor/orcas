@@ -30,8 +30,8 @@ const (
 
 const (
 	PKG_ALIGN     = 4096
-	PKG_SIZE      = 4194304         // Default chunk size, used if configuration is not set
-	DEFAULT_CHUNK = 4 * 1024 * 1024 // Default 4MB
+	PKG_SIZE      = 10 * 1024 * 1024 // Default chunk size, used if configuration is not set
+	DEFAULT_CHUNK = 10 * 1024 * 1024 // Default 4MB
 )
 
 type listener struct {
@@ -399,6 +399,8 @@ func (osi *OrcasSDKImpl) uploadFiles(c core.Ctx, bktID int64, u []uploadInfo,
 	if err == nil && bucket != nil && bucket.ChunkSize > 0 {
 		chunkSize = bucket.ChunkSize
 	}
+	fmt.Println("chunkSize", chunkSize)
+	fmt.Println("osi.cfg.PkgThres", osi.cfg.PkgThres)
 	if dp == nil {
 		dp = newDataPkger(osi.cfg.PkgThres, chunkSize)
 	}
@@ -561,7 +563,14 @@ type dataReader struct {
 }
 
 func NewDataReader(c core.Ctx, h core.Handler, bktID int64, d *core.DataInfo, endecKey string) *dataReader {
-	dr := &dataReader{c: c, h: h, bktID: bktID, remain: int(d.Size), kind: d.Kind, endecKey: endecKey}
+	dr := &dataReader{
+		c:        c,
+		h:        h,
+		bktID:    bktID,
+		remain:   int(d.OrigSize),
+		kind:     d.Kind,
+		endecKey: endecKey,
+	}
 	if d.PkgID > 0 {
 		dr.dataID = d.PkgID
 		dr.offset = d.PkgOffset
@@ -570,22 +579,43 @@ func NewDataReader(c core.Ctx, h core.Handler, bktID int64, d *core.DataInfo, en
 		dr.dataID = d.ID
 		dr.getSize = -1
 	}
+
 	return dr
 }
 
 func (dr *dataReader) Read(p []byte) (n int, err error) {
+	if dr.remain <= 0 {
+		return 0, io.EOF
+	}
+
 	if len(p) <= dr.buf.Len() {
+		dr.remain -= len(p)
 		return dr.buf.Read(p)
 	}
-	if dr.remain > 0 {
+
+	// Continue reading chunks until buffer has enough data or we hit EOF
+	for dr.buf.Len() < len(p) {
+		fmt.Println("dr.sn", dr.sn)
+		fmt.Println("dr.remain", dr.remain)
+		fmt.Println("len(p)", len(p))
+
 		// GetData's offsetOrSize parameter: one parameter means sn, two parameters mean sn+offset, three parameters mean sn+offset+size
 		buf, err := dr.h.GetData(dr.c, dr.bktID, dr.dataID, dr.sn, int(dr.offset), dr.getSize)
 		if err != nil {
-			fmt.Println(runtime.Caller(0))
-			fmt.Println(err)
+			// Otherwise, return the error (EOF or other error)
 			return 0, err
 		}
-		dr.remain -= len(buf)
+
+		// If GetData returns empty data, treat as EOF
+		if len(buf) == 0 {
+			if dr.buf.Len() > 0 {
+				break
+			}
+			return 0, io.EOF
+		}
+
+		fmt.Println("buf", len(buf))
+
 		dr.sn++
 
 		// Important: decrypt first, then decompress (because each chunk is independently compressed and encrypted)
@@ -593,15 +623,24 @@ func (dr *dataReader) Read(p []byte) (n int, err error) {
 		decodeBuf := buf
 		if dr.kind&core.DATA_ENDEC_AES256 != 0 {
 			// AES256 decryption
+			if dr.endecKey == "" {
+				return 0, fmt.Errorf("AES256 decryption requires encryption key but key is empty (chunk sn=%d)", dr.sn-1)
+			}
 			decodeBuf, err = aes256.Decrypt(dr.endecKey, buf)
+			if err != nil {
+				// Decryption failed - this usually means wrong key or corrupted data
+				return 0, fmt.Errorf("AES256 decryption failed for chunk sn=%d (key length=%d, data length=%d): %v. This usually means the encryption key is incorrect or the data is corrupted", dr.sn-1, len(dr.endecKey), len(buf), err)
+			}
 		} else if dr.kind&core.DATA_ENDEC_SM4 != 0 {
 			// SM4 decryption
+			if dr.endecKey == "" {
+				return 0, fmt.Errorf("SM4 decryption requires encryption key but key is empty (chunk sn=%d)", dr.sn-1)
+			}
 			decodeBuf, err = sm4.Sm4Cbc([]byte(dr.endecKey), buf, false) // sm4Cbc mode PKCS7 padding decryption
-		}
-		if err != nil {
-			fmt.Println(runtime.Caller(0))
-			fmt.Println(err)
-			decodeBuf = buf
+			if err != nil {
+				// Decryption failed - this usually means wrong key or corrupted data
+				return 0, fmt.Errorf("SM4 decryption failed for chunk sn=%d (key length=%d, data length=%d): %v. This usually means the encryption key is incorrect or the data is corrupted", dr.sn-1, len(dr.endecKey), len(buf), err)
+			}
 		}
 
 		// 2. Decompress next (if enabled)
@@ -635,6 +674,8 @@ func (dr *dataReader) Read(p []byte) (n int, err error) {
 
 		dr.buf.Write(finalBuf)
 	}
+
+	dr.remain -= len(p)
 	return dr.buf.Read(p)
 }
 
@@ -681,22 +722,23 @@ func (osi *OrcasSDKImpl) downloadFile(c core.Ctx, bktID int64, o *core.ObjectInf
 	b := bufio.NewWriter(f)
 	defer b.Flush()
 
-	var decmpr archiver.Decompressor
-	if d.Kind&core.DATA_CMPR_MASK != 0 {
-		if d.Kind&core.DATA_CMPR_SNAPPY != 0 {
-			decmpr = &archiver.Snappy{}
-		} else if d.Kind&core.DATA_CMPR_ZSTD != 0 {
-			decmpr = &archiver.Zstd{}
-		} else if d.Kind&core.DATA_CMPR_GZIP != 0 {
-			decmpr = &archiver.Gz{}
-		} else if d.Kind&core.DATA_CMPR_BR != 0 {
-			decmpr = &archiver.Brotli{}
+	// Get encryption key: use SDK config first, fallback to bucket config if empty
+	endecKey := osi.cfg.EndecKey
+	if endecKey == "" {
+		// Try to get encryption key from bucket configuration
+		bucket, err := osi.h.GetBktInfo(c, bktID)
+		if err == nil && bucket != nil && bucket.EndecKey != "" {
+			endecKey = bucket.EndecKey
 		}
-	} else {
-		decmpr = &DummyArchiver{}
 	}
 
-	if err = decmpr.Decompress(NewDataReader(c, osi.h, bktID, d, osi.cfg.EndecKey), b); err != nil {
+	// Check if encryption is required but key is missing
+	if d.Kind&core.DATA_ENDEC_MASK != 0 && endecKey == "" {
+		return fmt.Errorf("encryption key is required for encrypted data (DataID: %d, Kind: 0x%x) but not provided in SDK config or bucket config", dataID, d.Kind)
+	}
+
+	_, err = io.CopyN(b, NewDataReader(c, osi.h, bktID, d, endecKey), d.OrigSize)
+	if err != nil {
 		fmt.Println(runtime.Caller(0))
 		fmt.Println(err)
 		return err

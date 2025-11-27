@@ -1083,6 +1083,14 @@ func (n *OrcasNode) Rename(ctx context.Context, name string, newParent fs.InodeE
 	// Update source file cache with new name and parent
 	n.updateFileObjCache(sourceID, newName, newParentObj.ID)
 
+	// Invalidate DataInfo cache for source file to ensure fresh data after flush
+	// This is important for .tmp files that were just flushed
+	if sourceObj.Type == core.OBJ_TYPE_FILE && sourceObj.DataID > 0 {
+		dataInfoCacheKey := formatCacheKey(sourceObj.DataID)
+		dataInfoCache.Del(dataInfoCacheKey)
+		DebugLog("[VFS Rename] Invalidated DataInfo cache: fileID=%d, dataID=%d", sourceID, sourceObj.DataID)
+	}
+
 	// Note: After creating the version from the existing target file,
 	// the existing target file (existingTargetID) now has a version.
 	// When we rename the source file to the target name, the source file
@@ -1141,7 +1149,7 @@ func (n *OrcasNode) Read(ctx context.Context, dest []byte, off int64) (fuse.Read
 		reader = entry.reader
 		cachedEntry = entry
 	} else {
-		reader, errno = n.getDataReader()
+		reader, errno = n.getDataReader(off)
 		if errno != 0 {
 			DebugLog("[VFS Read] ERROR: Failed to get DataReader: objID=%d, DataID=%d, error=%v", obj.ID, obj.DataID, errno)
 			return nil, errno
@@ -1160,7 +1168,10 @@ func (n *OrcasNode) Read(ctx context.Context, dest []byte, off int64) (fuse.Read
 			return nil, syscall.EIO
 		}
 		DebugLog("[VFS Read] Successfully read data: objID=%d, DataID=%d, offset=%d, requested=%d, read=%d", obj.ID, obj.DataID, off, len(dest), nRead)
-		return fuse.ReadResultData(dest[:nRead]), 0
+		// Copy data to avoid buffer reuse/overwrite risk by FUSE kernel
+		result := make([]byte, nRead)
+		copy(result, dest[:nRead])
+		return fuse.ReadResultData(result), 0
 	}
 
 	nRead, err := reader.Read(dest)
@@ -1189,11 +1200,27 @@ func (n *OrcasNode) Read(ctx context.Context, dest []byte, off int64) (fuse.Read
 	}
 
 	DebugLog("[VFS Read] Successfully read data: objID=%d, DataID=%d, offset=%d, requested=%d, read=%d", obj.ID, obj.DataID, off, len(dest), nRead)
-	return fuse.ReadResultData(dest[:nRead]), 0
+
+	// Verify read data integrity (for debugging - can be disabled in production)
+	// Only verify on first read (offset=0) to avoid performance impact
+	if off == 0 && nRead > 0 {
+		// Note: Full verification is expensive, so we only log a warning if size seems wrong
+		// Full verification can be triggered manually via VerifyFileData()
+		if obj.Size > 0 && int64(nRead) > obj.Size {
+			DebugLog("[VFS Read] WARNING: Read more than file size: objID=%d, read=%d, fileSize=%d", obj.ID, nRead, obj.Size)
+		}
+	}
+
+	// Copy data to avoid buffer reuse/overwrite risk by FUSE kernel
+	result := make([]byte, nRead)
+	copy(result, dest[:nRead])
+	return fuse.ReadResultData(result), 0
 }
 
 // getDataReader gets or creates DataReader (with cache)
-func (n *OrcasNode) getDataReader() (io.Reader, syscall.Errno) {
+// offset: starting offset for streaming readers (compressed/encrypted)
+// For plain readers, offset is ignored as they support ReadAt
+func (n *OrcasNode) getDataReader(offset int64) (io.Reader, syscall.Errno) {
 	// Note: Since FUSE reads may be random access, caching reader may not be very effective
 	// But we can try to reuse reader for performance
 
@@ -1231,17 +1258,19 @@ func (n *OrcasNode) getDataReader() (io.Reader, syscall.Errno) {
 	}
 
 	if !hasCompression && !hasEncryption {
+		// Plain reader supports ReadAt, offset is not needed
 		reader := newPlainDataReader(n.fs.c, n.fs.h, n.fs.bktID, obj.DataID, chunkSize, dataInfo.OrigSize)
 		return reader, 0
 	}
 
 	// Compressed/encrypted path uses decoding reader (streaming)
+	// Initialize from specified offset
 	var endecKey string
 	bucket := n.fs.getBucketConfig()
 	if bucket != nil {
 		endecKey = bucket.EndecKey
 	}
-	reader := newDecodingChunkReader(n.fs.c, n.fs.h, n.fs.bktID, dataInfo, endecKey)
+	reader := newDecodingChunkReaderFromOffset(n.fs.c, n.fs.h, n.fs.bktID, dataInfo, endecKey, chunkSize, offset)
 	return reader, 0
 }
 
@@ -1495,6 +1524,14 @@ func (n *OrcasNode) getRandomAccessor() (*RandomAccessor, error) {
 		return nil, fmt.Errorf("object is not a file")
 	}
 
+	// Reuse existing writer RandomAccessor for .tmp files to preserve buffered data
+	if n.fs != nil && isTempFile(obj) {
+		if existing := n.fs.getRandomAccessorByFileID(obj.ID); existing != nil && existing.hasTempFileWriter() {
+			n.ra.Store(existing)
+			return existing, nil
+		}
+	}
+
 	newRA, err := NewRandomAccessor(n.fs, obj.ID)
 	if err != nil {
 		return nil, err
@@ -1507,6 +1544,7 @@ func (n *OrcasNode) getRandomAccessor() (*RandomAccessor, error) {
 		// Other goroutine already created, close what we created, use existing
 		newRA.Close()
 		if n.fs != nil {
+			DebugLog("[VFS getRandomAccessor] Unregistering RandomAccessor: fileID=%d", obj.ID)
 			n.fs.unregisterRandomAccessor(obj.ID, newRA)
 		}
 		if val := n.ra.Load(); val != nil && val != releasedMarker {
@@ -1520,6 +1558,7 @@ func (n *OrcasNode) getRandomAccessor() (*RandomAccessor, error) {
 
 	// Register RandomAccessor globally for cross-node lookup (e.g., rename flush)
 	if n.fs != nil {
+		DebugLog("[VFS getRandomAccessor] Registering RandomAccessor: fileID=%d", obj.ID)
 		n.fs.registerRandomAccessor(obj.ID, newRA)
 	}
 
@@ -1610,10 +1649,23 @@ func (n *OrcasNode) forceFlushTempFileBeforeRename(fileID int64, oldName, newNam
 		DebugLog("[VFS Rename] ERROR: Failed to force flush .tmp file: fileID=%d, error=%v", fileID, err)
 	} else {
 		DebugLog("[VFS Rename] Successfully forced flush .tmp file: fileID=%d", fileID)
+
+		// Verify flushed data (for debugging)
+		// Get the file node to verify
+		fileNode := &OrcasNode{
+			fs:    n.fs,
+			objID: fileID,
+		}
+		if err := fileNode.VerifyChunkData(); err != nil {
+			DebugLog("[VFS Rename] WARNING: Chunk verification failed after flush: fileID=%d, error=%v", fileID, err)
+		} else {
+			DebugLog("[VFS Rename] Chunk verification passed after flush: fileID=%d", fileID)
+		}
 	}
 
 	// After forcing flush, unregister RandomAccessor to avoid stale references
 	if n.fs != nil {
+		DebugLog("[VFS Rename] Unregistering RandomAccessor: fileID=%d", fileID)
 		n.fs.unregisterRandomAccessor(fileID, raToFlush)
 	}
 }
