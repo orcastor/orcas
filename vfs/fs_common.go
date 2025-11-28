@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/orcastor/orcas/core"
-	"github.com/orcastor/orcas/sdk"
 )
 
 // debugEnabled is a global flag to control debug logging
@@ -64,20 +63,13 @@ type OrcasFS struct {
 
 // NewOrcasFS creates a new ORCAS filesystem
 // This function is available on all platforms
-// sdkCfg parameter is deprecated, configuration is now read from bucket
-func NewOrcasFS(h core.Handler, c core.Ctx, bktID int64, sdkCfg *sdk.Config) *OrcasFS {
+func NewOrcasFS(h core.Handler, c core.Ctx, bktID int64) *OrcasFS {
 	// Get bucket configuration (includes chunkSize, compression, encryption settings)
-	var chunkSize int64 = 10 << 20 // Default 10MB
+	var chunkSize int64
 	bucket, err := h.GetBktInfo(c, bktID)
 	if err == nil && bucket != nil {
 		if bucket.ChunkSize > 0 {
 			chunkSize = bucket.ChunkSize
-		}
-		// If bucket config is empty but sdkCfg is provided, migrate config to bucket
-		// This is for backward compatibility during migration
-		if sdkCfg != nil && bucket.CmprWay == 0 && bucket.EndecWay == 0 {
-			// Note: This migration should be done at bucket creation time, not here
-			// But we keep it for backward compatibility
 		}
 	} else {
 		// If GetBktInfo fails, create a default bucket info
@@ -85,6 +77,10 @@ func NewOrcasFS(h core.Handler, c core.Ctx, bktID int64, sdkCfg *sdk.Config) *Or
 			ID:        bktID,
 			ChunkSize: chunkSize,
 		}
+	}
+
+	if chunkSize <= 0 {
+		chunkSize = 10 << 20 // Default 10MB
 	}
 
 	// Register bucket config to Handler for ConvertWritingVersions job
@@ -102,8 +98,6 @@ func NewOrcasFS(h core.Handler, c core.Ctx, bktID int64, sdkCfg *sdk.Config) *Or
 		bucket:    bucket,
 		chunkSize: chunkSize,
 	}
-
-	DebugLog("NewOrcasFS: bucketID=%d, chunkSize=%d", bktID, chunkSize)
 
 	// Root node initialization
 	// Windows platform needs to initialize root node immediately, as it doesn't rely on FUSE (implemented in fs_win.go)

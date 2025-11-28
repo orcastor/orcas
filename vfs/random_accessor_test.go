@@ -13,7 +13,6 @@ import (
 
 	"github.com/orca-zhang/idgen"
 	"github.com/orcastor/orcas/core"
-	"github.com/orcastor/orcas/sdk"
 	. "github.com/smartystreets/goconvey/convey"
 )
 
@@ -87,7 +86,7 @@ func TestVFSRandomAccessor(t *testing.T) {
 		So(err, ShouldBeNil)
 
 		// 创建OrcasFS
-		ofs := NewOrcasFS(lh, testCtx, testBktID, nil)
+		ofs := NewOrcasFS(lh, testCtx, testBktID)
 
 		Convey("test basic write and read", func() {
 			ra, err := NewRandomAccessor(ofs, fileID)
@@ -268,14 +267,8 @@ func TestVFSRandomAccessorWithSDK(t *testing.T) {
 		So(err, ShouldBeNil)
 
 		Convey("test with compression", func() {
-			// 创建SDK配置（启用压缩）
-			sdkCfg := &sdk.Config{
-				WiseCmpr: core.DATA_CMPR_SNAPPY,
-				CmprQlty: 1,
-			}
-
-			// 创建OrcasFS
-			ofs := NewOrcasFS(lh, testCtx, testBktID, sdkCfg)
+			// 创建OrcasFS（bucket配置已包含压缩设置）
+			ofs := NewOrcasFS(lh, testCtx, testBktID)
 
 			ra, err := NewRandomAccessor(ofs, fileID)
 			So(err, ShouldBeNil)
@@ -308,14 +301,8 @@ func TestVFSRandomAccessorWithSDK(t *testing.T) {
 		})
 
 		Convey("test with encryption", func() {
-			// 创建SDK配置（启用加密）
-			sdkCfg := &sdk.Config{
-				EndecWay: core.DATA_ENDEC_AES256,
-				EndecKey: "this is a test encryption key that is long enough",
-			}
-
-			// 创建OrcasFS
-			ofs := NewOrcasFS(lh, testCtx, testBktID, sdkCfg)
+			// 创建OrcasFS（bucket配置已包含加密设置）
+			ofs := NewOrcasFS(lh, testCtx, testBktID)
 
 			ra, err := NewRandomAccessor(ofs, fileID)
 			So(err, ShouldBeNil)
@@ -353,16 +340,8 @@ func TestVFSRandomAccessorWithSDK(t *testing.T) {
 		})
 
 		Convey("test with compression and encryption", func() {
-			// 创建SDK配置（启用压缩和加密）
-			sdkCfg := &sdk.Config{
-				WiseCmpr: core.DATA_CMPR_SNAPPY,
-				CmprQlty: 1,
-				EndecWay: core.DATA_ENDEC_AES256,
-				EndecKey: "this is a test encryption key that is long enough",
-			}
-
-			// 创建OrcasFS
-			ofs := NewOrcasFS(lh, testCtx, testBktID, sdkCfg)
+			// 创建OrcasFS（bucket配置已包含压缩和加密设置）
+			ofs := NewOrcasFS(lh, testCtx, testBktID)
 
 			ra, err := NewRandomAccessor(ofs, fileID)
 			So(err, ShouldBeNil)
@@ -395,16 +374,8 @@ func TestVFSRandomAccessorWithSDK(t *testing.T) {
 		})
 
 		Convey("test random read and write with chunk-based compression and encryption", func() {
-			// 创建SDK配置（启用压缩和加密）
-			sdkCfg := &sdk.Config{
-				WiseCmpr: core.DATA_CMPR_SNAPPY,
-				CmprQlty: 1,
-				EndecWay: core.DATA_ENDEC_AES256,
-				EndecKey: "this is a test encryption key that is long enough",
-			}
-
-			// 创建OrcasFS
-			ofs := NewOrcasFS(lh, testCtx, testBktID, sdkCfg)
+			// 创建OrcasFS（bucket配置已包含压缩和加密设置）
+			ofs := NewOrcasFS(lh, testCtx, testBktID)
 
 			// 创建新文件对象
 			fileID2, _ := ig.New()
@@ -505,14 +476,8 @@ func TestVFSRandomAccessorWithSDK(t *testing.T) {
 		})
 
 		Convey("test random write with overlapping chunks", func() {
-			// 创建SDK配置（仅启用压缩）
-			sdkCfg := &sdk.Config{
-				WiseCmpr: core.DATA_CMPR_ZSTD,
-				CmprQlty: 3,
-			}
-
-			// 创建OrcasFS
-			ofs := NewOrcasFS(lh, testCtx, testBktID, sdkCfg)
+			// 创建OrcasFS（bucket配置已包含压缩设置）
+			ofs := NewOrcasFS(lh, testCtx, testBktID)
 
 			// 创建新文件对象
 			fileID3, _ := ig.New()
@@ -711,12 +676,6 @@ func TestRandomAccessorReadWithEncryption(t *testing.T) {
 		md5Hash := md5.Sum(testData)
 		md5Int64 := int64(binary.BigEndian.Uint64(md5Hash[4:12]))
 
-		// 使用SDK写入加密数据
-		sdkCfg := &sdk.Config{
-			EndecWay: core.DATA_ENDEC_AES256,
-			EndecKey: "this is a test encryption key that is long enough",
-		}
-
 		// 这里我们需要手动创建加密的数据（简化测试）
 		// 在实际测试中，应该通过RandomAccessor写入
 		dataInfo := &core.DataInfo{
@@ -746,7 +705,7 @@ func TestRandomAccessorReadWithEncryption(t *testing.T) {
 		So(err, ShouldBeNil)
 
 		// 创建OrcasFS（带SDK配置）
-		ofs := NewOrcasFS(lh, testCtx, testBktID, sdkCfg)
+		ofs := NewOrcasFS(lh, testCtx, testBktID)
 
 		Convey("test read with SDK DataReader", func() {
 			ra, err := NewRandomAccessor(ofs, fileID)
@@ -806,7 +765,7 @@ func TestRandomAccessorReadOptimization(t *testing.T) {
 			_, err = dma.PutObj(testCtx, testBktID, []*core.ObjectInfo{fileObj})
 			So(err, ShouldBeNil)
 
-			ofs := NewOrcasFS(lh, testCtx, testBktID, nil)
+			ofs := NewOrcasFS(lh, testCtx, testBktID)
 			ra, err := NewRandomAccessor(ofs, fileID)
 			So(err, ShouldBeNil)
 			defer ra.Close()
@@ -838,12 +797,6 @@ func TestRandomAccessorReadOptimization(t *testing.T) {
 		})
 
 		Convey("test read with compression (exact size)", func() {
-			// 创建SDK配置（启用压缩）
-			sdkCfg := &sdk.Config{
-				WiseCmpr: core.DATA_CMPR_SNAPPY,
-				CmprQlty: 1,
-			}
-
 			// 创建文件对象
 			fileID, _ := ig.New()
 			fileObj := &core.ObjectInfo{
@@ -857,7 +810,7 @@ func TestRandomAccessorReadOptimization(t *testing.T) {
 			_, err = dma.PutObj(testCtx, testBktID, []*core.ObjectInfo{fileObj})
 			So(err, ShouldBeNil)
 
-			ofs := NewOrcasFS(lh, testCtx, testBktID, sdkCfg)
+			ofs := NewOrcasFS(lh, testCtx, testBktID)
 			ra, err := NewRandomAccessor(ofs, fileID)
 			So(err, ShouldBeNil)
 			defer ra.Close()
@@ -884,12 +837,6 @@ func TestRandomAccessorReadOptimization(t *testing.T) {
 		})
 
 		Convey("test read with encryption (exact size)", func() {
-			// 创建SDK配置（启用加密）
-			sdkCfg := &sdk.Config{
-				EndecWay: core.DATA_ENDEC_AES256,
-				EndecKey: "this is a test encryption key that is long enough",
-			}
-
 			// 创建文件对象
 			fileID, _ := ig.New()
 			fileObj := &core.ObjectInfo{
@@ -903,7 +850,7 @@ func TestRandomAccessorReadOptimization(t *testing.T) {
 			_, err = dma.PutObj(testCtx, testBktID, []*core.ObjectInfo{fileObj})
 			So(err, ShouldBeNil)
 
-			ofs := NewOrcasFS(lh, testCtx, testBktID, sdkCfg)
+			ofs := NewOrcasFS(lh, testCtx, testBktID)
 			ra, err := NewRandomAccessor(ofs, fileID)
 			So(err, ShouldBeNil)
 			defer ra.Close()
@@ -943,7 +890,7 @@ func TestRandomAccessorReadOptimization(t *testing.T) {
 			_, err = dma.PutObj(testCtx, testBktID, []*core.ObjectInfo{fileObj})
 			So(err, ShouldBeNil)
 
-			ofs := NewOrcasFS(lh, testCtx, testBktID, nil)
+			ofs := NewOrcasFS(lh, testCtx, testBktID)
 			ra, err := NewRandomAccessor(ofs, fileID)
 			So(err, ShouldBeNil)
 			defer ra.Close()
@@ -968,7 +915,7 @@ func TestRandomAccessorReadOptimization(t *testing.T) {
 			_, err = dma.PutObj(testCtx, testBktID, []*core.ObjectInfo{fileObj})
 			So(err, ShouldBeNil)
 
-			ofs := NewOrcasFS(lh, testCtx, testBktID, nil)
+			ofs := NewOrcasFS(lh, testCtx, testBktID)
 			ra, err := NewRandomAccessor(ofs, fileID)
 			So(err, ShouldBeNil)
 			defer ra.Close()
@@ -1004,7 +951,7 @@ func TestRandomAccessorReadOptimization(t *testing.T) {
 			_, err = dma.PutObj(testCtx, testBktID, []*core.ObjectInfo{fileObj})
 			So(err, ShouldBeNil)
 
-			ofs := NewOrcasFS(lh, testCtx, testBktID, nil)
+			ofs := NewOrcasFS(lh, testCtx, testBktID)
 			ra, err := NewRandomAccessor(ofs, fileID)
 			So(err, ShouldBeNil)
 			defer ra.Close()
@@ -1047,7 +994,7 @@ func TestRandomAccessorReadOptimization(t *testing.T) {
 			_, err = dma.PutObj(testCtx, testBktID, []*core.ObjectInfo{fileObj})
 			So(err, ShouldBeNil)
 
-			ofs := NewOrcasFS(lh, testCtx, testBktID, nil)
+			ofs := NewOrcasFS(lh, testCtx, testBktID)
 			ra, err := NewRandomAccessor(ofs, fileID)
 			So(err, ShouldBeNil)
 			defer ra.Close()
@@ -1120,7 +1067,7 @@ func TestSequentialWriteFallbackToRandom(t *testing.T) {
 		_, err = dma.PutObj(testCtx, testBktID, []*core.ObjectInfo{fileObj})
 		So(err, ShouldBeNil)
 
-		ofs := NewOrcasFS(lh, testCtx, testBktID, nil)
+		ofs := NewOrcasFS(lh, testCtx, testBktID)
 
 		Convey("test sequential write then random write", func() {
 			ra, err := NewRandomAccessor(ofs, fileID)
@@ -1222,7 +1169,7 @@ func TestMultipleFlush(t *testing.T) {
 		_, err = dma.PutObj(testCtx, testBktID, []*core.ObjectInfo{fileObj})
 		So(err, ShouldBeNil)
 
-		ofs := NewOrcasFS(lh, testCtx, testBktID, nil)
+		ofs := NewOrcasFS(lh, testCtx, testBktID)
 
 		Convey("test multiple flush", func() {
 			ra, err := NewRandomAccessor(ofs, fileID)
@@ -1297,7 +1244,7 @@ func TestWriteToExistingFile(t *testing.T) {
 		_, err = dma.PutObj(testCtx, testBktID, []*core.ObjectInfo{fileObj})
 		So(err, ShouldBeNil)
 
-		ofs := NewOrcasFS(lh, testCtx, testBktID, nil)
+		ofs := NewOrcasFS(lh, testCtx, testBktID)
 
 		Convey("test write to existing file", func() {
 			// 第一次写入
@@ -1428,11 +1375,7 @@ func TestDifferentCompressionAlgorithms(t *testing.T) {
 				_, err = dma.PutObj(testCtx, testBktID, []*core.ObjectInfo{fileObj})
 				So(err, ShouldBeNil)
 
-				sdkCfg := &sdk.Config{
-					WiseCmpr: algo.kind,
-					CmprQlty: 1,
-				}
-				ofs := NewOrcasFS(lh, testCtx, testBktID, sdkCfg)
+				ofs := NewOrcasFS(lh, testCtx, testBktID)
 
 				ra, err := NewRandomAccessor(ofs, fileID)
 				So(err, ShouldBeNil)
@@ -1510,11 +1453,7 @@ func TestDifferentEncryptionMethods(t *testing.T) {
 				_, err = dma.PutObj(testCtx, testBktID, []*core.ObjectInfo{fileObj})
 				So(err, ShouldBeNil)
 
-				sdkCfg := &sdk.Config{
-					EndecWay: method.kind,
-					EndecKey: method.key,
-				}
-				ofs := NewOrcasFS(lh, testCtx, testBktID, sdkCfg)
+				ofs := NewOrcasFS(lh, testCtx, testBktID)
 
 				ra, err := NewRandomAccessor(ofs, fileID)
 				So(err, ShouldBeNil)
@@ -1580,7 +1519,7 @@ func TestLargeFileOperations(t *testing.T) {
 		_, err = dma.PutObj(testCtx, testBktID, []*core.ObjectInfo{fileObj})
 		So(err, ShouldBeNil)
 
-		ofs := NewOrcasFS(lh, testCtx, testBktID, nil)
+		ofs := NewOrcasFS(lh, testCtx, testBktID)
 
 		Convey("test write large file in chunks", func() {
 			ra, err := NewRandomAccessor(ofs, fileID)
@@ -1663,7 +1602,7 @@ func TestConcurrentReadWrite(t *testing.T) {
 		_, err = dma.PutObj(testCtx, testBktID, []*core.ObjectInfo{fileObj})
 		So(err, ShouldBeNil)
 
-		ofs := NewOrcasFS(lh, testCtx, testBktID, nil)
+		ofs := NewOrcasFS(lh, testCtx, testBktID)
 
 		Convey("test concurrent write", func() {
 			// 先写入初始数据
@@ -1753,7 +1692,7 @@ func TestEmptyWrite(t *testing.T) {
 		_, err = dma.PutObj(testCtx, testBktID, []*core.ObjectInfo{fileObj})
 		So(err, ShouldBeNil)
 
-		ofs := NewOrcasFS(lh, testCtx, testBktID, nil)
+		ofs := NewOrcasFS(lh, testCtx, testBktID)
 
 		Convey("test empty write", func() {
 			ra, err := NewRandomAccessor(ofs, fileID)
@@ -1819,7 +1758,7 @@ func TestReadAfterClose(t *testing.T) {
 		_, err = dma.PutObj(testCtx, testBktID, []*core.ObjectInfo{fileObj})
 		So(err, ShouldBeNil)
 
-		ofs := NewOrcasFS(lh, testCtx, testBktID, nil)
+		ofs := NewOrcasFS(lh, testCtx, testBktID)
 
 		Convey("test read after close", func() {
 			ra, err := NewRandomAccessor(ofs, fileID)
@@ -1876,7 +1815,7 @@ func TestTruncate(t *testing.T) {
 		}
 		So(dma.PutBkt(testCtx, []*core.BucketInfo{bucket}), ShouldBeNil)
 
-		ofs := NewOrcasFS(lh, testCtx, testBktID, nil)
+		ofs := NewOrcasFS(lh, testCtx, testBktID)
 
 		Convey("test truncate to smaller size", func() {
 			fileID, _ := ig.New()
@@ -2094,7 +2033,7 @@ func TestTruncateAndWrite(t *testing.T) {
 		}
 		So(dma.PutBkt(testCtx, []*core.BucketInfo{bucket}), ShouldBeNil)
 
-		ofs := NewOrcasFS(lh, testCtx, testBktID, nil)
+		ofs := NewOrcasFS(lh, testCtx, testBktID)
 
 		Convey("test truncate then write", func() {
 			fileID, _ := ig.New()
@@ -2167,10 +2106,7 @@ func TestTruncateWithCompression(t *testing.T) {
 		So(dma.PutBkt(testCtx, []*core.BucketInfo{bucket}), ShouldBeNil)
 
 		// 使用压缩配置
-		sdkCfg := &sdk.Config{
-			WiseCmpr: core.DATA_CMPR_SNAPPY,
-		}
-		ofs := NewOrcasFS(lh, testCtx, testBktID, sdkCfg)
+	ofs := NewOrcasFS(lh, testCtx, testBktID)
 
 		Convey("test truncate compressed file", func() {
 			fileID, _ := ig.New()
@@ -2245,7 +2181,7 @@ func TestBatchWriteManagerSmallFile(t *testing.T) {
 		}
 		So(dma.PutBkt(testCtx, []*core.BucketInfo{bucket}), ShouldBeNil)
 
-		ofs := NewOrcasFS(lh, testCtx, testBktID, nil)
+		ofs := NewOrcasFS(lh, testCtx, testBktID)
 
 		Convey("test small file uses BatchWriter", func() {
 			fileID, _ := ig.New()
@@ -2317,7 +2253,7 @@ func TestSequentialWriteLargeFile(t *testing.T) {
 		}
 		So(dma.PutBkt(testCtx, []*core.BucketInfo{bucket}), ShouldBeNil)
 
-		ofs := NewOrcasFS(lh, testCtx, testBktID, nil)
+		ofs := NewOrcasFS(lh, testCtx, testBktID)
 
 		Convey("test sequential write that exceeds chunk size", func() {
 			fileID, _ := ig.New()
@@ -2400,7 +2336,7 @@ func TestTruncateReferenceDataBlock(t *testing.T) {
 		}
 		So(dma.PutBkt(testCtx, []*core.BucketInfo{bucket}), ShouldBeNil)
 
-		ofs := NewOrcasFS(lh, testCtx, testBktID, nil)
+		ofs := NewOrcasFS(lh, testCtx, testBktID)
 
 		Convey("test truncate references previous data block", func() {
 			fileID, _ := ig.New()

@@ -50,10 +50,160 @@ var (
 	// key: "<dirID>", value: []*core.ObjectInfo (dirID is globally unique)
 	dirListCache = ecache.NewLRUCache(16, 512, 30*time.Second)
 
+	// ecache cache: cache chunkReader by dataID (one reader per file)
+	// key: "<dataID>", value: *chunkReader
+	// This ensures one file uses the same reader, sharing chunk cache
+	decodingReaderCache = ecache.NewLRUCache(4, 64, 5*time.Minute)
+
+	// ecache cache: cache bucket configuration to reduce database queries
+	// key: "<bktID>", value: *core.BucketInfo (bktID is globally unique)
+	bucketConfigCache = ecache.NewLRUCache(4, 64, 5*time.Minute)
+
 	// singleflight group: prevent duplicate concurrent requests for the same directory
 	// key: "<dirID>", ensures only one request per directory at a time
 	dirListSingleFlight singleflight.Group
+
+	// singleflight group: prevent duplicate concurrent chunk reads
+	// key: "chunk_<dataID>_<sn>", ensures only one read per chunk at a time
+	chunkReadSingleFlight singleflight.Group
+
+	tempFlushMgr     *delayedFlushManager
+	tempFlushMgrOnce sync.Once
 )
+
+// getBucketConfigWithCache gets bucket configuration with global cache
+// This reduces database queries when multiple RandomAccessors access the same bucket
+func getBucketConfigWithCache(fs *OrcasFS) *core.BucketInfo {
+	if fs == nil {
+		return nil
+	}
+
+	// Check cache first
+	cacheKey := formatCacheKey(fs.bktID)
+	if cached, ok := bucketConfigCache.Get(cacheKey); ok {
+		if bucket, ok := cached.(*core.BucketInfo); ok && bucket != nil {
+			return bucket
+		}
+	}
+
+	// Get from OrcasFS (which has its own cache)
+	bucket := fs.getBucketConfig()
+	if bucket != nil {
+		// Cache the result
+		bucketConfigCache.Put(cacheKey, bucket)
+	}
+
+	return bucket
+}
+
+const (
+	tmpFileFlushInterval      = 5 * time.Minute
+	delayedFlushCheckInterval = time.Second
+)
+
+type delayedFlushEntry struct {
+	ra    *RandomAccessor
+	force bool
+}
+
+type delayedFlushManager struct {
+	mu      sync.Mutex
+	entries map[int64]*delayedFlushEntry
+	wakeCh  chan struct{}
+}
+
+func newDelayedFlushManager() *delayedFlushManager {
+	mgr := &delayedFlushManager{
+		entries: make(map[int64]*delayedFlushEntry),
+		wakeCh:  make(chan struct{}, 1),
+	}
+	go mgr.run()
+	return mgr
+}
+
+func getDelayedFlushManager() *delayedFlushManager {
+	tempFlushMgrOnce.Do(func() {
+		tempFlushMgr = newDelayedFlushManager()
+	})
+	return tempFlushMgr
+}
+
+func (m *delayedFlushManager) run() {
+	ticker := time.NewTicker(delayedFlushCheckInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			m.process()
+		case <-m.wakeCh:
+			m.process()
+		}
+	}
+}
+
+func (m *delayedFlushManager) process() {
+	var toFlush []*delayedFlushEntry
+
+	// For .tmp files, reset delayed flush timer on each write (5 minutes from last write)
+	// Note: This is handled by TempFileWriter for .tmp files, so we don't need to do it here
+	// (The .tmp file check happens earlier in the function, so we skip this section for .tmp files)
+
+	// Optimization: for sparse files and sequential writes, use longer delayed flush window to batch more writes
+	// This reduces flush frequency and improves performance for random writes
+	config := core.GetWriteBufferConfig()
+
+	m.mu.Lock()
+	for fileID, entry := range m.entries {
+		if entry == nil || entry.ra == nil {
+			delete(m.entries, fileID)
+			continue
+		}
+		last := entry.ra.lastActivity.Load()
+		if last == 0 {
+			continue
+		}
+		if core.Now()-last > int64(config.BufferWindow) {
+			toFlush = append(toFlush, entry)
+			delete(m.entries, fileID)
+		}
+	}
+	m.mu.Unlock()
+
+	for _, entry := range toFlush {
+		entry.ra.executeDelayedFlush(entry.force)
+	}
+}
+
+func (m *delayedFlushManager) schedule(ra *RandomAccessor, force bool) {
+	if ra == nil {
+		return
+	}
+	m.mu.Lock()
+	if entry, ok := m.entries[ra.fileID]; ok {
+		entry.force = force
+	} else {
+		m.entries[ra.fileID] = &delayedFlushEntry{
+			ra:    ra,
+			force: force,
+		}
+	}
+	m.mu.Unlock()
+
+	select {
+	case m.wakeCh <- struct{}{}:
+	default:
+	}
+}
+
+func (m *delayedFlushManager) cancel(ra *RandomAccessor) {
+	if ra == nil {
+		return
+	}
+	m.mu.Lock()
+	delete(m.entries, ra.fileID)
+	m.mu.Unlock()
+}
 
 // getBatchWriteManager gets the batch writer for the specified bucket (thread-safe)
 // Returns nil if batch write is disabled
@@ -71,8 +221,8 @@ func processFileDataForBatchWrite(fs *OrcasFS, originalData []byte) ([]byte, int
 	}
 
 	// Process compression and encryption according to configuration
-	// Get bucket configuration
-	bucket := fs.getBucketConfig()
+	// Get bucket configuration (with cache)
+	bucket := getBucketConfigWithCache(fs)
 	kind := uint32(0)
 	data := originalData
 	compressedData := originalData
@@ -140,7 +290,7 @@ func addFileToBatchWrite(ra *RandomAccessor, data []byte) (bool, int64, error) {
 
 	// Create unified config from bucket config
 	var instantUploadCfg *core.InstantUploadConfig
-	bucket := ra.fs.getBucketConfig()
+	bucket := getBucketConfigWithCache(ra.fs)
 	instantUploadCfg = core.GetBucketInstantUploadConfig(bucket)
 
 	if core.IsInstantUploadEnabledWithConfig(instantUploadCfg) {
@@ -325,8 +475,8 @@ type RandomAccessor struct {
 	buffer       *WriteBuffer           // Random write buffer
 	seqBuffer    *SequentialWriteBuffer // Sequential write buffer (optimized)
 	fileObj      atomic.Value
-	fileObjKey   string                        // Pre-computed file_obj cache key (optimized: avoid repeated conversion)
-	pendingFlush atomic.Value                  // Delayed flush timer (*time.Timer)
+	fileObjKey   string // Pre-computed file_obj cache key (optimized: avoid repeated conversion)
+	lastActivity atomic.Int64
 	sparseSize   atomic.Int64                  // Sparse file size (for pre-allocated files, e.g., qBittorrent)
 	lastOffset   atomic.Int64                  // Last write offset (for sequential write detection)
 	seqDetector  *ConcurrentSequentialDetector // Concurrent sequential write detector
@@ -340,27 +490,6 @@ func isTempFile(obj *core.ObjectInfo) bool {
 	}
 	name := strings.ToLower(obj.Name)
 	return strings.HasSuffix(name, ".tmp")
-}
-
-// setChunkSizeIfDifferent sets chunk size to object only if it differs from bucket's default
-func (ra *RandomAccessor) setChunkSizeIfDifferent(obj *core.ObjectInfo, chunkSize int64) {
-	if obj == nil {
-		return
-	}
-
-	// Get bucket's default chunk size
-	bucketChunkSize := ra.fs.chunkSize
-	if bucketChunkSize <= 0 {
-		bucketChunkSize = 10 << 20 // Default 10MB
-	}
-
-	// Only save chunk size if it differs from bucket's default
-	if chunkSize != bucketChunkSize {
-		core.SetChunkSizeToObject(obj, chunkSize)
-		DebugLog("[VFS setChunkSizeIfDifferent] Saved chunk size to object (differs from bucket): fileID=%d, chunkSize=%d, bucketChunkSize=%d", obj.ID, chunkSize, bucketChunkSize)
-	} else {
-		DebugLog("[VFS setChunkSizeIfDifferent] Skipped saving chunk size (same as bucket): fileID=%d, chunkSize=%d", obj.ID, chunkSize)
-	}
 }
 
 // getOrCreateTempWriter gets or creates TempFileWriter for .tmp files
@@ -568,7 +697,7 @@ func (tw *TempFileWriter) flushChunk(sn int) error {
 
 	// Extract chunk data (only up to written size)
 	chunkData := buf.data[:buf.offsetInChunk]
-	bucket := tw.fs.getBucketConfig()
+	bucket := getBucketConfigWithCache(tw.fs)
 
 	DebugLog("[VFS TempFileWriter flushChunk] Processing chunk: fileID=%d, dataID=%d, sn=%d, originalSize=%d, enableRealtime=%v",
 		tw.fileID, tw.dataID, sn, len(chunkData), tw.enableRealtime)
@@ -677,7 +806,7 @@ func (tw *TempFileWriter) flushChunk(sn int) error {
 
 func (tw *TempFileWriter) decideRealtimeProcessing(firstChunk []byte) {
 	tw.realtimeDecided = true
-	bucket := tw.fs.getBucketConfig()
+	bucket := getBucketConfigWithCache(tw.fs)
 	if bucket == nil {
 		tw.enableRealtime = false
 		tw.dataInfo.Kind = core.DATA_NORMAL
@@ -777,19 +906,6 @@ func (tw *TempFileWriter) Flush() error {
 		// For real-time processing, Size is already accumulated (compressed/encrypted size)
 		// Don't overwrite it
 		DebugLog("[VFS TempFileWriter Flush] Real-time processing: OrigSize=%d, Size=%d (compressed/encrypted)", dataInfo.OrigSize, dataInfo.Size)
-	}
-
-	// Save chunk size to file object's Extra field only if it differs from bucket's default
-	// Get bucket's default chunk size
-	bucketChunkSize := tw.fs.chunkSize
-	if bucketChunkSize <= 0 {
-		bucketChunkSize = 10 << 20 // Default 10MB
-	}
-	if tw.chunkSize != bucketChunkSize {
-		core.SetChunkSizeToObject(obj, tw.chunkSize)
-		DebugLog("[VFS TempFileWriter Flush] Saved chunk size to object (differs from bucket): fileID=%d, chunkSize=%d, bucketChunkSize=%d", tw.fileID, tw.chunkSize, bucketChunkSize)
-	} else {
-		DebugLog("[VFS TempFileWriter Flush] Skipped saving chunk size (same as bucket): fileID=%d, chunkSize=%d", tw.fileID, tw.chunkSize)
 	}
 
 	// Update file object
@@ -994,58 +1110,16 @@ func (ra *RandomAccessor) Write(offset int64, data []byte) error {
 	// Update last write offset for sequential write detection
 	ra.lastOffset.Store(offset + int64(len(data)))
 
-	// For .tmp files, reset delayed flush timer on each write (5 minutes from last write)
-	// Note: This is handled by TempFileWriter for .tmp files, so we don't need to do it here
-	// (The .tmp file check happens earlier in the function, so we skip this section for .tmp files)
-
-	// Optimization: for sparse files and sequential writes, use longer delayed flush window to batch more writes
-	// This reduces flush frequency and improves performance for random writes
-	flushWindow := config.BufferWindow
-	if isSparseFile {
-		// For sparse files, use 2x flush window to batch more random writes
-		flushWindow = config.BufferWindow * 2
-	} else if isSequentialWrite {
-		// For sequential writes, use 3x flush window to batch more writes
-		// This significantly reduces flush frequency for large file uploads
-		flushWindow = config.BufferWindow * 3
-	}
-
 	// Optimization: for small file writes, use batch write manager
 	// If data size is small and hasn't reached force flush condition, add to batch write manager
 	// Note: batch write only applies to small files, and needs to ensure data integrity
 	// Here use delayed flush first, batch write logic is handled in Flush
 	// For sequential writes, always use delayed flush to batch more writes
 	if isSequentialWrite || (int64(len(data)) < maxBufferSize/10 && atomic.LoadInt64(&ra.buffer.totalSize) < maxBufferSize) {
-		ra.scheduleDelayedFlush(flushWindow)
+		ra.requestDelayedFlush(false)
 	}
 
 	return nil
-}
-
-// scheduleDelayedFlush schedules delayed flush
-func (ra *RandomAccessor) scheduleDelayedFlush(window time.Duration) {
-	// Cancel previous timer (atomic load and swap)
-	// Use typed nil pointer (*time.Timer)(nil) instead of nil for atomic.Value
-	oldTimer := ra.pendingFlush.Swap((*time.Timer)(nil))
-	if oldTimer != nil {
-		if timer, ok := oldTimer.(*time.Timer); ok && timer != nil {
-			timer.Stop()
-		}
-	}
-
-	// Create new delayed flush timer
-	newTimer := time.AfterFunc(window, func() {
-		// Clear timer atomically
-		// Use typed nil pointer (*time.Timer)(nil) instead of nil for atomic.Value
-		ra.pendingFlush.Store((*time.Timer)(nil))
-		// Async flush, non-blocking
-		go func() {
-			_, _ = ra.Flush()
-		}()
-	})
-
-	// Store new timer atomically
-	ra.pendingFlush.Store(newTimer)
 }
 
 // initSequentialBuffer initializes sequential write buffer
@@ -1098,7 +1172,7 @@ func (ra *RandomAccessor) initSequentialBufferWithNewData() error {
 	}
 
 	// Set compression and encryption flags (if enabled)
-	bucket := ra.fs.getBucketConfig()
+	bucket := getBucketConfigWithCache(ra.fs)
 	if bucket != nil {
 		if bucket.CmprWay > 0 {
 			dataInfo.Kind |= bucket.CmprWay
@@ -1254,7 +1328,7 @@ func (ra *RandomAccessor) flushSequentialChunk() error {
 		return nil
 	}
 
-	bucket := ra.fs.getBucketConfig()
+	bucket := getBucketConfigWithCache(ra.fs)
 	chunkData := ra.seqBuffer.buffer
 
 	// Process first chunk: check file type and compression effect
@@ -1387,7 +1461,7 @@ func (ra *RandomAccessor) flushSequentialBuffer() error {
 		if len(allData) > 0 {
 			// Create unified config from bucket config
 			var instantUploadCfg *core.InstantUploadConfig
-			bucket := ra.fs.getBucketConfig()
+			bucket := getBucketConfigWithCache(ra.fs)
 			instantUploadCfg = core.GetBucketInstantUploadConfig(bucket)
 
 			if core.IsInstantUploadEnabledWithConfig(instantUploadCfg) {
@@ -1481,9 +1555,6 @@ func (ra *RandomAccessor) flushSequentialBuffer() error {
 
 	fileObj.DataID = ra.seqBuffer.dataID
 	fileObj.Size = ra.seqBuffer.dataInfo.OrigSize
-
-	// Save chunk size to file object's Extra field only if it differs from bucket's default
-	ra.setChunkSizeIfDifferent(fileObj, ra.seqBuffer.chunkSize)
 
 	// Optimization: Use PutDataInfoAndObj to write DataInfo and ObjectInfo together in a single transaction
 	// This reduces database round trips and improves performance
@@ -1606,33 +1677,21 @@ func (ra *RandomAccessor) Read(offset int64, size int) ([]byte, error) {
 		dataInfoCache.Put(dataInfoCacheKey, dataInfo)
 	}
 
-	// Check if data has compression or encryption
-	hasCompression := dataInfo.Kind&core.DATA_CMPR_MASK != 0
-	hasEncryption := dataInfo.Kind&core.DATA_ENDEC_MASK != 0
-
-	// Get chunk size from file object, fallback to bucket's chunk size
-	chunkSize := core.GetChunkSizeFromObject(fileObj)
+	// Always use bucket's default chunk size (force unified chunkSize)
+	chunkSize := ra.fs.chunkSize
 	if chunkSize <= 0 {
-		chunkSize = ra.fs.chunkSize
-		if chunkSize <= 0 {
-			chunkSize = 10 << 20 // Default 10MB
-		}
+		chunkSize = 10 << 20 // Default 10MB
+	}
+
+	// Use unified chunkReader for both plain and compressed/encrypted data
+	var endecKey string
+	bucket := getBucketConfigWithCache(ra.fs)
+	if bucket != nil {
+		endecKey = bucket.EndecKey
 	}
 
 	// Create data reader (abstract read interface, unified handling of uncompressed and compressed/encrypted data)
-	var reader dataReader
-	if !hasCompression && !hasEncryption {
-		// Uncompressed unencrypted: directly read by chunk
-		reader = newPlainDataReader(ra.fs.c, ra.fs.h, ra.fs.bktID, fileObj.DataID, chunkSize, fileObj.Size)
-	} else {
-		// Compressed/encrypted: use decodingChunkReader (will automatically decrypt and decompress)
-		var endecKey string
-		bucket := ra.fs.getBucketConfig()
-		if bucket != nil {
-			endecKey = bucket.EndecKey
-		}
-		reader = newDecodingChunkReader(ra.fs.c, ra.fs.h, ra.fs.bktID, dataInfo, endecKey)
-	}
+	reader := newChunkReader(ra.fs.c, ra.fs.h, ra.fs.bktID, dataInfo, endecKey, chunkSize)
 
 	// Unified read logic (includes merging write operations)
 	fileData, operationsHandled := ra.readWithWrites(reader, offset, size)
@@ -1718,6 +1777,36 @@ func (ra *RandomAccessor) extractRange(data []byte, offset int64, size int) []by
 	return result
 }
 
+func (ra *RandomAccessor) requestDelayedFlush(force bool) {
+	if ra == nil {
+		return
+	}
+	ra.lastActivity.Store(core.Now())
+	getDelayedFlushManager().schedule(ra, force)
+}
+
+func (ra *RandomAccessor) cancelDelayedFlush() {
+	if ra == nil {
+		return
+	}
+	getDelayedFlushManager().cancel(ra)
+}
+
+func (ra *RandomAccessor) executeDelayedFlush(force bool) {
+	if ra == nil {
+		return
+	}
+	if force {
+		if _, err := ra.ForceFlush(); err != nil {
+			DebugLog("[VFS RandomAccessor] ERROR: Force flush during delayed schedule failed: fileID=%d, error=%v", ra.fileID, err)
+		}
+		return
+	}
+	if _, err := ra.Flush(); err != nil {
+		DebugLog("[VFS RandomAccessor] ERROR: Flush during delayed schedule failed: fileID=%d, error=%v", ra.fileID, err)
+	}
+}
+
 // Flush flushes buffer, returns new version ID (returns 0 if no pending data to flush)
 // For .tmp files, this method does NOT flush immediately, but schedules a delayed flush after 5 minutes
 // Use ForceFlush() to force immediate flush (e.g., when renaming .tmp file)
@@ -1734,6 +1823,9 @@ func (ra *RandomAccessor) ForceFlush() (int64, error) {
 // flushInternal is the internal flush implementation
 // force: if true, flush immediately even for .tmp files; if false, schedule delayed flush for .tmp files
 func (ra *RandomAccessor) flushInternal(force bool) (int64, error) {
+	// Ensure any pending delayed flush entry is cleared before flushing now
+	ra.cancelDelayedFlush()
+
 	DebugLog("[VFS RandomAccessor Flush] Starting flush: fileID=%d, force=%v", ra.fileID, force)
 
 	if force {
@@ -1748,7 +1840,7 @@ func (ra *RandomAccessor) flushInternal(force bool) (int64, error) {
 		if err == nil && isTempFile(fileObj) {
 			// For .tmp files, schedule delayed flush after 5 minutes instead of immediate flush
 			DebugLog("[VFS RandomAccessor Flush] .tmp file detected, scheduling delayed flush after 5 minutes: fileID=%d", ra.fileID)
-			ra.scheduleDelayedFlush(5 * time.Minute)
+			ra.requestDelayedFlush(false)
 			return 0, nil // Return success but don't actually flush
 		}
 	}
@@ -1994,13 +2086,6 @@ func (ra *RandomAccessor) applyRandomWritesWithSDK(fileObj *core.ObjectInfo, wri
 		DebugLog("[VFS applyRandomWritesWithSDK] File size unchanged: fileID=%d, size=%d", ra.fileID, fileObj.Size)
 	}
 
-	// Get chunk size
-	chunkSize := ra.fs.chunkSize
-	if chunkSize <= 0 {
-		chunkSize = 10 << 20 // Default 10MB
-	}
-	chunkSizeInt := int(chunkSize)
-
 	// Check if original data is compressed or encrypted (optimized: use cache)
 	var oldDataInfo *core.DataInfo
 	var hasCompression, hasEncryption bool
@@ -2042,7 +2127,7 @@ func (ra *RandomAccessor) applyRandomWritesWithSDK(fileObj *core.ObjectInfo, wri
 	// But can stream write, avoid processing all data at once
 	if hasCompression || hasEncryption {
 		DebugLog("[VFS applyRandomWritesWithSDK] Processing compressed/encrypted data for fileID=%d, newDataID=%d", ra.fileID, newDataID)
-		newVersionID, err := ra.applyWritesStreamingCompressed(oldDataInfo, writes, dataInfo, chunkSize, newSize)
+		newVersionID, err := ra.applyWritesStreamingCompressed(oldDataInfo, writes, dataInfo, newSize)
 		if err != nil {
 			DebugLog("[VFS applyRandomWritesWithSDK] ERROR: Failed to apply writes (compressed/encrypted) for fileID=%d: %v", ra.fileID, err)
 			if err == core.ERR_QUOTA_EXCEED {
@@ -2090,24 +2175,9 @@ func (ra *RandomAccessor) applyRandomWritesWithSDK(fileObj *core.ObjectInfo, wri
 	}
 
 	// For uncompressed unencrypted data, can stream read and process by chunk
-	newVersionID, err := ra.applyWritesStreamingUncompressed(fileObj, oldDataInfo, writes, dataInfo, chunkSizeInt, newSize)
+	newVersionID, err := ra.applyWritesStreamingUncompressed(fileObj, oldDataInfo, writes, dataInfo, newSize)
 	if err != nil {
 		return 0, err
-	}
-
-	// Get chunk size from file object or use current chunkSizeInt (chunkSize already declared above)
-	if chunkSizeInt > 0 {
-		chunkSize = int64(chunkSizeInt)
-	} else {
-		chunkSizeFromObj := core.GetChunkSizeFromObject(fileObj)
-		if chunkSizeFromObj > 0 {
-			chunkSize = chunkSizeFromObj
-		} else {
-			chunkSize = ra.fs.chunkSize
-			if chunkSize <= 0 {
-				chunkSize = 10 << 20 // Default 10MB
-			}
-		}
 	}
 
 	// Optimization: use time calibrator to get timestamp, reduce time.Now() calls and GC pressure
@@ -2121,8 +2191,6 @@ func (ra *RandomAccessor) applyRandomWritesWithSDK(fileObj *core.ObjectInfo, wri
 		Size:   newSize,
 		MTime:  mTime,
 	}
-	// Save chunk size to version object's Extra field only if it differs from bucket's default
-	ra.setChunkSizeIfDifferent(newVersion, chunkSize)
 
 	// Optimization: batch write metadata (write version object and file object update together)
 	objectsToPut := []*core.ObjectInfo{newVersion}
@@ -2132,8 +2200,6 @@ func (ra *RandomAccessor) applyRandomWritesWithSDK(fileObj *core.ObjectInfo, wri
 		DataID: newDataID,
 		Size:   newSize,
 	}
-	// Save chunk size to file object's Extra field only if it differs from bucket's default
-	ra.setChunkSizeIfDifferent(updateFileObj, chunkSize)
 	objectsToPut = append(objectsToPut, updateFileObj)
 
 	// Use Put method to batch create version and update file object (will automatically apply version retention policy)
@@ -2174,15 +2240,9 @@ func (ra *RandomAccessor) applyWritesWithWritingVersion(fileObj *core.ObjectInfo
 		return 0, fmt.Errorf("writing version has invalid DataID")
 	}
 
-	// Get chunk size
-	chunkSize := ra.fs.chunkSize
-	if chunkSize <= 0 {
-		chunkSize = 10 << 20 // Default 10MB
-	}
-
 	// Writing versions always use uncompressed/unencrypted data
 	// No need to handle compression/encryption
-	chunkSizeInt := int64(chunkSize)
+	chunkSizeInt := int64(ra.fs.chunkSize)
 
 	// Group writes by chunk to batch updates
 	type chunkUpdate struct {
@@ -2388,17 +2448,8 @@ func (ra *RandomAccessor) applyWritesWithWritingVersion(fileObj *core.ObjectInfo
 			Size:   newSize,
 			MTime:  core.Now(),
 		}
-		// Get chunk size from file object or use default
-		chunkSize := core.GetChunkSizeFromObject(fileObj)
-		if chunkSize <= 0 {
-			chunkSize = ra.fs.chunkSize
-			if chunkSize <= 0 {
-				chunkSize = 10 << 20 // Default 10MB
-			}
-		}
-		// Save chunk size to file object's Extra field only if it differs from bucket's default
-		ra.setChunkSizeIfDifferent(updateFileObj, chunkSize)
-		DebugLog("[VFS applyWritesWithWritingVersion] Writing file object to disk: fileID=%d, dataID=%d, size=%d, chunkSize=%d", ra.fileID, dataID, newSize, chunkSize)
+
+		DebugLog("[VFS applyWritesWithWritingVersion] Writing file object to disk: fileID=%d, dataID=%d, size=%d, chunkSize=%d", ra.fileID, dataID, newSize, ra.fs.chunkSize)
 		_, err = lh.Put(ra.fs.c, ra.fs.bktID, []*core.ObjectInfo{updateFileObj})
 		if err != nil {
 			DebugLog("[VFS applyWritesWithWritingVersion] ERROR: Failed to write file object to disk: fileID=%d, error=%v", ra.fileID, err)
@@ -2421,24 +2472,21 @@ func (ra *RandomAccessor) applyWritesWithWritingVersion(fileObj *core.ObjectInfo
 // applyWritesStreamingCompressed handles compressed or encrypted data
 // Streaming processing: read original data by chunk, apply write operations, process and write to new object immediately
 func (ra *RandomAccessor) applyWritesStreamingCompressed(oldDataInfo *core.DataInfo, writes []WriteOperation,
-	dataInfo *core.DataInfo, chunkSize int64, newSize int64,
+	dataInfo *core.DataInfo, newSize int64,
 ) (int64, error) {
 	// Now each chunk is independently compressed and encrypted, can process by chunk in streaming
 	// Directly read by chunk, decrypt, decompress, don't use DataReader
 
 	var endecKey string
-	bucket := ra.fs.getBucketConfig()
+	bucket := getBucketConfigWithCache(ra.fs)
 	if bucket != nil {
 		endecKey = bucket.EndecKey
 	}
 
-	// Create a reader to read, decrypt, and decompress by chunk
-	reader := newDecodingChunkReader(ra.fs.c, ra.fs.h, ra.fs.bktID, oldDataInfo, endecKey)
+	chunkSize := ra.fs.chunkSize
 
-	chunkSizeInt := int(chunkSize)
-	if chunkSizeInt <= 0 {
-		chunkSizeInt = 10 << 20 // Default 10MB
-	}
+	// Create a reader to read, decrypt, and decompress by chunk
+	reader := newChunkReader(ra.fs.c, ra.fs.h, ra.fs.bktID, oldDataInfo, endecKey, chunkSize)
 
 	// Pre-calculate write operation indices for each chunk
 	chunkCount := int((newSize + chunkSize - 1) / chunkSize)
@@ -2467,19 +2515,20 @@ func (ra *RandomAccessor) applyWritesStreamingCompressed(oldDataInfo *core.DataI
 	}
 
 	// Stream processing: read, process, and write by chunk
-	return ra.processWritesStreaming(reader, writesByChunk, writes, dataInfo, chunkSizeInt, newSize, chunkCount)
+	return ra.processWritesStreaming(reader, writesByChunk, writes, dataInfo, newSize, chunkCount)
 }
 
 // applyWritesStreamingUncompressed handles uncompressed and unencrypted data
 // Can stream read and process by chunk, only reading affected data ranges
 func (ra *RandomAccessor) applyWritesStreamingUncompressed(fileObj *core.ObjectInfo, oldDataInfo *core.DataInfo,
-	writes []WriteOperation, dataInfo *core.DataInfo, chunkSizeInt int, newSize int64,
+	writes []WriteOperation, dataInfo *core.DataInfo, newSize int64,
 ) (int64, error) {
 	// For uncompressed and unencrypted data, can stream process by chunk
 	// Optimization: pre-calculate write operations for each chunk to reduce repeated checks in loops
 
+	chunkSize := ra.fs.chunkSize
 	// If no bucket configuration, directly stream write
-	bucket := ra.fs.getBucketConfig()
+	bucket := getBucketConfigWithCache(ra.fs)
 	if bucket == nil {
 		dataInfo.Size = newSize
 		dataInfo.OrigSize = newSize
@@ -2489,7 +2538,7 @@ func (ra *RandomAccessor) applyWritesStreamingUncompressed(fileObj *core.ObjectI
 
 		// Pre-calculate write operation indices for each chunk (optimization: reduce repeated checks)
 		// Optimization: estimate capacity to reduce slice expansion
-		chunkCount := int((newSize + int64(chunkSizeInt) - 1) / int64(chunkSizeInt))
+		chunkCount := int((newSize + chunkSize - 1) / chunkSize)
 		writesByChunk := make([][]int, chunkCount)
 		// Estimate average number of write operations per chunk (optimization: reduce slice expansion)
 		avgWritesPerChunk := len(writes) / chunkCount
@@ -2502,8 +2551,8 @@ func (ra *RandomAccessor) applyWritesStreamingUncompressed(fileObj *core.ObjectI
 
 		for i, write := range writes {
 			writeEnd := write.Offset + int64(len(write.Data))
-			startChunk := int(write.Offset / int64(chunkSizeInt))
-			endChunk := int((writeEnd + int64(chunkSizeInt) - 1) / int64(chunkSizeInt))
+			startChunk := int(write.Offset / chunkSize)
+			endChunk := int((writeEnd + chunkSize - 1) / chunkSize)
 			if endChunk >= chunkCount {
 				endChunk = chunkCount - 1
 			}
@@ -2517,8 +2566,8 @@ func (ra *RandomAccessor) applyWritesStreamingUncompressed(fileObj *core.ObjectI
 
 		// Process by chunk
 		for chunkIdx := 0; chunkIdx < chunkCount; chunkIdx++ {
-			pos := int64(chunkIdx * chunkSizeInt)
-			chunkEnd := pos + int64(chunkSizeInt)
+			pos := int64(chunkIdx * int(chunkSize))
+			chunkEnd := pos + chunkSize
 			if chunkEnd > newSize {
 				chunkEnd = newSize
 			}
@@ -2606,7 +2655,7 @@ func (ra *RandomAccessor) applyWritesStreamingUncompressed(fileObj *core.ObjectI
 	// Stream processing: read original data by chunk, apply write operations, process and write to new object immediately
 
 	// Pre-calculate write operation indices for each chunk
-	chunkCount := int((newSize + int64(chunkSizeInt) - 1) / int64(chunkSizeInt))
+	chunkCount := int((newSize + chunkSize - 1) / chunkSize)
 	writesByChunk := make([][]int, chunkCount)
 	avgWritesPerChunk := len(writes) / chunkCount
 	if avgWritesPerChunk < 1 {
@@ -2618,8 +2667,8 @@ func (ra *RandomAccessor) applyWritesStreamingUncompressed(fileObj *core.ObjectI
 
 	for i, write := range writes {
 		writeEnd := write.Offset + int64(len(write.Data))
-		startChunk := int(write.Offset / int64(chunkSizeInt))
-		endChunk := int((writeEnd + int64(chunkSizeInt) - 1) / int64(chunkSizeInt))
+		startChunk := int(write.Offset / chunkSize)
+		endChunk := int((writeEnd + chunkSize - 1) / chunkSize)
 		if endChunk >= chunkCount {
 			endChunk = chunkCount - 1
 		}
@@ -2633,29 +2682,28 @@ func (ra *RandomAccessor) applyWritesStreamingUncompressed(fileObj *core.ObjectI
 
 	// For uncompressed and unencrypted data, can directly read by chunk without reading all data first
 	// Create a special reader to support reading by chunk
-	var reader io.Reader
+	var reader dataReader
 	oldDataID := fileObj.DataID
 	if oldDataID > 0 && oldDataID != core.EmptyDataID {
-		// Create plainDataReader to support reading by chunk
-		reader = newPlainDataReader(ra.fs.c, ra.fs.h, ra.fs.bktID, oldDataID, int64(chunkSizeInt), fileObj.Size)
+		// Create chunkReader to support reading by chunk
+		reader = newChunkReader(ra.fs.c, ra.fs.h, ra.fs.bktID, &core.DataInfo{ID: oldDataID, OrigSize: fileObj.Size}, "", chunkSize)
 	}
 
 	// Stream processing: read, process, and write by chunk
-	return ra.processWritesStreaming(reader, writesByChunk, writes, dataInfo, chunkSizeInt, newSize, chunkCount)
+	return ra.processWritesStreaming(reader, writesByChunk, writes, dataInfo, newSize, chunkCount)
 }
 
 // processWritesStreaming streams processing of write operations
 // Read original data by chunk, apply write operations, immediately process (compress/encrypt) and write to new object
 func (ra *RandomAccessor) processWritesStreaming(
-	reader io.Reader,
+	reader dataReader,
 	writesByChunk [][]int,
 	writes []WriteOperation,
 	dataInfo *core.DataInfo,
-	chunkSizeInt int,
 	newSize int64,
 	chunkCount int,
 ) (int64, error) {
-	bucket := ra.fs.getBucketConfig()
+	bucket := getBucketConfigWithCache(ra.fs)
 
 	// Initialize compressor (if smart compression is enabled)
 	var cmpr archiver.Compressor
@@ -2687,8 +2735,8 @@ func (ra *RandomAccessor) processWritesStreaming(
 	var dataCRC32 uint32
 
 	sn := 0
-	currentPos := int64(0)
 	firstChunk := true
+	chunkSizeInt := int(ra.fs.chunkSize)
 
 	// Stream process by chunk
 	for chunkIdx := 0; chunkIdx < chunkCount; chunkIdx++ {
@@ -2707,25 +2755,11 @@ func (ra *RandomAccessor) processWritesStreaming(
 			chunkData = chunkData[:actualChunkSize]
 		}
 
-		// 1. Read this chunk of original data from reader
-		// Note: reader is sequential, need to read sequentially to current position
+		// 1. Read this chunk of original data from reader (using Read(buf, offset))
 		if reader != nil {
-			// Need to read to current chunk position
-			bytesToSkip := pos - currentPos
-			if bytesToSkip > 0 {
-				// Skip unnecessary data (read and discard)
-				skipBuf := make([]byte, bytesToSkip)
-				_, err := io.ReadFull(reader, skipBuf)
-				if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
-					chunkDataPool.Put(chunkData[:0])
-					return 0, fmt.Errorf("failed to skip to chunk position: %w", err)
-				}
-			}
-			currentPos = pos
-
-			// Read current chunk data
-			n, err := reader.Read(chunkData)
-			if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
+			// Read current chunk data directly from offset
+			n, err := reader.Read(chunkData, pos)
+			if err != nil && err != io.EOF {
 				chunkDataPool.Put(chunkData[:0])
 				return 0, fmt.Errorf("failed to read chunk: %w", err)
 			}
@@ -2736,7 +2770,6 @@ func (ra *RandomAccessor) processWritesStreaming(
 					chunkData[i] = 0
 				}
 			}
-			currentPos = chunkEnd
 		} else {
 			// No original data, initialize to 0
 			for i := range chunkData {
@@ -2877,8 +2910,9 @@ func (ra *RandomAccessor) processWritesStreaming(
 }
 
 // dataReader data reader interface, unified handling of data reading in different formats
+// Read reads data starting from offset into buf, returns number of bytes read and error
 type dataReader interface {
-	io.Reader
+	Read(buf []byte, offset int64) (int, error)
 }
 
 // readWithWrites unified handling of read logic: calculate read range, read data, apply write operations, extract result
@@ -2915,22 +2949,13 @@ func (ra *RandomAccessor) readWithWrites(reader dataReader, offset int64, size i
 		return []byte{}, true
 	}
 
-	// Skip data before readStart
-	if readStart > 0 {
-		skipBuf := make([]byte, readStart)
-		_, err := io.ReadFull(reader, skipBuf)
-		if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
-			return nil, false
-		}
-	}
-
-	// Read required data range
+	// Read required data range directly from offset
 	readData := make([]byte, readSize)
-	n, err := io.ReadFull(reader, readData)
+	n, err := reader.Read(readData, readStart)
 	// If read fails or read data is less than requested size, only return read data
 	if err != nil {
-		// io.EOF or io.ErrUnexpectedEOF means all available data has been read
-		if err == io.EOF || err == io.ErrUnexpectedEOF {
+		// io.EOF means all available data has been read
+		if err == io.EOF {
 			if n > 0 {
 				readData = readData[:n]
 			} else {
@@ -2940,7 +2965,7 @@ func (ra *RandomAccessor) readWithWrites(reader dataReader, offset int64, size i
 			// Other errors, return failure
 			return nil, false
 		}
-	} else if int64(n) < readSize {
+	} else if n < len(readData) {
 		// Read data is less than requested size (end of file), extract actually read data
 		readData = readData[:n]
 	}
@@ -2979,320 +3004,235 @@ func (ra *RandomAccessor) readWithWrites(reader dataReader, offset int64, size i
 	return readData[resultOffset:resultEnd], true
 }
 
-// plainDataReader supports reading uncompressed and unencrypted data by chunk
-type plainDataReader struct {
-	c          core.Ctx
-	h          core.Handler
-	bktID      int64
-	dataID     int64
-	chunkSize  int64
-	origSize   int64
-	currentPos int64
-	sn         int
-	buf        []byte
-	bufPos     int
+// chunkReader unified reader for both plain and compressed/encrypted data
+// Uses cache and singleflight for consistent performance
+// Supports asynchronous prefetching when reading reaches 80% of current chunk
+type chunkReader struct {
+	c                 core.Ctx
+	h                 core.Handler
+	bktID             int64
+	dataID            int64
+	kind              uint32        // Compression/encryption kind (0 for plain)
+	endecKey          string        // Encryption key (empty for plain)
+	origSize          int64         // Original data size (decompressed size)
+	chunkSize         int64         // Chunk size for original data
+	chunkCache        *ecache.Cache // Cache for chunks: key "<sn>", value []byte
+	prefetchThreshold float64       // Threshold percentage to trigger prefetch (default: 0.8 = 80%)
 }
 
-func newPlainDataReader(c core.Ctx, h core.Handler, bktID, dataID int64, chunkSize int64, origSize int64) *plainDataReader {
+// newChunkReader creates a unified chunk reader for both plain and compressed/encrypted data
+func newChunkReader(c core.Ctx, h core.Handler, bktID int64, dataInfo *core.DataInfo, endecKey string, chunkSize int64) *chunkReader {
 	if chunkSize <= 0 {
 		chunkSize = 10 << 20 // Default 10MB
 	}
-	return &plainDataReader{
-		c:         c,
-		h:         h,
-		bktID:     bktID,
-		dataID:    dataID,
-		chunkSize: chunkSize,
-		origSize:  origSize,
+
+	cr := &chunkReader{
+		c:                 c,
+		h:                 h,
+		bktID:             bktID,
+		chunkSize:         chunkSize,
+		chunkCache:        ecache.NewLRUCache(4, 64, 5*time.Minute),
+		prefetchThreshold: 0.8, // 80% threshold
 	}
+
+	if dataInfo != nil {
+		// Set dataInfo fields
+		cr.kind = dataInfo.Kind
+		cr.endecKey = endecKey
+		cr.origSize = dataInfo.OrigSize
+		if dataInfo.PkgID > 0 {
+			cr.dataID = dataInfo.PkgID
+		} else {
+			cr.dataID = dataInfo.ID
+		}
+	}
+
+	return cr
 }
 
-func (pr *plainDataReader) Read(p []byte) (n int, err error) {
-	totalRead := 0
-	for len(p) > 0 {
-		// If buffer is empty or fully read, read next chunk
-		if pr.buf == nil || pr.bufPos >= len(pr.buf) {
-			// Use sn to read chunk (uncompressed and unencrypted data is stored by chunk)
-			chunkData, err := pr.h.GetData(pr.c, pr.bktID, pr.dataID, pr.sn)
-			if err != nil {
-				// If read fails, chunk may not exist (end of file)
-				if totalRead == 0 {
-					return 0, io.EOF
-				}
-				return totalRead, nil
-			}
-			if len(chunkData) == 0 {
-				if totalRead == 0 {
-					return 0, io.EOF
-				}
-				return totalRead, nil
-			}
-			pr.buf = chunkData
-			pr.bufPos = 0
-			pr.sn++
-		}
-
-		// Copy data from buffer
-		copyLen := len(p)
-		available := len(pr.buf) - pr.bufPos
-		if copyLen > available {
-			copyLen = available
-		}
-		copy(p[:copyLen], pr.buf[pr.bufPos:pr.bufPos+copyLen])
-
-		pr.bufPos += copyLen
-		pr.currentPos += int64(copyLen)
-		totalRead += copyLen
-		p = p[copyLen:]
-	}
-
-	return totalRead, nil
+// Read reads data starting from offset into buf (uses ReadAt internally)
+func (cr *chunkReader) Read(buf []byte, offset int64) (int, error) {
+	return cr.ReadAt(buf, offset)
 }
 
 // ReadAt implements random-access reads by directly addressing chunks
-func (pr *plainDataReader) ReadAt(p []byte, off int64) (int, error) {
-	if off < 0 {
-		return 0, fmt.Errorf("invalid offset")
+func (cr *chunkReader) ReadAt(buf []byte, offset int64) (int, error) {
+	if offset < 0 {
+		return 0, fmt.Errorf("invalid offset: %d", offset)
 	}
-	if len(p) == 0 {
+	if offset >= cr.origSize {
+		return 0, io.EOF
+	}
+	if len(buf) == 0 {
 		return 0, nil
 	}
 
+	// Limit read size to available data
+	readSize := int64(len(buf))
+	if offset+readSize > cr.origSize {
+		readSize = cr.origSize - offset
+	}
+	if readSize <= 0 {
+		return 0, io.EOF
+	}
+
+	// ChunkSize must be set
+	if cr.chunkSize <= 0 {
+		return 0, fmt.Errorf("chunkSize not set")
+	}
+
 	totalRead := 0
-	currentOffset := off
-	remain := len(p)
+	currentOffset := offset
+	remaining := readSize
 
-	for remain > 0 {
-		if pr.origSize > 0 && currentOffset >= pr.origSize {
-			if totalRead == 0 {
-				return 0, io.EOF
-			}
-			return totalRead, io.EOF
-		}
+	for remaining > 0 && currentOffset < cr.origSize {
+		currentSn := int(currentOffset / cr.chunkSize)
+		currentOffsetInChunk := currentOffset % cr.chunkSize
 
-		sn := int(currentOffset / pr.chunkSize)
-		offsetInChunk := int(currentOffset % pr.chunkSize)
-
-		chunkData, err := pr.h.GetData(pr.c, pr.bktID, pr.dataID, sn)
+		// Get or load chunk (with cache and singleflight)
+		chunkData, err := cr.getChunk(currentSn)
 		if err != nil {
 			if totalRead == 0 {
 				return 0, err
 			}
-			return totalRead, err
-		}
-		if len(chunkData) == 0 || offsetInChunk >= len(chunkData) {
-			if totalRead == 0 {
-				return 0, io.EOF
-			}
-			return totalRead, io.EOF
+			return totalRead, nil
 		}
 
-		copyLen := len(chunkData) - offsetInChunk
-		if copyLen > remain {
-			copyLen = remain
+		// Calculate how much to read from this chunk
+		availableInChunk := int64(len(chunkData)) - currentOffsetInChunk
+		if availableInChunk <= 0 {
+			// End of file
+			break
 		}
 
-		start := totalRead
-		copy(p[start:start+copyLen], chunkData[offsetInChunk:offsetInChunk+copyLen])
-
-		totalRead += copyLen
-		currentOffset += int64(copyLen)
-		remain -= copyLen
-	}
-
-	return totalRead, nil
-}
-
-// decodingChunkReader supports reading, decrypting, and decompressing data by chunk (stream reading, process while reading)
-type decodingChunkReader struct {
-	c          core.Ctx
-	h          core.Handler
-	bktID      int64
-	dataID     int64
-	kind       uint32
-	endecKey   string
-	currentPos int64
-	sn         int
-	buf        []byte
-	bufPos     int
-	origSize   int64 // Original data size (decompressed size)
-	chunkSize  int64 // Chunk size for original data (used to calculate sn and offsetInChunk)
-}
-
-func newDecodingChunkReader(c core.Ctx, h core.Handler, bktID int64, dataInfo *core.DataInfo, endecKey string) *decodingChunkReader {
-	dr := &decodingChunkReader{
-		c:         c,
-		h:         h,
-		bktID:     bktID,
-		kind:      dataInfo.Kind,
-		endecKey:  endecKey,
-		origSize:  dataInfo.OrigSize, // Store original size (decompressed size)
-		chunkSize: 0,                 // Will be set if needed
-	}
-	if dataInfo.PkgID > 0 {
-		dr.dataID = dataInfo.PkgID
-	} else {
-		dr.dataID = dataInfo.ID
-	}
-	return dr
-}
-
-// newDecodingChunkReaderFromOffset creates a decoding reader starting from specified offset
-// For compressed/encrypted data, directly reads the target chunk and positions at the offset within that chunk
-func newDecodingChunkReaderFromOffset(c core.Ctx, h core.Handler, bktID int64, dataInfo *core.DataInfo, endecKey string, chunkSize int64, offset int64) *decodingChunkReader {
-	dr := newDecodingChunkReader(c, h, bktID, dataInfo, endecKey)
-	dr.chunkSize = chunkSize
-
-	if offset <= 0 || chunkSize <= 0 {
-		dr.currentPos = 0
-		dr.sn = 0
-		return dr
-	}
-
-	// Calculate starting chunk number and offset within chunk
-	// For independently compressed chunks, each chunk decompresses to chunkSize (except possibly the last)
-	sn := int(offset / chunkSize)
-	offsetInChunk := offset % chunkSize
-	dr.currentPos = offset
-	dr.sn = sn + 1 // Next chunk to read after current one
-
-	// Read the target chunk (compressed and encrypted data)
-	encryptedChunk, err := h.GetData(c, bktID, dr.dataID, sn)
-	if err != nil {
-		// If read fails, chunk may not exist (end of file)
-		dr.buf = nil
-		dr.bufPos = 0
-		return dr
-	}
-
-	// 1. Decrypt first (if enabled)
-	decodedChunk := encryptedChunk
-	if dr.kind&core.DATA_ENDEC_AES256 != 0 {
-		decodedChunk, err = aes256.Decrypt(endecKey, encryptedChunk)
-	} else if dr.kind&core.DATA_ENDEC_SM4 != 0 {
-		decodedChunk, err = sm4.Sm4Cbc([]byte(endecKey), encryptedChunk, false)
-	}
-	if err != nil {
-		decodedChunk = encryptedChunk
-	}
-
-	// 2. Decompress next (if enabled)
-	finalChunk := decodedChunk
-	if dr.kind&core.DATA_CMPR_MASK != 0 {
-		var decompressor archiver.Decompressor
-		if dr.kind&core.DATA_CMPR_SNAPPY != 0 {
-			decompressor = &archiver.Snappy{}
-		} else if dr.kind&core.DATA_CMPR_ZSTD != 0 {
-			decompressor = &archiver.Zstd{}
-		} else if dr.kind&core.DATA_CMPR_GZIP != 0 {
-			decompressor = &archiver.Gz{}
-		} else if dr.kind&core.DATA_CMPR_BR != 0 {
-			decompressor = &archiver.Brotli{}
+		toRead := remaining
+		if toRead > availableInChunk {
+			toRead = availableInChunk
 		}
 
-		if decompressor != nil {
-			var decompressedBuf bytes.Buffer
-			err := decompressor.Decompress(bytes.NewReader(decodedChunk), &decompressedBuf)
-			if err == nil {
-				finalChunk = decompressedBuf.Bytes()
-			}
-		}
-	}
+		// Copy data from chunk
+		copy(buf[totalRead:totalRead+int(toRead)], chunkData[currentOffsetInChunk:currentOffsetInChunk+toRead])
 
-	// Position at the offset within the decompressed chunk
-	// Adjust offsetInChunk if it exceeds decompressed size (for last chunk)
-	decompressedSize := int64(len(finalChunk))
-	if offsetInChunk > decompressedSize {
-		offsetInChunk = decompressedSize
-	}
+		totalRead += int(toRead)
+		currentOffset += toRead
+		remaining -= toRead
 
-	dr.buf = finalChunk
-	dr.bufPos = int(offsetInChunk)
-	return dr
-}
-
-func (dr *decodingChunkReader) Read(p []byte) (n int, err error) {
-	totalRead := 0
-	// Calculate remaining data based on current position and original size
-	remain := dr.origSize - dr.currentPos
-
-	for len(p) > 0 && remain > 0 {
-		// If buffer is empty or fully read, read next chunk
-		if dr.buf == nil || dr.bufPos >= len(dr.buf) {
-			// Read chunk (compressed and encrypted data)
-			encryptedChunk, err := dr.h.GetData(dr.c, dr.bktID, dr.dataID, dr.sn)
-			if err != nil {
-				// If read fails, chunk may not exist (end of file)
-				if totalRead == 0 {
-					return 0, io.EOF
-				}
-				return totalRead, nil
-			}
-			// Don't decrease remain here - we'll decrease it after decompression based on actual decompressed size
-			dr.sn++
-
-			// 1. Decrypt first (if enabled)
-			decodedChunk := encryptedChunk
-			if dr.kind&core.DATA_ENDEC_AES256 != 0 {
-				decodedChunk, err = aes256.Decrypt(dr.endecKey, encryptedChunk)
-			} else if dr.kind&core.DATA_ENDEC_SM4 != 0 {
-				decodedChunk, err = sm4.Sm4Cbc([]byte(dr.endecKey), encryptedChunk, false)
-			}
-			if err != nil {
-				// Decryption failed, use original data
-				decodedChunk = encryptedChunk
-			}
-			// 2. Decompress next (if enabled)
-			finalChunk := decodedChunk
-			if dr.kind&core.DATA_CMPR_MASK != 0 {
-				var decompressor archiver.Decompressor
-				if dr.kind&core.DATA_CMPR_SNAPPY != 0 {
-					decompressor = &archiver.Snappy{}
-				} else if dr.kind&core.DATA_CMPR_ZSTD != 0 {
-					decompressor = &archiver.Zstd{}
-				} else if dr.kind&core.DATA_CMPR_GZIP != 0 {
-					decompressor = &archiver.Gz{}
-				} else if dr.kind&core.DATA_CMPR_BR != 0 {
-					decompressor = &archiver.Brotli{}
-				}
-
-				if decompressor != nil {
-					var decompressedBuf bytes.Buffer
-					err := decompressor.Decompress(bytes.NewReader(decodedChunk), &decompressedBuf)
-					if err != nil {
-						// Decompression failed, use decrypted data
-						finalChunk = decodedChunk
-					} else {
-						finalChunk = decompressedBuf.Bytes()
+		// Trigger prefetch if we've read past the threshold percentage of current chunk
+		if len(chunkData) > 0 {
+			readPercentage := float64(currentOffsetInChunk+toRead) / float64(len(chunkData))
+			if readPercentage >= cr.prefetchThreshold {
+				// Asynchronously prefetch next chunk
+				nextSn := currentSn + 1
+				go func() {
+					// Check if next chunk exists and not already cached
+					if currentOffset+toRead < cr.origSize {
+						cacheKey := fmt.Sprintf("%d", nextSn)
+						if _, ok := cr.chunkCache.Get(cacheKey); !ok {
+							// Prefetch next chunk (ignore errors)
+							_, _ = cr.getChunk(nextSn)
+						}
 					}
-				}
+				}()
 			}
-
-			dr.buf = finalChunk
-			dr.bufPos = 0
 		}
-
-		// Copy data from buffer
-		copyLen := len(p)
-		available := len(dr.buf) - dr.bufPos
-		if copyLen > available {
-			copyLen = available
-		}
-		copy(p[:copyLen], dr.buf[dr.bufPos:dr.bufPos+copyLen])
-
-		dr.bufPos += copyLen
-		dr.currentPos += int64(copyLen)
-		totalRead += copyLen
-		p = p[copyLen:]
-
-		// Update remain based on current position
-		remain = dr.origSize - dr.currentPos
 	}
 
-	if remain <= 0 && totalRead == 0 {
+	if totalRead == 0 && currentOffset >= cr.origSize {
 		return 0, io.EOF
 	}
+
 	return totalRead, nil
+}
+
+// getChunk gets a chunk (plain or decompressed/decrypted), using cache and singleflight
+func (cr *chunkReader) getChunk(sn int) ([]byte, error) {
+	// Generate cache key for this chunk
+	cacheKey := fmt.Sprintf("%d", sn)
+
+	// Check cache first (fast path)
+	if cached, ok := cr.chunkCache.Get(cacheKey); ok {
+		if chunkData, ok := cached.([]byte); ok && len(chunkData) > 0 {
+			return chunkData, nil
+		}
+	}
+
+	// Use global singleflight to ensure only one goroutine reads this chunk
+	// Key format: "chunk_<dataID>_<sn>" to uniquely identify each chunk globally
+	sfKey := fmt.Sprintf("chunk_%d_%d", cr.dataID, sn)
+
+	result, err, _ := chunkReadSingleFlight.Do(sfKey, func() (interface{}, error) {
+		// Double-check cache after acquiring singleflight lock
+		// Another goroutine might have already loaded it
+		if cached, ok := cr.chunkCache.Get(cacheKey); ok {
+			if chunkData, ok := cached.([]byte); ok && len(chunkData) > 0 {
+				return chunkData, nil
+			}
+		}
+
+		// Read chunk (compressed/encrypted or plain)
+		rawChunk, err := cr.h.GetData(cr.c, cr.bktID, cr.dataID, sn)
+		if err != nil {
+			return nil, err
+		}
+
+		// Process chunk based on kind (plain, encrypted, compressed, or both)
+		finalChunk := rawChunk
+
+		// 1. Decrypt first (if enabled)
+		if cr.kind&core.DATA_ENDEC_MASK != 0 {
+			decodedChunk := rawChunk
+			if cr.kind&core.DATA_ENDEC_AES256 != 0 {
+				decodedChunk, err = aes256.Decrypt(cr.endecKey, rawChunk)
+				if err != nil {
+					decodedChunk = rawChunk
+				}
+			} else if cr.kind&core.DATA_ENDEC_SM4 != 0 {
+				decodedChunk, err = sm4.Sm4Cbc([]byte(cr.endecKey), rawChunk, false)
+				if err != nil {
+					decodedChunk = rawChunk
+				}
+			}
+			finalChunk = decodedChunk
+		}
+
+		// 2. Decompress next (if enabled)
+		if cr.kind&core.DATA_CMPR_MASK != 0 {
+			var decompressor archiver.Decompressor
+			if cr.kind&core.DATA_CMPR_SNAPPY != 0 {
+				decompressor = &archiver.Snappy{}
+			} else if cr.kind&core.DATA_CMPR_ZSTD != 0 {
+				decompressor = &archiver.Zstd{}
+			} else if cr.kind&core.DATA_CMPR_GZIP != 0 {
+				decompressor = &archiver.Gz{}
+			} else if cr.kind&core.DATA_CMPR_BR != 0 {
+				decompressor = &archiver.Brotli{}
+			}
+
+			if decompressor != nil {
+				var decompressedBuf bytes.Buffer
+				err := decompressor.Decompress(bytes.NewReader(finalChunk), &decompressedBuf)
+				if err == nil {
+					finalChunk = decompressedBuf.Bytes()
+				}
+			}
+		}
+
+		// Cache the processed chunk before returning
+		cr.chunkCache.Put(cacheKey, finalChunk)
+
+		return finalChunk, nil
+	})
+
+	if err != nil {
+		return nil, err
+	}
+
+	chunkData, ok := result.([]byte)
+	if !ok {
+		return nil, fmt.Errorf("unexpected chunk data type")
+	}
+
+	return chunkData, nil
 }
 
 // Truncate truncates file to specified size
@@ -3754,14 +3694,8 @@ func (ra *RandomAccessor) Truncate(newSize int64) (int64, error) {
 }
 
 func (ra *RandomAccessor) Close() error {
-	// Cancel delayed flush timer to ensure synchronous flush (atomic swap)
-	// Use typed nil pointer (*time.Timer)(nil) instead of nil for atomic.Value
-	oldTimer := ra.pendingFlush.Swap((*time.Timer)(nil))
-	if oldTimer != nil {
-		if timer, ok := oldTimer.(*time.Timer); ok && timer != nil {
-			timer.Stop()
-		}
-	}
+	// Cancel any pending delayed flush so we can finish synchronously
+	ra.cancelDelayedFlush()
 
 	// Synchronously flush all pending write data
 	_, err := ra.Flush()

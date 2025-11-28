@@ -128,7 +128,7 @@ func runPerformanceTest(t *testing.T, name string, dataSize, chunkSize int64, wr
 		t.Fatalf("PutObj failed: %v", err)
 	}
 
-	ofs := NewOrcasFS(lh, testCtx, testBktID, sdkCfg)
+	ofs := NewOrcasFS(lh, testCtx, testBktID)
 
 	// Prepare test data
 	testData := make([]byte, dataSize)
@@ -491,7 +491,7 @@ func runSequentialWriteTest(t *testing.T, name string, totalSize, chunkSize int6
 		t.Fatalf("PutObj failed: %v", err)
 	}
 
-	ofs := NewOrcasFS(lh, testCtx, testBktID, sdkCfg)
+	ofs := NewOrcasFS(lh, testCtx, testBktID)
 
 	// Prepare test data
 	writeChunkSize := int64(1024 * 1024) // 1MB per write
@@ -642,7 +642,7 @@ func runRandomWriteTest(t *testing.T, name string, totalSize, chunkSize int64, s
 		t.Fatalf("PutObj failed: %v", err)
 	}
 
-	ofs := NewOrcasFS(lh, testCtx, testBktID, sdkCfg)
+	ofs := NewOrcasFS(lh, testCtx, testBktID)
 
 	// Prepare test data: random offsets, non-contiguous writes
 	writeChunkSize := int64(512 * 1024) // 512KB per write
@@ -792,7 +792,7 @@ func runRandomWriteOverlappingTest(t *testing.T, name string, totalSize, chunkSi
 		t.Fatalf("PutObj failed: %v", err)
 	}
 
-	ofs := NewOrcasFS(lh, testCtx, testBktID, sdkCfg)
+	ofs := NewOrcasFS(lh, testCtx, testBktID)
 
 	// Prepare test data: overlapping writes
 	writeChunkSize := int64(1024 * 1024) // 1MB per write
@@ -932,7 +932,7 @@ func runRandomWriteSmallChunksTest(t *testing.T, name string, totalSize, chunkSi
 		t.Fatalf("PutObj failed: %v", err)
 	}
 
-	ofs := NewOrcasFS(lh, testCtx, testBktID, sdkCfg)
+	ofs := NewOrcasFS(lh, testCtx, testBktID)
 
 	// Prepare test data: small data chunks, multiple writes
 	writeChunkSize := int64(64 * 1024) // 64KB per write

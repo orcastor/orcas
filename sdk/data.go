@@ -31,7 +31,7 @@ const (
 const (
 	PKG_ALIGN     = 4096
 	PKG_SIZE      = 10 * 1024 * 1024 // Default chunk size, used if configuration is not set
-	DEFAULT_CHUNK = 10 * 1024 * 1024 // Default 4MB
+	DEFAULT_CHUNK = 10 * 1024 * 1024 // Default 10MB
 )
 
 type listener struct {

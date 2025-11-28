@@ -166,41 +166,39 @@ func BenchmarkRandomWriteSparseFile(b *testing.B) {
 // TestRandomWriteSparseFile tests random writes for sparse files
 func TestRandomWriteSparseFile(t *testing.T) {
 	Convey("Random write sparse file (qBittorrent scenario)", t, func() {
+		core.InitDB("")
+		ensureTestUser(t)
+
 		ig := idgen.NewIDGen(nil, 0)
 		testBktID, _ := ig.New()
-		core.InitBucketDB(context.TODO(), testBktID)
+		So(core.InitBucketDB(context.Background(), testBktID), ShouldBeNil)
 
 		dma := &core.DefaultMetadataAdapter{}
 		dda := &core.DefaultDataAdapter{}
 		dda.SetOptions(core.Options{})
-		lh := core.NewLocalHandler()
+
+		lh := core.NewLocalHandler().(*core.LocalHandler)
 		lh.SetAdapter(dma, dda)
 
-		// Create bucket
+		testCtx, userInfo, _, err := lh.Login(context.Background(), "orcas", "orcas")
+		So(err, ShouldBeNil)
+
 		bucket := &core.BucketInfo{
 			ID:    testBktID,
 			Name:  "test",
-			UID:   testBktID,
+			UID:   userInfo.ID,
 			Type:  1,
 			Quota: 100 << 30, // 100GB quota
 		}
-		So(dma.PutBkt(context.TODO(), []*core.BucketInfo{bucket}), ShouldBeNil)
+		So(dma.PutBkt(testCtx, []*core.BucketInfo{bucket}), ShouldBeNil)
 
-		// Create context with user info (bypass login)
-		ctx := core.UserInfo2Ctx(context.TODO(), &core.UserInfo{
-			ID:   testBktID,
-			Role: core.USER,
-		})
-
-		// Create test file system
 		fs := &OrcasFS{
 			h:         lh,
 			bktID:     testBktID,
-			c:         ctx,
+			c:         testCtx,
 			chunkSize: 4 << 20, // 4MB chunks
 		}
 
-		// Create a sparse file (100MB)
 		fileID, _ := ig.New()
 		fileSize := int64(100 << 20) // 100MB
 		fileObj := &core.ObjectInfo{
@@ -212,32 +210,26 @@ func TestRandomWriteSparseFile(t *testing.T) {
 			Size:   0,
 			MTime:  core.Now(),
 		}
-		_, err := lh.Put(ctx, testBktID, []*core.ObjectInfo{fileObj})
+		_, err = lh.Put(testCtx, testBktID, []*core.ObjectInfo{fileObj})
 		So(err, ShouldBeNil)
 
-		// Create RandomAccessor and mark as sparse
 		ra, err := NewRandomAccessor(fs, fileID)
 		So(err, ShouldBeNil)
 		ra.MarkSparseFile(fileSize)
 
-		// Pre-allocate file (simulate qBittorrent fallocate)
 		updateFileObj := &core.ObjectInfo{
 			ID:     fileID,
 			DataID: core.EmptyDataID,
 			Size:   fileSize,
 			MTime:  core.Now(),
 		}
-		_, err = lh.Put(context.TODO(), testBktID, []*core.ObjectInfo{updateFileObj})
+		_, err = lh.Put(testCtx, testBktID, []*core.ObjectInfo{updateFileObj})
 		So(err, ShouldBeNil)
 
-		// Create writing version (need to use LocalHandler directly)
-		localHandler, ok := lh.(*core.LocalHandler)
-		So(ok, ShouldBeTrue)
-		writingVersion, err := localHandler.GetOrCreateWritingVersion(context.TODO(), testBktID, fileID)
+		writingVersion, err := lh.GetOrCreateWritingVersion(testCtx, testBktID, fileID)
 		So(err, ShouldBeNil)
 		So(writingVersion.Name, ShouldEqual, core.WritingVersionName)
 
-		// Create sparse DataInfo
 		dataID := writingVersion.DataID
 		if dataID == 0 || dataID == core.EmptyDataID {
 			dataID, _ = ig.New()
@@ -247,21 +239,19 @@ func TestRandomWriteSparseFile(t *testing.T) {
 				OrigSize: fileSize,
 				Kind:     core.DATA_NORMAL | core.DATA_SPARSE,
 			}
-			_, err = lh.PutDataInfo(context.TODO(), testBktID, []*core.DataInfo{dataInfo})
+			_, err = lh.PutDataInfo(testCtx, testBktID, []*core.DataInfo{dataInfo})
 			So(err, ShouldBeNil)
 
-			// Update writing version with DataID
 			updateVersion := &core.ObjectInfo{
 				ID:     writingVersion.ID,
 				DataID: dataID,
 				Size:   fileSize,
 			}
-			err = dma.SetObj(context.TODO(), testBktID, []string{"did", "size"}, updateVersion)
+			err = dma.SetObj(testCtx, testBktID, []string{"did", "size"}, updateVersion)
 			So(err, ShouldBeNil)
 		}
 
 		Convey("random writes should use writing version", func() {
-			// Perform random writes
 			rand.Seed(time.Now().UnixNano())
 			numWrites := 100
 			writeSize := 64 << 10 // 64KB
@@ -275,14 +265,11 @@ func TestRandomWriteSparseFile(t *testing.T) {
 				So(err, ShouldBeNil)
 			}
 
-			// Flush (should use writing version, not create new version)
 			versionID, err := ra.Flush()
 			So(err, ShouldBeNil)
-			// Version ID should be 0 (using writing version)
 			So(versionID, ShouldEqual, 0)
 
-			// Verify writing version still exists
-			versions, err := dma.ListVersions(context.TODO(), testBktID, fileID, false)
+			versions, err := dma.ListVersions(testCtx, testBktID, fileID, false)
 			So(err, ShouldBeNil)
 			hasWritingVersion := false
 			for _, v := range versions {
@@ -295,28 +282,23 @@ func TestRandomWriteSparseFile(t *testing.T) {
 		})
 
 		Convey("read should return written data", func() {
-			// Write some data
 			testData := []byte("test data for sparse file")
 			offset := int64(10 << 20) // 10MB offset
 			err := ra.Write(offset, testData)
 			So(err, ShouldBeNil)
 
-			// Flush
 			_, err = ra.Flush()
 			So(err, ShouldBeNil)
 
-			// Read back
 			readData, err := ra.Read(offset, len(testData))
 			So(err, ShouldBeNil)
 			So(string(readData), ShouldEqual, string(testData))
 		})
 
 		Convey("read sparse regions should return zeros", func() {
-			// Read from uninitialized region
 			readData, err := ra.Read(50<<20, 1024) // Read 1KB from 50MB offset
 			So(err, ShouldBeNil)
 			So(len(readData), ShouldEqual, 1024)
-			// All should be zeros
 			for _, b := range readData {
 				So(b, ShouldEqual, 0)
 			}

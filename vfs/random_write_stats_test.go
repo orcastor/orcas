@@ -13,34 +13,37 @@ import (
 
 // TestRandomWriteRedundancy tests random write redundancy for sparse files
 func TestRandomWriteRedundancy(t *testing.T) {
+	core.InitDB("")
+	ensureTestUser(t)
+
 	ig := idgen.NewIDGen(nil, 0)
 	testBktID, _ := ig.New()
-	testUID, _ := ig.New()
-	core.InitBucketDB(context.TODO(), testBktID)
+	if err := core.InitBucketDB(context.Background(), testBktID); err != nil {
+		t.Fatalf("InitBucketDB failed: %v", err)
+	}
 
 	dma := &core.DefaultMetadataAdapter{}
 	dda := &core.DefaultDataAdapter{}
 	dda.SetOptions(core.Options{}) // Use default options
-	lh := core.NewLocalHandler()
+	lh := core.NewLocalHandler().(*core.LocalHandler)
 	lh.SetAdapter(dma, dda)
 
-	// Create bucket
+	ctx, userInfo, _, err := lh.Login(context.Background(), "orcas", "orcas")
+	if err != nil {
+		t.Fatalf("Login failed: %v", err)
+	}
+
 	bucket := &core.BucketInfo{
 		ID:    testBktID,
 		Name:  "test",
-		UID:   testUID,
+		UID:   userInfo.ID,
 		Type:  1,
 		Quota: 10 << 30, // 10GB quota
 	}
-	dma.PutBkt(context.TODO(), []*core.BucketInfo{bucket})
+	if err := dma.PutBkt(ctx, []*core.BucketInfo{bucket}); err != nil {
+		t.Fatalf("PutBkt failed: %v", err)
+	}
 
-	// Create context with user info (bypass login)
-	ctx := core.UserInfo2Ctx(context.TODO(), &core.UserInfo{
-		ID:   testUID,
-		Role: core.USER,
-	})
-
-	// Create test file system
 	fs := &OrcasFS{
 		h:         lh,
 		bktID:     testBktID,
@@ -60,7 +63,7 @@ func TestRandomWriteRedundancy(t *testing.T) {
 		Size:   0,
 		MTime:  core.Now(),
 	}
-	_, err := lh.Put(ctx, testBktID, []*core.ObjectInfo{fileObj})
+	_, err = lh.Put(ctx, testBktID, []*core.ObjectInfo{fileObj})
 	if err != nil {
 		t.Fatalf("Failed to create file: %v", err)
 	}
@@ -85,11 +88,7 @@ func TestRandomWriteRedundancy(t *testing.T) {
 	}
 
 	// Create writing version
-	localHandler, ok := lh.(*core.LocalHandler)
-	if !ok {
-		t.Fatalf("Handler is not LocalHandler")
-	}
-	writingVersion, err := localHandler.GetOrCreateWritingVersion(ctx, testBktID, fileID)
+	writingVersion, err := lh.GetOrCreateWritingVersion(ctx, testBktID, fileID)
 	if err != nil {
 		t.Fatalf("Failed to create writing version: %v", err)
 	}

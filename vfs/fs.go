@@ -196,6 +196,29 @@ func (n *OrcasNode) invalidateDirListCache(dirID int64) {
 	DebugLog("[VFS invalidateDirListCache] Invalidated directory listing cache: dirID=%d", dirID)
 }
 
+// appendChildToDirCache appends a newly created child object into the
+// cached directory listing instead of invalidating the entire cache.
+func (n *OrcasNode) appendChildToDirCache(dirID int64, child *core.ObjectInfo) {
+	if child == nil {
+		return
+	}
+	cacheKey := formatCacheKey(dirID)
+	if cached, ok := dirListCache.Get(cacheKey); ok {
+		if children, ok := cached.([]*core.ObjectInfo); ok && children != nil {
+			for _, existing := range children {
+				if existing != nil && existing.ID == child.ID {
+					return
+				}
+			}
+			newChildren := make([]*core.ObjectInfo, len(children)+1)
+			copy(newChildren, children)
+			newChildren[len(children)] = child
+			dirListCache.Put(cacheKey, newChildren)
+			DebugLog("[VFS appendChildToDirCache] Appended child to cache: dirID=%d, childID=%d", dirID, child.ID)
+		}
+	}
+}
+
 // Getattr gets file/directory attributes
 func (n *OrcasNode) Getattr(ctx context.Context, f fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
 	obj, err := n.getObj()
@@ -227,7 +250,7 @@ func getMode(objType int) uint32 {
 
 // Lookup looks up child node
 func (n *OrcasNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
-	DebugLog("[VFS Lookup] Looking up child node: name=%s, parentID=%d", name, n.objID)
+	// DebugLog("[VFS Lookup] Looking up child node: name=%s, parentID=%d", name, n.objID)
 	obj, err := n.getObj()
 	if err != nil {
 		return nil, syscall.ENOENT
@@ -286,7 +309,7 @@ func (n *OrcasNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut)
 
 // Readdir reads directory contents
 func (n *OrcasNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
-	DebugLog("[VFS Readdir] Reading directory: objID=%d", n.objID)
+	// DebugLog("[VFS Readdir] Reading directory: objID=%d", n.objID)
 	obj, err := n.getObj()
 	if err != nil {
 		return nil, syscall.ENOENT
@@ -339,7 +362,7 @@ func (n *OrcasNode) getDirListWithCache(dirID int64) ([]*core.ObjectInfo, syscal
 	cacheKey := formatCacheKey(dirID)
 	if cached, ok := dirListCache.Get(cacheKey); ok {
 		if children, ok := cached.([]*core.ObjectInfo); ok && children != nil {
-			DebugLog("[VFS getDirListWithCache] Found in cache: dirID=%d, count=%d", dirID, len(children))
+			// DebugLog("[VFS getDirListWithCache] Found in cache: dirID=%d, count=%d", dirID, len(children))
 			return children, 0
 		}
 	}
@@ -351,13 +374,13 @@ func (n *OrcasNode) getDirListWithCache(dirID int64) ([]*core.ObjectInfo, syscal
 		// Double-check cache after acquiring singleflight lock
 		if cached, ok := dirListCache.Get(cacheKey); ok {
 			if children, ok := cached.([]*core.ObjectInfo); ok && children != nil {
-				DebugLog("[VFS getDirListWithCache] Found in cache (after singleflight): dirID=%d, count=%d", dirID, len(children))
+				// DebugLog("[VFS getDirListWithCache] Found in cache (after singleflight): dirID=%d, count=%d", dirID, len(children))
 				return children, nil
 			}
 		}
 
 		// List directory contents from database
-		DebugLog("[VFS getDirListWithCache] Querying database: dirID=%d", dirID)
+		// DebugLog("[VFS getDirListWithCache] Querying database: dirID=%d", dirID)
 		children, _, _, err := n.fs.h.List(n.fs.c, n.fs.bktID, dirID, core.ListOptions{
 			Count: core.DefaultListPageSize,
 		})
@@ -368,7 +391,7 @@ func (n *OrcasNode) getDirListWithCache(dirID int64) ([]*core.ObjectInfo, syscal
 
 		// Cache the result
 		dirListCache.Put(cacheKey, children)
-		DebugLog("[VFS getDirListWithCache] Cached directory listing: dirID=%d, count=%d", dirID, len(children))
+		// DebugLog("[VFS getDirListWithCache] Cached directory listing: dirID=%d, count=%d", dirID, len(children))
 
 		return children, nil
 	})
@@ -414,7 +437,7 @@ func (n *OrcasNode) preloadChildDirs(children []*core.ObjectInfo) {
 				}
 
 				// List directory contents
-				DebugLog("[VFS preloadChildDirs] Preloading directory: dirID=%d", dirID)
+				// DebugLog("[VFS preloadChildDirs] Preloading directory: dirID=%d", dirID)
 				children, _, _, err := n.fs.h.List(n.fs.c, n.fs.bktID, dirID, core.ListOptions{
 					Count: core.DefaultListPageSize,
 				})
@@ -425,7 +448,7 @@ func (n *OrcasNode) preloadChildDirs(children []*core.ObjectInfo) {
 
 				// Cache the result
 				dirListCache.Put(cacheKey, children)
-				DebugLog("[VFS preloadChildDirs] Preloaded directory: dirID=%d, count=%d", dirID, len(children))
+				// DebugLog("[VFS preloadChildDirs] Preloaded directory: dirID=%d, count=%d", dirID, len(children))
 
 				// Cache child objects for GetAttr optimization
 				for _, grandchild := range children {
@@ -583,6 +606,7 @@ func (n *OrcasNode) Create(ctx context.Context, name string, flags uint32, mode 
 	// Cache new file object for GetAttr optimization
 	cacheKey := formatCacheKey(fileObj.ID)
 	fileObjCache.Put(cacheKey, fileObj)
+	n.appendChildToDirCache(obj.ID, fileObj)
 
 	// Create file node
 	fileNode := &OrcasNode{
@@ -606,10 +630,8 @@ func (n *OrcasNode) Create(ctx context.Context, name string, flags uint32, mode 
 	out.Atime = out.Mtime
 	out.Ino = uint64(fileObj.ID)
 
-	// Invalidate parent directory cache
+	// Invalidate parent directory cache (object metadata may change later)
 	n.invalidateObj()
-	// Invalidate parent directory listing cache
-	n.invalidateDirListCache(obj.ID)
 
 	return fileInode, fileNode, 0, 0
 }
@@ -691,6 +713,7 @@ func (n *OrcasNode) Mkdir(ctx context.Context, name string, mode uint32, out *fu
 	// Cache new directory object for GetAttr optimization
 	cacheKey := formatCacheKey(dirObj.ID)
 	fileObjCache.Put(cacheKey, dirObj)
+	n.appendChildToDirCache(obj.ID, dirObj)
 
 	// Create directory node
 	dirNode := &OrcasNode{
@@ -714,10 +737,8 @@ func (n *OrcasNode) Mkdir(ctx context.Context, name string, mode uint32, out *fu
 	out.Atime = out.Mtime
 	out.Ino = uint64(dirObj.ID)
 
-	// Invalidate parent directory cache
+	// Invalidate parent directory cache (metadata may be updated later)
 	n.invalidateObj()
-	// Invalidate parent directory listing cache
-	n.invalidateDirListCache(obj.ID)
 
 	return dirInode, 0
 }
@@ -1053,13 +1074,50 @@ func (n *OrcasNode) Rename(ctx context.Context, name string, newParent fs.InodeE
 		}
 
 		if existingObj != nil && existingObj.Type == core.OBJ_TYPE_FILE {
-			// Create version from existing file
-			// Note: We need to check if handler supports CreateVersionFromFile
-			if lh, ok := n.fs.h.(*core.LocalHandler); ok {
-				err = lh.CreateVersionFromFile(n.fs.c, n.fs.bktID, existingTargetID)
-				if err != nil {
-					// Log error but continue with rename (don't fail the operation)
-					// The existing file will be overwritten
+			// Check if existing target file is a .tmp file
+			existingNameLower := strings.ToLower(existingObj.Name)
+			isExistingTmpFile := strings.HasSuffix(existingNameLower, ".tmp")
+
+			if isExistingTmpFile {
+				// If target file is a .tmp file, delete it instead of creating a version
+				// .tmp files are temporary and should be removed when overwritten
+				DebugLog("[VFS Rename] Target file is .tmp file, deleting it: fileID=%d, name=%s", existingTargetID, existingObj.Name)
+
+				// First, try to flush and close any open RandomAccessor for the target .tmp file
+				if n.fs != nil {
+					if targetRA := n.fs.getRandomAccessorByFileID(existingTargetID); targetRA != nil {
+						// Force flush before deletion
+						if _, err := targetRA.ForceFlush(); err != nil {
+							DebugLog("[VFS Rename] WARNING: Failed to flush target .tmp file before deletion: fileID=%d, error=%v", existingTargetID, err)
+						}
+						// Unregister RandomAccessor
+						n.fs.unregisterRandomAccessor(existingTargetID, targetRA)
+					}
+				}
+
+				// Delete the .tmp file (asynchronously to avoid blocking rename)
+				go func() {
+					bgCtx := context.Background()
+					err := n.fs.h.Delete(bgCtx, n.fs.bktID, existingTargetID)
+					if err != nil {
+						DebugLog("[VFS Rename] ERROR: Failed to delete target .tmp file: fileID=%d, error=%v", existingTargetID, err)
+					} else {
+						DebugLog("[VFS Rename] Successfully deleted target .tmp file: fileID=%d", existingTargetID)
+					}
+				}()
+
+				// Remove from cache immediately
+				targetCacheKey := formatCacheKey(existingTargetID)
+				fileObjCache.Del(targetCacheKey)
+			} else {
+				// Create version from existing file (non-.tmp files should preserve versions)
+				// Note: We need to check if handler supports CreateVersionFromFile
+				if lh, ok := n.fs.h.(*core.LocalHandler); ok {
+					err = lh.CreateVersionFromFile(n.fs.c, n.fs.bktID, existingTargetID)
+					if err != nil {
+						// Log error but continue with rename (don't fail the operation)
+						// The existing file will be overwritten
+					}
 				}
 			}
 		}
@@ -1141,64 +1199,19 @@ func (n *OrcasNode) Read(ctx context.Context, dest []byte, off int64) (fuse.Read
 		return fuse.ReadResultData(nil), 0
 	}
 
-	var reader io.Reader
-	var errno syscall.Errno
-	var cachedEntry *cachedReader
-
-	if entry := acquireStreamingReader(obj.DataID, off); entry != nil {
-		reader = entry.reader
-		cachedEntry = entry
-	} else {
-		reader, errno = n.getDataReader(off)
-		if errno != 0 {
-			DebugLog("[VFS Read] ERROR: Failed to get DataReader: objID=%d, DataID=%d, error=%v", obj.ID, obj.DataID, errno)
-			return nil, errno
-		}
+	// Get dataReader (cached by dataID, one per file)
+	reader, errno := n.getDataReader(off)
+	if errno != 0 {
+		DebugLog("[VFS Read] ERROR: Failed to get DataReader: objID=%d, DataID=%d, error=%v", obj.ID, obj.DataID, errno)
+		return nil, errno
 	}
 
-	if readerAt, ok := reader.(io.ReaderAt); ok {
-		if cachedEntry != nil {
-			// Shouldn't happen, but release just in case
-			releaseStreamingReader(obj.DataID, cachedEntry.nextOffset)
-			cachedEntry = nil
-		}
-		nRead, err := readerAt.ReadAt(dest, off)
-		if err != nil && err != io.EOF {
-			DebugLog("[VFS Read] ERROR: ReadAt failed: objID=%d, DataID=%d, offset=%d, size=%d, error=%v", obj.ID, obj.DataID, off, len(dest), err)
-			return nil, syscall.EIO
-		}
-		DebugLog("[VFS Read] Successfully read data: objID=%d, DataID=%d, offset=%d, requested=%d, read=%d", obj.ID, obj.DataID, off, len(dest), nRead)
-		// Copy data to avoid buffer reuse/overwrite risk by FUSE kernel
-		result := make([]byte, nRead)
-		copy(result, dest[:nRead])
-		return fuse.ReadResultData(result), 0
-	}
-
-	nRead, err := reader.Read(dest)
+	// Use dataReader interface (Read(buf, offset))
+	nRead, err := reader.Read(dest, off)
 	if err != nil && err != io.EOF {
-		if cachedEntry != nil {
-			releaseStreamingReader(obj.DataID, cachedEntry.nextOffset)
-		}
-		DebugLog("[VFS Read] ERROR: Failed to read data: objID=%d, DataID=%d, offset=%d, size=%d, error=%v", obj.ID, obj.DataID, off, len(dest), err)
+		DebugLog("[VFS Read] ERROR: Read failed: objID=%d, DataID=%d, offset=%d, size=%d, error=%v", obj.ID, obj.DataID, off, len(dest), err)
 		return nil, syscall.EIO
 	}
-
-	if cachedEntry != nil {
-		if err == nil && nRead > 0 {
-			cachedEntry.nextOffset = off + int64(nRead)
-			cachedEntry.reader = reader
-			storeStreamingReader(cachedEntry)
-		} else {
-			releaseStreamingReader(obj.DataID, cachedEntry.nextOffset)
-		}
-	} else if err == nil && nRead > 0 {
-		storeStreamingReader(&cachedReader{
-			reader:     reader,
-			nextOffset: off + int64(nRead),
-			dataID:     obj.DataID,
-		})
-	}
-
 	DebugLog("[VFS Read] Successfully read data: objID=%d, DataID=%d, offset=%d, requested=%d, read=%d", obj.ID, obj.DataID, off, len(dest), nRead)
 
 	// Verify read data integrity (for debugging - can be disabled in production)
@@ -1211,19 +1224,14 @@ func (n *OrcasNode) Read(ctx context.Context, dest []byte, off int64) (fuse.Read
 		}
 	}
 
-	// Copy data to avoid buffer reuse/overwrite risk by FUSE kernel
-	result := make([]byte, nRead)
-	copy(result, dest[:nRead])
-	return fuse.ReadResultData(result), 0
+	return fuse.ReadResultData(dest[:nRead]), 0
 }
 
 // getDataReader gets or creates DataReader (with cache)
 // offset: starting offset for streaming readers (compressed/encrypted)
 // For plain readers, offset is ignored as they support ReadAt
-func (n *OrcasNode) getDataReader(offset int64) (io.Reader, syscall.Errno) {
-	// Note: Since FUSE reads may be random access, caching reader may not be very effective
-	// But we can try to reuse reader for performance
-
+// For compressed/encrypted files, uses dataID as cache key to ensure one file uses the same reader
+func (n *OrcasNode) getDataReader(offset int64) (dataReader, syscall.Errno) {
 	obj, err := n.getObj()
 	if err != nil {
 		DebugLog("[VFS getDataReader] ERROR: Failed to get object: objID=%d, error=%v", n.objID, err)
@@ -1249,28 +1257,52 @@ func (n *OrcasNode) getDataReader(offset int64) (io.Reader, syscall.Errno) {
 
 	DebugLog("[VFS getDataReader] Has compression: %v, Has encryption: %v", hasCompression, hasEncryption)
 
-	chunkSize := core.GetChunkSizeFromObject(obj)
+	// Always use bucket's default chunk size (force unified chunkSize)
+	chunkSize := n.fs.chunkSize
 	if chunkSize <= 0 {
-		chunkSize = n.fs.chunkSize
-		if chunkSize <= 0 {
-			chunkSize = 10 << 20 // Default
+		chunkSize = 10 << 20 // Default 10MB
+	}
+
+	// Use unified chunkReader for both plain and compressed/encrypted data
+	// Use dataID as cache key to ensure one file uses the same reader
+	// This allows sharing chunk cache across all reads of the same file
+	cacheKey := formatCacheKey(obj.DataID)
+
+	// Try to get cached reader
+	if cached, ok := decodingReaderCache.Get(cacheKey); ok {
+		if reader, ok := cached.(*chunkReader); ok && reader != nil {
+			DebugLog("[VFS getDataReader] Reusing cached reader: objID=%d, DataID=%d", obj.ID, obj.DataID)
+			return reader, 0
 		}
 	}
 
-	if !hasCompression && !hasEncryption {
-		// Plain reader supports ReadAt, offset is not needed
-		reader := newPlainDataReader(n.fs.c, n.fs.h, n.fs.bktID, obj.DataID, chunkSize, dataInfo.OrigSize)
-		return reader, 0
-	}
-
-	// Compressed/encrypted path uses decoding reader (streaming)
-	// Initialize from specified offset
+	// Create new reader
 	var endecKey string
 	bucket := n.fs.getBucketConfig()
 	if bucket != nil {
 		endecKey = bucket.EndecKey
 	}
-	reader := newDecodingChunkReaderFromOffset(n.fs.c, n.fs.h, n.fs.bktID, dataInfo, endecKey, chunkSize, offset)
+
+	// Create chunkReader (dataInfo is always available here)
+	var reader *chunkReader
+	if !hasCompression && !hasEncryption {
+		// Plain data: create chunkReader with plain DataInfo
+		plainDataInfo := &core.DataInfo{
+			ID:       obj.DataID,
+			OrigSize: dataInfo.OrigSize,
+			Size:     dataInfo.Size,
+			Kind:     0, // Plain data
+		}
+		reader = newChunkReader(n.fs.c, n.fs.h, n.fs.bktID, plainDataInfo, "", chunkSize)
+	} else {
+		// Compressed/encrypted: use chunkReader with processing
+		reader = newChunkReader(n.fs.c, n.fs.h, n.fs.bktID, dataInfo, endecKey, chunkSize)
+	}
+
+	// Cache the reader (one per dataID)
+	decodingReaderCache.Put(cacheKey, reader)
+	DebugLog("[VFS getDataReader] Created and cached new reader: objID=%d, DataID=%d", obj.ID, obj.DataID)
+
 	return reader, 0
 }
 
@@ -1741,14 +1773,27 @@ func streamingReaderCacheKey(dataID int64, offset int64) string {
 }
 
 func acquireStreamingReader(dataID int64, offset int64) *cachedReader {
+	// For compressed/encrypted files, readers are now cached by dataID in decodingReaderCache
+	// This function is kept for backward compatibility but may not be used for decodingChunkReader
+	// Try to find any cached reader for this dataID (not just matching offset)
 	key := streamingReaderCacheKey(dataID, offset)
 	if val, ok := streamingReaderCache.Get(key); ok {
-		if entry, ok := val.(*cachedReader); ok && entry != nil && entry.nextOffset == offset && entry.reader != nil {
-			streamingReaderCache.Del(key)
-			return entry
+		if entry, ok := val.(*cachedReader); ok && entry != nil && entry.reader != nil {
+			// Check if reader supports ReadAt (for random access)
+			if _, supportsReadAt := entry.reader.(io.ReaderAt); supportsReadAt {
+				// Reader supports ReadAt, can be reused for any offset
+				streamingReaderCache.Del(key)
+				return entry
+			}
+			// For streaming readers, only reuse if offset matches
+			if entry.nextOffset == offset {
+				streamingReaderCache.Del(key)
+				return entry
+			}
 		}
 		streamingReaderCache.Del(key)
 	}
+
 	return nil
 }
 

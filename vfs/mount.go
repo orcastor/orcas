@@ -65,8 +65,8 @@ func Mount(h core.Handler, c core.Ctx, bktID int64, opts *MountOptions) (*fuse.S
 		SetDebugEnabled(true)
 	}
 
-	// Create filesystem, pass SDK configuration
-	ofs := NewOrcasFS(h, c, bktID, opts.SDKConfig)
+	// Create filesystem
+	ofs := NewOrcasFS(h, c, bktID)
 
 	// Build FUSE mount options
 	fuseOpts := &fuse.MountOptions{
