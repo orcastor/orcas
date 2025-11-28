@@ -88,6 +88,7 @@ func TestBatchWriterVisibilityBeforeFlush(t *testing.T) {
 	if batchMgr == nil {
 		t.Fatal("Failed to get batch write manager")
 	}
+	batchMgr.SetFlushContext(ctx)
 
 	// 添加文件到batch write manager，但不flush
 	testKey := "test-object-before-flush"
@@ -204,6 +205,7 @@ func TestBatchWriterVisibilityConcurrent(t *testing.T) {
 	if batchMgr == nil {
 		t.Fatal("Failed to get batch write manager")
 	}
+	batchMgr.SetFlushContext(ctx)
 
 	// 并发添加多个文件，但不flush
 	numFiles := 10

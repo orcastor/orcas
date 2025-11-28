@@ -141,6 +141,9 @@ func runBatchWritePerformanceTest(t *testing.T, batchWriteEnabled bool, numObjec
 	var batchMgr *BatchWriter
 	if batchWriteEnabled {
 		batchMgr = GetBatchWriteManager(handler, bktID)
+		if batchMgr != nil {
+			batchMgr.SetFlushContext(ctx)
+		}
 	}
 
 	// 并发AddFile或PutData
@@ -403,6 +406,9 @@ func BenchmarkBatchWriteComparison(b *testing.B) {
 			var batchMgr *BatchWriter
 			if tc.enabled {
 				batchMgr = GetBatchWriteManager(handler, bktID)
+				if batchMgr != nil {
+					batchMgr.SetFlushContext(ctx)
+				}
 			}
 
 			b.ResetTimer()

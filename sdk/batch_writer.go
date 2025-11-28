@@ -63,6 +63,7 @@ type BatchWriter struct {
 	// Periodic flush control
 	lastFlushTime int64        // Last flush time (UnixNano, atomic access)
 	flushTimer    atomic.Value // *time.Timer for periodic flush
+	flushCtx      atomic.Value // Stored context for scheduled flushes
 }
 
 var (
@@ -207,12 +208,18 @@ func createBatchWriter(handler core.Handler, bktID int64) *BatchWriter {
 
 // FlushAll flushes all pending write data
 func (bwm *BatchWriter) FlushAll(ctx context.Context) {
+	if ctx != nil {
+		bwm.SetFlushContext(ctx)
+	}
 	bwm.flush(ctx)
 }
 
 // flush flushes all pending write data (lock-free)
 // Atomically gets current write position and file info, then packages and writes
 func (bwm *BatchWriter) flush(ctx context.Context) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	// Get current buffer (for writing) - atomic load
 	currentBuf := (*BatchWriterBuffer)(atomic.LoadPointer(&bwm.currentBuffer))
 
@@ -544,6 +551,29 @@ func (bwm *BatchWriter) GetPendingObjects() map[int64]*PackagedFileInfo {
 	return result
 }
 
+// UpdatePendingObject updates a pending object in the cache
+// This is useful for updating metadata (e.g., name) before flushing
+func (bwm *BatchWriter) UpdatePendingObject(fileID int64, updateFn func(*PackagedFileInfo)) bool {
+	if pkgInfo, ok := bwm.GetPendingObject(fileID); ok && pkgInfo != nil {
+		// Update the file info using the provided function
+		updateFn(pkgInfo)
+		// Store the updated file info back to cache
+		bwm.pendingObjects.Store(fileID, pkgInfo)
+		return true
+	}
+	return false
+}
+
+// RemovePendingObject removes a pending object from the cache
+// This is useful when a file is deleted or renamed before flush
+func (bwm *BatchWriter) RemovePendingObject(fileID int64) bool {
+	if _, ok := bwm.GetPendingObject(fileID); ok {
+		bwm.pendingObjects.Delete(fileID)
+		return true
+	}
+	return false
+}
+
 // getFileIDFromFileInfo extracts fileID from file info
 func (bwm *BatchWriter) getFileIDFromFileInfo(fileInfo *PackagedFileInfo) int64 {
 	return fileInfo.ObjectID
@@ -657,8 +687,7 @@ func (bwm *BatchWriter) schedulePeriodicFlush() {
 
 		// Only flush if BufferWindow has elapsed since last flush
 		if elapsed >= bwm.flushWindow {
-			// Create a background context for flush
-			ctx := context.Background()
+			ctx := bwm.getFlushContext()
 			// Async flush, non-blocking
 			go func() {
 				bwm.flush(ctx)
@@ -671,4 +700,24 @@ func (bwm *BatchWriter) schedulePeriodicFlush() {
 
 	// Store new timer atomically
 	bwm.flushTimer.Store(newTimer)
+}
+
+// SetFlushContext stores the context used for asynchronous flush operations
+func (bwm *BatchWriter) SetFlushContext(ctx context.Context) {
+	if bwm == nil || ctx == nil {
+		return
+	}
+	bwm.flushCtx.Store(ctx)
+}
+
+func (bwm *BatchWriter) getFlushContext() context.Context {
+	if bwm == nil {
+		return context.Background()
+	}
+	if val := bwm.flushCtx.Load(); val != nil {
+		if ctx, ok := val.(context.Context); ok && ctx != nil {
+			return ctx
+		}
+	}
+	return context.Background()
 }

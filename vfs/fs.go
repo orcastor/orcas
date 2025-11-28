@@ -16,6 +16,7 @@ import (
 	"github.com/hanwen/go-fuse/v2/fuse"
 	"github.com/orca-zhang/ecache"
 	"github.com/orcastor/orcas/core"
+	"github.com/orcastor/orcas/sdk"
 )
 
 // initRootNode initializes root node (non-Windows platform implementation)
@@ -867,10 +868,11 @@ func (n *OrcasNode) Rmdir(ctx context.Context, name string) syscall.Errno {
 	n.invalidateDirListCache(obj.ID)
 
 	// Step 3: Asynchronously delete and clean up (permanent deletion)
-	// This includes physical deletion of data files and metadata
+	// This includes recursively deleting all child objects and physical deletion of data files and metadata
 	go func() {
 		// Use background context for async operation
 		bgCtx := context.Background()
+		// Delete will recursively delete all child objects in the background
 		err := n.fs.h.Delete(bgCtx, n.fs.bktID, targetID)
 		if err != nil {
 			DebugLog("[VFS Rmdir] ERROR: Failed to permanently delete directory: dirID=%d, error=%v", targetID, err)
@@ -975,6 +977,29 @@ func (n *OrcasNode) Rename(ctx context.Context, name string, newParent fs.InodeE
 
 		if isRemovingTmp {
 			n.forceFlushTempFileBeforeRename(sourceID, sourceObj.Name, newName)
+			// Re-fetch source object after flush to ensure we have latest DataID
+			// This is critical for files that were in batch writer buffer
+			n.invalidateObj()
+			sourceObj, err = n.getObj()
+			if err != nil {
+				return syscall.ENOENT
+			}
+			// Verify that file has data before renaming
+			if sourceObj.DataID == 0 || sourceObj.DataID == core.EmptyDataID {
+				DebugLog("[VFS Rename] WARNING: Source file has no DataID after flush: fileID=%d, name=%s", sourceID, sourceObj.Name)
+				// Wait a bit for batch flush to complete if file was in batch writer
+				time.Sleep(50 * time.Millisecond)
+				// Re-fetch again
+				n.invalidateObj()
+				sourceObj, err = n.getObj()
+				if err != nil {
+					return syscall.ENOENT
+				}
+				if sourceObj.DataID == 0 || sourceObj.DataID == core.EmptyDataID {
+					DebugLog("[VFS Rename] ERROR: Source file still has no DataID after wait: fileID=%d, name=%s", sourceID, sourceObj.Name)
+					return syscall.EIO
+				}
+			}
 		}
 	}
 
@@ -1050,6 +1075,9 @@ func (n *OrcasNode) Rename(ctx context.Context, name string, newParent fs.InodeE
 	// Check if source file has an open RandomAccessor and update its cache
 	n.updateFileObjCache(sourceID, newName, newParentObj.ID)
 
+	// Track if we need to delete target file (if it's a .tmp file)
+	var targetTmpFileID int64 = 0
+
 	// If target file exists and is a file (not directory), create a version from it
 	if existingTargetID > 0 {
 		// Get the existing target object to check its type (try cache first)
@@ -1072,18 +1100,17 @@ func (n *OrcasNode) Rename(ctx context.Context, name string, newParent fs.InodeE
 				}
 			}
 		}
-
 		if existingObj != nil && existingObj.Type == core.OBJ_TYPE_FILE {
 			// Check if existing target file is a .tmp file
 			existingNameLower := strings.ToLower(existingObj.Name)
 			isExistingTmpFile := strings.HasSuffix(existingNameLower, ".tmp")
 
 			if isExistingTmpFile {
-				// If target file is a .tmp file, delete it instead of creating a version
-				// .tmp files are temporary and should be removed when overwritten
-				DebugLog("[VFS Rename] Target file is .tmp file, deleting it: fileID=%d, name=%s", existingTargetID, existingObj.Name)
-
+				// If target file is a .tmp file, we'll delete it after rename (synchronously with cache)
 				// First, try to flush and close any open RandomAccessor for the target .tmp file
+				targetTmpFileID = existingTargetID
+				DebugLog("[VFS Rename] Target file is .tmp file, will delete after rename: fileID=%d, name=%s", existingTargetID, existingObj.Name)
+
 				if n.fs != nil {
 					if targetRA := n.fs.getRandomAccessorByFileID(existingTargetID); targetRA != nil {
 						// Force flush before deletion
@@ -1095,18 +1122,15 @@ func (n *OrcasNode) Rename(ctx context.Context, name string, newParent fs.InodeE
 					}
 				}
 
-				// Delete the .tmp file (asynchronously to avoid blocking rename)
-				go func() {
-					bgCtx := context.Background()
-					err := n.fs.h.Delete(bgCtx, n.fs.bktID, existingTargetID)
-					if err != nil {
-						DebugLog("[VFS Rename] ERROR: Failed to delete target .tmp file: fileID=%d, error=%v", existingTargetID, err)
-					} else {
-						DebugLog("[VFS Rename] Successfully deleted target .tmp file: fileID=%d", existingTargetID)
+				// Remove from batch writer cache if present
+				batchMgr := n.fs.getBatchWriteManager()
+				if batchMgr != nil {
+					if removed := batchMgr.RemovePendingObject(existingTargetID); removed {
+						DebugLog("[VFS Rename] Removed target .tmp file from batch writer cache: fileID=%d", existingTargetID)
 					}
-				}()
+				}
 
-				// Remove from cache immediately
+				// Remove from file object cache immediately (before database delete)
 				targetCacheKey := formatCacheKey(existingTargetID)
 				fileObjCache.Del(targetCacheKey)
 			} else {
@@ -1137,6 +1161,37 @@ func (n *OrcasNode) Rename(ctx context.Context, name string, newParent fs.InodeE
 		}
 	}
 
+	// After rename, synchronously delete target .tmp file if needed (to keep cache in sync)
+	if targetTmpFileID > 0 {
+		DebugLog("[VFS Rename] Deleting target .tmp file synchronously: fileID=%d", targetTmpFileID)
+		err := n.fs.h.Delete(n.fs.c, n.fs.bktID, targetTmpFileID)
+		if err != nil {
+			DebugLog("[VFS Rename] ERROR: Failed to delete target .tmp file: fileID=%d, error=%v", targetTmpFileID, err)
+		} else {
+			DebugLog("[VFS Rename] Successfully deleted target .tmp file: fileID=%d", targetTmpFileID)
+		}
+		// Cache already removed above, no need to remove again
+	}
+
+	// If source file is a .tmp file being renamed away from .tmp, delete it after rename
+	// This ensures the .tmp file is removed after successful rename
+	if isRemovingTmp {
+		DebugLog("[VFS Rename] Source .tmp file renamed, will delete after rename: fileID=%d, oldName=%s, newName=%s", sourceID, sourceObj.Name, newName)
+
+		// Remove from batch writer cache if present
+		batchMgr := n.fs.getBatchWriteManager()
+		if batchMgr != nil {
+			if removed := batchMgr.RemovePendingObject(sourceID); removed {
+				DebugLog("[VFS Rename] Removed source .tmp file from batch writer cache: fileID=%d", sourceID)
+			}
+		}
+
+		// Note: We don't delete the source file here because it has been renamed to the target name
+		// The source file ID now represents the renamed file, so we should not delete it
+		// The .tmp extension has been removed, so it's no longer a temporary file
+		DebugLog("[VFS Rename] .tmp extension removed (flush already performed): fileID=%d, oldName=%s, newName=%s", sourceID, sourceObj.Name, newName)
+	}
+
 	// Update cache after database operations
 	// Update source file cache with new name and parent
 	n.updateFileObjCache(sourceID, newName, newParentObj.ID)
@@ -1149,19 +1204,8 @@ func (n *OrcasNode) Rename(ctx context.Context, name string, newParent fs.InodeE
 		DebugLog("[VFS Rename] Invalidated DataInfo cache: fileID=%d, dataID=%d", sourceID, sourceObj.DataID)
 	}
 
-	// Note: After creating the version from the existing target file,
-	// the existing target file (existingTargetID) now has a version.
-	// When we rename the source file to the target name, the source file
-	// will replace the existing target file (same name, same parent).
-	// The old target file's data is preserved as a version.
-
+	// Update cached source object name for future logic
 	if sourceObj.Type == core.OBJ_TYPE_FILE {
-		if isRemovingTmp {
-			DebugLog("[VFS Rename] .tmp extension removed (flush already performed): fileID=%d, oldName=%s, newName=%s", sourceID, sourceObj.Name, newName)
-		}
-
-		// Writing versions are no longer maintained for .tmp rename flow
-		// Update cached source object name for future logic
 		sourceObj.Name = newName
 	}
 
@@ -1662,6 +1706,19 @@ func (n *OrcasNode) updateFileObjCacheFromAccessor(ra *RandomAccessor, newName s
 func (n *OrcasNode) forceFlushTempFileBeforeRename(fileID int64, oldName, newName string) {
 	DebugLog("[VFS Rename] .tmp file being renamed, forcing flush: fileID=%d, oldName=%s, newName=%s", fileID, oldName, newName)
 
+	// First, check if file is in batch writer buffer and update cache before flushing
+	batchMgr := n.fs.getBatchWriteManager()
+	if batchMgr != nil {
+		updated := batchMgr.UpdatePendingObject(fileID, func(pkgInfo *sdk.PackagedFileInfo) {
+			// File is in batch writer buffer, update the cached name before flushing
+			DebugLog("[VFS Rename] File found in batch writer buffer, updating cached name: fileID=%d, oldName=%s, newName=%s", fileID, pkgInfo.Name, newName)
+			pkgInfo.Name = newName
+		})
+		if updated {
+			DebugLog("[VFS Rename] Updated batch writer cache with new name: fileID=%d, newName=%s", fileID, newName)
+		}
+	}
+
 	var raToFlush *RandomAccessor
 	if val := n.ra.Load(); val != nil && val != releasedMarker {
 		if ra, ok := val.(*RandomAccessor); ok && ra != nil && ra.fileID == fileID {
@@ -1673,6 +1730,14 @@ func (n *OrcasNode) forceFlushTempFileBeforeRename(fileID int64, oldName, newNam
 	}
 
 	if raToFlush == nil {
+		// If no RandomAccessor found, but file is in batch writer, just flush batch writer
+		if batchMgr != nil {
+			if _, ok := batchMgr.GetPendingObject(fileID); ok {
+				DebugLog("[VFS Rename] No RandomAccessor found, but file is in batch writer, flushing batch writer: fileID=%d", fileID)
+				batchMgr.FlushAll(n.fs.c)
+				return
+			}
+		}
 		DebugLog("[VFS Rename] WARNING: Unable to find RandomAccessor for .tmp file flush: fileID=%d", fileID)
 		return
 	}
@@ -1682,12 +1747,23 @@ func (n *OrcasNode) forceFlushTempFileBeforeRename(fileID int64, oldName, newNam
 	} else {
 		DebugLog("[VFS Rename] Successfully forced flush .tmp file: fileID=%d", fileID)
 
-		// Verify flushed data (for debugging)
-		// Get the file node to verify
+		// Re-fetch file object from database to ensure we have the latest DataID and size
+		// This is critical for files that were in batch writer buffer
 		fileNode := &OrcasNode{
 			fs:    n.fs,
 			objID: fileID,
 		}
+		fileNode.invalidateObj() // Invalidate cache to force fresh fetch
+		obj, err := fileNode.getObj()
+		if err == nil && obj != nil {
+			DebugLog("[VFS Rename] File object after flush: fileID=%d, dataID=%d, size=%d, name=%s", fileID, obj.DataID, obj.Size, obj.Name)
+			// Verify that file has data (DataID > 0 and size > 0)
+			if obj.DataID == 0 || obj.DataID == core.EmptyDataID || obj.Size == 0 {
+				DebugLog("[VFS Rename] WARNING: File has no data after flush: fileID=%d, dataID=%d, size=%d", fileID, obj.DataID, obj.Size)
+			}
+		}
+
+		// Verify flushed data (for debugging)
 		if err := fileNode.VerifyChunkData(); err != nil {
 			DebugLog("[VFS Rename] WARNING: Chunk verification failed after flush: fileID=%d, error=%v", fileID, err)
 		} else {

@@ -1,4 +1,4 @@
-package main
+package s3_test
 
 import (
 	"testing"
@@ -7,7 +7,7 @@ import (
 )
 
 // BenchmarkCacheKeyFormatting benchmarks cache key formatting functions
-func BenchmarkCacheKeyFormatting(b *testing.B) {
+func TestCacheKeyFormatting(t *testing.T) {
 	testID1 := int64(1234567890123456789)
 	testID2 := int64(9876543210987654)
 

@@ -1452,6 +1452,7 @@ func PutObject(c *gin.Context) {
 		// Try to use batch writer
 		batchMgr := sdk.GetBatchWriterForBucket(handler, bktID)
 		if batchMgr != nil {
+			batchMgr.SetFlushContext(ctx)
 			added, batchDataID, err := batchMgr.AddFile(objID, data, pid, fileName, dataSize)
 			if err == nil && added {
 				// Successfully added to batch write manager

@@ -90,6 +90,7 @@ func TestBatchWriterBufferFull(t *testing.T) {
 	if batchMgr == nil {
 		t.Fatal("Failed to get batch write manager")
 	}
+	batchMgr.SetFlushContext(ctx)
 
 	// Buffer size is managed internally by SDK
 	// Use a reasonable test size
@@ -182,6 +183,7 @@ func TestBatchWriterBufferFullSequential(t *testing.T) {
 	if batchMgr == nil {
 		t.Fatal("Failed to get batch write manager")
 	}
+	batchMgr.SetFlushContext(ctx)
 
 	// Buffer size is managed internally by SDK
 	// Use a reasonable test size
@@ -277,6 +279,7 @@ func TestBatchWriterBufferFullWithNormalWrite(t *testing.T) {
 	if batchMgr == nil {
 		t.Fatal("Failed to get batch write manager")
 	}
+	batchMgr.SetFlushContext(ctx)
 
 	// Buffer size is managed internally by SDK
 	bufferSize := int64(1 << 20) // 1MB for testing

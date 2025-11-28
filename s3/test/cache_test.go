@@ -1,4 +1,4 @@
-package main
+package s3_test
 
 import (
 	"bytes"
@@ -16,6 +16,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/orca-zhang/idgen"
 	"github.com/orcastor/orcas/core"
+	"github.com/orcastor/orcas/s3"
 )
 
 // setupTestEnvironment 设置测试环境
@@ -83,14 +84,14 @@ func setupTestEnvironmentForCache(t *testing.T) (int64, *gin.Engine) {
 	})
 
 	// 注册路由
-	router.GET("/", listBuckets)
-	router.PUT("/:bucket", createBucket)
-	router.DELETE("/:bucket", deleteBucket)
-	router.GET("/:bucket", listObjects)
-	router.GET("/:bucket/*key", getObject)
-	router.PUT("/:bucket/*key", putObject)
-	router.DELETE("/:bucket/*key", deleteObject)
-	router.HEAD("/:bucket/*key", headObject)
+	router.GET("/", s3.ListBuckets)
+	router.PUT("/:bucket", s3.CreateBucket)
+	router.DELETE("/:bucket", s3.DeleteBucket)
+	router.GET("/:bucket", s3.ListObjects)
+	router.GET("/:bucket/*key", s3.GetObject)
+	router.PUT("/:bucket/*key", s3.PutObject)
+	router.DELETE("/:bucket/*key", s3.DeleteObject)
+	router.HEAD("/:bucket/*key", s3.HeadObject)
 
 	return testBktID, router
 }
@@ -144,7 +145,7 @@ func TestCachePutObjectListObjects(t *testing.T) {
 		t.Fatalf("ListObjects failed: status=%d, body=%s", w.Code, w.Body.String())
 	}
 
-	var result ListBucketResult
+	var result s3.ListBucketResult
 	if err := xml.Unmarshal(w.Body.Bytes(), &result); err != nil {
 		t.Fatalf("Failed to unmarshal ListBucketResult: %v", err)
 	}
@@ -206,7 +207,7 @@ func TestCacheConcurrentPutObjectListObjects(t *testing.T) {
 				return
 			}
 
-			var result ListBucketResult
+			var result s3.ListBucketResult
 			if err := xml.Unmarshal(w.Body.Bytes(), &result); err != nil {
 				errors <- fmt.Errorf("ListObjects %d unmarshal failed: %v", id, err)
 				return
@@ -240,7 +241,7 @@ func TestCacheConcurrentPutObjectListObjects(t *testing.T) {
 		t.Fatalf("Final ListObjects failed: status=%d", w.Code)
 	}
 
-	var result ListBucketResult
+	var result s3.ListBucketResult
 	if err := xml.Unmarshal(w.Body.Bytes(), &result); err != nil {
 		t.Fatalf("Failed to unmarshal final ListBucketResult: %v", err)
 	}
@@ -304,7 +305,7 @@ func TestCacheConcurrentPutDeleteList(t *testing.T) {
 				return
 			}
 
-			var result ListBucketResult
+			var result s3.ListBucketResult
 			if err := xml.Unmarshal(w.Body.Bytes(), &result); err != nil {
 				errors <- fmt.Errorf("ListObjects after put %d unmarshal failed: %v", id, err)
 				return
@@ -345,7 +346,7 @@ func TestCacheConcurrentPutDeleteList(t *testing.T) {
 					return
 				}
 
-				var result2 ListBucketResult
+				var result2 s3.ListBucketResult
 				if err := xml.Unmarshal(w.Body.Bytes(), &result2); err != nil {
 					errors <- fmt.Errorf("ListObjects after delete %d unmarshal failed: %v", id, err)
 					return
@@ -383,7 +384,7 @@ func TestCacheConcurrentPutDeleteList(t *testing.T) {
 		t.Fatalf("Final ListObjects failed: status=%d", w.Code)
 	}
 
-	var result ListBucketResult
+	var result s3.ListBucketResult
 	if err := xml.Unmarshal(w.Body.Bytes(), &result); err != nil {
 		t.Fatalf("Failed to unmarshal final ListBucketResult: %v", err)
 	}
@@ -436,7 +437,7 @@ func TestCacheUpdateObject(t *testing.T) {
 		t.Fatalf("ListObjects failed: status=%d", w.Code)
 	}
 
-	var result1 ListBucketResult
+	var result1 s3.ListBucketResult
 	if err := xml.Unmarshal(w.Body.Bytes(), &result1); err != nil {
 		t.Fatalf("Failed to unmarshal ListBucketResult: %v", err)
 	}
@@ -470,7 +471,7 @@ func TestCacheUpdateObject(t *testing.T) {
 		t.Fatalf("ListObjects after update failed: status=%d", w.Code)
 	}
 
-	var result2 ListBucketResult
+	var result2 s3.ListBucketResult
 	if err := xml.Unmarshal(w.Body.Bytes(), &result2); err != nil {
 		t.Fatalf("Failed to unmarshal ListBucketResult after update: %v", err)
 	}
@@ -524,7 +525,7 @@ func TestCacheNestedPaths(t *testing.T) {
 		t.Fatalf("ListObjects with prefix failed: status=%d", w.Code)
 	}
 
-	var result ListBucketResult
+	var result s3.ListBucketResult
 	if err := xml.Unmarshal(w.Body.Bytes(), &result); err != nil {
 		t.Fatalf("Failed to unmarshal ListBucketResult: %v", err)
 	}
@@ -587,7 +588,7 @@ func TestCacheStressTest(t *testing.T) {
 				return
 			}
 
-			var result ListBucketResult
+			var result s3.ListBucketResult
 			if err := xml.Unmarshal(w.Body.Bytes(), &result); err != nil {
 				errors <- fmt.Errorf("ListObjects %d unmarshal failed: %v", id, err)
 			}
@@ -615,7 +616,7 @@ func TestCacheStressTest(t *testing.T) {
 		t.Fatalf("Final ListObjects failed: status=%d", w.Code)
 	}
 
-	var result ListBucketResult
+	var result s3.ListBucketResult
 	if err := xml.Unmarshal(w.Body.Bytes(), &result); err != nil {
 		t.Fatalf("Failed to unmarshal final ListBucketResult: %v", err)
 	}
