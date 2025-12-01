@@ -1107,9 +1107,17 @@ func (n *OrcasNode) Rename(ctx context.Context, name string, newParent fs.InodeE
 
 			if isExistingTmpFile {
 				// If target file is a .tmp file, we'll delete it after rename (synchronously with cache)
-				// First, try to flush and close any open RandomAccessor for the target .tmp file
+				// First, check if target file is in batch writer buffer
 				targetTmpFileID = existingTargetID
 				DebugLog("[VFS Rename] Target file is .tmp file, will delete after rename: fileID=%d, name=%s", existingTargetID, existingObj.Name)
+
+				batchMgr := n.fs.getBatchWriteManager()
+				if batchMgr != nil {
+					// Note: We do NOT flush batch writer here
+					// FlushAll is only called when buffer is full (AddFile returns false) or by periodic timer
+					// Just remove from batch writer cache - the file will be flushed automatically when buffer is full or timer expires
+					batchMgr.RemovePendingObject(existingTargetID)
+				}
 
 				if n.fs != nil {
 					if targetRA := n.fs.getRandomAccessorByFileID(existingTargetID); targetRA != nil {
@@ -1119,14 +1127,6 @@ func (n *OrcasNode) Rename(ctx context.Context, name string, newParent fs.InodeE
 						}
 						// Unregister RandomAccessor
 						n.fs.unregisterRandomAccessor(existingTargetID, targetRA)
-					}
-				}
-
-				// Remove from batch writer cache if present
-				batchMgr := n.fs.getBatchWriteManager()
-				if batchMgr != nil {
-					if removed := batchMgr.RemovePendingObject(existingTargetID); removed {
-						DebugLog("[VFS Rename] Removed target .tmp file from batch writer cache: fileID=%d", existingTargetID)
 					}
 				}
 
@@ -1730,15 +1730,40 @@ func (n *OrcasNode) forceFlushTempFileBeforeRename(fileID int64, oldName, newNam
 	}
 
 	if raToFlush == nil {
-		// If no RandomAccessor found, but file is in batch writer, just flush batch writer
+		// If no RandomAccessor found, check if file is in batch writer
 		if batchMgr != nil {
 			if _, ok := batchMgr.GetPendingObject(fileID); ok {
-				DebugLog("[VFS Rename] No RandomAccessor found, but file is in batch writer, flushing batch writer: fileID=%d", fileID)
-				batchMgr.FlushAll(n.fs.c)
+				// File is in batch writer, but we do NOT flush here
+				// FlushAll is only called when buffer is full (AddFile returns false) or by periodic timer
+				// The file will be flushed automatically when buffer is full or timer expires
+				// For rename, we can use the pending object info from batch writer cache
+				DebugLog("[VFS Rename] No RandomAccessor found, but file is in batch writer: fileID=%d (will be flushed automatically)", fileID)
+				// Note: Rename can proceed using pending object info, flush will happen automatically
 				return
 			}
 		}
-		DebugLog("[VFS Rename] WARNING: Unable to find RandomAccessor for .tmp file flush: fileID=%d", fileID)
+
+		// If not in batch writer, try to create a temporary RandomAccessor to flush any pending data
+		// This handles the case where data is still in RandomAccessor's buffer but RandomAccessor wasn't registered
+		DebugLog("[VFS Rename] No RandomAccessor found and not in batch writer, trying to create temporary RandomAccessor to flush: fileID=%d", fileID)
+		tempRA, err := NewRandomAccessor(n.fs, fileID)
+		if err == nil && tempRA != nil {
+			// Try to flush any pending data
+			if _, flushErr := tempRA.ForceFlush(); flushErr != nil {
+				DebugLog("[VFS Rename] WARNING: Failed to flush temporary RandomAccessor: fileID=%d, error=%v", fileID, flushErr)
+			} else {
+				DebugLog("[VFS Rename] Successfully flushed temporary RandomAccessor: fileID=%d", fileID)
+				// Update cache after flush
+				cacheKey := formatCacheKey(fileID)
+				fileObjCache.Del(cacheKey)
+				objs, err := n.fs.h.Get(n.fs.c, n.fs.bktID, []int64{fileID})
+				if err == nil && len(objs) > 0 {
+					fileObjCache.Put(cacheKey, objs[0])
+				}
+			}
+		} else {
+			DebugLog("[VFS Rename] WARNING: Unable to create temporary RandomAccessor for .tmp file flush: fileID=%d, error=%v", fileID, err)
+		}
 		return
 	}
 
@@ -1842,44 +1867,4 @@ func (n *OrcasNode) Release(ctx context.Context) syscall.Errno {
 	}
 
 	return 0
-}
-
-func streamingReaderCacheKey(dataID int64, offset int64) string {
-	return fmt.Sprintf("stream_reader:%d:%d", dataID, offset)
-}
-
-func acquireStreamingReader(dataID int64, offset int64) *cachedReader {
-	// For compressed/encrypted files, readers are now cached by dataID in decodingReaderCache
-	// This function is kept for backward compatibility but may not be used for decodingChunkReader
-	// Try to find any cached reader for this dataID (not just matching offset)
-	key := streamingReaderCacheKey(dataID, offset)
-	if val, ok := streamingReaderCache.Get(key); ok {
-		if entry, ok := val.(*cachedReader); ok && entry != nil && entry.reader != nil {
-			// Check if reader supports ReadAt (for random access)
-			if _, supportsReadAt := entry.reader.(io.ReaderAt); supportsReadAt {
-				// Reader supports ReadAt, can be reused for any offset
-				streamingReaderCache.Del(key)
-				return entry
-			}
-			// For streaming readers, only reuse if offset matches
-			if entry.nextOffset == offset {
-				streamingReaderCache.Del(key)
-				return entry
-			}
-		}
-		streamingReaderCache.Del(key)
-	}
-
-	return nil
-}
-
-func storeStreamingReader(entry *cachedReader) {
-	if entry == nil || entry.reader == nil {
-		return
-	}
-	streamingReaderCache.Put(streamingReaderCacheKey(entry.dataID, entry.nextOffset), entry)
-}
-
-func releaseStreamingReader(dataID int64, offset int64) {
-	streamingReaderCache.Del(streamingReaderCacheKey(dataID, offset))
 }

@@ -409,12 +409,13 @@ func (bwm *BatchWriter) flushPackage(ctx context.Context, fileInfos []*PackagedF
 		dataInfos = append(dataInfos, dataInfo)
 
 		// Create or update ObjectInfo
+		// Use OrigSize for ObjectInfo.Size (file's logical size), not processed Size
 		objectInfo := &core.ObjectInfo{
 			ID:     pkgInfo.ObjectID,
 			PID:    pkgInfo.PID,
 			DataID: dataID,
-			Size:   pkgInfo.Size,
-			MTime:  now, // Use cached timestamp
+			Size:   pkgInfo.OrigSize, // Use original size, not processed size
+			MTime:  now,              // Use cached timestamp
 			Type:   core.OBJ_TYPE_FILE,
 			Name:   pkgInfo.Name,
 		}

@@ -281,8 +281,8 @@ func processFileDataForBatchWrite(fs *OrcasFS, originalData []byte) ([]byte, int
 }
 
 // addFileToBatchWrite adds file data to SDK's batch write manager
-// If flushNow is true, FlushAll is invoked immediately after enqueueing data
-func addFileToBatchWrite(ra *RandomAccessor, data []byte, flushNow bool) (bool, int64, error) {
+// FlushAll is only called when buffer is full or by periodic timer
+func addFileToBatchWrite(ra *RandomAccessor, data []byte) (bool, int64, error) {
 	if len(data) == 0 {
 		return true, 0, nil
 	}
@@ -385,9 +385,8 @@ func addFileToBatchWrite(ra *RandomAccessor, data []byte, flushNow bool) (bool, 
 		ra.fileObj.Store(updateFileObj)
 	}
 
-	if flushNow {
-		batchMgr.FlushAll(ra.fs.c)
-	}
+	// Note: FlushAll is only called when buffer is full (AddFile returns false) or by periodic timer
+	// Do NOT call FlushAll here to avoid unnecessary flushes
 
 	return true, dataID, nil
 }
@@ -1659,7 +1658,7 @@ func (ra *RandomAccessor) flushSequentialBuffer() error {
 			// If instant upload failed, try batch write
 			batchMgr := ra.fs.getBatchWriteManager()
 			if batchMgr != nil {
-				added, _, err := addFileToBatchWrite(ra, allData, false)
+				added, _, err := addFileToBatchWrite(ra, allData)
 				if err == nil && added {
 					// Successfully added to batch write manager
 					// Clear sequential buffer
@@ -1667,12 +1666,12 @@ func (ra *RandomAccessor) flushSequentialBuffer() error {
 					ra.seqBuffer.buffer = ra.seqBuffer.buffer[:0]
 					return nil
 				}
-				// If batch write failed, fallback to normal write
-				// Retry once after flush
+				// If batch write failed (buffer full), flush and retry
+				// This is the only case where we flush: when buffer is full
 				if !added {
 					batchMgr.FlushAll(ra.fs.c)
-					DebugLog("[VFS flushSequentialBuffer] Successfully flushed all pending writes")
-					added, _, err = addFileToBatchWrite(ra, allData, false)
+					DebugLog("[VFS flushSequentialBuffer] Buffer full, flushed all pending writes")
+					added, _, err = addFileToBatchWrite(ra, allData)
 					if err == nil && added {
 						ra.seqBuffer.hasData = false
 						ra.seqBuffer.buffer = ra.seqBuffer.buffer[:0]
@@ -1988,23 +1987,9 @@ func (ra *RandomAccessor) flushInternal(force bool) (int64, error) {
 
 	DebugLog("[VFS RandomAccessor Flush] Starting flush: fileID=%d, force=%v", ra.fileID, force)
 
-	// If force flushing, check if file is in batch writer buffer and flush it first
-	if force {
-		batchMgr := ra.fs.getBatchWriteManager()
-		if batchMgr != nil {
-			if _, isPending := batchMgr.GetPendingObject(ra.fileID); isPending {
-				DebugLog("[VFS RandomAccessor Flush] Force flush: file in batch writer buffer, flushing batch writer first: fileID=%d", ra.fileID)
-				batchMgr.FlushAll(ra.fs.c)
-				// Wait a bit for batch flush to complete (batch flush is synchronous for FlushAll)
-				// Re-fetch file object to get updated DataID after batch flush
-				ra.fileObj.Store((*core.ObjectInfo)(nil)) // Invalidate cache
-				fileObj, err := ra.getFileObj()
-				if err == nil && fileObj != nil {
-					DebugLog("[VFS RandomAccessor Flush] Force flush: file object after batch flush: fileID=%d, dataID=%d, size=%d", ra.fileID, fileObj.DataID, fileObj.Size)
-				}
-			}
-		}
-	}
+	// Note: We do NOT flush batch writer here even if force=true
+	// FlushAll is only called when buffer is full (AddFile returns false) or by periodic timer
+	// If file is in batch writer, it will be flushed automatically when buffer is full or timer expires
 
 	if err := ra.flushTempFileWriter(); err != nil {
 		return 0, err
@@ -2083,21 +2068,8 @@ func (ra *RandomAccessor) flushInternal(force bool) (int64, error) {
 			// This ensures proper merging of existing data with new writes
 			// Continue to normal write path below
 		} else {
-			if isPendingInBatchWriter && force && batchMgr != nil {
-				DebugLog("[VFS RandomAccessor Flush] Force flush requested, flushing pending batch writes: fileID=%d", ra.fileID)
-				batchMgr.FlushAll(ra.fs.c)
-				isPendingInBatchWriter = false
-				// Re-fetch file object to see newly flushed data
-				freshObj, objErr := ra.getFileObj()
-				if objErr == nil && freshObj != nil {
-					fileObj = freshObj
-					if freshObj.DataID > 0 && freshObj.DataID != core.EmptyDataID && freshObj.Size > 0 {
-						if _, err := ra.fs.h.GetDataInfo(ra.fs.c, ra.fs.bktID, freshObj.DataID); err == nil {
-							hasExistingDataInDB = true
-						}
-					}
-				}
-			}
+			// Note: We do NOT flush batch writer here even if force=true
+			// FlushAll is only called when buffer is full (AddFile returns false) or by periodic timer
 			// No existing data, can use BatchWriter
 			// Now copy operations (before swapping)
 			operations := make([]WriteOperation, writeIndex)
@@ -2133,19 +2105,25 @@ func (ra *RandomAccessor) flushInternal(force bool) (int64, error) {
 				// Add to batch write manager (lock-free)
 				batchMgr := ra.fs.getBatchWriteManager()
 				if batchMgr != nil {
-					added, _, err := addFileToBatchWrite(ra, mergedData, force)
+					added, dataID, err := addFileToBatchWrite(ra, mergedData)
 					if err != nil {
-						// Processing failed, fallback to normal write
+						// Processing failed (e.g., compression/encryption error), fallback to normal write
+						DebugLog("[VFS RandomAccessor Flush] Batch write processing failed, falling back to normal write: fileID=%d, error=%v", ra.fileID, err)
 					} else if !added {
-						// Buffer full, need to flush before retry
-						// Only flush if buffer is actually full (not just time window)
+						// Buffer full, flush and retry (this is the only case where we flush: when buffer is full)
+						DebugLog("[VFS RandomAccessor Flush] Batch write buffer full, flushing and retrying: fileID=%d", ra.fileID)
 						batchMgr.FlushAll(ra.fs.c)
-						DebugLog("[VFS RandomAccessor Flush] Buffer full, flushed all pending writes before retry")
+
+						// Wait a brief moment for flush to complete (FlushAll is synchronous, but give it a moment)
+						time.Sleep(10 * time.Millisecond)
+
 						// Retry add after flush
-						added, _, err = addFileToBatchWrite(ra, mergedData, force)
-						if !added {
+						added, dataID, err = addFileToBatchWrite(ra, mergedData)
+						if err != nil {
+							DebugLog("[VFS RandomAccessor Flush] Batch write retry failed with error, falling back to normal write: fileID=%d, error=%v", ra.fileID, err)
+						} else if !added {
 							// Still failed after retry, fallback to normal write
-							DebugLog("[VFS RandomAccessor Flush] Batch write still failed after flush, using normal write path")
+							DebugLog("[VFS RandomAccessor Flush] Batch write still failed after flush, using normal write path: fileID=%d", ra.fileID)
 						}
 					}
 
@@ -2157,7 +2135,23 @@ func (ra *RandomAccessor) flushInternal(force bool) (int64, error) {
 						// 1. Buffer is full
 						// 2. Time window expires (default 5 seconds)
 						// 3. Explicit FlushAll is called elsewhere
-						DebugLog("[VFS RandomAccessor Flush] Successfully added to batch write manager: fileID=%d", ra.fileID)
+						DebugLog("[VFS RandomAccessor Flush] Successfully added to batch write manager: fileID=%d, dataID=%d", ra.fileID, dataID)
+
+						// Update local cache with batch write DataID for immediate visibility
+						if fileObj, err := ra.getFileObj(); err == nil && fileObj != nil {
+							updateFileObj := &core.ObjectInfo{
+								ID:     fileObj.ID,
+								PID:    fileObj.PID,
+								DataID: dataID,
+								Size:   mergedDataSize,
+								MTime:  core.Now(),
+								Type:   fileObj.Type,
+								Name:   fileObj.Name,
+							}
+							fileObjCache.Put(ra.fileObjKey, updateFileObj)
+							ra.fileObj.Store(updateFileObj)
+						}
+
 						// Reset buffer
 						atomic.StoreInt64(&ra.buffer.totalSize, 0)
 						// Return new version ID
@@ -3426,10 +3420,9 @@ func (ra *RandomAccessor) Truncate(newSize int64) (int64, error) {
 		return 0, err
 	}
 
-	// Ensure batch-writer data is persisted before proceeding (truncate needs consistent state)
-	if batchMgr := ra.fs.getBatchWriteManager(); batchMgr != nil {
-		batchMgr.FlushAll(ra.fs.c)
-	}
+	// Note: We do NOT flush batch writer here
+	// FlushAll is only called when buffer is full (AddFile returns false) or by periodic timer
+	// Truncate will work with data that's already in batch writer, it will be flushed automatically
 
 	// Invalidate cache to ensure we get fresh fileObj
 	// Use typed nil pointer instead of nil for atomic.Value
