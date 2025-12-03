@@ -24,10 +24,9 @@ type BucketInfo struct {
 	RealUsed     int64  `borm:"real_used" json:"ru,omitempty"`     // Actual physical usage, counts actual stored data size
 	LogicalUsed  int64  `borm:"logical_used" json:"lu,omitempty"`  // Logical occupancy, counts logical size of all valid objects (not deleted, PID >= 0) considering deduplication but excluding deleted objects
 	DedupSavings int64  `borm:"dedup_savings" json:"ds,omitempty"` // Instant upload space savings, counts deduplicated data savings (LogicalUsed - unique data block size)
-	ChunkSize    int64  `borm:"chunk_size" json:"cs,omitempty"`    // Chunk size (bytes), 0 or unset uses default 4MB
+	ChunkSize    int64  `borm:"chunk_size" json:"cs,omitempty"`    // Chunk size (bytes), must be >0 (defaults to system chunk size)
 	Key          string `borm:"key" json:"k,omitempty"`            // Database encryption key
-	CmprWay      uint32 `borm:"cmpr_way" json:"cw,omitempty"`      // Compression method (DATA_CMPR_MASK)
-	WiseCmpr     uint32 `borm:"wise_cmpr" json:"wc,omitempty"`     // Compression method (DATA_CMPR_MASK), same as CmprWay
+	CmprWay      uint32 `borm:"cmpr_way" json:"cw,omitempty"`      // Compression method (DATA_CMPR_MASK), default is smart compression (checks file type)
 	CmprQlty     uint32 `borm:"cmpr_qlty" json:"cq,omitempty"`     // Compression quality
 	EndecWay     uint32 `borm:"endec_way" json:"ew,omitempty"`     // Encryption method (DATA_ENDEC_MASK)
 	EndecKey     string `borm:"endec_key" json:"ek,omitempty"`     // Encryption key
@@ -134,45 +133,6 @@ func MarkSparseFile(dataInfo *DataInfo) {
 	if dataInfo != nil {
 		dataInfo.Kind |= DATA_SPARSE
 	}
-}
-
-// GetChunkSizeFromObject gets chunk size from ObjectInfo's Extra field
-// Returns 0 if not found or invalid, caller should use bucket's default chunk size
-func GetChunkSizeFromObject(obj *ObjectInfo) int64 {
-	if obj == nil || obj.Extra == "" {
-		return 0
-	}
-	// Parse JSON from Extra field: {"chunkSize": 10485760}
-	// Simple parsing: look for "chunkSize" followed by a number
-	// This is a simple implementation, can be enhanced with proper JSON parsing if needed
-	extra := obj.Extra
-	chunkSizeIdx := strings.Index(extra, `"chunkSize"`)
-	if chunkSizeIdx < 0 {
-		return 0
-	}
-	// Find the number after "chunkSize"
-	valueStart := chunkSizeIdx + len(`"chunkSize"`)
-	// Skip whitespace and colon
-	for valueStart < len(extra) && (extra[valueStart] == ' ' || extra[valueStart] == ':') {
-		valueStart++
-	}
-	// Parse the number
-	var chunkSize int64
-	_, err := fmt.Sscanf(extra[valueStart:], "%d", &chunkSize)
-	if err != nil {
-		return 0
-	}
-	return chunkSize
-}
-
-// SetChunkSizeToObject sets chunk size to ObjectInfo's Extra field
-// If Extra is empty or not valid JSON, creates a simple JSON object
-func SetChunkSizeToObject(obj *ObjectInfo, chunkSize int64) {
-	if obj == nil {
-		return
-	}
-	// Simple JSON format: {"chunkSize": 10485760}
-	obj.Extra = fmt.Sprintf(`{"chunkSize":%d}`, chunkSize)
 }
 
 const (
@@ -1336,13 +1296,11 @@ func (dma *DefaultMetadataAdapter) PutBkt(c Ctx, o []*BucketInfo) error {
 	}
 	// Note: Don't close the connection, it's from the pool
 
-	// 同步CmprWay和WiseCmpr：如果CmprWay有值，同步到WiseCmpr；如果WiseCmpr有值，同步到CmprWay
+	// CmprWay is now smart compression by default (checks file type)
 	for _, bucket := range o {
 		if bucket != nil {
-			if bucket.CmprWay > 0 && bucket.WiseCmpr == 0 {
-				bucket.WiseCmpr = bucket.CmprWay
-			} else if bucket.WiseCmpr > 0 && bucket.CmprWay == 0 {
-				bucket.CmprWay = bucket.WiseCmpr
+			if bucket.ChunkSize <= 0 {
+				bucket.ChunkSize = DEFAULT_CHUNK_SIZE
 			}
 		}
 	}

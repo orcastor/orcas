@@ -168,14 +168,14 @@ func runBatchWritePerformanceTest(t *testing.T, batchWriteEnabled bool, numObjec
 			if batchWriteEnabled && batchMgr != nil {
 				// 使用batch write manager
 				objID := core.NewID()
-				added, _, addErr := batchMgr.AddFile(objID, testData, 0, key, int64(len(testData)))
+				added, _, addErr := batchMgr.AddFile(objID, testData, 0, key, int64(len(testData)), 0)
 				if addErr != nil {
 					err = addErr
 				} else if !added {
 					// Buffer full or file too large for batch write
 					// Try flush once, but if still fails, fallback to direct write
 					batchMgr.FlushAll(ctx)
-					added, _, addErr = batchMgr.AddFile(objID, testData, 0, key, int64(len(testData)))
+					added, _, addErr = batchMgr.AddFile(objID, testData, 0, key, int64(len(testData)), 0)
 					if !added || addErr != nil {
 						// Fallback to direct write for large files or when buffer is full
 						_, err = handler.PutData(ctx, bktID, 0, -1, testData)
@@ -420,7 +420,7 @@ func BenchmarkBatchWriteComparison(b *testing.B) {
 
 					if tc.enabled && batchMgr != nil {
 						objID := core.NewID()
-						added, _, err := batchMgr.AddFile(objID, testData, 0, key, int64(len(testData)))
+						added, _, err := batchMgr.AddFile(objID, testData, 0, key, int64(len(testData)), 0)
 						if err != nil || !added {
 							b.Errorf("AddFile failed: err=%v, added=%v", err, added)
 						}

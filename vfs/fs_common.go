@@ -15,6 +15,14 @@ import (
 // 0 = disabled, 1 = enabled
 var debugEnabled int32
 
+// init initializes debug mode from environment variable (for backward compatibility)
+func init() {
+	// Check ORCAS_DEBUG environment variable at startup
+	if os.Getenv("ORCAS_DEBUG") != "" && os.Getenv("ORCAS_DEBUG") != "0" {
+		atomic.StoreInt32(&debugEnabled, 1)
+	}
+}
+
 // SetDebugEnabled sets the debug mode (can be called from cmd/main.go)
 func SetDebugEnabled(enabled bool) {
 	if enabled {
@@ -32,11 +40,10 @@ func IsDebugEnabled() bool {
 // DebugLog logs debug messages with timestamp
 // Debug mode can be controlled by:
 // 1. SetDebugEnabled() function (from cmd/main.go -debug parameter)
-// 2. ORCAS_DEBUG environment variable (for backward compatibility)
+// 2. ORCAS_DEBUG environment variable (initialized in init() for backward compatibility)
 func DebugLog(format string, args ...interface{}) {
-	// Check if debug is enabled via SetDebugEnabled() or environment variable
-	enabled := IsDebugEnabled() || os.Getenv("ORCAS_DEBUG") != "0"
-	if !enabled {
+	// Check if debug is enabled (environment variable is checked once in init())
+	if !IsDebugEnabled() {
 		return
 	}
 

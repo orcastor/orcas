@@ -98,7 +98,7 @@ func TestBatchWriterVisibilityBeforeFlush(t *testing.T) {
 	// 确保父目录存在
 	pid := int64(0)
 
-	added, dataID, err := batchMgr.AddFile(objID, testData, pid, testKey, int64(len(testData)))
+	added, dataID, err := batchMgr.AddFile(objID, testData, pid, testKey, int64(len(testData)), 0)
 	if err != nil {
 		t.Fatalf("AddFile failed: %v", err)
 	}
@@ -218,7 +218,7 @@ func TestBatchWriterVisibilityConcurrent(t *testing.T) {
 		testData[i] = []byte(fmt.Sprintf("test data %d", i))
 		objIDs[i] = core.NewID()
 
-		added, _, err := batchMgr.AddFile(objIDs[i], testData[i], 0, testKeys[i], int64(len(testData[i])))
+		added, _, err := batchMgr.AddFile(objIDs[i], testData[i], 0, testKeys[i], int64(len(testData[i])), 0)
 		if err != nil {
 			t.Fatalf("AddFile failed for file %d: %v", i, err)
 		}

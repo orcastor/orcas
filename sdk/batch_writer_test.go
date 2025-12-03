@@ -121,7 +121,7 @@ func TestBatchWriterBufferFull(t *testing.T) {
 			}
 
 			// 尝试添加到batch write manager
-			added, dataID, err := batchMgr.AddFile(core.NewID(), data, 0, fmt.Sprintf("file-%d", id), int64(len(data)))
+			added, dataID, err := batchMgr.AddFile(core.NewID(), data, 0, fmt.Sprintf("file-%d", id), int64(len(data)), 0)
 			if err != nil {
 				t.Errorf("addFile failed for file %d: %v", id, err)
 				atomic.AddInt64(&failCount, 1)
@@ -141,7 +141,7 @@ func TestBatchWriterBufferFull(t *testing.T) {
 				time.Sleep(10 * time.Millisecond) // 等待flush完成
 
 				// 重试
-				added, dataID, err = batchMgr.AddFile(core.NewID(), data, 0, fmt.Sprintf("file-%d-retry", id), int64(len(data)))
+				added, dataID, err = batchMgr.AddFile(core.NewID(), data, 0, fmt.Sprintf("file-%d-retry", id), int64(len(data)), 0)
 				if added {
 					atomic.AddInt64(&successCount, 1)
 					t.Logf("File %d added after flush (dataID: %d)", id, dataID)
@@ -201,7 +201,7 @@ func TestBatchWriterBufferFullSequential(t *testing.T) {
 			data[j] = byte(i + j)
 		}
 
-		added, _, err := batchMgr.AddFile(core.NewID(), data, 0, fmt.Sprintf("file-%d", i), int64(len(data)))
+		added, _, err := batchMgr.AddFile(core.NewID(), data, 0, fmt.Sprintf("file-%d", i), int64(len(data)), 0)
 		if err != nil {
 			t.Fatalf("addFile failed: %v", err)
 		}
@@ -225,7 +225,7 @@ func TestBatchWriterBufferFullSequential(t *testing.T) {
 			data[j] = byte(i + 100 + j) // 不同的数据
 		}
 
-		added, _, err := batchMgr.AddFile(core.NewID(), data, 0, fmt.Sprintf("file2-%d", i), int64(len(data)))
+		added, _, err := batchMgr.AddFile(core.NewID(), data, 0, fmt.Sprintf("file2-%d", i), int64(len(data)), 0)
 		if err != nil {
 			t.Fatalf("addFile failed: %v", err)
 		}
@@ -239,7 +239,7 @@ func TestBatchWriterBufferFullSequential(t *testing.T) {
 	// 第四步：尝试再写入一个文件，应该失败（两个buffer都满）
 	t.Log("Step 4: Try to add file when both buffers are full")
 	data := make([]byte, fileSize)
-	added, _, err := batchMgr.AddFile(core.NewID(), data, 0, "file-full", int64(len(data)))
+	added, _, err := batchMgr.AddFile(core.NewID(), data, 0, "file-full", int64(len(data)), 0)
 	if err != nil {
 		t.Fatalf("addFile should not return error: %v", err)
 	}
@@ -259,7 +259,7 @@ func TestBatchWriterBufferFullSequential(t *testing.T) {
 	// 第六步：现在应该可以写入新文件了
 	t.Log("Step 6: Try to add file after flush (should succeed)")
 	data = make([]byte, fileSize)
-	added, _, err = batchMgr.AddFile(core.NewID(), data, 0, "file-after-flush", int64(len(data)))
+	added, _, err = batchMgr.AddFile(core.NewID(), data, 0, "file-after-flush", int64(len(data)), 0)
 	if err != nil {
 		t.Fatalf("addFile failed: %v", err)
 	}
@@ -296,7 +296,7 @@ func TestBatchWriterBufferFullWithNormalWrite(t *testing.T) {
 			data[j] = byte(i + j)
 		}
 
-		added, _, err := batchMgr.AddFile(core.NewID(), data, 0, fmt.Sprintf("file-%d", i), int64(len(data)))
+		added, _, err := batchMgr.AddFile(core.NewID(), data, 0, fmt.Sprintf("file-%d", i), int64(len(data)), 0)
 		if err != nil {
 			t.Fatalf("addFile failed: %v", err)
 		}
@@ -318,7 +318,7 @@ func TestBatchWriterBufferFullWithNormalWrite(t *testing.T) {
 			data[j] = byte(i + 100 + j) // 不同的数据
 		}
 
-		added, _, err := batchMgr.AddFile(core.NewID(), data, 0, fmt.Sprintf("file2-%d", i), int64(len(data)))
+		added, _, err := batchMgr.AddFile(core.NewID(), data, 0, fmt.Sprintf("file2-%d", i), int64(len(data)), 0)
 		if err != nil {
 			t.Fatalf("addFile failed: %v", err)
 		}
@@ -341,7 +341,7 @@ func TestBatchWriterBufferFullWithNormalWrite(t *testing.T) {
 				data[j] = byte(i + 200 + j)
 			}
 
-			added, _, err := batchMgr.AddFile(core.NewID(), data, 0, fmt.Sprintf("file3-%d", i), int64(len(data)))
+			added, _, err := batchMgr.AddFile(core.NewID(), data, 0, fmt.Sprintf("file3-%d", i), int64(len(data)), 0)
 			if err != nil {
 				t.Fatalf("addFile failed: %v", err)
 			}
@@ -403,7 +403,7 @@ func TestBatchWriterBufferFullWithNormalWrite(t *testing.T) {
 	// 第七步：验证batch write manager在currentBuffer满时拒绝新文件
 	t.Log("Step 6: Verify batch write manager rejects new files when current buffer is full")
 	// 当前currentBuffer应该是满的，尝试添加一个新文件应该被拒绝
-	added, _, err := batchMgr.AddFile(core.NewID(), testData, 0, "file-rejected", int64(len(testData)))
+	added, _, err := batchMgr.AddFile(core.NewID(), testData, 0, "file-rejected", int64(len(testData)), 0)
 	if err != nil {
 		t.Fatalf("addFile should not return error: %v", err)
 	}
@@ -420,7 +420,7 @@ func TestBatchWriterBufferFullWithNormalWrite(t *testing.T) {
 	batchMgr.FlushAll(ctx)
 	time.Sleep(50 * time.Millisecond)
 
-	added, _, err = batchMgr.AddFile(core.NewID(), testData, 0, "file-after-flush", int64(len(testData)))
+	added, _, err = batchMgr.AddFile(core.NewID(), testData, 0, "file-after-flush", int64(len(testData)), 0)
 	if err != nil {
 		t.Fatalf("addFile failed: %v", err)
 	}

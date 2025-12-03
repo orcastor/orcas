@@ -208,6 +208,53 @@ func NewLocalHandler() Handler {
 	}
 }
 
+// NewNoAuthHandler creates a Handler that bypasses all authentication and permission checks
+// This is useful for testing, internal operations, or when authentication is handled externally
+// The handler uses NoAuthAccessCtrlMgr which always allows all operations
+func NewNoAuthHandler() Handler {
+	dma := &DefaultMetadataAdapter{}
+	return &LocalHandler{
+		ma:  dma,
+		da:  &DefaultDataAdapter{},
+		acm: &NoAuthAccessCtrlMgr{},
+	}
+}
+
+// NewHandlerWithAccessCtrl creates a Handler with a custom AccessCtrlMgr
+// This allows injecting a custom access control manager for testing or special use cases
+func NewHandlerWithAccessCtrl(acm AccessCtrlMgr) Handler {
+	dma := &DefaultMetadataAdapter{}
+	if acm == nil {
+		acm = &DefaultAccessCtrlMgr{ma: dma}
+	}
+	acm.SetAdapter(dma)
+	return &LocalHandler{
+		ma:  dma,
+		da:  &DefaultDataAdapter{},
+		acm: acm,
+	}
+}
+
+// NewHandlerWithAdapters creates a Handler with custom MetadataAdapter, DataAdapter, and AccessCtrlMgr
+// This provides maximum flexibility for testing or custom implementations
+func NewHandlerWithAdapters(ma MetadataAdapter, da DataAdapter, acm AccessCtrlMgr) Handler {
+	if ma == nil {
+		ma = &DefaultMetadataAdapter{}
+	}
+	if da == nil {
+		da = &DefaultDataAdapter{}
+	}
+	if acm == nil {
+		acm = &DefaultAccessCtrlMgr{ma: ma}
+	}
+	acm.SetAdapter(ma)
+	return &LocalHandler{
+		ma:  ma,
+		da:  da,
+		acm: acm,
+	}
+}
+
 // New returns current handler, forming a chain with underlying handler
 func (lh *LocalHandler) New(Handler) Handler {
 	// Ignore underlying handler
@@ -230,11 +277,18 @@ func (lh *LocalHandler) SetAdapter(ma MetadataAdapter, da DataAdapter) {
 	lh.acm.SetAdapter(ma)
 }
 
+// GetDataAdapter returns the DataAdapter instance
+// This allows external packages to access DataAdapter for operations like Delete
+func (lh *LocalHandler) GetDataAdapter() DataAdapter {
+	return lh.da
+}
+
 // SetSDKConfig sets SDK configuration for a bucket
 // This allows ConvertWritingVersions to access compression/encryption settings
-func (lh *LocalHandler) SetSDKConfig(bktID int64, wiseCmpr, cmprQlty, endecWay uint32, endecKey string) {
+// cmprWay is smart compression by default (checks file type)
+func (lh *LocalHandler) SetSDKConfig(bktID int64, cmprWay, cmprQlty, endecWay uint32, endecKey string) {
 	lh.sdkConfigs.Store(bktID, &SDKConfigInfo{
-		WiseCmpr: wiseCmpr,
+		WiseCmpr: cmprWay, // Store as WiseCmpr for SDK compatibility (smart compression)
 		CmprQlty: cmprQlty,
 		EndecWay: endecWay,
 		EndecKey: endecKey,
@@ -257,11 +311,8 @@ func (lh *LocalHandler) SetBucketConfig(bktID int64, bucket *BucketInfo) {
 	if bucket != nil {
 		lh.bucketConfigs.Store(bktID, bucket)
 		// Also sync to SDKConfig
-		cmprWay := bucket.CmprWay
-		if cmprWay == 0 {
-			cmprWay = bucket.WiseCmpr
-		}
-		lh.SetSDKConfig(bktID, cmprWay, bucket.CmprQlty, bucket.EndecWay, bucket.EndecKey)
+		// CmprWay is now smart compression by default
+		lh.SetSDKConfig(bktID, bucket.CmprWay, bucket.CmprQlty, bucket.EndecWay, bucket.EndecKey)
 	}
 }
 
@@ -297,12 +348,8 @@ func (lh *LocalHandler) Login(c Ctx, usr, pwd string) (Ctx, *UserInfo, []*Bucket
 	// 同步每个bucket的配置到SDKConfig
 	for _, bucket := range b {
 		if bucket != nil {
-			// 使用CmprWay或WiseCmpr（CmprWay优先）
-			cmprWay := bucket.CmprWay
-			if cmprWay == 0 {
-				cmprWay = bucket.WiseCmpr
-			}
-			lh.SetSDKConfig(bucket.ID, cmprWay, bucket.CmprQlty, bucket.EndecWay, bucket.EndecKey)
+		// CmprWay is now smart compression by default
+		lh.SetSDKConfig(bucket.ID, bucket.CmprWay, bucket.CmprQlty, bucket.EndecWay, bucket.EndecKey)
 		}
 	}
 
@@ -762,9 +809,9 @@ func (lh *LocalHandler) UpdateData(c Ctx, bktID, dataID int64, sn int, offset in
 	if sizeDiff > 0 {
 		// Get bucket info and check quota
 		buckets, err := lh.ma.GetBkt(c, []int64{bktID})
-		if err != nil {
-			return err
-		}
+	if err != nil {
+		return err
+	}
 		if len(buckets) == 0 {
 			return ERR_QUERY_DB
 		}
@@ -779,8 +826,8 @@ func (lh *LocalHandler) UpdateData(c Ctx, bktID, dataID int64, sn int, offset in
 
 		// Increase usage (only when extending)
 		if err := lh.ma.IncBktRealUsed(c, bktID, sizeDiff); err != nil {
-			return err
-		}
+		return err
+	}
 	}
 
 	// Update data block using DataAdapter.Update (supports partial update)
@@ -811,27 +858,27 @@ func (lh *LocalHandler) AppendData(c Ctx, bktID, dataID int64, sn int, buf []byt
 	newSize := oldSize + int64(len(buf))
 	sizeDiff := int64(len(buf))
 
-	// Get bucket info and check quota
-	buckets, err := lh.ma.GetBkt(c, []int64{bktID})
-	if err != nil {
-		return err
-	}
-	if len(buckets) == 0 {
-		return ERR_QUERY_DB
-	}
-	bucket := buckets[0]
-
-	// If quota >= 0, check if it exceeds quota
-	if bucket.Quota >= 0 {
-		if bucket.RealUsed+sizeDiff > bucket.Quota {
-			return ERR_QUOTA_EXCEED
+		// Get bucket info and check quota
+		buckets, err := lh.ma.GetBkt(c, []int64{bktID})
+		if err != nil {
+			return err
 		}
-	}
+		if len(buckets) == 0 {
+			return ERR_QUERY_DB
+		}
+		bucket := buckets[0]
+
+		// If quota >= 0, check if it exceeds quota
+		if bucket.Quota >= 0 {
+			if bucket.RealUsed+sizeDiff > bucket.Quota {
+				return ERR_QUOTA_EXCEED
+			}
+		}
 
 	// Increase usage
-	if err := lh.ma.IncBktRealUsed(c, bktID, sizeDiff); err != nil {
-		return err
-	}
+		if err := lh.ma.IncBktRealUsed(c, bktID, sizeDiff); err != nil {
+			return err
+		}
 
 	log.Printf("[Core AppendData] Appending data to disk: bktID=%d, dataID=%d, sn=%d, size=%d, oldSize=%d, newSize=%d", bktID, dataID, sn, len(buf), oldSize, newSize)
 	err = lh.da.Append(c, bktID, dataID, sn, buf)
@@ -1057,8 +1104,9 @@ func (lh *LocalHandler) Recycle(c Ctx, bktID, id int64) error {
 	if err := lh.acm.CheckPermission(c, MDRW, bktID); err != nil {
 		return err
 	}
-	// Recycle only marks as deleted, actual cleanup is done by CleanRecycleBin
-	return DeleteObject(c, bktID, id, lh.ma)
+	// Recycle only marks as deleted without recursion for fast deletion
+	// Child objects will be deleted asynchronously in the background
+	return MarkObjectAsDeleted(c, bktID, id, lh.ma)
 }
 
 func (lh *LocalHandler) Delete(c Ctx, bktID, id int64) error {
@@ -1100,12 +1148,8 @@ func (lh *LocalHandler) GetBktInfo(c Ctx, bktID int64) (*BucketInfo, error) {
 	bucket := buckets[0]
 	// 同步bucket配置到SDKConfig
 	if bucket != nil {
-		// 使用CmprWay或WiseCmpr（CmprWay优先）
-		cmprWay := bucket.CmprWay
-		if cmprWay == 0 {
-			cmprWay = bucket.WiseCmpr
-		}
-		lh.SetSDKConfig(bktID, cmprWay, bucket.CmprQlty, bucket.EndecWay, bucket.EndecKey)
+		// CmprWay is now smart compression by default
+		lh.SetSDKConfig(bktID, bucket.CmprWay, bucket.CmprQlty, bucket.EndecWay, bucket.EndecKey)
 	}
 	return bucket, nil
 }
@@ -1129,6 +1173,53 @@ func NewLocalAdmin() Admin {
 		ma:  dma,
 		da:  &DefaultDataAdapter{},
 		acm: &DefaultAccessCtrlMgr{ma: dma},
+	}
+}
+
+// NewNoAuthAdmin creates an Admin that bypasses all authentication and permission checks
+// This is useful for testing, internal operations, or when authentication is handled externally
+// The admin uses NoAuthAccessCtrlMgr which always allows all operations
+func NewNoAuthAdmin() Admin {
+	dma := &DefaultMetadataAdapter{}
+	return &LocalAdmin{
+		ma:  dma,
+		da:  &DefaultDataAdapter{},
+		acm: &NoAuthAccessCtrlMgr{},
+	}
+}
+
+// NewAdminWithAccessCtrl creates an Admin with a custom AccessCtrlMgr
+// This allows injecting a custom access control manager for testing or special use cases
+func NewAdminWithAccessCtrl(acm AccessCtrlMgr) Admin {
+	dma := &DefaultMetadataAdapter{}
+	if acm == nil {
+		acm = &DefaultAccessCtrlMgr{ma: dma}
+	}
+	acm.SetAdapter(dma)
+	return &LocalAdmin{
+		ma:  dma,
+		da:  &DefaultDataAdapter{},
+		acm: acm,
+	}
+}
+
+// NewAdminWithAdapters creates an Admin with custom MetadataAdapter, DataAdapter, and AccessCtrlMgr
+// This provides maximum flexibility for testing or custom implementations
+func NewAdminWithAdapters(ma MetadataAdapter, da DataAdapter, acm AccessCtrlMgr) Admin {
+	if ma == nil {
+		ma = &DefaultMetadataAdapter{}
+	}
+	if da == nil {
+		da = &DefaultDataAdapter{}
+	}
+	if acm == nil {
+		acm = &DefaultAccessCtrlMgr{ma: ma}
+	}
+	acm.SetAdapter(ma)
+	return &LocalAdmin{
+		ma:  ma,
+		da:  da,
+		acm: acm,
 	}
 }
 

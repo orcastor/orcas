@@ -27,6 +27,9 @@ type DataAdapter interface {
 
 	Read(c Ctx, bktID, dataID int64, sn int) ([]byte, error)
 	ReadBytes(c Ctx, bktID, dataID int64, sn, offset, size int) ([]byte, error)
+	// Delete deletes a specific data chunk (DataID + sn)
+	// If the chunk doesn't exist, it returns nil (no error)
+	Delete(c Ctx, bktID, dataID int64, sn int) error
 }
 
 type DefaultDataAdapter struct {
@@ -56,12 +59,24 @@ func (dda *DefaultDataAdapter) Write(c Ctx, bktID, dataID int64, sn int, buf []b
 	if err != nil {
 		return ERR_OPEN_FILE
 	}
+	defer f.Close()
 
 	_, err = f.Write(buf)
-	if err == nil && os.Getenv("ORCAS_DEBUG") != "0" {
+	if err != nil {
+		return err
+	}
+
+	// Immediately flush data to disk to ensure data is persisted
+	// This is critical for large file writes where chunks must be flushed when full
+	err = f.Sync()
+	if err != nil {
+		return err
+	}
+
+	if os.Getenv("ORCAS_DEBUG") != "0" {
 		fmt.Printf("[DATA WRITE] PutData bkt=%d data=%d sn=%d size=%d path=%s\n", bktID, dataID, sn, len(buf), path)
 	}
-	return err
+	return nil
 }
 
 // Update updates part of existing data chunk (for writing versions with name="0")
@@ -226,4 +241,28 @@ func (dda *DefaultDataAdapter) ReadBytes(c Ctx, bktID, dataID int64, sn, offset,
 		return buf[:n], nil
 	}
 	return buf, nil
+}
+
+// Delete deletes a specific data chunk (DataID + sn)
+// If the chunk doesn't exist, it returns nil (no error)
+func (dda *DefaultDataAdapter) Delete(c Ctx, bktID, dataID int64, sn int) error {
+	path := toFilePath(ORCAS_DATA, bktID, dataID, sn)
+	
+	// Check if file exists
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		// File doesn't exist, return nil (no error)
+		return nil
+	}
+	
+	// Delete the file
+	err := os.Remove(path)
+	if err != nil {
+		return err
+	}
+	
+	if os.Getenv("ORCAS_DEBUG") != "0" {
+		fmt.Printf("[DATA DELETE] DeleteData bkt=%d data=%d sn=%d path=%s\n", bktID, dataID, sn, path)
+	}
+	
+	return nil
 }

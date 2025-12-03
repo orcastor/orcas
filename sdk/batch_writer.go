@@ -22,6 +22,7 @@ type PackagedFileInfo struct {
 	OrigSize  int64  // Original data size (before processing)
 	PID       int64  // Parent directory ID
 	Name      string // Object name
+	Kind      uint32 // Compression/encryption flags (DATA_CMPR_*, DATA_ENDEC_*)
 }
 
 // BatchWriterBuffer encapsulates buffer, offset, and file infos for double-buffering
@@ -68,17 +69,17 @@ type BatchWriter struct {
 
 var (
 	// Default configuration
-	// Optimized for small files (< 64KB)
-	// Increased buffer size for better handling of medium-sized files (100KB)
-	defaultBufferSize     = int64(16 << 20) // 16MB - increased for better batching of medium files
-	defaultMaxFileInfos   = int64(2 << 10)  // 2048 - increased for more files per batch
-	defaultFlushWindow    = 5 * time.Second // 5s - reduced for faster response
-	defaultMaxPackageSize = int64(16 << 20) // 16MB - increased for larger packages
+	// Aggressively optimized for small files (< 64KB) - large scale small file writes
+	// Balanced: increased buffer size for better batching while maintaining responsiveness
+	defaultBufferSize     = int64(24 << 20) // 24MB - balanced increase for better batching of many small files
+	defaultMaxFileInfos   = int64(3 << 10)  // 3072 - balanced increase for more files per batch
+	defaultFlushWindow    = 5 * time.Second // 5s - increased window for better batching performance
+	defaultMaxPackageSize = int64(24 << 20) // 24MB - balanced for larger packages
 
 	// Threshold for determining if a file is too large for batch write
 	// If a single file exceeds this percentage of buffer size, it should be written directly
-	// This prevents large files from causing frequent flushes and performance degradation
-	maxFileSizeRatio = 0.3 // 30% of buffer size
+	// Balanced: slightly increased threshold to allow larger files in batch write
+	maxFileSizeRatio = 0.35 // 35% of buffer size (balanced between 30% and 40%)
 
 	// batchWriters stores batch writers for each bucket
 	// key: bktID (int64), value: *BatchWriter
@@ -261,25 +262,18 @@ func (bwm *BatchWriter) flush(ctx context.Context) {
 
 	// After swapping, next writes use the new current buffer
 	// Collect file infos from the just-flushed buffer (now bgBuffer)
+	// Optimized: pre-allocate with known capacity and combine loops
 	fileInfos := make([]*PackagedFileInfo, 0, oldIndex)
-	for i := int64(0); i < oldIndex; i++ {
-		if i < int64(len(currentBuf.fileInfos)) && currentBuf.fileInfos[i] != nil {
-			fileInfos = append(fileInfos, currentBuf.fileInfos[i])
-		}
-	}
-
-	if len(fileInfos) == 0 {
-		return
-	}
-
-	// Find last valid file info to determine buffer size
-	// We need to get the size from the adapter
 	var lastOffset int64
 	var lastSize int64
-	for _, fileInfo := range fileInfos {
-		if fileInfo != nil {
-			// Get offset and size from file info
-			// This is adapter-specific, so we need a helper method
+
+	// Single pass: collect file infos and find buffer size simultaneously
+	for i := int64(0); i < oldIndex; i++ {
+		if i < int64(len(currentBuf.fileInfos)) && currentBuf.fileInfos[i] != nil {
+			fileInfo := currentBuf.fileInfos[i]
+			fileInfos = append(fileInfos, fileInfo)
+			
+			// Track last offset and size for buffer size calculation
 			offset, size := bwm.getFileInfoOffsetSize(fileInfo)
 			if size > 0 {
 				totalOffset := offset + size
@@ -291,7 +285,7 @@ func (bwm *BatchWriter) flush(ctx context.Context) {
 		}
 	}
 
-	if lastSize == 0 {
+	if len(fileInfos) == 0 || lastSize == 0 {
 		return
 	}
 
@@ -301,10 +295,6 @@ func (bwm *BatchWriter) flush(ctx context.Context) {
 
 	var currentOffset uint32 = 0
 	for _, fileInfo := range fileInfos {
-		if fileInfo == nil {
-			continue
-		}
-
 		_, size := bwm.getFileInfoOffsetSize(fileInfo)
 		if size <= 0 {
 			continue
@@ -386,10 +376,16 @@ func (bwm *BatchWriter) flushPackage(ctx context.Context, fileInfos []*PackagedF
 	dataInfos := make([]*core.DataInfo, 0, len(fileInfos))
 	objectInfos := make([]*core.ObjectInfo, 0, len(fileInfos))
 
-	// Cache Now() call to avoid repeated system calls
+	// Cache Now() call to avoid repeated system calls (optimization for many small files)
 	now := core.Now()
 
-	for _, pkgInfo := range fileInfos {
+	// Optimized loop: minimize allocations and function calls
+	for i := range fileInfos {
+		pkgInfo := fileInfos[i]
+		if pkgInfo == nil {
+			continue
+		}
+
 		dataID := pkgInfo.DataID
 		if dataID <= 0 {
 			dataID = core.NewID()
@@ -398,19 +394,18 @@ func (bwm *BatchWriter) flushPackage(ctx context.Context, fileInfos []*PackagedF
 			}
 		}
 
-		// Create DataInfo
-		dataInfo := &core.DataInfo{
+		// Create DataInfo (inline struct creation for better performance)
+		dataInfos = append(dataInfos, &core.DataInfo{
 			ID:        dataID,
 			Size:      pkgInfo.Size,
 			OrigSize:  pkgInfo.OrigSize,
 			PkgID:     pkgID,
 			PkgOffset: pkgInfo.PkgOffset,
-		}
-		dataInfos = append(dataInfos, dataInfo)
+			Kind:      pkgInfo.Kind, // Include compression/encryption flags
+		})
 
-		// Create or update ObjectInfo
-		// Use OrigSize for ObjectInfo.Size (file's logical size), not processed Size
-		objectInfo := &core.ObjectInfo{
+		// Create ObjectInfo (inline struct creation for better performance)
+		objectInfos = append(objectInfos, &core.ObjectInfo{
 			ID:     pkgInfo.ObjectID,
 			PID:    pkgInfo.PID,
 			DataID: dataID,
@@ -418,8 +413,7 @@ func (bwm *BatchWriter) flushPackage(ctx context.Context, fileInfos []*PackagedF
 			MTime:  now,              // Use cached timestamp
 			Type:   core.OBJ_TYPE_FILE,
 			Name:   pkgInfo.Name,
-		}
-		objectInfos = append(objectInfos, objectInfo)
+		})
 	}
 
 	// 4. Batch write DataInfo and ObjectInfo together in a single transaction
@@ -438,12 +432,12 @@ func (bwm *BatchWriter) flushPackage(ctx context.Context, fileInfos []*PackagedF
 // AddFile adds file data to batch write buffer
 // Returns (success, dataID, error)
 // dataID is returned immediately for API compatibility
-func (bwm *BatchWriter) AddFile(fileID int64, data []byte, pid int64, name string, origSize int64) (bool, int64, error) {
+// kind: compression/encryption flags (DATA_CMPR_*, DATA_ENDEC_*)
+func (bwm *BatchWriter) AddFile(fileID int64, data []byte, pid int64, name string, origSize int64, kind uint32) (bool, int64, error) {
 	if len(data) == 0 {
 		return true, 0, nil
 	}
 
-	kind := uint32(0)
 	if origSize <= 0 {
 		origSize = int64(len(data))
 	}
@@ -465,65 +459,63 @@ func (bwm *BatchWriter) AddFile(fileID int64, data []byte, pid int64, name strin
 		return false, 0, fmt.Errorf("failed to generate DataID")
 	}
 
-	// Try to write, may need retry (if space is insufficient, flush first)
-	maxRetries := 10
-	for retry := 0; retry < maxRetries; retry++ {
-		// Get current buffer (atomic load with memory barrier)
-		currentBuf := (*BatchWriterBuffer)(atomic.LoadPointer(&bwm.currentBuffer))
+	// Get current buffer (atomic load with memory barrier)
+	currentBuf := (*BatchWriterBuffer)(atomic.LoadPointer(&bwm.currentBuffer))
 
-		// Check current buffer space
-		currOffset := atomic.LoadInt64(&currentBuf.writeOffset)
-		if currOffset+processedSize > bwm.bufferSize {
-			// Current buffer is full
-			// Check if the background buffer is also full
-			bgBuf := (*BatchWriterBuffer)(atomic.LoadPointer(&bwm.bgBuffer))
-			bgOff := atomic.LoadInt64(&bgBuf.writeOffset)
-			if bgOff+processedSize > bwm.bufferSize {
-				// Both buffers are full, cannot use batch write
-				// Caller should write directly to storage, not use batch writer
-				return false, 0, nil
-			}
-			// One buffer full, need to flush the current buffer
-			// Let caller know to flush before retrying
+	// Check current buffer space
+	currOffset := atomic.LoadInt64(&currentBuf.writeOffset)
+	if currOffset+processedSize > bwm.bufferSize {
+		// Current buffer is full
+		// Check if the background buffer is also full
+		bgBuf := (*BatchWriterBuffer)(atomic.LoadPointer(&bwm.bgBuffer))
+		bgOff := atomic.LoadInt64(&bgBuf.writeOffset)
+		if bgOff+processedSize > bwm.bufferSize {
+			// Both buffers are full, cannot use batch write
+			// Caller should write directly to storage, not use batch writer
 			return false, 0, nil
 		}
-
-		// Reserve space in current buffer (atomic operation)
-		oldOffset := atomic.LoadInt64(&currentBuf.writeOffset)
-		newOffset := atomic.AddInt64(&currentBuf.writeOffset, processedSize)
-
-		// Check again if exceeds buffer size (race condition check)
-		if newOffset > bwm.bufferSize {
-			// Space insufficient after reservation, return false
-			return false, 0, nil
-		}
-
-		// Memory barrier: atomic.AddInt64 already provides memory barrier
-
-		// Write data to current buffer
-		copy(currentBuf.buffer[oldOffset:newOffset], data)
-
-		// Get file info index
-		idx := atomic.AddInt64(&currentBuf.fileIndex, 1) - 1
-		if idx >= bwm.maxFileInfos {
-			// File info list is full, return false
-			return false, 0, nil
-		}
-
-		// Create file info
-		fileInfo := bwm.createFileInfo(fileID, dataID, oldOffset, processedSize, origSize, kind, pid, name)
-		currentBuf.fileInfos[idx] = fileInfo
-
-		// Store in pending objects cache for visibility before flush
-		bwm.pendingObjects.Store(fileID, fileInfo)
-
-		// Schedule periodic flush if not already scheduled
-		bwm.schedulePeriodicFlush()
-
-		return true, dataID, nil
+		// One buffer full, need to flush the current buffer
+		// Let caller know to flush before retrying
+		return false, 0, nil
 	}
 
-	return false, 0, nil
+	// Reserve space in current buffer (atomic operation)
+	oldOffset := atomic.LoadInt64(&currentBuf.writeOffset)
+	newOffset := atomic.AddInt64(&currentBuf.writeOffset, processedSize)
+
+	// Check again if exceeds buffer size (race condition check)
+	if newOffset > bwm.bufferSize {
+		// Space insufficient after reservation, return false
+		return false, 0, nil
+	}
+
+	// Memory barrier: atomic.AddInt64 already provides memory barrier
+
+	// Write data to current buffer
+	copy(currentBuf.buffer[oldOffset:newOffset], data)
+
+	// Get file info index
+	idx := atomic.AddInt64(&currentBuf.fileIndex, 1) - 1
+	if idx >= bwm.maxFileInfos {
+		// File info list is full, return false
+		return false, 0, nil
+	}
+
+	// Create file info
+	fileInfo := bwm.createFileInfo(fileID, dataID, oldOffset, processedSize, origSize, kind, pid, name)
+	currentBuf.fileInfos[idx] = fileInfo
+
+	// Store in pending objects cache for visibility before flush
+	bwm.pendingObjects.Store(fileID, fileInfo)
+
+	// Schedule periodic flush if not already scheduled (optimized: only schedule if needed)
+	// Check if timer already exists first to avoid unnecessary work
+	if timerVal := bwm.flushTimer.Load(); timerVal == nil {
+		// Only schedule if no timer exists (optimization for high concurrency)
+		bwm.schedulePeriodicFlush()
+	}
+
+	return true, dataID, nil
 }
 
 // GetPendingObject gets a pending object from the buffer (before flush)
@@ -607,6 +599,7 @@ func (bwm *BatchWriter) createFileInfo(fileID, dataID, offset, size, origSize in
 		OrigSize:  origSize,
 		PID:       pid,
 		Name:      name,
+		Kind:      kind, // Include compression/encryption flags
 	}
 }
 
@@ -621,6 +614,7 @@ func (bwm *BatchWriter) createPackagedFileInfo(fileInfo PackagedFileInfo, pkgOff
 		OrigSize:  fileInfo.OrigSize,
 		PID:       fileInfo.PID,
 		Name:      fileInfo.Name,
+		Kind:      fileInfo.Kind, // Include compression/encryption flags
 	}
 }
 
@@ -637,7 +631,16 @@ func (bwm *BatchWriter) cancelFlushTimer() {
 // schedulePeriodicFlush schedules a periodic flush based on BufferWindow
 // It ensures that if the last flush was recent (due to count threshold),
 // the timer will wait for the remaining time until BufferWindow expires
+// Optimized for high concurrency: minimize time.Now() calls and timer creation
 func (bwm *BatchWriter) schedulePeriodicFlush() {
+	// Check if timer already exists first (fast path for high concurrency)
+	if timerVal := bwm.flushTimer.Load(); timerVal != nil {
+		if timer, ok := timerVal.(*time.Timer); ok && timer != nil {
+			// Timer already exists, don't create a new one
+			return
+		}
+	}
+
 	// Check if there's pending data to flush
 	currentBuf := (*BatchWriterBuffer)(atomic.LoadPointer(&bwm.currentBuffer))
 	currOffset := atomic.LoadInt64(&currentBuf.writeOffset)
@@ -648,18 +651,10 @@ func (bwm *BatchWriter) schedulePeriodicFlush() {
 		return
 	}
 
-	// Check if timer already exists
-	if timerVal := bwm.flushTimer.Load(); timerVal != nil {
-		if timer, ok := timerVal.(*time.Timer); ok && timer != nil {
-			// Timer already exists, don't create a new one
-			return
-		}
-	}
-
-	// Get last flush time
+	// Get last flush time and current time (minimize time.Now() calls)
 	lastFlushNano := atomic.LoadInt64(&bwm.lastFlushTime)
-	lastFlushTime := time.Unix(0, lastFlushNano)
 	now := time.Now()
+	lastFlushTime := time.Unix(0, lastFlushNano)
 
 	// Calculate time elapsed since last flush
 	elapsed := now.Sub(lastFlushTime)
@@ -699,8 +694,12 @@ func (bwm *BatchWriter) schedulePeriodicFlush() {
 		}
 	})
 
-	// Store new timer atomically
-	bwm.flushTimer.Store(newTimer)
+	// Store new timer atomically (use CompareAndSwap to handle race condition)
+	// If another goroutine already created a timer, cancel this one
+	if !bwm.flushTimer.CompareAndSwap(nil, newTimer) {
+		// Another goroutine created a timer first, cancel this one
+		newTimer.Stop()
+	}
 }
 
 // SetFlushContext stores the context used for asynchronous flush operations

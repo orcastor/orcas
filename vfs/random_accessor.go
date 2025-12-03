@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -28,9 +29,10 @@ import (
 
 var (
 	// Object pool: reuse byte buffers to reduce memory allocation
+	// Optimization: use smaller initial capacity for small file operations
 	chunkDataPool = sync.Pool{
 		New: func() interface{} {
-			return make([]byte, 0, 4<<20) // Pre-allocate 4MB capacity
+			return make([]byte, 0, 64<<10) // Pre-allocate 64KB capacity (reduced from 4MB for small files)
 		},
 	}
 
@@ -38,6 +40,40 @@ var (
 	writeOpsPool = sync.Pool{
 		New: func() interface{} {
 			return make([]WriteOperation, 0, 32)
+		},
+	}
+
+	// Object pool for large buffers (used when small pool buffer is insufficient)
+	largeChunkDataPool = sync.Pool{
+		New: func() interface{} {
+			return make([]byte, 0, 4<<20) // Pre-allocate 4MB capacity for large files
+		},
+	}
+
+	// Object pool for async write data buffers (reuse buffers for async writes)
+	asyncWriteDataPool = sync.Pool{
+		New: func() interface{} {
+			return make([]byte, 0, 10<<20) // Pre-allocate 10MB capacity for async writes
+		},
+	}
+
+	// Worker pool for async writes: limit concurrent async writes to avoid too many goroutines
+	asyncWriteWorkers = make(chan struct{}, 16) // Max 16 concurrent async writes
+
+	// Object pool for int slices (used for remainingChunks, etc.)
+	intSlicePool = sync.Pool{
+		New: func() interface{} {
+			return make([]int, 0, 32) // Pre-allocate capacity for chunk lists
+		},
+	}
+
+	// Object pool for chunk buffers (reuse large chunk buffers to reduce allocations)
+	chunkBufferPool = sync.Pool{
+		New: func() interface{} {
+			return &chunkBuffer{
+				data:          make([]byte, 0, 10<<20), // Pre-allocate 10MB capacity
+				offsetInChunk: 0,
+			}
 		},
 	}
 
@@ -52,6 +88,16 @@ var (
 	// ecache cache: cache directory listing to reduce database queries
 	// key: "<dirID>", value: []*core.ObjectInfo (dirID is globally unique)
 	dirListCache = ecache.NewLRUCache(16, 512, 30*time.Second)
+
+	// ecache cache: cache Readdir entries (DirStream) to avoid rebuilding entries every time
+	// key: "<dirID>", value: *cachedDirStream (dirID is globally unique)
+	// This cache stores the final DirStream entries, avoiding data merging on every Readdir call
+	readdirCache = ecache.NewLRUCache(16, 512, 30*time.Second)
+
+	// Map to track directories that need delayed cache refresh
+	// key: "<dirID>", value: true (if true, cache needs refresh on next access)
+	// This allows marking cache as stale without immediately deleting it
+	readdirCacheStale sync.Map // map[int64]bool
 
 	// ecache cache: cache chunkReader by dataID (one reader per file)
 	// key: "<dataID>", value: *chunkReader
@@ -217,10 +263,11 @@ func (fs *OrcasFS) getBatchWriteManager() *sdk.BatchWriter {
 
 // processFileDataForBatchWrite processes file data (compression/encryption) for batch write
 // This is a helper function to process data before passing to SDK's BatchWriter
-func processFileDataForBatchWrite(fs *OrcasFS, originalData []byte) ([]byte, int64) {
+// Returns: (processedData, origSize, kind)
+func processFileDataForBatchWrite(fs *OrcasFS, originalData []byte) ([]byte, int64, uint32) {
 	origSize := int64(len(originalData))
 	if origSize == 0 {
-		return originalData, origSize
+		return originalData, origSize, 0
 	}
 
 	// Process compression and encryption according to configuration
@@ -232,31 +279,50 @@ func processFileDataForBatchWrite(fs *OrcasFS, originalData []byte) ([]byte, int
 	var err error
 
 	// 1. Compression (if enabled)
+	// CmprWay is now smart compression by default (checks file type)
+	cmprWay := uint32(0)
 	if bucket != nil && bucket.CmprWay > 0 {
-		kind |= bucket.CmprWay
-		var cmpr archiver.Compressor
-		if bucket.CmprWay&core.DATA_CMPR_SNAPPY != 0 {
-			cmpr = &archiver.Snappy{}
-		} else if bucket.CmprWay&core.DATA_CMPR_ZSTD != 0 {
-			cmpr = &archiver.Zstd{EncoderOptions: []zstd.EOption{zstd.WithEncoderLevel(zstd.EncoderLevelFromZstd(int(bucket.CmprQlty)))}}
-		} else if bucket.CmprWay&core.DATA_CMPR_GZIP != 0 {
-			cmpr = &archiver.Gz{CompressionLevel: int(bucket.CmprQlty)}
-		} else if bucket.CmprWay&core.DATA_CMPR_BR != 0 {
-			cmpr = &archiver.Brotli{Quality: int(bucket.CmprQlty)}
+		cmprWay = bucket.CmprWay
+	}
+
+	if cmprWay > 0 {
+		// Smart compression: check file type first to determine if compression is needed
+		// Only compress if file type is Unknown (likely not already compressed)
+		needsCompression := true
+		detectedKind, _ := filetype.Match(originalData)
+		if detectedKind != filetype.Unknown {
+			// File type is known (likely already compressed or not compressible), don't compress
+			needsCompression = false
 		}
 
-		if cmpr != nil {
-			var cmprBuf bytes.Buffer
-			err := cmpr.Compress(bytes.NewBuffer(data), &cmprBuf)
-			if err == nil && cmprBuf.Len() < len(data) {
-				compressedData = cmprBuf.Bytes()
-				data = compressedData
-			} else {
-				kind &= ^core.DATA_CMPR_MASK
-				compressedData = originalData
-				data = originalData
+		if needsCompression {
+			kind |= cmprWay
+			var cmpr archiver.Compressor
+			if cmprWay&core.DATA_CMPR_SNAPPY != 0 {
+				cmpr = &archiver.Snappy{}
+			} else if cmprWay&core.DATA_CMPR_ZSTD != 0 {
+				cmpr = &archiver.Zstd{EncoderOptions: []zstd.EOption{zstd.WithEncoderLevel(zstd.EncoderLevelFromZstd(int(bucket.CmprQlty)))}}
+			} else if cmprWay&core.DATA_CMPR_GZIP != 0 {
+				cmpr = &archiver.Gz{CompressionLevel: int(bucket.CmprQlty)}
+			} else if cmprWay&core.DATA_CMPR_BR != 0 {
+				cmpr = &archiver.Brotli{Quality: int(bucket.CmprQlty)}
+			}
+
+			if cmpr != nil {
+				var cmprBuf bytes.Buffer
+				err := cmpr.Compress(bytes.NewBuffer(data), &cmprBuf)
+				if err == nil && cmprBuf.Len() < len(data) {
+					compressedData = cmprBuf.Bytes()
+					data = compressedData
+				} else {
+					// Compression failed or compressed size is not smaller, remove compression flag
+					kind &= ^core.DATA_CMPR_MASK
+					compressedData = originalData
+					data = originalData
+				}
 			}
 		}
+		// If needsCompression is false, don't set compression flag, just proceed to encryption
 	}
 
 	// 2. Encryption (if enabled)
@@ -277,7 +343,7 @@ func processFileDataForBatchWrite(fs *OrcasFS, originalData []byte) ([]byte, int
 		}
 	}
 
-	return data, origSize
+	return data, origSize, kind
 }
 
 // addFileToBatchWrite adds file data to SDK's batch write manager
@@ -328,7 +394,7 @@ func addFileToBatchWrite(ra *RandomAccessor, data []byte) (bool, int64, error) {
 	}
 
 	// Process compression and encryption
-	processedData, origSize := processFileDataForBatchWrite(ra.fs, data)
+	processedData, origSize, kind := processFileDataForBatchWrite(ra.fs, data)
 	if len(processedData) == 0 {
 		return false, 0, fmt.Errorf("failed to process file data")
 	}
@@ -354,7 +420,7 @@ func addFileToBatchWrite(ra *RandomAccessor, data []byte) (bool, int64, error) {
 	batchMgr.SetFlushContext(ra.fs.c)
 
 	// Add file to SDK's batch write manager
-	added, dataID, err := batchMgr.AddFile(ra.fileID, processedData, pid, name, origSize)
+	added, dataID, err := batchMgr.AddFile(ra.fileID, processedData, pid, name, origSize, kind)
 	if err != nil {
 		return false, 0, err
 	}
@@ -454,18 +520,37 @@ type SequentialWriteBuffer struct {
 // Uses in-memory buffers to accumulate data until a complete chunk is ready
 // Supports optional real-time compression/encryption (can be disabled for offline processing)
 // Supports concurrent writes to different chunks
+// Uses adaptive chunk size: starts with 64KB for small files, upgrades to 10MB for large files
+// Supports semi-synchronous writes: first and last chunks are synchronous, middle chunks are asynchronous
 type TempFileWriter struct {
-	fs              *OrcasFS
-	fileID          int64
-	dataID          int64                // Data ID for this .tmp file
-	chunkSize       int64                // Chunk size for this file (always bucket chunk size)
-	size            atomic.Int64         // Total file size (atomic for concurrent access)
-	mu              sync.Mutex           // Mutex for thread-safe operations on chunks map
-	chunks          map[int]*chunkBuffer // Chunk buffers for each chunk (key: sn)
-	dataInfo        *core.DataInfo       // DataInfo for tracking compression/encryption
-	enableRealtime  bool                 // Whether to enable real-time compression/encryption (default: false for offline processing)
-	realtimeDecided bool                 // Whether realtime capability has been determined
-	lh              *core.LocalHandler   // Cached LocalHandler (nil if not LocalHandler)
+	fs               *OrcasFS
+	fileID           int64
+	dataID           int64                // Data ID for this .tmp file
+	chunkSize        int64                // Chunk size for this file (adaptive: 64KB -> 10MB)
+	initialChunkSize int64                // Initial chunk size (64KB for small files)
+	largeChunkSize   int64                // Large chunk size (10MB for large files)
+	size             atomic.Int64         // Total file size (atomic for concurrent access)
+	mu               sync.Mutex           // Mutex for thread-safe operations on chunks map
+	chunks           map[int]*chunkBuffer // Chunk buffers for each chunk (key: sn)
+	dataInfo         *core.DataInfo       // DataInfo for tracking compression/encryption
+	enableRealtime   bool                 // Whether to enable real-time compression/encryption (default: false for offline processing)
+	realtimeDecided  bool                 // Whether realtime capability has been determined
+	lh               *core.LocalHandler   // Cached LocalHandler (nil if not LocalHandler)
+	upgraded         atomic.Bool          // Whether chunk size has been upgraded to large
+	// Semi-synchronous write support
+	pendingWrites sync.Map     // map[int]*pendingWrite - tracks async writes (key: sn)
+	writeErrors   sync.Map     // map[int]error - stores errors from async writes (key: sn)
+	firstChunkSN  atomic.Int64 // First chunk sequence number (sn=0)
+	lastChunkSN   atomic.Int64 // Last chunk sequence number (updated when flushing)
+}
+
+// pendingWrite tracks an asynchronous write operation
+type pendingWrite struct {
+	sn   int
+	data []byte
+	done chan struct{}
+	err  error
+	mu   sync.Mutex
 }
 
 // chunkBuffer holds data for a single chunk before compression/encryption and upload
@@ -513,10 +598,12 @@ func (ra *RandomAccessor) getOrCreateTempWriter() (*TempFileWriter, error) {
 		return nil, err
 	}
 
-	// Enforce fixed chunk size from bucket configuration
-	chunkSize := ra.fs.chunkSize
-	if chunkSize <= 0 {
-		chunkSize = 10 << 20 // Default 10MB
+	// Adaptive chunk size: start with 64KB for small files, upgrade to 10MB for large files
+	// This reduces memory allocation for small files while maintaining performance for large files
+	initialChunkSize := int64(64 << 10) // 64KB for small files
+	largeChunkSize := ra.fs.chunkSize
+	if largeChunkSize <= 0 {
+		largeChunkSize = 10 << 20 // Default 10MB for large files
 	}
 
 	// Create new DataID for .tmp file
@@ -541,21 +628,27 @@ func (ra *RandomAccessor) getOrCreateTempWriter() (*TempFileWriter, error) {
 	}
 
 	ra.tempWriter = &TempFileWriter{
-		fs:              ra.fs,
-		fileID:          ra.fileID,
-		dataID:          dataID,
-		chunkSize:       chunkSize,
-		size:            atomic.Int64{},
-		chunks:          make(map[int]*chunkBuffer),
-		dataInfo:        dataInfo,
-		enableRealtime:  false,
-		realtimeDecided: false,
-		lh:              lh,
+		fs:               ra.fs,
+		fileID:           ra.fileID,
+		dataID:           dataID,
+		chunkSize:        initialChunkSize, // Start with 64KB
+		initialChunkSize: initialChunkSize,
+		largeChunkSize:   largeChunkSize,
+		size:             atomic.Int64{},
+		chunks:           make(map[int]*chunkBuffer),
+		dataInfo:         dataInfo,
+		enableRealtime:   false,
+		realtimeDecided:  false,
+		lh:               lh,
+		upgraded:         atomic.Bool{},
+		firstChunkSN:     atomic.Int64{},
+		lastChunkSN:      atomic.Int64{},
 	}
+	ra.tempWriter.firstChunkSN.Store(0) // First chunk is always sn=0
 
 	// Log creation of TempFileWriter for large file
-	DebugLog("[VFS TempFileWriter Create] Created TempFileWriter for large file: fileID=%d, dataID=%d, fileName=%s, chunkSize=%d, realtimeCompressEncrypt=%v",
-		ra.fileID, dataID, fileObj.Name, chunkSize, ra.tempWriter.enableRealtime)
+	DebugLog("[VFS TempFileWriter Create] Created TempFileWriter for large file: fileID=%d, dataID=%d, fileName=%s, initialChunkSize=%d, largeChunkSize=%d, realtimeCompressEncrypt=%v",
+		ra.fileID, dataID, fileObj.Name, initialChunkSize, largeChunkSize, ra.tempWriter.enableRealtime)
 
 	return ra.tempWriter, nil
 }
@@ -581,19 +674,27 @@ func (tw *TempFileWriter) Write(offset int64, data []byte) error {
 
 	currentOffset := offset
 	dataPos := 0
-	var completedChunks []int // Track completed chunks to flush after releasing locks
+	// Optimization: pre-allocate completedChunks slice to reduce allocations
+	// Estimate: typically 1-2 chunks per write operation
+	completedChunks := make([]int, 0, 2) // Track completed chunks to flush after releasing locks
 
 	// Process data across chunks
+	// Note: chunk size may be upgraded during write, so we need to handle mixed chunk sizes
 	for currentOffset < writeEnd {
-		// Calculate sn directly from offset: sn = offset / chunkSize
-		sn := int(currentOffset / tw.chunkSize)
-		chunkStart := int64(sn) * tw.chunkSize
+		// Get current chunk size (may have been upgraded)
+		currentChunkSize := tw.chunkSize
+
+		// Calculate sn: need to account for mixed chunk sizes
+		// For simplicity, calculate sn based on current chunk size
+		// If file was upgraded mid-write, we may have chunks with different sizes
+		sn := int(currentOffset / currentChunkSize)
+		chunkStart := int64(sn) * currentChunkSize
 		writeStartInChunk := currentOffset - chunkStart
 
 		// Calculate how much data to write in this chunk
 		writeEndInChunk := writeEnd - chunkStart
-		if writeEndInChunk > tw.chunkSize {
-			writeEndInChunk = tw.chunkSize
+		if writeEndInChunk > currentChunkSize {
+			writeEndInChunk = currentChunkSize
 		}
 		writeSize := writeEndInChunk - writeStartInChunk
 
@@ -606,9 +707,20 @@ func (tw *TempFileWriter) Write(offset int64, data []byte) error {
 		if !exists {
 			// Chunk buffer doesn't exist in memory, check if it exists on disk
 			// If it does, read it first to preserve existing data
-			buf = &chunkBuffer{
-				data:          make([]byte, tw.chunkSize), // Pre-allocate full chunk size
-				offsetInChunk: 0,
+			// Use current chunk size (may have been upgraded)
+			// Optimization: use object pool for chunk buffers to reduce allocations
+			pooledBuf := chunkBufferPool.Get().(*chunkBuffer)
+			if cap(pooledBuf.data) >= int(currentChunkSize) {
+				pooledBuf.data = pooledBuf.data[:currentChunkSize]
+				pooledBuf.offsetInChunk = 0
+				buf = pooledBuf
+			} else {
+				// Pool buffer too small, allocate new and return pool buffer
+				buf = &chunkBuffer{
+					data:          make([]byte, currentChunkSize),
+					offsetInChunk: 0,
+				}
+				chunkBufferPool.Put(pooledBuf) // Return to pool
 			}
 
 			// Try to read existing chunk from disk if it exists
@@ -618,18 +730,19 @@ func (tw *TempFileWriter) Write(offset int64, data []byte) error {
 				// Decompress/decrypt using the current TempFileWriter configuration
 				processedChunk := tw.decodeChunkData(existingChunkData)
 
-				copy(buf.data, processedChunk)
-				if len(processedChunk) < int(tw.chunkSize) {
-					buf.offsetInChunk = int64(len(processedChunk))
-				} else {
-					buf.offsetInChunk = tw.chunkSize
+				// Optimization: only copy what we need, avoid full chunk copy if processedChunk is smaller
+				copyLen := len(processedChunk)
+				if copyLen > int(currentChunkSize) {
+					copyLen = int(currentChunkSize)
 				}
+				copy(buf.data[:copyLen], processedChunk)
+				buf.offsetInChunk = int64(copyLen)
 
 				DebugLog("[VFS TempFileWriter Write] Loaded existing chunk from disk: fileID=%d, dataID=%d, sn=%d, size=%d", tw.fileID, tw.dataID, sn, len(processedChunk))
 			}
 
 			tw.chunks[sn] = buf
-			DebugLog("[VFS TempFileWriter Write] Created new chunk buffer: fileID=%d, dataID=%d, sn=%d, chunkSize=%d, loadedFromDisk=%v", tw.fileID, tw.dataID, sn, tw.chunkSize, readErr == nil && len(existingChunkData) > 0)
+			DebugLog("[VFS TempFileWriter Write] Created new chunk buffer: fileID=%d, dataID=%d, sn=%d, chunkSize=%d, loadedFromDisk=%v", tw.fileID, tw.dataID, sn, currentChunkSize, readErr == nil && len(existingChunkData) > 0)
 		}
 		tw.mu.Unlock()
 
@@ -649,15 +762,23 @@ func (tw *TempFileWriter) Write(offset int64, data []byte) error {
 
 		bufferProgress := buf.offsetInChunk
 
-		// Check if chunk is full
-		chunkComplete := buf.offsetInChunk >= tw.chunkSize
+		// Check if chunk is full (use current chunk size)
+		chunkComplete := buf.offsetInChunk >= currentChunkSize
 		buf.mu.Unlock()
 
 		DebugLog("[VFS TempFileWriter Write] Chunk complete: fileID=%d, dataID=%d, sn=%d, chunkSize=%d, bufferProgress=%d, remaining=%d",
-			tw.fileID, tw.dataID, sn, tw.chunkSize, buf.offsetInChunk, tw.chunkSize-buf.offsetInChunk)
+			tw.fileID, tw.dataID, sn, currentChunkSize, buf.offsetInChunk, currentChunkSize-buf.offsetInChunk)
+
+		// Check for errors from previous async writes before processing this chunk
+		// This ensures we detect async write failures early
+		if err := tw.checkPreviousAsyncWriteError(sn); err != nil {
+			DebugLog("[VFS TempFileWriter Write] ERROR: Previous async write failed: fileID=%d, dataID=%d, sn=%d, error=%v", tw.fileID, tw.dataID, sn, err)
+			return err
+		}
 
 		if chunkComplete {
-			// Chunk is full, flush it (compress/encrypt if enabled, then write)
+			// Chunk is full, flush it immediately
+			// First and last chunks are synchronous, middle chunks are asynchronous
 			DebugLog("[VFS TempFileWriter Write] Chunk full, flushing: fileID=%d, dataID=%d, sn=%d, bufferSize=%d/%d",
 				tw.fileID, tw.dataID, sn, bufferProgress, tw.chunkSize)
 			if err := tw.flushChunk(sn); err != nil {
@@ -669,8 +790,10 @@ func (tw *TempFileWriter) Write(offset int64, data []byte) error {
 			DebugLog("[VFS TempFileWriter Write] Chunk flushed successfully: fileID=%d, dataID=%d, sn=%d, chunkSize=%d, currentFileSize=%d",
 				tw.fileID, tw.dataID, sn, bufferProgress, currentFileSize)
 		} else {
+			// Chunk not full yet, just buffer the data
+			// Will be flushed when chunk is full or during final Flush()
 			DebugLog("[VFS TempFileWriter Write] Data buffered in chunk: fileID=%d, dataID=%d, sn=%d, bufferSize=%d/%d, remaining=%d",
-				tw.fileID, tw.dataID, sn, bufferProgress, tw.chunkSize, tw.chunkSize-bufferProgress)
+				tw.fileID, tw.dataID, sn, bufferProgress, currentChunkSize, currentChunkSize-bufferProgress)
 		}
 
 		// Update tracking
@@ -682,7 +805,15 @@ func (tw *TempFileWriter) Write(offset int64, data []byte) error {
 	if len(completedChunks) > 0 {
 		tw.mu.Lock()
 		for _, sn := range completedChunks {
-			delete(tw.chunks, sn)
+			if buf, ok := tw.chunks[sn]; ok {
+				// Return chunk buffer to pool before deleting
+				if cap(buf.data) <= 10<<20 {
+					buf.data = buf.data[:0] // Reset length, keep capacity
+					buf.offsetInChunk = 0
+					chunkBufferPool.Put(buf)
+				}
+				delete(tw.chunks, sn)
+			}
 		}
 		tw.mu.Unlock()
 	}
@@ -703,9 +834,55 @@ func (tw *TempFileWriter) Write(offset int64, data []byte) error {
 	return nil
 }
 
+// checkPreviousAsyncWriteError checks if the previous async write (sn-1) has an error
+// This is called before starting a new chunk write to report errors early
+// Optimized: only check for errors, don't block waiting for completion
+func (tw *TempFileWriter) checkPreviousAsyncWriteError(currentSN int) error {
+	if currentSN <= 0 {
+		return nil // No previous chunk to check
+	}
+
+	prevSN := currentSN - 1
+
+	// First check if there's a stored error (fast path)
+	if errVal, ok := tw.writeErrors.Load(prevSN); ok {
+		err := errVal.(error)
+		tw.writeErrors.Delete(prevSN)
+		return fmt.Errorf("previous async write error for chunk %d: %w", prevSN, err)
+	}
+
+	// Check if there's a pending write for previous chunk
+	if pwVal, ok := tw.pendingWrites.Load(prevSN); ok {
+		pw := pwVal.(*pendingWrite)
+
+		// Non-blocking check: only check if write is already done
+		select {
+		case <-pw.done:
+			// Async write completed, check error
+			pw.mu.Lock()
+			err := pw.err
+			pw.mu.Unlock()
+			if err != nil {
+				// Remove from pending writes and store error
+				tw.pendingWrites.Delete(prevSN)
+				tw.writeErrors.Store(prevSN, err)
+				return fmt.Errorf("async write failed for chunk %d: %w", prevSN, err)
+			}
+			// Success, remove from pending
+			tw.pendingWrites.Delete(prevSN)
+		default:
+			// Write still in progress, don't block - error will be checked later
+			// This allows writes to continue in parallel without blocking
+		}
+	}
+
+	return nil
+}
+
 // flushChunk processes and writes a complete chunk
 // If real-time compression/encryption is enabled, processes the chunk before writing
 // Otherwise, writes raw data directly (for offline processing)
+// Semi-synchronous: first and last chunks are synchronous, middle chunks are asynchronous
 func (tw *TempFileWriter) flushChunk(sn int) error {
 	tw.mu.Lock()
 	buf, exists := tw.chunks[sn]
@@ -745,6 +922,7 @@ func (tw *TempFileWriter) flushChunk(sn int) error {
 			if kind != filetype.Unknown {
 				// Not unknown type, don't compress
 				tw.dataInfo.Kind &= ^core.DATA_CMPR_MASK
+				DebugLog("[VFS TempFileWriter flushChunk] Not unknown type, don't compress: fileID=%d, dataID=%d, sn=%d, Kind=0x%x", tw.fileID, tw.dataID, sn, tw.dataInfo.Kind)
 			}
 		}
 
@@ -817,56 +995,223 @@ func (tw *TempFileWriter) flushChunk(sn int) error {
 			tw.fileID, tw.dataID, sn, len(finalData))
 	}
 
+	// Determine if this is first chunk, last chunk, or middle chunk
+	// For semi-synchronous writes: first and last chunks are synchronous, middle chunks are asynchronous
+	isFirstChunk := sn == 0
+	isLastChunk := false // Will be determined during Flush() or when we know it's the last chunk
+
+	// Check if this might be the last chunk (if size suggests it)
+	currentSize := tw.size.Load()
+	currentChunkSize := tw.chunkSize
+	nextChunkStart := int64(sn+1) * currentChunkSize
+	isLastChunk = nextChunkStart >= currentSize
+
+	// Semi-synchronous write strategy:
+	// - First chunk (sn=0): always synchronous
+	// - Last chunk: synchronous (determined during Flush or when next chunk doesn't exist)
+	// - Middle chunks: asynchronous
+	shouldSync := isFirstChunk || isLastChunk
+
 	// Write data block
 	// If chunk already exists (e.g., when writing to same chunk multiple times in reverse order),
 	// we need to delete it first before writing
-	DebugLog("[VFS TempFileWriter flushChunk] Writing chunk to disk: fileID=%d, dataID=%d, sn=%d, size=%d, realtime=%v",
-		tw.fileID, tw.dataID, sn, len(finalData), tw.enableRealtime)
-	_, err = tw.fs.h.PutData(tw.fs.c, tw.fs.bktID, tw.dataID, sn, finalData)
-	if err != nil {
-		// If error is due to file already existing (ERR_OPEN_FILE), delete it and retry
-		if err == core.ERR_OPEN_FILE {
-			// Delete existing chunk file before retrying using DataAdapter.Delete
-			if lh, ok := tw.fs.h.(*core.LocalHandler); ok {
-				// Use DataAdapter.Delete method
-				da := lh.GetDataAdapter()
-				if deleteErr := da.Delete(tw.fs.c, tw.fs.bktID, tw.dataID, sn); deleteErr != nil {
-					DebugLog("[VFS TempFileWriter flushChunk] WARNING: Failed to delete existing chunk file: fileID=%d, dataID=%d, sn=%d, error=%v",
-						tw.fileID, tw.dataID, sn, deleteErr)
-					// Continue anyway, PutData might still work if file was deleted
+	DebugLog("[VFS TempFileWriter flushChunk] Writing chunk to disk: fileID=%d, dataID=%d, sn=%d, size=%d, realtime=%v, sync=%v, isFirst=%v, isLast=%v",
+		tw.fileID, tw.dataID, sn, len(finalData), tw.enableRealtime, shouldSync, isFirstChunk, isLastChunk)
+
+	if shouldSync {
+		// Synchronous write for first and last chunks
+		_, err = tw.fs.h.PutData(tw.fs.c, tw.fs.bktID, tw.dataID, sn, finalData)
+		if err != nil {
+			// If error is due to file already existing (ERR_OPEN_FILE), delete it and retry
+			if err == core.ERR_OPEN_FILE {
+				// Delete existing chunk file before retrying using DataAdapter.Delete
+				if lh, ok := tw.fs.h.(*core.LocalHandler); ok {
+					// Use DataAdapter.Delete method
+					da := lh.GetDataAdapter()
+					if deleteErr := da.Delete(tw.fs.c, tw.fs.bktID, tw.dataID, sn); deleteErr != nil {
+						DebugLog("[VFS TempFileWriter flushChunk] WARNING: Failed to delete existing chunk file: fileID=%d, dataID=%d, sn=%d, error=%v",
+							tw.fileID, tw.dataID, sn, deleteErr)
+						// Continue anyway, PutData might still work if file was deleted
+					} else {
+						DebugLog("[VFS TempFileWriter flushChunk] Deleted existing chunk file before rewrite: fileID=%d, dataID=%d, sn=%d",
+							tw.fileID, tw.dataID, sn)
+					}
 				} else {
-					DebugLog("[VFS TempFileWriter flushChunk] Deleted existing chunk file before rewrite: fileID=%d, dataID=%d, sn=%d",
-						tw.fileID, tw.dataID, sn)
+					// Fallback to direct file removal if not LocalHandler
+					fileName := fmt.Sprintf("%d_%d", tw.dataID, sn)
+					hash := fmt.Sprintf("%X", md5.Sum([]byte(fileName)))
+					chunkPath := filepath.Join(core.ORCAS_DATA, fmt.Sprint(tw.fs.bktID), hash[21:24], hash[8:24], fileName)
+					if removeErr := os.Remove(chunkPath); removeErr != nil && !os.IsNotExist(removeErr) {
+						DebugLog("[VFS TempFileWriter flushChunk] WARNING: Failed to remove existing chunk file: fileID=%d, dataID=%d, sn=%d, path=%s, error=%v",
+							tw.fileID, tw.dataID, sn, chunkPath, removeErr)
+					} else {
+						DebugLog("[VFS TempFileWriter flushChunk] Removed existing chunk file before rewrite: fileID=%d, dataID=%d, sn=%d, path=%s",
+							tw.fileID, tw.dataID, sn, chunkPath)
+					}
+				}
+
+				// Retry PutData after removing existing file
+				_, err = tw.fs.h.PutData(tw.fs.c, tw.fs.bktID, tw.dataID, sn, finalData)
+				if err != nil {
+					DebugLog("[VFS TempFileWriter flushChunk] ERROR: Failed to put data after removing existing file: fileID=%d, dataID=%d, sn=%d, error=%v", tw.fileID, tw.dataID, sn, err)
+					return err
 				}
 			} else {
-				// Fallback to direct file removal if not LocalHandler
-				fileName := fmt.Sprintf("%d_%d", tw.dataID, sn)
-				hash := fmt.Sprintf("%X", md5.Sum([]byte(fileName)))
-				chunkPath := filepath.Join(core.ORCAS_DATA, fmt.Sprint(tw.fs.bktID), hash[21:24], hash[8:24], fileName)
-				if removeErr := os.Remove(chunkPath); removeErr != nil && !os.IsNotExist(removeErr) {
-					DebugLog("[VFS TempFileWriter flushChunk] WARNING: Failed to remove existing chunk file: fileID=%d, dataID=%d, sn=%d, path=%s, error=%v",
-						tw.fileID, tw.dataID, sn, chunkPath, removeErr)
+				DebugLog("[VFS TempFileWriter flushChunk] ERROR: Failed to put data: fileID=%d, dataID=%d, sn=%d, error=%v", tw.fileID, tw.dataID, sn, err)
+				return err
+			}
+		}
+	} else {
+		// Asynchronous write for middle chunks
+		// Optimize memory allocation: use object pool for async write buffers
+		dataLen := len(finalData)
+		var asyncData []byte
+
+		// Get buffer from pool if size is reasonable, otherwise allocate new
+		if dataLen <= 10<<20 { // 10MB threshold
+			pooledData := asyncWriteDataPool.Get().([]byte)
+			if cap(pooledData) >= dataLen {
+				asyncData = pooledData[:dataLen]
+			} else {
+				// Pool buffer too small, allocate new and return pool buffer
+				asyncData = make([]byte, dataLen)
+				asyncWriteDataPool.Put(pooledData[:0])
+			}
+		} else {
+			// Very large chunk, allocate directly
+			asyncData = make([]byte, dataLen)
+		}
+
+		// Copy data (necessary for async write safety)
+		copy(asyncData, finalData)
+
+		// Create pending write
+		pw := &pendingWrite{
+			sn:   sn,
+			data: asyncData,
+			done: make(chan struct{}),
+		}
+		tw.pendingWrites.Store(sn, pw)
+
+		// Start async write in goroutine with worker pool limit
+		go func() {
+			defer close(pw.done)
+
+			// Acquire worker slot (limit concurrent async writes)
+			asyncWriteWorkers <- struct{}{}
+			defer func() { <-asyncWriteWorkers }()
+
+			// Perform the actual write
+			_, writeErr := tw.fs.h.PutData(tw.fs.c, tw.fs.bktID, tw.dataID, sn, asyncData)
+
+			// Handle errors (same logic as sync path)
+			if writeErr == core.ERR_OPEN_FILE {
+				// Delete existing chunk file before retrying
+				if lh, ok := tw.fs.h.(*core.LocalHandler); ok {
+					da := lh.GetDataAdapter()
+					if deleteErr := da.Delete(tw.fs.c, tw.fs.bktID, tw.dataID, sn); deleteErr == nil {
+						// Retry after deletion
+						_, writeErr = tw.fs.h.PutData(tw.fs.c, tw.fs.bktID, tw.dataID, sn, asyncData)
+					}
 				} else {
-					DebugLog("[VFS TempFileWriter flushChunk] Removed existing chunk file before rewrite: fileID=%d, dataID=%d, sn=%d, path=%s",
-						tw.fileID, tw.dataID, sn, chunkPath)
+					// Fallback to direct file removal if not LocalHandler
+					fileName := fmt.Sprintf("%d_%d", tw.dataID, sn)
+					hash := fmt.Sprintf("%X", md5.Sum([]byte(fileName)))
+					chunkPath := filepath.Join(core.ORCAS_DATA, fmt.Sprint(tw.fs.bktID), hash[21:24], hash[8:24], fileName)
+					if removeErr := os.Remove(chunkPath); removeErr == nil || os.IsNotExist(removeErr) {
+						// Retry after removal
+						_, writeErr = tw.fs.h.PutData(tw.fs.c, tw.fs.bktID, tw.dataID, sn, asyncData)
+					}
 				}
 			}
 
-			// Retry PutData after removing existing file
-			_, err = tw.fs.h.PutData(tw.fs.c, tw.fs.bktID, tw.dataID, sn, finalData)
-			if err != nil {
-				DebugLog("[VFS TempFileWriter flushChunk] ERROR: Failed to put data after removing existing file: fileID=%d, dataID=%d, sn=%d, error=%v", tw.fileID, tw.dataID, sn, err)
-				return err
+			// Store error if any
+			pw.mu.Lock()
+			pw.err = writeErr
+			pw.mu.Unlock()
+
+			if writeErr != nil {
+				tw.writeErrors.Store(sn, writeErr)
+				DebugLog("[VFS TempFileWriter flushChunk] ERROR: Async write failed: fileID=%d, dataID=%d, sn=%d, error=%v", tw.fileID, tw.dataID, sn, writeErr)
+			} else {
+				DebugLog("[VFS TempFileWriter flushChunk] Successfully wrote chunk asynchronously: fileID=%d, dataID=%d, sn=%d, size=%d", tw.fileID, tw.dataID, sn, len(asyncData))
 			}
-		} else {
-			DebugLog("[VFS TempFileWriter flushChunk] ERROR: Failed to put data: fileID=%d, dataID=%d, sn=%d, error=%v", tw.fileID, tw.dataID, sn, err)
-			return err
-		}
+
+			// Return buffer to pool after use
+			if cap(asyncData) <= 10<<20 {
+				asyncWriteDataPool.Put(asyncData[:0])
+			}
+		}()
+
+		// For async writes, we don't wait, just return success
+		// Error will be checked in next chunk write
+		DebugLog("[VFS TempFileWriter flushChunk] Started async write: fileID=%d, dataID=%d, sn=%d, size=%d", tw.fileID, tw.dataID, sn, len(asyncData))
+		return nil
 	}
 
 	DebugLog("[VFS TempFileWriter flushChunk] Successfully wrote chunk to disk: fileID=%d, dataID=%d, sn=%d, size=%d, totalOrigSize=%d, totalSize=%d",
 		tw.fileID, tw.dataID, sn, len(finalData), tw.dataInfo.OrigSize, tw.dataInfo.Size)
 	return nil
+}
+
+// waitForAllAsyncWrites waits for all pending async writes to complete
+// Optimized: dynamic timeout based on number of pending writes
+func (tw *TempFileWriter) waitForAllAsyncWrites() {
+	// Count pending writes to calculate appropriate timeout
+	pendingCount := 0
+	tw.pendingWrites.Range(func(key, value interface{}) bool {
+		pendingCount++
+		return true
+	})
+
+	if pendingCount == 0 {
+		return // No pending writes
+	}
+
+	// Dynamic timeout: 2 seconds per pending write, max 60 seconds
+	timeout := time.Duration(pendingCount) * 2 * time.Second
+	if timeout > 60*time.Second {
+		timeout = 60 * time.Second
+	}
+
+	// Wait for all writes with dynamic timeout
+	done := make(chan struct{})
+	completedSNs := make([]int, 0, pendingCount) // Pre-allocate for cleanup
+	go func() {
+		tw.pendingWrites.Range(func(key, value interface{}) bool {
+			sn := key.(int)
+			pw := value.(*pendingWrite)
+			<-pw.done // Wait for completion
+
+			pw.mu.Lock()
+			err := pw.err
+			pw.mu.Unlock()
+			if err != nil {
+				tw.writeErrors.Store(sn, err)
+				DebugLog("[VFS TempFileWriter waitForAllAsyncWrites] Async write error: fileID=%d, dataID=%d, sn=%d, error=%v", tw.fileID, tw.dataID, sn, err)
+			}
+			completedSNs = append(completedSNs, sn) // Track for cleanup
+			return true
+		})
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		// All writes completed - clean up pending writes
+		for _, sn := range completedSNs {
+			tw.pendingWrites.Delete(sn)
+		}
+	case <-time.After(timeout):
+		// Timeout - mark remaining writes as timed out and clean up
+		tw.pendingWrites.Range(func(key, value interface{}) bool {
+			sn := key.(int)
+			tw.writeErrors.Store(sn, fmt.Errorf("timeout waiting for async write"))
+			tw.pendingWrites.Delete(sn) // Clean up on timeout
+			DebugLog("[VFS TempFileWriter waitForAllAsyncWrites] Timeout waiting for async write: fileID=%d, dataID=%d, sn=%d", tw.fileID, tw.dataID, sn)
+			return true
+		})
+	}
 }
 
 // decodeChunkData decodes chunk data using TempFileWriter's compression/encryption configuration
@@ -976,8 +1321,13 @@ func (tw *TempFileWriter) Flush() error {
 	obj := fileObj[0]
 
 	// Flush all remaining incomplete chunks
+	// Optimization: use object pool for remainingChunks slice
 	tw.mu.Lock()
-	remainingChunks := make([]int, 0, len(tw.chunks))
+	remainingChunks := intSlicePool.Get().([]int)
+	remainingChunks = remainingChunks[:0] // Reset length, keep capacity
+	if cap(remainingChunks) < len(tw.chunks) {
+		remainingChunks = make([]int, 0, len(tw.chunks))
+	}
 	for sn := range tw.chunks {
 		remainingChunks = append(remainingChunks, sn)
 	}
@@ -988,8 +1338,62 @@ func (tw *TempFileWriter) Flush() error {
 			len(remainingChunks), tw.fileID, tw.dataID, remainingChunks)
 	}
 
+	// Sort chunks to ensure we process them in order
+	// This ensures the last chunk is identified correctly
+	sort.Ints(remainingChunks)
+
+	// Wait for all pending async writes to complete before flushing remaining chunks
+	tw.waitForAllAsyncWrites()
+
+	// Check for any async write errors
+	var asyncWriteErr error
+	tw.writeErrors.Range(func(key, value interface{}) bool {
+		sn := key.(int)
+		err := value.(error)
+		asyncWriteErr = fmt.Errorf("async write error for chunk %d: %w", sn, err)
+		return false // Stop iteration on first error
+	})
+	if asyncWriteErr != nil {
+		return asyncWriteErr
+	}
+
+	// Find the last chunk (highest sn)
+	var lastChunkSN int = -1
+	if len(remainingChunks) > 0 {
+		lastChunkSN = remainingChunks[len(remainingChunks)-1]
+		tw.lastChunkSN.Store(int64(lastChunkSN))
+	}
+
 	for _, sn := range remainingChunks {
+		// Mark as last chunk if it's the highest sn
+		isLastChunk := sn == lastChunkSN
+
+		// Force synchronous write for last chunk
+		if isLastChunk {
+			// Check if there's a pending async write for this chunk
+			if pwVal, ok := tw.pendingWrites.Load(sn); ok {
+				pw := pwVal.(*pendingWrite)
+				// Wait for it to complete
+				<-pw.done
+				pw.mu.Lock()
+				err := pw.err
+				pw.mu.Unlock()
+				if err != nil {
+					tw.pendingWrites.Delete(sn)
+					return fmt.Errorf("async write failed for last chunk %d: %w", sn, err)
+				}
+				tw.pendingWrites.Delete(sn)
+				// Chunk already written asynchronously, just remove from chunks map
+				tw.mu.Lock()
+				delete(tw.chunks, sn)
+				tw.mu.Unlock()
+				continue
+			}
+		}
+
 		if err := tw.flushChunk(sn); err != nil {
+			// Return remainingChunks slice to pool on error
+			intSlicePool.Put(remainingChunks[:0])
 			DebugLog("[VFS TempFileWriter Flush] ERROR: Failed to flush remaining chunk: fileID=%d, dataID=%d, sn=%d, error=%v", tw.fileID, tw.dataID, sn, err)
 			return err
 		}
@@ -997,6 +1401,9 @@ func (tw *TempFileWriter) Flush() error {
 		delete(tw.chunks, sn)
 		tw.mu.Unlock()
 	}
+
+	// Return remainingChunks slice to pool after use
+	intSlicePool.Put(remainingChunks[:0])
 
 	// Use the DataInfo we've been tracking (with compression/encryption flags and sizes)
 	dataInfo := tw.dataInfo
@@ -1039,9 +1446,28 @@ func (tw *TempFileWriter) Flush() error {
 		return err
 	}
 
+	// Re-fetch file object from database to ensure we have the latest information
+	// This is important for directory cache updates
+	updatedFileObjs, err := tw.fs.h.Get(tw.fs.c, tw.fs.bktID, []int64{tw.fileID})
+	if err == nil && len(updatedFileObjs) > 0 {
+		obj = updatedFileObjs[0]
+		DebugLog("[VFS TempFileWriter Flush] Re-fetched file object from database: fileID=%d, dataID=%d, size=%d, pid=%d", tw.fileID, obj.DataID, obj.Size, obj.PID)
+	}
+
 	// Update cache
 	fileObjCache.Put(formatCacheKey(tw.fileID), obj)
 	dataInfoCache.Put(formatCacheKey(tw.dataID), dataInfo)
+
+	// After sync flush, append file to directory listing cache
+	// This ensures the file is immediately visible in Readdir
+	if obj.PID > 0 {
+		dirNode := &OrcasNode{
+			fs:    tw.fs,
+			objID: obj.PID,
+		}
+		dirNode.appendChildToDirCache(obj.PID, obj)
+		DebugLog("[VFS TempFileWriter Flush] Appended file to directory listing cache after sync flush: fileID=%d, dirID=%d, name=%s", tw.fileID, obj.PID, obj.Name)
+	}
 
 	// Update RandomAccessor's fileObj cache if available
 	// This ensures that subsequent reads use the updated file size
@@ -1064,6 +1490,73 @@ func (tw *TempFileWriter) Flush() error {
 	//	DebugLog("[VFS TempFileWriter Flush] WARNING: Write verification failed: fileID=%d, dataID=%d, error=%v", tw.fileID, tw.dataID, err)
 	// Don't return error - verification failure doesn't mean write failed
 	//}
+
+	// Auto-remove .tmp suffix after flush completes
+	// This ensures .tmp files are automatically renamed after writing completes
+	if strings.HasSuffix(strings.ToLower(obj.Name), ".tmp") {
+		// Remove .tmp suffix
+		newName := strings.TrimSuffix(obj.Name, ".tmp")
+		if newName != obj.Name {
+			DebugLog("[VFS TempFileWriter Flush] Auto-removing .tmp suffix after flush: fileID=%d, oldName=%s, newName=%s", tw.fileID, obj.Name, newName)
+
+			// Check if a .tmp file with the same name already exists (different fileID)
+			// This can happen when uploading a new file with the same .tmp name
+			// We need to delete the old .tmp file before renaming
+			if obj.PID > 0 {
+				// Get directory listing to find existing .tmp file
+				children, _, _, err := tw.fs.h.List(tw.fs.c, tw.fs.bktID, obj.PID, core.ListOptions{
+					Count: core.DefaultListPageSize,
+				})
+				if err == nil {
+					for _, child := range children {
+						// Check if there's another .tmp file with the same name (different fileID)
+						if child.ID != tw.fileID && child.Name == obj.Name && child.Type == core.OBJ_TYPE_FILE {
+							DebugLog("[VFS TempFileWriter Flush] Found existing .tmp file with same name, deleting it: fileID=%d, name=%s", child.ID, child.Name)
+							// Delete the old .tmp file
+							deleteErr := tw.fs.h.Delete(tw.fs.c, tw.fs.bktID, child.ID)
+							if deleteErr != nil {
+								DebugLog("[VFS TempFileWriter Flush] WARNING: Failed to delete existing .tmp file: fileID=%d, name=%s, error=%v", child.ID, child.Name, deleteErr)
+							} else {
+								DebugLog("[VFS TempFileWriter Flush] Successfully deleted existing .tmp file: fileID=%d, name=%s", child.ID, child.Name)
+								// Remove from cache
+								fileObjCache.Del(formatCacheKey(child.ID))
+								// Remove from directory cache
+								dirNode := &OrcasNode{
+									fs:    tw.fs,
+									objID: obj.PID,
+								}
+								dirNode.removeChildFromDirCache(obj.PID, child.ID)
+							}
+							break
+						}
+					}
+				}
+			}
+
+			// Use handler's Rename method to rename the file
+			renameErr := tw.fs.h.Rename(tw.fs.c, tw.fs.bktID, tw.fileID, newName)
+			if renameErr != nil {
+				DebugLog("[VFS TempFileWriter Flush] WARNING: Failed to auto-rename .tmp file: fileID=%d, oldName=%s, newName=%s, error=%v", tw.fileID, obj.Name, newName, renameErr)
+				// Don't return error - rename failure doesn't mean flush failed
+			} else {
+				DebugLog("[VFS TempFileWriter Flush] Successfully auto-renamed .tmp file: fileID=%d, oldName=%s, newName=%s", tw.fileID, obj.Name, newName)
+				// Update cache with new name
+				updatedFileObjs, err := tw.fs.h.Get(tw.fs.c, tw.fs.bktID, []int64{tw.fileID})
+				if err == nil && len(updatedFileObjs) > 0 {
+					updatedObj := updatedFileObjs[0]
+					fileObjCache.Put(formatCacheKey(tw.fileID), updatedObj)
+					// Update directory cache
+					if updatedObj.PID > 0 {
+						dirNode := &OrcasNode{
+							fs:    tw.fs,
+							objID: updatedObj.PID,
+						}
+						dirNode.updateChildInDirCache(updatedObj.PID, updatedObj)
+					}
+				}
+			}
+		}
+	}
 
 	return nil
 }
@@ -1095,6 +1588,13 @@ func NewRandomAccessor(fs *OrcasFS, fileID int64) (*RandomAccessor, error) {
 			enabled:          false,
 		},
 	}
+
+	// Register RandomAccessor globally for cross-node lookup and directory listing
+	// This ensures files are visible in directory listings even before flush
+	if fs != nil {
+		fs.registerRandomAccessor(fileID, ra)
+	}
+
 	return ra, nil
 }
 
@@ -1107,33 +1607,38 @@ func (ra *RandomAccessor) MarkSparseFile(size int64) {
 // Write adds write operation to buffer
 // Optimization: sequential write optimization - if sequential write starting from 0, directly write to data block, avoid caching
 // Optimization: for sparse files (pre-allocated), use more aggressive delayed flush to reduce frequent flushes
-// For .tmp files, uses simple TempFileWriter that directly calls PutData
-// Exception: Small .tmp files should use batch write for better performance
+// For .tmp files, we don't know the final file size until rename (removing .tmp extension),
+// so we can't decide whether to use batch write during Write(). Use random write mode first,
+// and the decision will be made during Flush() based on final file size.
 func (ra *RandomAccessor) Write(offset int64, data []byte) error {
-	// Check if this is a .tmp file
-	fileObj, err := ra.getFileObj()
-	if err == nil && isTempFile(fileObj) {
-		// For small .tmp files, use batch write instead of TempFileWriter
-		// This allows multiple small files to be packaged together
-		config := core.GetWriteBufferConfig()
-		isSmallFile := int64(len(data)) < 1<<20 // 1MB threshold
-		shouldUseBatchWrite := isSmallFile && config.BatchWriteEnabled &&
-			offset == 0 && (fileObj.DataID == 0 || fileObj.DataID == core.EmptyDataID)
-
-		if shouldUseBatchWrite {
-			// Small .tmp file, use batch write instead of TempFileWriter
-			// Don't use TempFileWriter, let it fall through to random write mode
-			// which will handle batch write in flushInternal
-			DebugLog("[VFS RandomAccessor Write] Small .tmp file detected, will use batch write: fileID=%d, size=%d", ra.fileID, len(data))
-		} else {
-			// Large .tmp file, use TempFileWriter
-			tw, err := ra.getOrCreateTempWriter()
-			if err != nil {
-				DebugLog("[VFS RandomAccessor Write] ERROR: Failed to get TempFileWriter: fileID=%d, error=%v", ra.fileID, err)
-				return err
-			}
-			return tw.Write(offset, data)
+	// Optimization: cache fileObj to avoid repeated getFileObj calls
+	// Check local atomic value first (fast path)
+	var fileObj *core.ObjectInfo
+	fileObjValue := ra.fileObj.Load()
+	if fileObjValue != nil {
+		if obj, ok := fileObjValue.(*core.ObjectInfo); ok && obj != nil {
+			fileObj = obj
 		}
+	}
+
+	// If not in local cache, get from cache or database (only if needed)
+	var err error
+	if fileObj == nil {
+		fileObj, err = ra.getFileObj()
+		if err != nil {
+			return err
+		}
+	}
+
+	// Check if this is a .tmp file
+	isTmpFile := isTempFile(fileObj)
+	if isTmpFile {
+		// For .tmp files, don't use TempFileWriter immediately
+		// We don't know the final file size until rename, so we can't decide whether to use batch write
+		// Use random write mode first, and the decision will be made during Flush() based on final file size
+		// This allows small .tmp files to use batch write optimization when they are flushed/renamed
+		// DebugLog("[VFS RandomAccessor Write] .tmp file detected, using random write mode (batch write decision will be made during Flush): fileID=%d, offset=%d, size=%d", ra.fileID, offset, len(data))
+		// Fall through to random write mode below
 	}
 
 	// Check if in sequential write mode
@@ -1144,14 +1649,14 @@ func (ra *RandomAccessor) Write(offset int64, data []byte) error {
 			return ra.writeSequential(offset, data)
 		} else if offset < ra.seqBuffer.offset {
 			// Write backwards, switch to random write mode
-			if err := ra.flushSequentialBuffer(); err != nil {
-				return err
+			if flushErr := ra.flushSequentialBuffer(); flushErr != nil {
+				return flushErr
 			}
 			ra.seqBuffer.closed = true
 		} else {
 			// Skipped some positions, switch to random write mode
-			if err := ra.flushSequentialBuffer(); err != nil {
-				return err
+			if flushErr := ra.flushSequentialBuffer(); flushErr != nil {
+				return flushErr
 			}
 			ra.seqBuffer.closed = true
 		}
@@ -1160,9 +1665,9 @@ func (ra *RandomAccessor) Write(offset int64, data []byte) error {
 	// Initialize sequential write buffer
 	// For small files, check if batch write should be used instead
 	if ra.seqBuffer == nil && len(data) > 0 {
-		fileObj, err := ra.getFileObj()
-		if err == nil {
-			forceSequential := isTempFile(fileObj)
+		// Reuse cached fileObj (already loaded above)
+		if fileObj != nil {
+			forceSequential := isTmpFile
 
 			// Check if this is a small file that should use batch write
 			// Small files (< 1MB) should use batch write for better performance
@@ -1176,7 +1681,7 @@ func (ra *RandomAccessor) Write(offset int64, data []byte) error {
 				// This allows multiple small files to be packaged together
 				// Don't initialize sequential buffer, let it fall through to random write mode
 				// which will handle batch write in flushInternal
-				DebugLog("[VFS RandomAccessor Write] Small file detected, will use batch write: fileID=%d, size=%d", ra.fileID, len(data))
+				// DebugLog("[VFS RandomAccessor Write] Small file detected, will use batch write: fileID=%d, size=%d", ra.fileID, len(data))
 			} else if offset == 0 && (fileObj.DataID == 0 || fileObj.DataID == core.EmptyDataID) {
 				// File has no data, can initialize sequential write buffer
 				if initErr := ra.initSequentialBuffer(forceSequential); initErr == nil {
@@ -1212,24 +1717,44 @@ func (ra *RandomAccessor) Write(offset int64, data []byte) error {
 		}
 	} else {
 		// First write, check if it starts from file end (append mode)
-		fileObj, err := ra.getFileObj()
-		if err == nil && offset == fileObj.Size {
+		// Reuse cached fileObj (already loaded above)
+		if fileObj == nil {
+			fileObj, err = ra.getFileObj()
+			if err != nil {
+				return err
+			}
+		}
+		if offset == fileObj.Size {
 			isSequentialWrite = true
 		}
 	}
 
-	// For sparse files (pre-allocated), use larger buffer threshold to reduce flush frequency
+	// Aggressive optimization: for sparse files (pre-allocated), use larger buffer threshold to reduce flush frequency
 	// This is critical for qBittorrent random write performance
+	// For small files, use larger buffer to allow more batching (balanced approach)
 	sparseSize := ra.sparseSize.Load()
 	isSparseFile := sparseSize > 0
 	maxBufferSize := config.MaxBufferSize
+
+	// Check if this is a small file (likely to use batch write)
+	// Balanced aggressive: use larger buffer for small files to allow more operations before flush
+	isSmallFile := fileObj != nil && fileObj.Size > 0 && fileObj.Size < 1536<<10 // 1.5MB threshold
+
 	if isSparseFile {
 		// For sparse files, allow larger buffer (2x) to reduce flush frequency
 		// This significantly improves performance for random writes
 		maxBufferSize = config.MaxBufferSize * 2
 	} else if isSequentialWrite {
-		// For sequential writes, use larger buffer (3x) to reduce flush frequency
-		// This is critical for large file uploads and sequential writes
+		// Balanced aggressive: For sequential writes, use larger buffer (4x for small files, 3x for others)
+		// This allows more small files to accumulate before flushing, reducing database operations
+		if isSmallFile {
+			maxBufferSize = config.MaxBufferSize * 4 // Aggressive for small files
+		} else {
+			maxBufferSize = config.MaxBufferSize * 3
+		}
+	} else if isSmallFile {
+		// Balanced aggressive: For small files even in random write mode, use larger buffer (3x)
+		// This allows more operations to accumulate before flush
 		maxBufferSize = config.MaxBufferSize * 3
 	}
 
@@ -1255,19 +1780,34 @@ func (ra *RandomAccessor) Write(offset int64, data []byte) error {
 	atomic.AddInt64(&ra.buffer.totalSize, int64(len(data)))
 
 	// Write new data
+	// Optimization: reuse existing Data slice if capacity is sufficient (reduce allocations for fragmented writes)
 	ra.buffer.operations[writeIndex].Offset = offset
-	ra.buffer.operations[writeIndex].Data = make([]byte, len(data))
-	copy(ra.buffer.operations[writeIndex].Data, data)
+	if cap(ra.buffer.operations[writeIndex].Data) >= len(data) {
+		// Reuse existing slice if capacity is sufficient
+		ra.buffer.operations[writeIndex].Data = ra.buffer.operations[writeIndex].Data[:len(data)]
+		copy(ra.buffer.operations[writeIndex].Data, data)
+	} else {
+		// Allocate new slice only if capacity is insufficient
+		ra.buffer.operations[writeIndex].Data = make([]byte, len(data))
+		copy(ra.buffer.operations[writeIndex].Data, data)
+	}
 
 	// Update last write offset for sequential write detection
 	ra.lastOffset.Store(offset + int64(len(data)))
 
-	// Optimization: for small file writes, use batch write manager
+	// Aggressive optimization: for small file writes, use batch write manager
 	// If data size is small and hasn't reached force flush condition, add to batch write manager
 	// Note: batch write only applies to small files, and needs to ensure data integrity
 	// Here use delayed flush first, batch write logic is handled in Flush
-	// For sequential writes, always use delayed flush to batch more writes
-	if isSequentialWrite || (int64(len(data)) < maxBufferSize/10 && atomic.LoadInt64(&ra.buffer.totalSize) < maxBufferSize) {
+	// Aggressive: reduce delayed flush scheduling frequency to allow more batching
+	// Only schedule if buffer is getting quite full (80%+) or it's a sequential write with significant data (70%+)
+	// This allows more small files to accumulate before flushing, reducing database operations
+	bufferUsage := float64(atomic.LoadInt64(&ra.buffer.totalSize)) / float64(maxBufferSize)
+	if isSequentialWrite && bufferUsage > 0.7 {
+		// Sequential write with significant buffer usage, schedule delayed flush
+		ra.requestDelayedFlush(false)
+	} else if !isSequentialWrite && bufferUsage > 0.85 {
+		// Fragmented write, schedule when buffer is 85% full (more aggressive than before)
 		ra.requestDelayedFlush(false)
 	}
 
@@ -1490,6 +2030,7 @@ func (ra *RandomAccessor) flushSequentialChunk() error {
 		if kind != filetype.Unknown {
 			// Not unknown type, don't compress
 			ra.seqBuffer.dataInfo.Kind &= ^core.DATA_CMPR_MASK
+			DebugLog("[VFS flushSequentialChunk] Not unknown type, don't compress: fileID=%d, dataID=%d, sn=%d, Kind=0x%x", ra.fileID, ra.seqBuffer.dataID, ra.seqBuffer.sn, ra.seqBuffer.dataInfo.Kind)
 		}
 	}
 
@@ -1523,6 +2064,7 @@ func (ra *RandomAccessor) flushSequentialChunk() error {
 				// Compression failed, only remove compression flag on first chunk
 				if isFirstChunk {
 					ra.seqBuffer.dataInfo.Kind &= ^core.DATA_CMPR_MASK
+					DebugLog("[VFS flushSequentialChunk] Compression failed, remove compression flag: fileID=%d, dataID=%d, sn=%d, Kind=0x%x", ra.fileID, ra.seqBuffer.dataID, ra.seqBuffer.sn, ra.seqBuffer.dataInfo.Kind)
 				}
 				processedChunk = chunkData
 			} else {
@@ -1530,6 +2072,7 @@ func (ra *RandomAccessor) flushSequentialChunk() error {
 				if isFirstChunk && cmprBuf.Len() >= len(chunkData) {
 					processedChunk = chunkData
 					ra.seqBuffer.dataInfo.Kind &= ^core.DATA_CMPR_MASK
+					DebugLog("[VFS flushSequentialChunk] Compressed size is larger or equal, remove compression flag: fileID=%d, dataID=%d, sn=%d, Kind=0x%x", ra.fileID, ra.seqBuffer.dataID, ra.seqBuffer.sn, ra.seqBuffer.dataInfo.Kind)
 				} else {
 					processedChunk = cmprBuf.Bytes()
 				}
@@ -1729,6 +2272,17 @@ func (ra *RandomAccessor) flushSequentialBuffer() error {
 	fileObjCache.Put(ra.fileObjKey, fileObj)
 	ra.fileObj.Store(fileObj)
 
+	// After sync flush, append file to directory listing cache
+	// This ensures the file is immediately visible in Readdir
+	if fileObj.PID > 0 {
+		dirNode := &OrcasNode{
+			fs:    ra.fs,
+			objID: fileObj.PID,
+		}
+		dirNode.appendChildToDirCache(fileObj.PID, fileObj)
+		DebugLog("[VFS flushSequentialBuffer] Appended file to directory listing cache after sync flush: fileID=%d, dirID=%d, name=%s", ra.fileID, fileObj.PID, fileObj.Name)
+	}
+
 	DebugLog("[VFS flushSequentialBuffer] Successfully flushed sequential buffer: fileID=%d, dataID=%d, size=%d", ra.fileID, fileObj.DataID, fileObj.Size)
 	return nil
 }
@@ -1769,13 +2323,42 @@ func (ra *RandomAccessor) Read(offset int64, size int) ([]byte, error) {
 		return nil, err
 	}
 
-	// Limit reading size to file size
-	if offset >= fileObj.Size {
-		DebugLog("[VFS Read] offset >= size: fileID=%d, offset=%d, size=%d", ra.fileID, offset, fileObj.Size)
-		return []byte{}, nil
+	// Check if file is in batch writer buffer (not yet flushed to database)
+	// If so, use OrigSize from batch writer for size check
+	var actualFileSize int64 = fileObj.Size
+	var isInBatchWriter bool
+	batchMgr := ra.fs.getBatchWriteManager()
+	if batchMgr != nil {
+		if pkgInfo, isPending := batchMgr.GetPendingObject(ra.fileID); isPending {
+			// File is in batch writer, use OrigSize from batch writer
+			actualFileSize = pkgInfo.OrigSize
+			isInBatchWriter = true
+			DebugLog("[VFS Read] File in batch writer, using OrigSize: fileID=%d, OrigSize=%d, fileObj.Size=%d", ra.fileID, pkgInfo.OrigSize, fileObj.Size)
+		}
 	}
-	if int64(size) > fileObj.Size-offset {
-		size = int(fileObj.Size - offset)
+
+	// If file has no DataID and is not in batch writer, check buffer first
+	// Buffer may have data even if fileObj.Size is 0
+	if (fileObj.DataID == 0 || fileObj.DataID == core.EmptyDataID) && !isInBatchWriter {
+		// Check if buffer has data
+		writeIndex := atomic.LoadInt64(&ra.buffer.writeIndex)
+		if writeIndex > 0 {
+			// Buffer has data, allow reading from buffer even if fileObj.Size is 0
+			// Size will be calculated from buffer operations
+			DebugLog("[VFS Read] File has no DataID and buffer has data, reading from buffer: fileID=%d, writeIndex=%d", ra.fileID, writeIndex)
+			return ra.readFromBuffer(offset, size), nil
+		}
+	}
+
+	// Limit reading size to file size (only if we have a valid size)
+	if actualFileSize > 0 {
+		if offset >= actualFileSize {
+			DebugLog("[VFS Read] offset >= size: fileID=%d, offset=%d, size=%d", ra.fileID, offset, actualFileSize)
+			return []byte{}, nil
+		}
+		if int64(size) > actualFileSize-offset {
+			size = int(actualFileSize - offset)
+		}
 	}
 
 	// If sequential write buffer has data, read from it first
@@ -1806,10 +2389,43 @@ func (ra *RandomAccessor) Read(offset int64, size int) ([]byte, error) {
 		}
 	}
 
-	// If no data ID, directly handle buffer write operations
+	// If no data ID, check batch writer buffer first (file not yet flushed to database)
 	if fileObj.DataID == 0 || fileObj.DataID == core.EmptyDataID {
+		// Check if file is in batch writer buffer
+		if batchMgr != nil {
+			if pkgInfo, isPending := batchMgr.GetPendingObject(ra.fileID); isPending {
+				// File is in batch writer buffer, read from batch writer's buffer
+				// Get processed data from batch writer buffer
+				DebugLog("[VFS Read] File in batch writer buffer (no DataID): fileID=%d, OrigSize=%d, Size=%d", ra.fileID, pkgInfo.OrigSize, pkgInfo.Size)
+				processedData := batchMgr.ReadPendingData(ra.fileID)
+				DebugLog("[VFS Read] ReadPendingData returned: fileID=%d, dataLen=%d", ra.fileID, len(processedData))
+				if len(processedData) > 0 {
+					// Decode processed data (decompress/decrypt)
+					// Get kind from bucket configuration (same as used during processing)
+					bucket := getBucketConfigWithCache(ra.fs)
+					kind := uint32(0)
+					if bucket != nil {
+						if bucket.CmprWay > 0 {
+							kind |= bucket.CmprWay
+						}
+						if bucket.EndecWay > 0 {
+							kind |= bucket.EndecWay
+						}
+					}
+					decodedData, decodeErr := ra.decodeProcessedData(processedData, kind, pkgInfo.OrigSize)
+					if decodeErr == nil && len(decodedData) > 0 {
+						// Merge with buffer writes and return
+						return ra.readFromDataAndBuffer(decodedData, offset, size), nil
+					}
+				}
+			}
+		}
+		// If no DataID and not in batch writer, read from buffer only
 		return ra.readFromBuffer(offset, size), nil
 	}
+
+	// File has DataID, should read from database (not from batch writer buffer)
+	// Even if file is still in batch writer cache, database has the authoritative data
 
 	// Get DataInfo
 	dataInfoCacheKey := formatCacheKey(fileObj.DataID)
@@ -1830,11 +2446,42 @@ func (ra *RandomAccessor) Read(offset int64, size int) ([]byte, error) {
 			if readErr == nil && len(data) > 0 {
 				return ra.readFromDataAndBuffer(data, offset, size), nil
 			}
+			// If direct read also fails, try reading from batch writer as fallback
+			// This handles the case where file has DataID but database hasn't been updated yet
+			if batchMgr != nil {
+				if pkgInfo, isPending := batchMgr.GetPendingObject(ra.fileID); isPending {
+					// File is in batch writer, read from batch writer's buffer
+					DebugLog("[VFS Read] Database read failed, falling back to batch writer: fileID=%d, DataID=%d", ra.fileID, fileObj.DataID)
+					processedData := batchMgr.ReadPendingData(ra.fileID)
+					if len(processedData) > 0 {
+						// Decode processed data (decompress/decrypt)
+						bucket := getBucketConfigWithCache(ra.fs)
+						kind := uint32(0)
+						if bucket != nil {
+							if bucket.CmprWay > 0 {
+								kind |= bucket.CmprWay
+							}
+							if bucket.EndecWay > 0 {
+								kind |= bucket.EndecWay
+							}
+						}
+						decodedData, decodeErr := ra.decodeProcessedData(processedData, kind, pkgInfo.OrigSize)
+						if decodeErr == nil && len(decodedData) > 0 {
+							// Merge with buffer writes and return
+							return ra.readFromDataAndBuffer(decodedData, offset, size), nil
+						}
+					}
+				}
+			}
 			return ra.readFromBuffer(offset, size), nil
 		}
 		// Update cache
 		dataInfoCache.Put(dataInfoCacheKey, dataInfo)
 	}
+
+	// Debug: Log DataInfo details
+	DebugLog("[VFS Read] DataInfo: fileID=%d, DataID=%d, OrigSize=%d, Size=%d, Kind=0x%x, PkgID=%d, PkgOffset=%d",
+		ra.fileID, dataInfo.ID, dataInfo.OrigSize, dataInfo.Size, dataInfo.Kind, dataInfo.PkgID, dataInfo.PkgOffset)
 
 	// Always use bucket's default chunk size (force unified chunkSize)
 	chunkSize := ra.fs.chunkSize
@@ -1847,15 +2494,47 @@ func (ra *RandomAccessor) Read(offset int64, size int) ([]byte, error) {
 	bucket := getBucketConfigWithCache(ra.fs)
 	if bucket != nil {
 		endecKey = bucket.EndecKey
+		DebugLog("[VFS Read] Bucket config: fileID=%d, CmprWay=%d, EndecWay=%d, endecKey length=%d",
+			ra.fileID, bucket.CmprWay, bucket.EndecWay, len(endecKey))
 	}
 
 	// Create data reader (abstract read interface, unified handling of uncompressed and compressed/encrypted data)
 	reader := newChunkReader(ra.fs.c, ra.fs.h, ra.fs.bktID, dataInfo, endecKey, chunkSize)
+	DebugLog("[VFS Read] Created chunkReader: fileID=%d, dataID=%d, kind=0x%x, endecKey length=%d",
+		ra.fileID, reader.dataID, reader.kind, len(reader.endecKey))
 
 	// Unified read logic (includes merging write operations)
 	fileData, operationsHandled := ra.readWithWrites(reader, offset, size)
 	if operationsHandled {
 		return fileData, nil
+	}
+
+	// If read fails or write operations not handled, try batch writer as fallback
+	// This handles the case where file has DataID but database read fails
+	if batchMgr != nil {
+		if pkgInfo, isPending := batchMgr.GetPendingObject(ra.fileID); isPending {
+			// File is in batch writer, read from batch writer's buffer
+			DebugLog("[VFS Read] Database read failed, falling back to batch writer: fileID=%d, DataID=%d", ra.fileID, fileObj.DataID)
+			processedData := batchMgr.ReadPendingData(ra.fileID)
+			if len(processedData) > 0 {
+				// Decode processed data (decompress/decrypt)
+				bucket := getBucketConfigWithCache(ra.fs)
+				kind := uint32(0)
+				if bucket != nil {
+					if bucket.CmprWay > 0 {
+						kind |= bucket.CmprWay
+					}
+					if bucket.EndecWay > 0 {
+						kind |= bucket.EndecWay
+					}
+				}
+				decodedData, decodeErr := ra.decodeProcessedData(processedData, kind, pkgInfo.OrigSize)
+				if decodeErr == nil && len(decodedData) > 0 {
+					// Merge with buffer writes and return
+					return ra.readFromDataAndBuffer(decodedData, offset, size), nil
+				}
+			}
+		}
 	}
 
 	// If read fails or write operations not handled, read from buffer
@@ -1936,6 +2615,72 @@ func (ra *RandomAccessor) extractRange(data []byte, offset int64, size int) []by
 	return result
 }
 
+// decodeProcessedData decodes processed data (decompress/decrypt) based on kind
+// This is used to decode data from batch writer buffer before reading
+func (ra *RandomAccessor) decodeProcessedData(processedData []byte, kind uint32, origSize int64) ([]byte, error) {
+	if len(processedData) == 0 {
+		return processedData, nil
+	}
+
+	// Get encryption key from bucket configuration
+	bucket := getBucketConfigWithCache(ra.fs)
+	endecKey := ""
+	if bucket != nil {
+		endecKey = bucket.EndecKey
+	}
+
+	// 1. Decrypt first (if enabled)
+	// Important: decrypt first, then decompress (same order as encoding)
+	decodeBuf := processedData
+	var err error
+	if kind&core.DATA_ENDEC_AES256 != 0 {
+		// AES256 decryption
+		if endecKey == "" {
+			return nil, fmt.Errorf("AES256 decryption requires encryption key but key is empty")
+		}
+		decodeBuf, err = aes256.Decrypt(endecKey, processedData)
+		if err != nil {
+			return nil, fmt.Errorf("AES256 decryption failed: %v", err)
+		}
+	} else if kind&core.DATA_ENDEC_SM4 != 0 {
+		// SM4 decryption
+		if endecKey == "" {
+			return nil, fmt.Errorf("SM4 decryption requires encryption key but key is empty")
+		}
+		decodeBuf, err = sm4.Sm4Cbc([]byte(endecKey), processedData, false) // sm4Cbc mode PKCS7 padding decryption
+		if err != nil {
+			return nil, fmt.Errorf("SM4 decryption failed: %v", err)
+		}
+	}
+
+	// 2. Decompress next (if enabled)
+	finalBuf := decodeBuf
+	if kind&core.DATA_CMPR_MASK != 0 {
+		var decompressor archiver.Decompressor
+		if kind&core.DATA_CMPR_SNAPPY != 0 {
+			decompressor = &archiver.Snappy{}
+		} else if kind&core.DATA_CMPR_ZSTD != 0 {
+			decompressor = &archiver.Zstd{}
+		} else if kind&core.DATA_CMPR_GZIP != 0 {
+			decompressor = &archiver.Gz{}
+		} else if kind&core.DATA_CMPR_BR != 0 {
+			decompressor = &archiver.Brotli{}
+		}
+
+		if decompressor != nil {
+			var decompressedBuf bytes.Buffer
+			err := decompressor.Decompress(bytes.NewReader(decodeBuf), &decompressedBuf)
+			if err != nil {
+				// Decompression failed, use decrypted data (compressed data may be corrupted or wrong format)
+				return nil, fmt.Errorf("decompression failed: %v", err)
+			}
+			finalBuf = decompressedBuf.Bytes()
+		}
+	}
+
+	return finalBuf, nil
+}
+
 func (ra *RandomAccessor) requestDelayedFlush(force bool) {
 	if ra == nil {
 		return
@@ -1991,8 +2736,93 @@ func (ra *RandomAccessor) flushInternal(force bool) (int64, error) {
 	// FlushAll is only called when buffer is full (AddFile returns false) or by periodic timer
 	// If file is in batch writer, it will be flushed automatically when buffer is full or timer expires
 
-	if err := ra.flushTempFileWriter(); err != nil {
-		return 0, err
+	// For .tmp files, check final file size before flushing TempFileWriter
+	// If file is small, we can use batch write instead of TempFileWriter
+	fileObj, err := ra.getFileObj()
+	isTmpFile := err == nil && fileObj != nil && isTempFile(fileObj)
+	if isTmpFile {
+		// For .tmp files, check if we should use batch write based on final file size
+		// Calculate final file size from buffer operations (before swapping)
+		writeIndex := atomic.LoadInt64(&ra.buffer.writeIndex)
+		totalSize := atomic.LoadInt64(&ra.buffer.totalSize)
+
+		// Check if TempFileWriter has data to flush
+		// This is important because large files use TempFileWriter, and data might be
+		// in TempFileWriter but not in RandomAccessor's buffer (writeIndex=0, totalSize=0)
+		hasTempWriterData := false
+		ra.tempWriterMu.Lock()
+		if ra.tempWriter != nil {
+			// Check if TempFileWriter has data (size > 0)
+			twSize := ra.tempWriter.size.Load()
+			hasTempWriterData = twSize > 0
+			DebugLog("[VFS RandomAccessor Flush] .tmp file with TempFileWriter: fileID=%d, twSize=%d, writeIndex=%d, totalSize=%d", ra.fileID, twSize, writeIndex, totalSize)
+		}
+		ra.tempWriterMu.Unlock()
+
+		// If file has no DataID and is small, we can use batch write
+		// Otherwise, use TempFileWriter (for large files or files that already have DataID)
+		config := core.GetWriteBufferConfig()
+		isSmallFile := totalSize > 0 && totalSize < 1<<20 // 1MB threshold
+		shouldUseBatchWrite := isSmallFile && config.BatchWriteEnabled &&
+			(fileObj.DataID == 0 || fileObj.DataID == core.EmptyDataID) &&
+			writeIndex > 0 && // Has pending writes in buffer
+			!hasTempWriterData // TempFileWriter should not have data if using batch write
+
+		if !shouldUseBatchWrite {
+			// Large .tmp file or already has DataID, or TempFileWriter has data, use TempFileWriter
+			if hasTempWriterData || fileObj.DataID == 0 || fileObj.DataID == core.EmptyDataID {
+				// TempFileWriter has data or file has no DataID, flush it
+				if err := ra.flushTempFileWriter(); err != nil {
+					return 0, err
+				}
+				// After flushing TempFileWriter, re-fetch fileObj to get updated DataID and Size
+				// This ensures we have the latest information after flush
+				fileObj, err = ra.getFileObj()
+				if err == nil && fileObj != nil {
+					// Re-fetch from database to get latest DataID and Size
+					objs, err := ra.fs.h.Get(ra.fs.c, ra.fs.bktID, []int64{ra.fileID})
+					if err == nil && len(objs) > 0 {
+						updatedFileObj := objs[0]
+						ra.fileObj.Store(updatedFileObj)
+						fileObjCache.Put(ra.fileObjKey, updatedFileObj)
+						DebugLog("[VFS RandomAccessor Flush] Updated fileObj after TempFileWriter flush: fileID=%d, dataID=%d, size=%d", ra.fileID, updatedFileObj.DataID, updatedFileObj.Size)
+						fileObj = updatedFileObj
+					}
+				}
+			}
+		} else {
+			// Small .tmp file without DataID, skip TempFileWriter and use batch write
+			// The batch write will be handled in the code below
+			// DebugLog("[VFS RandomAccessor Flush] Small .tmp file detected, will use batch write instead of TempFileWriter: fileID=%d, size=%d", ra.fileID, totalSize)
+		}
+	} else {
+		// Not a .tmp file, flush TempFileWriter if exists
+		if err := ra.flushTempFileWriter(); err != nil {
+			return 0, err
+		}
+		// After flushing TempFileWriter, re-fetch fileObj to get updated DataID and Size
+		// This ensures we have the latest information after flush
+		fileObj, err = ra.getFileObj()
+		if err == nil && fileObj != nil {
+			// Re-fetch from database to get latest DataID and Size
+			objs, err := ra.fs.h.Get(ra.fs.c, ra.fs.bktID, []int64{ra.fileID})
+			if err == nil && len(objs) > 0 {
+				updatedFileObj := objs[0]
+				ra.fileObj.Store(updatedFileObj)
+				fileObjCache.Put(ra.fileObjKey, updatedFileObj)
+				DebugLog("[VFS RandomAccessor Flush] Updated fileObj after TempFileWriter flush (non-tmp): fileID=%d, dataID=%d, size=%d", ra.fileID, updatedFileObj.DataID, updatedFileObj.Size)
+				fileObj = updatedFileObj
+				// Ensure directory cache is updated (TempFileWriter.Flush() should have done this, but double-check)
+				if updatedFileObj.PID > 0 {
+					dirNode := &OrcasNode{
+						fs:    ra.fs,
+						objID: updatedFileObj.PID,
+					}
+					dirNode.appendChildToDirCache(updatedFileObj.PID, updatedFileObj)
+					DebugLog("[VFS RandomAccessor Flush] Appended file to directory listing cache after TempFileWriter flush (non-tmp): fileID=%d, dirID=%d, name=%s", ra.fileID, updatedFileObj.PID, updatedFileObj.Name)
+				}
+			}
+		}
 	}
 
 	// If sequential write buffer has data, flush it first
@@ -2071,10 +2901,52 @@ func (ra *RandomAccessor) flushInternal(force bool) (int64, error) {
 			// Note: We do NOT flush batch writer here even if force=true
 			// FlushAll is only called when buffer is full (AddFile returns false) or by periodic timer
 			// No existing data, can use BatchWriter
+			// Optimization: reuse operations slice from pool if possible
 			// Now copy operations (before swapping)
-			operations := make([]WriteOperation, writeIndex)
-			copy(operations, ra.buffer.operations[:writeIndex])
+			// Optimization: avoid copying Data slices if operations are already sequential
+			// For sequential writes, we can directly use the buffer operations
+			// Optimization: use object pool for operations slice to reduce allocations
+			operations := writeOpsPool.Get().([]WriteOperation)
+			if cap(operations) < int(writeIndex) {
+				operations = make([]WriteOperation, writeIndex)
+			} else {
+				operations = operations[:writeIndex]
+			}
+
+			// Check if operations are sequential (common case for fragmented io.Copy)
+			isSequential := true
+			for i := int64(1); i < writeIndex; i++ {
+				prevEnd := ra.buffer.operations[i-1].Offset + int64(len(ra.buffer.operations[i-1].Data))
+				if ra.buffer.operations[i].Offset != prevEnd {
+					isSequential = false
+					break
+				}
+			}
+
+			// Optimization: for sequential operations, avoid copying Data slices
+			if isSequential && writeIndex > 0 {
+				// Sequential operations, can reuse Data slices directly
+				for i := int64(0); i < writeIndex; i++ {
+					operations[i].Offset = ra.buffer.operations[i].Offset
+					operations[i].Data = ra.buffer.operations[i].Data // Reuse slice
+				}
+			} else {
+				// Non-sequential, need to copy
+				for i := int64(0); i < writeIndex; i++ {
+					operations[i].Offset = ra.buffer.operations[i].Offset
+					// Reuse Data slice if capacity is sufficient (for fragmented writes)
+					if cap(ra.buffer.operations[i].Data) >= len(ra.buffer.operations[i].Data) {
+						operations[i].Data = ra.buffer.operations[i].Data
+					} else {
+						operations[i].Data = make([]byte, len(ra.buffer.operations[i].Data))
+						copy(operations[i].Data, ra.buffer.operations[i].Data)
+					}
+				}
+			}
 			mergedOps := mergeWriteOperations(operations)
+
+			// Return operations slice to pool after merging (optimization: reduce allocations)
+			writeOpsPool.Put(operations[:0])
 
 			// Calculate total size of merged data
 			var mergedDataSize int64
@@ -2085,19 +2957,106 @@ func (ra *RandomAccessor) flushInternal(force bool) (int64, error) {
 			}
 
 			// If data is continuous or can be merged into continuous data, use batch write
-			if mergedDataSize < 1<<20 && len(mergedOps) <= 10 { // Small file and not many write operations
+			// Aggressive optimization: for fragmented writes (many small operations), allow more operations if they're sequential
+			// For small files (< 1.5MB), be more aggressive with batch write to reduce database operations
+			maxOpsForBatchWrite := 15                     // Increased from 10 for small files (balanced)
+			maxFileSizeForBatchWrite := int64(1536 << 10) // 1.5MB - balanced increase from 1MB
+
+			if len(mergedOps) > 1 {
+				// Check if operations are mostly sequential (common for fragmented io.Copy)
+				sequentialCount := 0
+				for i := 1; i < len(mergedOps); i++ {
+					prevEnd := mergedOps[i-1].Offset + int64(len(mergedOps[i-1].Data))
+					if mergedOps[i].Offset == prevEnd || mergedOps[i].Offset == mergedOps[i-1].Offset {
+						sequentialCount++
+					}
+				}
+				// Balanced aggressive: If most operations are sequential, allow more operations (up to 100 for very sequential writes)
+				sequentialRatio := float64(sequentialCount) / float64(len(mergedOps)-1)
+				if sequentialRatio > 0.9 {
+					// Very sequential (>90%), allow up to 100 operations
+					maxOpsForBatchWrite = 100
+				} else if sequentialRatio > 0.8 {
+					// Mostly sequential (>80%), allow up to 75 operations
+					maxOpsForBatchWrite = 75
+				} else if sequentialRatio > 0.6 {
+					// Somewhat sequential (>60%), allow up to 50 operations
+					maxOpsForBatchWrite = 50
+				}
+			}
+
+			// Balanced: For very small files (< 64KB), allow more operations
+			if mergedDataSize < 64<<10 && len(mergedOps) <= 75 {
+				maxOpsForBatchWrite = 75
+			}
+
+			if mergedDataSize < maxFileSizeForBatchWrite && len(mergedOps) <= maxOpsForBatchWrite { // Small file and reasonable number of write operations
 				// Check if file is already in BatchWriter's pending objects
-				// If so, don't add again, just wait for BatchWriter to auto-flush
+				// If so, flush BatchWriter immediately to ensure data is persisted (especially when force=true)
 				if isPendingInBatchWriter {
-					// File is already in BatchWriter, just reset buffer and return
-					// BatchWriter will automatically flush when time window expires or buffer is full
-					DebugLog("[VFS RandomAccessor Flush] File already in BatchWriter pending objects, waiting for auto-flush: fileID=%d", ra.fileID)
-					atomic.StoreInt64(&ra.buffer.totalSize, 0)
-					return core.NewID(), nil
+					if force {
+						// File is already in BatchWriter and force=true, flush immediately to ensure data is persisted
+						DebugLog("[VFS RandomAccessor Flush] File is in BatchWriter and force=true, flushing BatchWriter immediately: fileID=%d", ra.fileID)
+						batchMgr.FlushAll(ra.fs.c)
+						// Wait a bit for flush to complete
+						time.Sleep(50 * time.Millisecond)
+						// Re-fetch file object to get updated DataID
+						fileObj, err = ra.getFileObj()
+						if err == nil && fileObj.DataID > 0 && fileObj.DataID != core.EmptyDataID {
+							// Update cache with fresh data
+							cacheKey := formatCacheKey(ra.fileID)
+							fileObjCache.Put(cacheKey, fileObj)
+							DebugLog("[VFS RandomAccessor Flush] File flushed from BatchWriter: fileID=%d, dataID=%d, size=%d", ra.fileID, fileObj.DataID, fileObj.Size)
+							return core.NewID(), nil
+						}
+						// If DataID is still not available, fall through to normal write path
+						DebugLog("[VFS RandomAccessor Flush] File still has no DataID after BatchWriter flush, falling back to normal write path: fileID=%d", ra.fileID)
+					} else {
+						// File is already in BatchWriter, but force=false, still flush to ensure data is persisted
+						// This is needed for test cases that expect data to be available after Flush()
+						DebugLog("[VFS RandomAccessor Flush] File is in BatchWriter, flushing BatchWriter: fileID=%d", ra.fileID)
+						atomic.StoreInt64(&ra.buffer.totalSize, 0)
+						batchMgr.FlushAll(ra.fs.c)
+						// Wait a bit for flush to complete
+						time.Sleep(50 * time.Millisecond)
+						// Re-fetch file object to get updated DataID
+						fileObj, err = ra.getFileObj()
+						if err == nil && fileObj.DataID > 0 && fileObj.DataID != core.EmptyDataID {
+							// Update cache with fresh data
+							cacheKey := formatCacheKey(ra.fileID)
+							fileObjCache.Put(cacheKey, fileObj)
+							DebugLog("[VFS RandomAccessor Flush] File flushed from BatchWriter: fileID=%d, dataID=%d, size=%d", ra.fileID, fileObj.DataID, fileObj.Size)
+							return core.NewID(), nil
+						}
+						// If DataID is still not available, fall through to normal write path
+						DebugLog("[VFS RandomAccessor Flush] File still has no DataID after BatchWriter flush, falling back to normal write path: fileID=%d", ra.fileID)
+					}
 				}
 
 				// Merge all data into a continuous data block
-				mergedData := make([]byte, mergedDataSize)
+				// Optimization: use appropriate object pool based on size
+				var mergedData []byte
+				useSmallPool := mergedDataSize <= 64<<10 // 64KB
+				useLargePool := mergedDataSize <= 4<<20  // 4MB
+				if useSmallPool {
+					pooledData := chunkDataPool.Get().([]byte)
+					if cap(pooledData) >= int(mergedDataSize) {
+						mergedData = pooledData[:mergedDataSize]
+					} else {
+						mergedData = make([]byte, mergedDataSize)
+						chunkDataPool.Put(pooledData[:0])
+					}
+				} else if useLargePool {
+					pooledData := largeChunkDataPool.Get().([]byte)
+					if cap(pooledData) >= int(mergedDataSize) {
+						mergedData = pooledData[:mergedDataSize]
+					} else {
+						mergedData = make([]byte, mergedDataSize)
+						largeChunkDataPool.Put(pooledData[:0])
+					}
+				} else {
+					mergedData = make([]byte, mergedDataSize)
+				}
 				for _, op := range mergedOps {
 					copy(mergedData[op.Offset:], op.Data)
 				}
@@ -2132,10 +3091,10 @@ func (ra *RandomAccessor) flushInternal(force bool) (int64, error) {
 						// Do NOT immediately flush - let batch write manager handle flushing based on its time window
 						// This allows multiple files to be batched together for better performance
 						// Batch write manager will automatically flush when:
-						// 1. Buffer is full
-						// 2. Time window expires (default 5 seconds)
+						// 1. Buffer is full (AddFile returns false, triggers FlushAll)
+						// 2. Time window expires (default 1 second, set by schedulePeriodicFlush)
 						// 3. Explicit FlushAll is called elsewhere
-						DebugLog("[VFS RandomAccessor Flush] Successfully added to batch write manager: fileID=%d, dataID=%d", ra.fileID, dataID)
+						// DebugLog("[VFS RandomAccessor Flush] Successfully added to batch write manager: fileID=%d, dataID=%d, will auto-flush when buffer full or timer expires", ra.fileID, dataID)
 
 						// Update local cache with batch write DataID for immediate visibility
 						if fileObj, err := ra.getFileObj(); err == nil && fileObj != nil {
@@ -2163,6 +3122,8 @@ func (ra *RandomAccessor) flushInternal(force bool) (int64, error) {
 		} // End of else block for BatchWriter
 	}
 
+	// Files >= 1MB threshold: use direct write path (flush immediately to disk)
+	// This ensures large files are written directly without batching
 	// Copy actually used portion (avoid modification during flush)
 	operations := make([]WriteOperation, writeIndex)
 	copy(operations, ra.buffer.operations[:writeIndex])
@@ -2176,46 +3137,56 @@ func (ra *RandomAccessor) flushInternal(force bool) (int64, error) {
 	// Get file object information
 	// Note: For BatchWriter path, fileObj is already updated in addFile
 	// For normal write path, we use getFileObj and will create new DataID to overwrite
-	fileObj, err := ra.getFileObj()
+	fileObj, err = ra.getFileObj()
 	if err != nil {
 		return 0, err
 	}
 
-	// Optimization: use writing version to directly modify data blocks for all file types
-	// This avoids creating new versions when buffer is full and data is still being written
-	// This allows continuous writing on the same version, only updating size information
-	// Note: Writing versions use uncompressed/unencrypted data for better performance
-	// If compression/encryption is needed, it will be processed when the file is completed
+	// Only use writing version for sparse files (pre-allocated files with holes, e.g., qBittorrent)
+	// For non-sparse files, use SDK path which handles compression/encryption properly
+	sparseSize := ra.sparseSize.Load()
+	isSparseFile := sparseSize > 0
 
-	// Get DataInfo to check compression/encryption status
-	var oldDataInfo *core.DataInfo
-	oldDataID := fileObj.DataID
-	if oldDataID > 0 && oldDataID != core.EmptyDataID {
-		dataInfoCacheKey := formatCacheKey(oldDataID)
-		if cached, ok := dataInfoCache.Get(dataInfoCacheKey); ok {
-			if info, ok := cached.(*core.DataInfo); ok && info != nil {
-				oldDataInfo = info
+	if isSparseFile {
+		// For sparse files, use writing version to directly modify data blocks
+		// This avoids creating new versions and significantly improves performance for random writes
+		// Note: Writing versions use uncompressed/unencrypted data for better performance
+		// If compression/encryption is needed, it will be processed when the file is completed
+
+		// Get DataInfo to check compression/encryption status
+		var oldDataInfo *core.DataInfo
+		oldDataID := fileObj.DataID
+		if oldDataID > 0 && oldDataID != core.EmptyDataID {
+			dataInfoCacheKey := formatCacheKey(oldDataID)
+			if cached, ok := dataInfoCache.Get(dataInfoCacheKey); ok {
+				if info, ok := cached.(*core.DataInfo); ok && info != nil {
+					oldDataInfo = info
+				}
+			}
+			if oldDataInfo == nil {
+				var err error
+				oldDataInfo, err = ra.fs.h.GetDataInfo(ra.fs.c, ra.fs.bktID, oldDataID)
+				if err == nil && oldDataInfo != nil {
+					dataInfoCache.Put(dataInfoCacheKey, oldDataInfo)
+				}
 			}
 		}
-		if oldDataInfo == nil {
-			var err error
-			oldDataInfo, err = ra.fs.h.GetDataInfo(ra.fs.c, ra.fs.bktID, oldDataID)
-			if err == nil && oldDataInfo != nil {
-				dataInfoCache.Put(dataInfoCacheKey, oldDataInfo)
+
+		// Use writing version path for sparse files, but fall back if DB access fails
+		newVersionID, err := ra.applyWritesWithWritingVersion(fileObj, mergedOps, oldDataInfo)
+		if err != nil {
+			if errors.Is(err, core.ERR_QUERY_DB) || errors.Is(err, core.ERR_OPEN_DB) {
+				DebugLog("[VFS RandomAccessor Flush] Writing version unavailable, falling back to SDK path: fileID=%d, error=%v", ra.fileID, err)
+				return ra.applyRandomWritesWithSDK(fileObj, mergedOps)
 			}
+			return 0, err
 		}
+		return newVersionID, nil
 	}
 
-	// Prefer writing version path for efficient random writes, but fall back if DB access fails
-	newVersionID, err := ra.applyWritesWithWritingVersion(fileObj, mergedOps, oldDataInfo)
-	if err != nil {
-		if errors.Is(err, core.ERR_QUERY_DB) || errors.Is(err, core.ERR_OPEN_DB) {
-			DebugLog("[VFS RandomAccessor Flush] Writing version unavailable, falling back to SDK path: fileID=%d, error=%v", ra.fileID, err)
-			return ra.applyRandomWritesWithSDK(fileObj, mergedOps)
-		}
-		return 0, err
-	}
-	return newVersionID, nil
+	// For non-sparse files, use SDK path which handles compression/encryption properly
+	DebugLog("[VFS RandomAccessor Flush] Non-sparse file, using SDK path: fileID=%d", ra.fileID)
+	return ra.applyRandomWritesWithSDK(fileObj, mergedOps)
 }
 
 // applyRandomWritesWithSDK uses SDK's listener to handle compression and encryption, applies random writes
@@ -2226,6 +3197,65 @@ func (ra *RandomAccessor) applyRandomWritesWithSDK(fileObj *core.ObjectInfo, wri
 	if !ok {
 		return 0, fmt.Errorf("handler is not LocalHandler")
 	}
+
+	// Handle empty file case: if no writes or all writes are empty, return empty file
+	// Note: We check len(writes) == 0 BEFORE filtering, because filtering happens below
+	// If writes is empty, it means no write operations were passed to this function
+	// This should not happen in normal flow, but we handle it for safety
+	if len(writes) == 0 {
+		// No writes, file remains empty
+		DebugLog("[VFS applyRandomWritesWithSDK] No writes, file remains empty: fileID=%d, size=%d", ra.fileID, fileObj.Size)
+		// Only update if file is actually empty (Size = 0)
+		// If file has existing data (Size > 0), don't overwrite it
+		if fileObj.Size == 0 {
+			updateFileObj := &core.ObjectInfo{
+				ID:     fileObj.ID,
+				PID:    fileObj.PID,
+				Type:   fileObj.Type,
+				Name:   fileObj.Name,
+				Size:   0,
+				DataID: core.EmptyDataID,
+				MTime:  core.Now(),
+			}
+			_, err := ra.fs.h.Put(ra.fs.c, ra.fs.bktID, []*core.ObjectInfo{updateFileObj})
+			if err != nil {
+				DebugLog("[VFS applyRandomWritesWithSDK] ERROR: Failed to update empty file: fileID=%d, error=%v", ra.fileID, err)
+				return 0, err
+			}
+		}
+		return 0, nil
+	}
+
+	// Filter out empty writes
+	nonEmptyWrites := make([]WriteOperation, 0, len(writes))
+	for _, write := range writes {
+		if len(write.Data) > 0 {
+			nonEmptyWrites = append(nonEmptyWrites, write)
+		}
+	}
+
+	// If all writes were empty, treat as empty file
+	if len(nonEmptyWrites) == 0 {
+		DebugLog("[VFS applyRandomWritesWithSDK] All writes are empty, file remains empty: fileID=%d", ra.fileID)
+		updateFileObj := &core.ObjectInfo{
+			ID:     fileObj.ID,
+			PID:    fileObj.PID,
+			Type:   fileObj.Type,
+			Name:   fileObj.Name,
+			Size:   0,
+			DataID: core.EmptyDataID,
+			MTime:  core.Now(),
+		}
+		_, err := ra.fs.h.Put(ra.fs.c, ra.fs.bktID, []*core.ObjectInfo{updateFileObj})
+		if err != nil {
+			DebugLog("[VFS applyRandomWritesWithSDK] ERROR: Failed to update empty file: fileID=%d, error=%v", ra.fileID, err)
+			return 0, err
+		}
+		return 0, nil
+	}
+
+	// Use non-empty writes for processing
+	writes = nonEmptyWrites
 
 	// Create new data ID
 	newDataID := core.NewID()
@@ -2326,10 +3356,15 @@ func (ra *RandomAccessor) applyRandomWritesWithSDK(fileObj *core.ObjectInfo, wri
 		// Optimization: batch write metadata (write version object and file object update together)
 		objectsToPut := []*core.ObjectInfo{newVersion}
 		// Also update file object (if file object itself needs update)
+		// IMPORTANT: Must include Type, Name, PID, MTime to avoid cache corruption
 		updateFileObj := &core.ObjectInfo{
 			ID:     ra.fileID,
+			PID:    fileObj.PID,
+			Type:   fileObj.Type,
+			Name:   fileObj.Name,
 			DataID: newDataID,
 			Size:   newSize,
+			MTime:  mTime,
 		}
 		objectsToPut = append(objectsToPut, updateFileObj)
 
@@ -2342,6 +3377,15 @@ func (ra *RandomAccessor) applyRandomWritesWithSDK(fileObj *core.ObjectInfo, wri
 			fileObjCache.Put(ra.fileObjKey, updateFileObj)
 			ra.fileObj.Store(updateFileObj)
 			DebugLog("[VFS applyRandomWritesWithSDK] Successfully applied writes (compressed/encrypted): fileID=%d, versionID=%d, newDataID=%d, size=%d", ra.fileID, newVersionID, newDataID, newSize)
+			// Update directory listing cache to ensure file is visible in Readdir
+			if updateFileObj.PID > 0 {
+				dirNode := &OrcasNode{
+					fs:    ra.fs,
+					objID: updateFileObj.PID,
+				}
+				dirNode.appendChildToDirCache(updateFileObj.PID, updateFileObj)
+				DebugLog("[VFS applyRandomWritesWithSDK] Appended file to directory listing cache: fileID=%d, dirID=%d, name=%s", ra.fileID, updateFileObj.PID, updateFileObj.Name)
+			}
 		} else {
 			DebugLog("[VFS applyRandomWritesWithSDK] ERROR: Failed to update objects: fileID=%d, error=%v", ra.fileID, err)
 		}
@@ -2370,10 +3414,15 @@ func (ra *RandomAccessor) applyRandomWritesWithSDK(fileObj *core.ObjectInfo, wri
 	// Optimization: batch write metadata (write version object and file object update together)
 	objectsToPut := []*core.ObjectInfo{newVersion}
 	// Also update file object (if file object itself needs update)
+	// IMPORTANT: Must include Type, Name, PID, MTime to avoid cache corruption
 	updateFileObj := &core.ObjectInfo{
 		ID:     ra.fileID,
+		PID:    fileObj.PID,
+		Type:   fileObj.Type,
+		Name:   fileObj.Name,
 		DataID: newDataID,
 		Size:   newSize,
+		MTime:  mTime,
 	}
 	objectsToPut = append(objectsToPut, updateFileObj)
 
@@ -2386,6 +3435,15 @@ func (ra *RandomAccessor) applyRandomWritesWithSDK(fileObj *core.ObjectInfo, wri
 		fileObjCache.Put(ra.fileObjKey, updateFileObj)
 		ra.fileObj.Store(updateFileObj)
 		DebugLog("[VFS applyRandomWritesWithSDK] Successfully applied writes (uncompressed/unencrypted): fileID=%d, versionID=%d, newDataID=%d, size=%d", ra.fileID, newVersionID, newDataID, newSize)
+		// Update directory listing cache to ensure file is visible in Readdir
+		if updateFileObj.PID > 0 {
+			dirNode := &OrcasNode{
+				fs:    ra.fs,
+				objID: updateFileObj.PID,
+			}
+			dirNode.appendChildToDirCache(updateFileObj.PID, updateFileObj)
+			DebugLog("[VFS applyRandomWritesWithSDK] Appended file to directory listing cache: fileID=%d, dirID=%d, name=%s", ra.fileID, updateFileObj.PID, updateFileObj.Name)
+		}
 	} else {
 		DebugLog("[VFS applyRandomWritesWithSDK] ERROR: Failed to update objects: fileID=%d, error=%v", ra.fileID, err)
 	}
@@ -2617,11 +3675,16 @@ func (ra *RandomAccessor) applyWritesWithWritingVersion(fileObj *core.ObjectInfo
 		}
 
 		// Update file object
+		// IMPORTANT: Must include Type, Name, PID, MTime to avoid cache corruption
+		mTime := core.Now()
 		updateFileObj := &core.ObjectInfo{
 			ID:     ra.fileID,
+			PID:    fileObj.PID,
+			Type:   fileObj.Type,
+			Name:   fileObj.Name,
 			DataID: dataID,
 			Size:   newSize,
-			MTime:  core.Now(),
+			MTime:  mTime,
 		}
 
 		DebugLog("[VFS applyWritesWithWritingVersion] Writing file object to disk: fileID=%d, dataID=%d, size=%d, chunkSize=%d", ra.fileID, dataID, newSize, ra.fs.chunkSize)
@@ -2665,13 +3728,24 @@ func (ra *RandomAccessor) applyWritesStreamingCompressed(oldDataInfo *core.DataI
 
 	// Pre-calculate write operation indices for each chunk
 	chunkCount := int((newSize + chunkSize - 1) / chunkSize)
-	writesByChunk := make([][]int, chunkCount)
-	avgWritesPerChunk := len(writes) / chunkCount
-	if avgWritesPerChunk < 1 {
-		avgWritesPerChunk = 1
+	if chunkCount == 0 {
+		// Empty file, no chunks needed
+		chunkCount = 1
 	}
-	for i := range writesByChunk {
-		writesByChunk[i] = make([]int, 0, avgWritesPerChunk)
+	writesByChunk := make([][]int, chunkCount)
+	if chunkCount > 0 {
+		avgWritesPerChunk := len(writes) / chunkCount
+		if avgWritesPerChunk < 1 {
+			avgWritesPerChunk = 1
+		}
+		for i := range writesByChunk {
+			writesByChunk[i] = make([]int, 0, avgWritesPerChunk)
+		}
+	} else {
+		avgWritesPerChunk := 1
+		for i := range writesByChunk {
+			writesByChunk[i] = make([]int, 0, avgWritesPerChunk)
+		}
 	}
 
 	for i, write := range writes {
@@ -2714,9 +3788,19 @@ func (ra *RandomAccessor) applyWritesStreamingUncompressed(fileObj *core.ObjectI
 		// Pre-calculate write operation indices for each chunk (optimization: reduce repeated checks)
 		// Optimization: estimate capacity to reduce slice expansion
 		chunkCount := int((newSize + chunkSize - 1) / chunkSize)
+		if chunkCount == 0 {
+			// Empty file, no chunks needed
+			chunkCount = 1
+		}
 		writesByChunk := make([][]int, chunkCount)
 		// Estimate average number of write operations per chunk (optimization: reduce slice expansion)
-		avgWritesPerChunk := len(writes) / chunkCount
+		avgWritesPerChunk := 1
+		if chunkCount > 0 {
+			avgWritesPerChunk = len(writes) / chunkCount
+			if avgWritesPerChunk < 1 {
+				avgWritesPerChunk = 1
+			}
+		}
 		if avgWritesPerChunk < 1 {
 			avgWritesPerChunk = 1
 		}
@@ -2796,16 +3880,25 @@ func (ra *RandomAccessor) applyWritesStreamingUncompressed(fileObj *core.ObjectI
 
 			// Write chunk
 			// Note: need to copy data because PutData may process asynchronously, and chunkData needs to be returned to object pool
-			chunkDataCopy := make([]byte, len(chunkData))
+			// Optimization: use object pool for chunkDataCopy to reduce allocations
+			chunkDataCopy := chunkDataPool.Get().([]byte)
+			if cap(chunkDataCopy) < len(chunkData) {
+				chunkDataCopy = make([]byte, len(chunkData))
+			} else {
+				chunkDataCopy = chunkDataCopy[:len(chunkData)]
+			}
 			copy(chunkDataCopy, chunkData)
-			// Return to object pool before writing (reset length but keep capacity)
+			// Return original buffer to object pool before writing
 			chunkDataPool.Put(chunkData[:0])
 
 			DebugLog("[VFS applyWritesStreamingUncompressed] Writing data chunk to disk: fileID=%d, dataID=%d, sn=%d, size=%d", ra.fileID, dataInfo.ID, sn, len(chunkDataCopy))
 			if _, err := ra.fs.h.PutData(ra.fs.c, ra.fs.bktID, dataInfo.ID, sn, chunkDataCopy); err != nil {
+				// Return copy buffer to pool on error
+				chunkDataPool.Put(chunkDataCopy[:0])
 				DebugLog("[VFS applyWritesStreamingUncompressed] ERROR: Failed to write data chunk to disk: fileID=%d, dataID=%d, sn=%d, error=%v", ra.fileID, dataInfo.ID, sn, err)
 				return 0, err
 			}
+			// Note: chunkDataCopy is consumed by PutData, don't return to pool here
 			DebugLog("[VFS applyWritesStreamingUncompressed] Successfully wrote data chunk to disk: fileID=%d, dataID=%d, sn=%d, size=%d", ra.fileID, dataInfo.ID, sn, len(chunkDataCopy))
 			sn++
 		}
@@ -2831,13 +3924,24 @@ func (ra *RandomAccessor) applyWritesStreamingUncompressed(fileObj *core.ObjectI
 
 	// Pre-calculate write operation indices for each chunk
 	chunkCount := int((newSize + chunkSize - 1) / chunkSize)
-	writesByChunk := make([][]int, chunkCount)
-	avgWritesPerChunk := len(writes) / chunkCount
-	if avgWritesPerChunk < 1 {
-		avgWritesPerChunk = 1
+	if chunkCount == 0 {
+		// Empty file, no chunks needed
+		chunkCount = 1
 	}
-	for i := range writesByChunk {
-		writesByChunk[i] = make([]int, 0, avgWritesPerChunk)
+	writesByChunk := make([][]int, chunkCount)
+	if chunkCount > 0 {
+		avgWritesPerChunk := len(writes) / chunkCount
+		if avgWritesPerChunk < 1 {
+			avgWritesPerChunk = 1
+		}
+		for i := range writesByChunk {
+			writesByChunk[i] = make([]int, 0, avgWritesPerChunk)
+		}
+	} else {
+		avgWritesPerChunk := 1
+		for i := range writesByChunk {
+			writesByChunk[i] = make([]int, 0, avgWritesPerChunk)
+		}
 	}
 
 	for i, write := range writes {
@@ -3190,9 +4294,11 @@ type chunkReader struct {
 	kind              uint32        // Compression/encryption kind (0 for plain)
 	endecKey          string        // Encryption key (empty for plain)
 	origSize          int64         // Original data size (decompressed size)
+	compressedSize    int64         // Compressed/encrypted data size (for packaged files)
 	chunkSize         int64         // Chunk size for original data
 	chunkCache        *ecache.Cache // Cache for chunks: key "<sn>", value []byte
 	prefetchThreshold float64       // Threshold percentage to trigger prefetch (default: 0.8 = 80%)
+	pkgOffset         uint32        // Package offset (for packaged files, 0 for non-packaged files)
 }
 
 // newChunkReader creates a unified chunk reader for both plain and compressed/encrypted data
@@ -3215,10 +4321,13 @@ func newChunkReader(c core.Ctx, h core.Handler, bktID int64, dataInfo *core.Data
 		cr.kind = dataInfo.Kind
 		cr.endecKey = endecKey
 		cr.origSize = dataInfo.OrigSize
+		cr.compressedSize = dataInfo.Size // Compressed/encrypted size
 		if dataInfo.PkgID > 0 {
 			cr.dataID = dataInfo.PkgID
+			cr.pkgOffset = dataInfo.PkgOffset
 		} else {
 			cr.dataID = dataInfo.ID
+			cr.pkgOffset = 0
 		}
 	}
 
@@ -3256,6 +4365,93 @@ func (cr *chunkReader) ReadAt(buf []byte, offset int64) (int, error) {
 		return 0, fmt.Errorf("chunkSize not set")
 	}
 
+	// For packaged files, read entire package once and extract file data
+	var fileData []byte
+	if cr.pkgOffset > 0 {
+		// This is a packaged file, read entire package (sn=0)
+		DebugLog("[VFS chunkReader ReadAt] Reading packaged file: dataID=%d, pkgOffset=%d, origSize=%d, offset=%d, bufSize=%d",
+			cr.dataID, cr.pkgOffset, cr.origSize, offset, len(buf))
+		pkgData, err := cr.getChunk(0)
+		if err != nil {
+			DebugLog("[VFS chunkReader ReadAt] ERROR: Failed to get package chunk: dataID=%d, error=%v", cr.dataID, err)
+			return 0, err
+		}
+		DebugLog("[VFS chunkReader ReadAt] Got package data: dataID=%d, pkgDataLen=%d", cr.dataID, len(pkgData))
+		// Extract file data from package
+		// PkgOffset is the offset of compressed/encrypted file data in the package
+		// Use compressedSize (not origSize) to calculate the range
+		pkgStart := int64(cr.pkgOffset)
+		pkgEnd := pkgStart + cr.compressedSize
+		if int64(len(pkgData)) < pkgEnd {
+			DebugLog("[VFS chunkReader ReadAt] ERROR: Package data incomplete: dataID=%d, pkgOffset=%d, compressedSize=%d, expected %d bytes, got %d",
+				cr.dataID, cr.pkgOffset, cr.compressedSize, pkgEnd, len(pkgData))
+			return 0, fmt.Errorf("package data incomplete: expected %d bytes, got %d", pkgEnd, len(pkgData))
+		}
+		encryptedFileData := pkgData[pkgStart:pkgEnd]
+		DebugLog("[VFS chunkReader ReadAt] Extracted encrypted file data: dataID=%d, encryptedFileDataLen=%d", cr.dataID, len(encryptedFileData))
+
+		// Decrypt and decompress the file data
+		decodedFileData := encryptedFileData
+
+		// 1. Decrypt first (if enabled)
+		if cr.kind&core.DATA_ENDEC_MASK != 0 {
+			if cr.kind&core.DATA_ENDEC_AES256 != 0 {
+				decodedFileData, err = aes256.Decrypt(cr.endecKey, encryptedFileData)
+				if err != nil {
+					DebugLog("[VFS chunkReader ReadAt] ERROR: AES256 decryption failed: dataID=%d, error=%v", cr.dataID, err)
+					return 0, fmt.Errorf("AES256 decryption failed: %v", err)
+				}
+			} else if cr.kind&core.DATA_ENDEC_SM4 != 0 {
+				decodedFileData, err = sm4.Sm4Cbc([]byte(cr.endecKey), encryptedFileData, false)
+				if err != nil {
+					DebugLog("[VFS chunkReader ReadAt] ERROR: SM4 decryption failed: dataID=%d, error=%v", cr.dataID, err)
+					return 0, fmt.Errorf("SM4 decryption failed: %v", err)
+				}
+			}
+		}
+
+		// 2. Decompress next (if enabled)
+		if cr.kind&core.DATA_CMPR_MASK != 0 {
+			var decompressor archiver.Decompressor
+			if cr.kind&core.DATA_CMPR_SNAPPY != 0 {
+				decompressor = &archiver.Snappy{}
+			} else if cr.kind&core.DATA_CMPR_ZSTD != 0 {
+				decompressor = &archiver.Zstd{}
+			} else if cr.kind&core.DATA_CMPR_GZIP != 0 {
+				decompressor = &archiver.Gz{}
+			} else if cr.kind&core.DATA_CMPR_BR != 0 {
+				decompressor = &archiver.Brotli{}
+			}
+
+			if decompressor != nil {
+				var decompressedBuf bytes.Buffer
+				err := decompressor.Decompress(bytes.NewReader(decodedFileData), &decompressedBuf)
+				if err != nil {
+					DebugLog("[VFS chunkReader ReadAt] ERROR: Decompression failed: dataID=%d, error=%v", cr.dataID, err)
+					return 0, fmt.Errorf("decompression failed: %v", err)
+				}
+				decodedFileData = decompressedBuf.Bytes()
+			}
+		}
+
+		fileData = decodedFileData
+		DebugLog("[VFS chunkReader ReadAt] Decoded file data: dataID=%d, decodedFileDataLen=%d, origSize=%d", cr.dataID, len(fileData), cr.origSize)
+
+		// Now read from decoded fileData
+		if offset >= int64(len(fileData)) {
+			DebugLog("[VFS chunkReader ReadAt] Offset beyond file size: dataID=%d, offset=%d, fileDataLen=%d", cr.dataID, offset, len(fileData))
+			return 0, io.EOF
+		}
+		readSize := int64(len(buf))
+		if offset+readSize > int64(len(fileData)) {
+			readSize = int64(len(fileData)) - offset
+		}
+		DebugLog("[VFS chunkReader ReadAt] Reading from decoded file data: dataID=%d, offset=%d, readSize=%d", cr.dataID, offset, readSize)
+		copy(buf[:readSize], fileData[offset:offset+readSize])
+		return int(readSize), nil
+	}
+
+	// For non-packaged files, use normal chunk-based reading
 	totalRead := 0
 	currentOffset := offset
 	remaining := readSize
@@ -3350,7 +4546,16 @@ func (cr *chunkReader) getChunk(sn int) ([]byte, error) {
 			return nil, err
 		}
 
-		// Process chunk based on kind (plain, encrypted, compressed, or both)
+		// For packaged files (pkgOffset > 0), package itself is not encrypted/compressed
+		// Each file in the package is individually encrypted/compressed
+		// So we should return raw package data without processing
+		if cr.pkgOffset > 0 {
+			// This is a packaged file, return raw package data
+			// Decryption/decompression will be done on individual file data later
+			return rawChunk, nil
+		}
+
+		// For non-packaged files, process chunk based on kind (plain, encrypted, compressed, or both)
 		finalChunk := rawChunk
 
 		// 1. Decrypt first (if enabled)
@@ -3538,8 +4743,12 @@ func (ra *RandomAccessor) Truncate(newSize int64) (int64, error) {
 						}
 
 						// Update file object (if not already updated by Flush)
+						// IMPORTANT: Must include Type, Name, PID to avoid cache corruption
 						updateFileObj := &core.ObjectInfo{
 							ID:     ra.fileID,
+							PID:    updatedFileObj.PID,
+							Type:   updatedFileObj.Type,
+							Name:   updatedFileObj.Name,
 							DataID: updatedFileObj.DataID,
 							Size:   newSize,
 							MTime:  mTime,
@@ -3635,8 +4844,12 @@ func (ra *RandomAccessor) Truncate(newSize int64) (int64, error) {
 						}
 
 						// Update file object (if not already updated by Flush)
+						// IMPORTANT: Must include Type, Name, PID to avoid cache corruption
 						updateFileObj := &core.ObjectInfo{
 							ID:     ra.fileID,
+							PID:    updatedFileObj.PID,
+							Type:   updatedFileObj.Type,
+							Name:   updatedFileObj.Name,
 							DataID: updatedFileObj.DataID,
 							Size:   newSize,
 							MTime:  mTime,
@@ -3739,9 +4952,19 @@ func (ra *RandomAccessor) Truncate(newSize int64) (int64, error) {
 		MTime:  mTime,
 	}
 
+	// Get file object to get Type, Name, PID for updateFileObj
+	fileObj, err = ra.getFileObj()
+	if err != nil {
+		return 0, fmt.Errorf("failed to get file object: %v", err)
+	}
+
 	// Update file object
+	// IMPORTANT: Must include Type, Name, PID to avoid cache corruption
 	updateFileObj := &core.ObjectInfo{
 		ID:     ra.fileID,
+		PID:    fileObj.PID,
+		Type:   fileObj.Type,
+		Name:   fileObj.Name,
 		DataID: newDataID,
 		Size:   newSize,
 		MTime:  mTime,
@@ -3775,11 +4998,33 @@ func (ra *RandomAccessor) Truncate(newSize int64) (int64, error) {
 			return 0, fmt.Errorf("failed to update file object: %v", err)
 		}
 		DebugLog("[VFS applyRandomWritesWithSDK] Successfully wrote ObjectInfo to disk: fileID=%d, newSize=%d", ra.fileID, newSize)
+		// Update cache
+		fileObjCache.Put(ra.fileObjKey, updateFileObj)
+		ra.fileObj.Store(updateFileObj)
+		// Update directory listing cache to ensure file is visible in Readdir
+		if updateFileObj.PID > 0 {
+			dirNode := &OrcasNode{
+				fs:    ra.fs,
+				objID: updateFileObj.PID,
+			}
+			dirNode.appendChildToDirCache(updateFileObj.PID, updateFileObj)
+			DebugLog("[VFS applyRandomWritesWithSDK] Appended file to directory listing cache: fileID=%d, dirID=%d, name=%s", ra.fileID, updateFileObj.PID, updateFileObj.Name)
+		}
 	}
 
 	// Update cache
 	fileObjCache.Put(ra.fileObjKey, updateFileObj)
 	ra.fileObj.Store(updateFileObj)
+
+	// Update directory listing cache to ensure file is visible in Readdir
+	if updateFileObj.PID > 0 {
+		dirNode := &OrcasNode{
+			fs:    ra.fs,
+			objID: updateFileObj.PID,
+		}
+		dirNode.appendChildToDirCache(updateFileObj.PID, updateFileObj)
+		DebugLog("[VFS applyRandomWritesWithSDK] Appended file to directory listing cache: fileID=%d, dirID=%d, name=%s", ra.fileID, updateFileObj.PID, updateFileObj.Name)
+	}
 
 	// Invalidate old DataInfo cache if DataID changed
 	if fileObj.DataID > 0 && fileObj.DataID != core.EmptyDataID && fileObj.DataID != newDataID {
@@ -3844,30 +5089,79 @@ func (ra *RandomAccessor) hasTempFileWriter() bool {
 
 // mergeWriteOperations merges overlapping write operations
 // Optimization: use more efficient sorting algorithm (quicksort)
+// IMPORTANT: When sorting by offset, we need to preserve the original order for operations with the same offset
+// This ensures that later writes (in time order) overwrite earlier writes when they overlap
 func mergeWriteOperations(operations []WriteOperation) []WriteOperation {
 	if len(operations) == 0 {
 		return nil
 	}
 
 	// Optimization: if operations are already sorted, can skip sorting
-	// But for safety, still sort (can use more efficient algorithm)
-	// Optimization: in-place sort to avoid extra memory allocation
+	// Optimization: for small number of operations, use insertion sort (already sorted for sequential writes)
+	// For larger numbers, use more efficient sorting
 	sorted := operations
 	if len(sorted) > 1 {
-		// Create new slice for sorting (avoid modifying original slice)
-		sorted = make([]WriteOperation, len(operations))
-		copy(sorted, operations)
-	}
-	// Use quicksort (built-in sort package)
-	// But to avoid introducing new dependencies, use optimized insertion sort
-	for i := 1; i < len(sorted); i++ {
-		key := sorted[i]
-		j := i - 1
-		for j >= 0 && sorted[j].Offset > key.Offset {
-			sorted[j+1] = sorted[j]
-			j--
+		// Check if already sorted (common case for sequential writes)
+		isSorted := true
+		for i := 1; i < len(sorted); i++ {
+			if sorted[i-1].Offset > sorted[i].Offset {
+				isSorted = false
+				break
+			}
 		}
-		sorted[j+1] = key
+
+		if !isSorted {
+			// Create new slice for sorting (avoid modifying original slice)
+			// IMPORTANT: Use stable sort to preserve order of operations with same offset
+			// This ensures that later writes (in original order) overwrite earlier writes
+			sorted = make([]WriteOperation, len(operations))
+			copy(sorted, operations)
+
+			// Use stable insertion sort to preserve order for same offset
+			// This ensures that when operations have the same offset, the later one (in original order) is used
+			if len(sorted) < 50 {
+				// Optimized stable insertion sort (in-place, preserves order for equal elements)
+				for i := 1; i < len(sorted); i++ {
+					key := sorted[i]
+					j := i - 1
+					// Sort by offset, but preserve original order for same offset (stable sort)
+					for j >= 0 && sorted[j].Offset > key.Offset {
+						sorted[j+1] = sorted[j]
+						j--
+					}
+					sorted[j+1] = key
+				}
+			} else {
+				// For larger arrays, use stable sort with binary search
+				for i := 1; i < len(sorted); i++ {
+					key := sorted[i]
+					j := i - 1
+					// Optimized: use binary search for insertion point (for large arrays)
+					if len(sorted) > 100 {
+						// Binary search for insertion point (stable: preserve order for equal elements)
+						left, right := 0, i
+						for left < right {
+							mid := (left + right) / 2
+							if sorted[mid].Offset <= key.Offset {
+								left = mid + 1
+							} else {
+								right = mid
+							}
+						}
+						// Shift elements
+						copy(sorted[left+1:i+1], sorted[left:i])
+						sorted[left] = key
+					} else {
+						// Standard stable insertion sort for smaller arrays
+						for j >= 0 && sorted[j].Offset > key.Offset {
+							sorted[j+1] = sorted[j]
+							j--
+						}
+						sorted[j+1] = key
+					}
+				}
+			}
+		}
 	}
 
 	// Optimization: pre-allocate capacity to reduce expansion
@@ -3908,21 +5202,53 @@ func mergeWriteOperations(operations []WriteOperation) []WriteOperation {
 				endOffset = opEnd
 			}
 
-			// Optimization: use object pool to get buffer
-			mergedData := chunkDataPool.Get().([]byte)
-			if cap(mergedData) < int(endOffset-startOffset) {
-				mergedData = make([]byte, endOffset-startOffset)
-			} else {
-				mergedData = mergedData[:endOffset-startOffset]
-			}
+			// Optimization: check if we can reuse last.Data slice
+			mergedSize := int(endOffset - startOffset)
+			var mergedData []byte
 
-			// Copy old data
-			if last.Offset >= startOffset {
-				copy(mergedData[last.Offset-startOffset:], last.Data)
-			}
-			// Copy new data (overwrite)
-			if op.Offset >= startOffset {
-				copy(mergedData[op.Offset-startOffset:], op.Data)
+			// Try to reuse last.Data if it has sufficient capacity
+			if cap(last.Data) >= mergedSize && last.Offset == startOffset {
+				// Can reuse existing slice, just extend it
+				mergedData = last.Data[:mergedSize]
+				// IMPORTANT: Since operations are sorted by offset and we process them in order,
+				// and operations maintain their original order for same offset (stable sort),
+				// op comes after last in the original order, so op should overwrite last
+				// Old data is already in place, just overwrite with new data
+				if op.Offset >= startOffset {
+					copy(mergedData[op.Offset-startOffset:], op.Data)
+				}
+			} else {
+				// Need new buffer, use appropriate object pool based on size
+				if mergedSize <= 64<<10 {
+					// Small buffer, use small pool
+					mergedData = chunkDataPool.Get().([]byte)
+					if cap(mergedData) < mergedSize {
+						mergedData = make([]byte, mergedSize)
+						chunkDataPool.Put(mergedData[:0]) // Return empty pool item
+					} else {
+						mergedData = mergedData[:mergedSize]
+					}
+				} else {
+					// Large buffer, use large pool
+					mergedData = largeChunkDataPool.Get().([]byte)
+					if cap(mergedData) < mergedSize {
+						mergedData = make([]byte, mergedSize)
+						largeChunkDataPool.Put(mergedData[:0]) // Return empty pool item
+					} else {
+						mergedData = mergedData[:mergedSize]
+					}
+				}
+
+				// IMPORTANT: Copy old data first, then overwrite with new data
+				// Since operations are sorted by offset and maintain original order for same offset,
+				// op comes after last in the original order, so op should overwrite last
+				if last.Offset >= startOffset {
+					copy(mergedData[last.Offset-startOffset:], last.Data)
+				}
+				// Overwrite with new data (op comes later in original order, so it should overwrite)
+				if op.Offset >= startOffset {
+					copy(mergedData[op.Offset-startOffset:], op.Data)
+				}
 			}
 
 			last.Offset = startOffset

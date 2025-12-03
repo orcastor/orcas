@@ -190,3 +190,26 @@ func getKey(c Ctx) string {
 	}
 	return ""
 }
+
+// NoAuthAccessCtrlMgr is an AccessCtrlMgr that bypasses all permission checks
+// This is useful for testing, internal operations, or when authentication is handled externally
+type NoAuthAccessCtrlMgr struct{}
+
+func (nacm *NoAuthAccessCtrlMgr) SetAdapter(ma MetadataAdapter) {
+	// No-op: NoAuthAccessCtrlMgr doesn't need MetadataAdapter
+}
+
+func (nacm *NoAuthAccessCtrlMgr) CheckPermission(c Ctx, action int, bktID int64) error {
+	// Always allow: bypass permission check
+	return nil
+}
+
+func (nacm *NoAuthAccessCtrlMgr) CheckRole(c Ctx, role uint32) error {
+	// Always allow: bypass role check
+	return nil
+}
+
+func (nacm *NoAuthAccessCtrlMgr) CheckOwn(c Ctx, bktID int64) error {
+	// Always allow: bypass ownership check
+	return nil
+}

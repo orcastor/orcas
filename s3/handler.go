@@ -1453,7 +1453,7 @@ func PutObject(c *gin.Context) {
 		batchMgr := sdk.GetBatchWriterForBucket(handler, bktID)
 		if batchMgr != nil {
 			batchMgr.SetFlushContext(ctx)
-			added, batchDataID, err := batchMgr.AddFile(objID, data, pid, fileName, dataSize)
+			added, batchDataID, err := batchMgr.AddFile(objID, data, pid, fileName, dataSize, 0) // kind=0: S3 API data is raw, no compression/encryption
 			if err == nil && added {
 				// Successfully added to batch write manager
 				// For S3 API, we flush immediately to ensure data is available
@@ -1501,7 +1501,7 @@ func PutObject(c *gin.Context) {
 			} else {
 				// Buffer full or other issue, flush existing data and retry once
 				batchMgr.FlushAll(ctx)
-				added, batchDataID, err = batchMgr.AddFile(objID, data, pid, fileName, dataSize)
+				added, batchDataID, err = batchMgr.AddFile(objID, data, pid, fileName, dataSize, 0) // kind=0: S3 API data is raw, no compression/encryption
 				if err == nil && added {
 					dataID = batchDataID
 					// First check memory cache (pending objects) for better performance
