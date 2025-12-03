@@ -664,7 +664,7 @@ func (tw *TempFileWriter) Write(offset int64, data []byte) error {
 
 	// Check handler type early
 	if tw.lh == nil {
-		return fmt.Errorf("handler is not LocalHandler, cannot use AppendData")
+		return fmt.Errorf("handler is not LocalHandler, cannot use Write")
 	}
 
 	writeEnd := offset + int64(len(data))
@@ -818,10 +818,12 @@ func (tw *TempFileWriter) Write(offset int64, data []byte) error {
 		tw.mu.Unlock()
 	}
 
-	// Update size atomically
+	// Update size atomically (always update to maximum writeEnd)
+	// This ensures that concurrent writes correctly track the maximum file size
 	for {
 		currentSize := tw.size.Load()
 		if writeEnd <= currentSize {
+			// Already updated by another concurrent write, no need to update
 			break
 		}
 		if tw.size.CompareAndSwap(currentSize, writeEnd) {
@@ -829,6 +831,7 @@ func (tw *TempFileWriter) Write(offset int64, data []byte) error {
 				tw.fileID, tw.dataID, currentSize, writeEnd)
 			break
 		}
+		// CAS failed, retry (another concurrent write may have updated size)
 	}
 
 	return nil
@@ -1006,19 +1009,13 @@ func (tw *TempFileWriter) flushChunk(sn int) error {
 	nextChunkStart := int64(sn+1) * currentChunkSize
 	isLastChunk = nextChunkStart >= currentSize
 
-	// Semi-synchronous write strategy:
-	// - First chunk (sn=0): always synchronous
-	// - Last chunk: synchronous (determined during Flush or when next chunk doesn't exist)
-	// - Middle chunks: asynchronous
-	shouldSync := isFirstChunk || isLastChunk
+	// Write data block immediately when chunk is complete (synchronous)
+	// All chunks are written synchronously to ensure data is persisted immediately
+	DebugLog("[VFS TempFileWriter flushChunk] Writing chunk to disk synchronously: fileID=%d, dataID=%d, sn=%d, size=%d, realtime=%v, isFirst=%v, isLast=%v",
+		tw.fileID, tw.dataID, sn, len(finalData), tw.enableRealtime, isFirstChunk, isLastChunk)
 
-	// Write data block
-	// If chunk already exists (e.g., when writing to same chunk multiple times in reverse order),
-	// we need to delete it first before writing
-	DebugLog("[VFS TempFileWriter flushChunk] Writing chunk to disk: fileID=%d, dataID=%d, sn=%d, size=%d, realtime=%v, sync=%v, isFirst=%v, isLast=%v",
-		tw.fileID, tw.dataID, sn, len(finalData), tw.enableRealtime, shouldSync, isFirstChunk, isLastChunk)
-
-	if shouldSync {
+	// Synchronous write for all chunks - write immediately when chunk is complete
+	{
 		// Synchronous write for first and last chunks
 		_, err = tw.fs.h.PutData(tw.fs.c, tw.fs.bktID, tw.dataID, sn, finalData)
 		if err != nil {
@@ -1061,93 +1058,9 @@ func (tw *TempFileWriter) flushChunk(sn int) error {
 				return err
 			}
 		}
-	} else {
-		// Asynchronous write for middle chunks
-		// Optimize memory allocation: use object pool for async write buffers
-		dataLen := len(finalData)
-		var asyncData []byte
-
-		// Get buffer from pool if size is reasonable, otherwise allocate new
-		if dataLen <= 10<<20 { // 10MB threshold
-			pooledData := asyncWriteDataPool.Get().([]byte)
-			if cap(pooledData) >= dataLen {
-				asyncData = pooledData[:dataLen]
-			} else {
-				// Pool buffer too small, allocate new and return pool buffer
-				asyncData = make([]byte, dataLen)
-				asyncWriteDataPool.Put(pooledData[:0])
-			}
-		} else {
-			// Very large chunk, allocate directly
-			asyncData = make([]byte, dataLen)
-		}
-
-		// Copy data (necessary for async write safety)
-		copy(asyncData, finalData)
-
-		// Create pending write
-		pw := &pendingWrite{
-			sn:   sn,
-			data: asyncData,
-			done: make(chan struct{}),
-		}
-		tw.pendingWrites.Store(sn, pw)
-
-		// Start async write in goroutine with worker pool limit
-		go func() {
-			defer close(pw.done)
-
-			// Acquire worker slot (limit concurrent async writes)
-			asyncWriteWorkers <- struct{}{}
-			defer func() { <-asyncWriteWorkers }()
-
-			// Perform the actual write
-			_, writeErr := tw.fs.h.PutData(tw.fs.c, tw.fs.bktID, tw.dataID, sn, asyncData)
-
-			// Handle errors (same logic as sync path)
-			if writeErr == core.ERR_OPEN_FILE {
-				// Delete existing chunk file before retrying
-				if lh, ok := tw.fs.h.(*core.LocalHandler); ok {
-					da := lh.GetDataAdapter()
-					if deleteErr := da.Delete(tw.fs.c, tw.fs.bktID, tw.dataID, sn); deleteErr == nil {
-						// Retry after deletion
-						_, writeErr = tw.fs.h.PutData(tw.fs.c, tw.fs.bktID, tw.dataID, sn, asyncData)
-					}
-				} else {
-					// Fallback to direct file removal if not LocalHandler
-					fileName := fmt.Sprintf("%d_%d", tw.dataID, sn)
-					hash := fmt.Sprintf("%X", md5.Sum([]byte(fileName)))
-					chunkPath := filepath.Join(core.ORCAS_DATA, fmt.Sprint(tw.fs.bktID), hash[21:24], hash[8:24], fileName)
-					if removeErr := os.Remove(chunkPath); removeErr == nil || os.IsNotExist(removeErr) {
-						// Retry after removal
-						_, writeErr = tw.fs.h.PutData(tw.fs.c, tw.fs.bktID, tw.dataID, sn, asyncData)
-					}
-				}
-			}
-
-			// Store error if any
-			pw.mu.Lock()
-			pw.err = writeErr
-			pw.mu.Unlock()
-
-			if writeErr != nil {
-				tw.writeErrors.Store(sn, writeErr)
-				DebugLog("[VFS TempFileWriter flushChunk] ERROR: Async write failed: fileID=%d, dataID=%d, sn=%d, error=%v", tw.fileID, tw.dataID, sn, writeErr)
-			} else {
-				DebugLog("[VFS TempFileWriter flushChunk] Successfully wrote chunk asynchronously: fileID=%d, dataID=%d, sn=%d, size=%d", tw.fileID, tw.dataID, sn, len(asyncData))
-			}
-
-			// Return buffer to pool after use
-			if cap(asyncData) <= 10<<20 {
-				asyncWriteDataPool.Put(asyncData[:0])
-			}
-		}()
-
-		// For async writes, we don't wait, just return success
-		// Error will be checked in next chunk write
-		DebugLog("[VFS TempFileWriter flushChunk] Started async write: fileID=%d, dataID=%d, sn=%d, size=%d", tw.fileID, tw.dataID, sn, len(asyncData))
-		return nil
 	}
+	
+	return nil
 
 	DebugLog("[VFS TempFileWriter flushChunk] Successfully wrote chunk to disk: fileID=%d, dataID=%d, sn=%d, size=%d, totalOrigSize=%d, totalSize=%d",
 		tw.fileID, tw.dataID, sn, len(finalData), tw.dataInfo.OrigSize, tw.dataInfo.Size)
@@ -1436,6 +1349,14 @@ func (tw *TempFileWriter) Flush() error {
 	obj.Size = size
 	obj.MTime = core.Now()
 
+	// Save original name BEFORE PutDataInfoAndObj (in case it gets updated)
+	// Auto-remove .tmp suffix after flush completes
+	// This ensures .tmp files are automatically renamed after writing completes
+	originalObjName := obj.Name
+	objNameLower := strings.ToLower(originalObjName)
+	shouldRemoveTmp := strings.HasSuffix(objNameLower, ".tmp")
+	DebugLog("[VFS TempFileWriter Flush] Checking for .tmp suffix removal: fileID=%d, fileName=%s, shouldRemoveTmp=%v", tw.fileID, originalObjName, shouldRemoveTmp)
+
 	// Upload DataInfo and ObjectInfo together
 	DebugLog("[VFS TempFileWriter Flush] Uploading metadata: fileID=%d, dataID=%d, fileName=%s, origSize=%d, size=%d, chunkSize=%d, realtime=%v, hasCompression=%v, hasEncryption=%v",
 		tw.fileID, tw.dataID, obj.Name, dataInfo.OrigSize, dataInfo.Size, tw.chunkSize, tw.enableRealtime,
@@ -1445,13 +1366,19 @@ func (tw *TempFileWriter) Flush() error {
 		DebugLog("[VFS TempFileWriter Flush] ERROR: Failed to upload DataInfo and ObjectInfo: fileID=%d, dataID=%d, error=%v", tw.fileID, tw.dataID, err)
 		return err
 	}
-
+	
 	// Re-fetch file object from database to ensure we have the latest information
 	// This is important for directory cache updates
 	updatedFileObjs, err := tw.fs.h.Get(tw.fs.c, tw.fs.bktID, []int64{tw.fileID})
 	if err == nil && len(updatedFileObjs) > 0 {
 		obj = updatedFileObjs[0]
-		DebugLog("[VFS TempFileWriter Flush] Re-fetched file object from database: fileID=%d, dataID=%d, size=%d, pid=%d", tw.fileID, obj.DataID, obj.Size, obj.PID)
+		DebugLog("[VFS TempFileWriter Flush] Re-fetched file object from database: fileID=%d, dataID=%d, size=%d, pid=%d, name=%s", tw.fileID, obj.DataID, obj.Size, obj.PID, obj.Name)
+		// Use re-fetched name if it still has .tmp suffix
+		if strings.HasSuffix(strings.ToLower(obj.Name), ".tmp") {
+			originalObjName = obj.Name
+			objNameLower = strings.ToLower(obj.Name)
+			shouldRemoveTmp = true
+		}
 	}
 
 	// Update cache
@@ -1493,25 +1420,30 @@ func (tw *TempFileWriter) Flush() error {
 
 	// Auto-remove .tmp suffix after flush completes
 	// This ensures .tmp files are automatically renamed after writing completes
-	if strings.HasSuffix(strings.ToLower(obj.Name), ".tmp") {
-		// Remove .tmp suffix
-		newName := strings.TrimSuffix(obj.Name, ".tmp")
-		if newName != obj.Name {
-			DebugLog("[VFS TempFileWriter Flush] Auto-removing .tmp suffix after flush: fileID=%d, oldName=%s, newName=%s", tw.fileID, obj.Name, newName)
+	if shouldRemoveTmp {
+		DebugLog("[VFS TempFileWriter Flush] File has .tmp suffix, removing it: fileID=%d, fileName=%s", tw.fileID, originalObjName)
+		// Remove .tmp suffix (case-insensitive)
+		objNameLen := len(originalObjName)
+		tmpSuffixLen := 4 // ".tmp"
+		if objNameLen >= tmpSuffixLen {
+			newName := originalObjName[:objNameLen-tmpSuffixLen]
+			DebugLog("[VFS TempFileWriter Flush] Calculated new name: fileID=%d, oldName=%s, newName=%s, objNameLen=%d, tmpSuffixLen=%d", tw.fileID, originalObjName, newName, objNameLen, tmpSuffixLen)
+			if newName != originalObjName {
+				DebugLog("[VFS TempFileWriter Flush] Auto-removing .tmp suffix after flush: fileID=%d, oldName=%s, newName=%s", tw.fileID, originalObjName, newName)
 
-			// Check if a .tmp file with the same name already exists (different fileID)
-			// This can happen when uploading a new file with the same .tmp name
-			// We need to delete the old .tmp file before renaming
-			if obj.PID > 0 {
-				// Get directory listing to find existing .tmp file
-				children, _, _, err := tw.fs.h.List(tw.fs.c, tw.fs.bktID, obj.PID, core.ListOptions{
-					Count: core.DefaultListPageSize,
-				})
-				if err == nil {
-					for _, child := range children {
-						// Check if there's another .tmp file with the same name (different fileID)
-						if child.ID != tw.fileID && child.Name == obj.Name && child.Type == core.OBJ_TYPE_FILE {
-							DebugLog("[VFS TempFileWriter Flush] Found existing .tmp file with same name, deleting it: fileID=%d, name=%s", child.ID, child.Name)
+				// Check if a .tmp file with the same name already exists (different fileID)
+				// This can happen when uploading a new file with the same .tmp name
+				// We need to delete the old .tmp file before renaming
+				if obj.PID > 0 {
+					// Get directory listing to find existing .tmp file
+					children, _, _, err := tw.fs.h.List(tw.fs.c, tw.fs.bktID, obj.PID, core.ListOptions{
+						Count: core.DefaultListPageSize,
+					})
+					if err == nil {
+						for _, child := range children {
+							// Check if there's another .tmp file with the same name (different fileID)
+							if child.ID != tw.fileID && child.Name == originalObjName && child.Type == core.OBJ_TYPE_FILE {
+								DebugLog("[VFS TempFileWriter Flush] Found existing .tmp file with same name, deleting it: fileID=%d, name=%s", child.ID, child.Name)
 							// Delete the old .tmp file
 							deleteErr := tw.fs.h.Delete(tw.fs.c, tw.fs.bktID, child.ID)
 							if deleteErr != nil {
@@ -1533,13 +1465,13 @@ func (tw *TempFileWriter) Flush() error {
 				}
 			}
 
-			// Use handler's Rename method to rename the file
-			renameErr := tw.fs.h.Rename(tw.fs.c, tw.fs.bktID, tw.fileID, newName)
-			if renameErr != nil {
-				DebugLog("[VFS TempFileWriter Flush] WARNING: Failed to auto-rename .tmp file: fileID=%d, oldName=%s, newName=%s, error=%v", tw.fileID, obj.Name, newName, renameErr)
+				// Use handler's Rename method to rename the file
+				renameErr := tw.fs.h.Rename(tw.fs.c, tw.fs.bktID, tw.fileID, newName)
+				if renameErr != nil {
+					DebugLog("[VFS TempFileWriter Flush] WARNING: Failed to auto-rename .tmp file: fileID=%d, oldName=%s, newName=%s, error=%v", tw.fileID, originalObjName, newName, renameErr)
 				// Don't return error - rename failure doesn't mean flush failed
-			} else {
-				DebugLog("[VFS TempFileWriter Flush] Successfully auto-renamed .tmp file: fileID=%d, oldName=%s, newName=%s", tw.fileID, obj.Name, newName)
+				} else {
+					DebugLog("[VFS TempFileWriter Flush] Successfully auto-renamed .tmp file: fileID=%d, oldName=%s, newName=%s", tw.fileID, originalObjName, newName)
 				// Update cache with new name
 				updatedFileObjs, err := tw.fs.h.Get(tw.fs.c, tw.fs.bktID, []int64{tw.fileID})
 				if err == nil && len(updatedFileObjs) > 0 {
@@ -1554,6 +1486,7 @@ func (tw *TempFileWriter) Flush() error {
 						dirNode.updateChildInDirCache(updatedObj.PID, updatedObj)
 					}
 				}
+			}
 			}
 		}
 	}
@@ -2333,7 +2266,7 @@ func (ra *RandomAccessor) Read(offset int64, size int) ([]byte, error) {
 			// File is in batch writer, use OrigSize from batch writer
 			actualFileSize = pkgInfo.OrigSize
 			isInBatchWriter = true
-			DebugLog("[VFS Read] File in batch writer, using OrigSize: fileID=%d, OrigSize=%d, fileObj.Size=%d", ra.fileID, pkgInfo.OrigSize, fileObj.Size)
+			// DebugLog("[VFS Read] File in batch writer, using OrigSize: fileID=%d, OrigSize=%d, fileObj.Size=%d", ra.fileID, pkgInfo.OrigSize, fileObj.Size)
 		}
 	}
 
@@ -2345,7 +2278,7 @@ func (ra *RandomAccessor) Read(offset int64, size int) ([]byte, error) {
 		if writeIndex > 0 {
 			// Buffer has data, allow reading from buffer even if fileObj.Size is 0
 			// Size will be calculated from buffer operations
-			DebugLog("[VFS Read] File has no DataID and buffer has data, reading from buffer: fileID=%d, writeIndex=%d", ra.fileID, writeIndex)
+			// DebugLog("[VFS Read] File has no DataID and buffer has data, reading from buffer: fileID=%d, writeIndex=%d", ra.fileID, writeIndex)
 			return ra.readFromBuffer(offset, size), nil
 		}
 	}
@@ -2353,7 +2286,7 @@ func (ra *RandomAccessor) Read(offset int64, size int) ([]byte, error) {
 	// Limit reading size to file size (only if we have a valid size)
 	if actualFileSize > 0 {
 		if offset >= actualFileSize {
-			DebugLog("[VFS Read] offset >= size: fileID=%d, offset=%d, size=%d", ra.fileID, offset, actualFileSize)
+			// DebugLog("[VFS Read] offset >= size: fileID=%d, offset=%d, size=%d", ra.fileID, offset, actualFileSize)
 			return []byte{}, nil
 		}
 		if int64(size) > actualFileSize-offset {
@@ -2396,9 +2329,9 @@ func (ra *RandomAccessor) Read(offset int64, size int) ([]byte, error) {
 			if pkgInfo, isPending := batchMgr.GetPendingObject(ra.fileID); isPending {
 				// File is in batch writer buffer, read from batch writer's buffer
 				// Get processed data from batch writer buffer
-				DebugLog("[VFS Read] File in batch writer buffer (no DataID): fileID=%d, OrigSize=%d, Size=%d", ra.fileID, pkgInfo.OrigSize, pkgInfo.Size)
+				// DebugLog("[VFS Read] File in batch writer buffer (no DataID): fileID=%d, OrigSize=%d, Size=%d", ra.fileID, pkgInfo.OrigSize, pkgInfo.Size)
 				processedData := batchMgr.ReadPendingData(ra.fileID)
-				DebugLog("[VFS Read] ReadPendingData returned: fileID=%d, dataLen=%d", ra.fileID, len(processedData))
+				// DebugLog("[VFS Read] ReadPendingData returned: fileID=%d, dataLen=%d", ra.fileID, len(processedData))
 				if len(processedData) > 0 {
 					// Decode processed data (decompress/decrypt)
 					// Get kind from bucket configuration (same as used during processing)
@@ -2451,7 +2384,7 @@ func (ra *RandomAccessor) Read(offset int64, size int) ([]byte, error) {
 			if batchMgr != nil {
 				if pkgInfo, isPending := batchMgr.GetPendingObject(ra.fileID); isPending {
 					// File is in batch writer, read from batch writer's buffer
-					DebugLog("[VFS Read] Database read failed, falling back to batch writer: fileID=%d, DataID=%d", ra.fileID, fileObj.DataID)
+					// DebugLog("[VFS Read] Database read failed, falling back to batch writer: fileID=%d, DataID=%d", ra.fileID, fileObj.DataID)
 					processedData := batchMgr.ReadPendingData(ra.fileID)
 					if len(processedData) > 0 {
 						// Decode processed data (decompress/decrypt)
@@ -2480,8 +2413,8 @@ func (ra *RandomAccessor) Read(offset int64, size int) ([]byte, error) {
 	}
 
 	// Debug: Log DataInfo details
-	DebugLog("[VFS Read] DataInfo: fileID=%d, DataID=%d, OrigSize=%d, Size=%d, Kind=0x%x, PkgID=%d, PkgOffset=%d",
-		ra.fileID, dataInfo.ID, dataInfo.OrigSize, dataInfo.Size, dataInfo.Kind, dataInfo.PkgID, dataInfo.PkgOffset)
+	// DebugLog("[VFS Read] DataInfo: fileID=%d, DataID=%d, OrigSize=%d, Size=%d, Kind=0x%x, PkgID=%d, PkgOffset=%d",
+	//	ra.fileID, dataInfo.ID, dataInfo.OrigSize, dataInfo.Size, dataInfo.Kind, dataInfo.PkgID, dataInfo.PkgOffset)
 
 	// Always use bucket's default chunk size (force unified chunkSize)
 	chunkSize := ra.fs.chunkSize
@@ -2494,14 +2427,14 @@ func (ra *RandomAccessor) Read(offset int64, size int) ([]byte, error) {
 	bucket := getBucketConfigWithCache(ra.fs)
 	if bucket != nil {
 		endecKey = bucket.EndecKey
-		DebugLog("[VFS Read] Bucket config: fileID=%d, CmprWay=%d, EndecWay=%d, endecKey length=%d",
-			ra.fileID, bucket.CmprWay, bucket.EndecWay, len(endecKey))
+		// DebugLog("[VFS Read] Bucket config: fileID=%d, CmprWay=%d, EndecWay=%d, endecKey length=%d",
+		//	ra.fileID, bucket.CmprWay, bucket.EndecWay, len(endecKey))
 	}
 
 	// Create data reader (abstract read interface, unified handling of uncompressed and compressed/encrypted data)
 	reader := newChunkReader(ra.fs.c, ra.fs.h, ra.fs.bktID, dataInfo, endecKey, chunkSize)
-	DebugLog("[VFS Read] Created chunkReader: fileID=%d, dataID=%d, kind=0x%x, endecKey length=%d",
-		ra.fileID, reader.dataID, reader.kind, len(reader.endecKey))
+	// DebugLog("[VFS Read] Created chunkReader: fileID=%d, dataID=%d, kind=0x%x, endecKey length=%d",
+	//	ra.fileID, reader.dataID, reader.kind, len(reader.endecKey))
 
 	// Unified read logic (includes merging write operations)
 	fileData, operationsHandled := ra.readWithWrites(reader, offset, size)
@@ -2514,7 +2447,7 @@ func (ra *RandomAccessor) Read(offset int64, size int) ([]byte, error) {
 	if batchMgr != nil {
 		if pkgInfo, isPending := batchMgr.GetPendingObject(ra.fileID); isPending {
 			// File is in batch writer, read from batch writer's buffer
-			DebugLog("[VFS Read] Database read failed, falling back to batch writer: fileID=%d, DataID=%d", ra.fileID, fileObj.DataID)
+			// DebugLog("[VFS Read] Database read failed, falling back to batch writer: fileID=%d, DataID=%d", ra.fileID, fileObj.DataID)
 			processedData := batchMgr.ReadPendingData(ra.fileID)
 			if len(processedData) > 0 {
 				// Decode processed data (decompress/decrypt)
@@ -4388,7 +4321,7 @@ func (cr *chunkReader) ReadAt(buf []byte, offset int64) (int, error) {
 			return 0, fmt.Errorf("package data incomplete: expected %d bytes, got %d", pkgEnd, len(pkgData))
 		}
 		encryptedFileData := pkgData[pkgStart:pkgEnd]
-		DebugLog("[VFS chunkReader ReadAt] Extracted encrypted file data: dataID=%d, encryptedFileDataLen=%d", cr.dataID, len(encryptedFileData))
+		// DebugLog("[VFS chunkReader ReadAt] Extracted encrypted file data: dataID=%d, encryptedFileDataLen=%d", cr.dataID, len(encryptedFileData))
 
 		// Decrypt and decompress the file data
 		decodedFileData := encryptedFileData
@@ -4435,7 +4368,7 @@ func (cr *chunkReader) ReadAt(buf []byte, offset int64) (int, error) {
 		}
 
 		fileData = decodedFileData
-		DebugLog("[VFS chunkReader ReadAt] Decoded file data: dataID=%d, decodedFileDataLen=%d, origSize=%d", cr.dataID, len(fileData), cr.origSize)
+		// DebugLog("[VFS chunkReader ReadAt] Decoded file data: dataID=%d, decodedFileDataLen=%d, origSize=%d", cr.dataID, len(fileData), cr.origSize)
 
 		// Now read from decoded fileData
 		if offset >= int64(len(fileData)) {
@@ -5132,34 +5065,10 @@ func mergeWriteOperations(operations []WriteOperation) []WriteOperation {
 					sorted[j+1] = key
 				}
 			} else {
-				// For larger arrays, use stable sort with binary search
-				for i := 1; i < len(sorted); i++ {
-					key := sorted[i]
-					j := i - 1
-					// Optimized: use binary search for insertion point (for large arrays)
-					if len(sorted) > 100 {
-						// Binary search for insertion point (stable: preserve order for equal elements)
-						left, right := 0, i
-						for left < right {
-							mid := (left + right) / 2
-							if sorted[mid].Offset <= key.Offset {
-								left = mid + 1
-							} else {
-								right = mid
-							}
-						}
-						// Shift elements
-						copy(sorted[left+1:i+1], sorted[left:i])
-						sorted[left] = key
-					} else {
-						// Standard stable insertion sort for smaller arrays
-						for j >= 0 && sorted[j].Offset > key.Offset {
-							sorted[j+1] = sorted[j]
-							j--
-						}
-						sorted[j+1] = key
-					}
-				}
+				// For larger arrays, use standard library stable sort (guaranteed stability)
+				sort.SliceStable(sorted, func(i, j int) bool {
+					return sorted[i].Offset < sorted[j].Offset
+				})
 			}
 		}
 	}

@@ -2932,9 +2932,30 @@ func (n *OrcasNode) forceFlushTempFileBeforeRename(fileID int64, oldName, newNam
 		raToFlush = n.fs.getRandomAccessorByFileID(fileID)
 	}
 
+	// Get file object to check size
+	cacheKey := formatCacheKey(fileID)
+	fileObjCache.Del(cacheKey) // Invalidate cache to get fresh data
+	objs, err := n.fs.h.Get(n.fs.c, n.fs.bktID, []int64{fileID})
+	var fileObj *core.ObjectInfo
+	if err == nil && len(objs) > 0 {
+		fileObj = objs[0]
+	}
+
+	// Check if file is large (uses TempFileWriter) or empty (Size=0)
+	isLargeFile := false
+	isEmptyFile := false
+	if fileObj != nil {
+		isEmptyFile = fileObj.Size == 0
+		// Large file threshold: 1MB (files larger than this use TempFileWriter)
+		isLargeFile = fileObj.Size > 1<<20
+	}
+
+	// For large files or empty files, force flush to disk
+	shouldForceFlush := isLargeFile || isEmptyFile
+
 	// Check if file has TempFileWriter - if so, directly sync flush (no waiting)
 	if raToFlush != nil && raToFlush.hasTempFileWriter() {
-		DebugLog("[VFS Rename] File has TempFileWriter, directly syncing flush: fileID=%d", fileID)
+		DebugLog("[VFS Rename] File has TempFileWriter, directly syncing flush: fileID=%d, size=%d, isLargeFile=%v, isEmptyFile=%v", fileID, fileObj.Size, isLargeFile, isEmptyFile)
 		if err := raToFlush.flushTempFileWriter(); err != nil {
 			DebugLog("[VFS Rename] ERROR: Failed to flush TempFileWriter: fileID=%d, error=%v", fileID, err)
 		} else {
@@ -2945,6 +2966,26 @@ func (n *OrcasNode) forceFlushTempFileBeforeRename(fileID int64, oldName, newNam
 			objs, err := n.fs.h.Get(n.fs.c, n.fs.bktID, []int64{fileID})
 			if err == nil && len(objs) > 0 {
 				fileObj := objs[0]
+				// For empty files, ensure EmptyDataID is set
+				if fileObj.Size == 0 && fileObj.DataID != core.EmptyDataID {
+					DebugLog("[VFS Rename] Empty file detected, setting EmptyDataID: fileID=%d, currentDataID=%d", fileID, fileObj.DataID)
+					updateFileObj := &core.ObjectInfo{
+						ID:     fileObj.ID,
+						PID:    fileObj.PID,
+						Type:   fileObj.Type,
+						Name:   fileObj.Name,
+						DataID: core.EmptyDataID,
+						Size:   0,
+						MTime:  core.Now(),
+					}
+					_, putErr := n.fs.h.Put(n.fs.c, n.fs.bktID, []*core.ObjectInfo{updateFileObj})
+					if putErr == nil {
+						fileObj = updateFileObj
+						DebugLog("[VFS Rename] Successfully set EmptyDataID for empty file: fileID=%d", fileID)
+					} else {
+						DebugLog("[VFS Rename] WARNING: Failed to set EmptyDataID for empty file: fileID=%d, error=%v", fileID, putErr)
+					}
+				}
 				fileObjCache.Put(cacheKey, fileObj)
 				DebugLog("[VFS Rename] Strong consistency: re-fetched from database after TempFileWriter flush: fileID=%d, dataID=%d, size=%d", fileID, fileObj.DataID, fileObj.Size)
 				// After sync flush, append file to directory listing cache
@@ -2963,6 +3004,45 @@ func (n *OrcasNode) forceFlushTempFileBeforeRename(fileID int64, oldName, newNam
 			n.fs.unregisterRandomAccessor(fileID, raToFlush)
 		}
 		return
+	}
+
+	// For large files or empty files without TempFileWriter, force flush
+	if shouldForceFlush && raToFlush != nil {
+		DebugLog("[VFS Rename] Large file or empty file detected, forcing flush: fileID=%d, size=%d, isLargeFile=%v, isEmptyFile=%v", fileID, fileObj.Size, isLargeFile, isEmptyFile)
+		if _, err := raToFlush.ForceFlush(); err != nil {
+			DebugLog("[VFS Rename] ERROR: Failed to force flush: fileID=%d, error=%v", fileID, err)
+		} else {
+			DebugLog("[VFS Rename] Successfully force flushed: fileID=%d", fileID)
+			// Re-fetch to check if empty file needs EmptyDataID
+			cacheKey := formatCacheKey(fileID)
+			fileObjCache.Del(cacheKey)
+			objs, err := n.fs.h.Get(n.fs.c, n.fs.bktID, []int64{fileID})
+			if err == nil && len(objs) > 0 {
+				fileObj := objs[0]
+				// For empty files, ensure EmptyDataID is set
+				if fileObj.Size == 0 && fileObj.DataID != core.EmptyDataID {
+					DebugLog("[VFS Rename] Empty file detected after flush, setting EmptyDataID: fileID=%d, currentDataID=%d", fileID, fileObj.DataID)
+					updateFileObj := &core.ObjectInfo{
+						ID:     fileObj.ID,
+						PID:    fileObj.PID,
+						Type:   fileObj.Type,
+						Name:   fileObj.Name,
+						DataID: core.EmptyDataID,
+						Size:   0,
+						MTime:  core.Now(),
+					}
+					_, putErr := n.fs.h.Put(n.fs.c, n.fs.bktID, []*core.ObjectInfo{updateFileObj})
+					if putErr == nil {
+						fileObj = updateFileObj
+						DebugLog("[VFS Rename] Successfully set EmptyDataID for empty file: fileID=%d", fileID)
+					} else {
+						DebugLog("[VFS Rename] WARNING: Failed to set EmptyDataID for empty file: fileID=%d, error=%v", fileID, putErr)
+					}
+				}
+				fileObjCache.Put(cacheKey, fileObj)
+				DebugLog("[VFS Rename] Re-fetched after force flush: fileID=%d, dataID=%d, size=%d", fileID, fileObj.DataID, fileObj.Size)
+			}
+		}
 	}
 
 	// If RandomAccessor exists but no TempFileWriter, flush its buffer first
@@ -3116,6 +3196,26 @@ func (n *OrcasNode) forceFlushTempFileBeforeRename(fileID int64, oldName, newNam
 			objs, err := n.fs.h.Get(n.fs.c, n.fs.bktID, []int64{fileID})
 			if err == nil && len(objs) > 0 {
 				fileObj := objs[0]
+				// For empty files, ensure EmptyDataID is set
+				if fileObj.Size == 0 && fileObj.DataID != core.EmptyDataID {
+					DebugLog("[VFS Rename] Empty file detected after temporary flush, setting EmptyDataID: fileID=%d, currentDataID=%d", fileID, fileObj.DataID)
+					updateFileObj := &core.ObjectInfo{
+						ID:     fileObj.ID,
+						PID:    fileObj.PID,
+						Type:   fileObj.Type,
+						Name:   fileObj.Name,
+						DataID: core.EmptyDataID,
+						Size:   0,
+						MTime:  core.Now(),
+					}
+					_, putErr := n.fs.h.Put(n.fs.c, n.fs.bktID, []*core.ObjectInfo{updateFileObj})
+					if putErr == nil {
+						fileObj = updateFileObj
+						DebugLog("[VFS Rename] Successfully set EmptyDataID for empty file: fileID=%d", fileID)
+					} else {
+						DebugLog("[VFS Rename] WARNING: Failed to set EmptyDataID for empty file: fileID=%d, error=%v", fileID, putErr)
+					}
+				}
 				fileObjCache.Put(cacheKey, fileObj)
 				DebugLog("[VFS Rename] Strong consistency: re-fetched from database after temporary flush: fileID=%d, dataID=%d, size=%d", fileID, fileObj.DataID, fileObj.Size)
 				// Update directory listing cache
@@ -3170,11 +3270,31 @@ func (n *OrcasNode) forceFlushTempFileBeforeRename(fileID int64, oldName, newNam
 	}
 
 	// Strong consistency: always re-fetch from database and update cache
-	cacheKey := formatCacheKey(fileID)
+	cacheKey = formatCacheKey(fileID)
 	fileObjCache.Del(cacheKey)
-	objs, err := n.fs.h.Get(n.fs.c, n.fs.bktID, []int64{fileID})
+	objs, err = n.fs.h.Get(n.fs.c, n.fs.bktID, []int64{fileID})
 	if err == nil && len(objs) > 0 {
 		fileObj := objs[0]
+		// For empty files, ensure EmptyDataID is set
+		if fileObj.Size == 0 && fileObj.DataID != core.EmptyDataID {
+			DebugLog("[VFS Rename] Empty file detected after flush, setting EmptyDataID: fileID=%d, currentDataID=%d", fileID, fileObj.DataID)
+			updateFileObj := &core.ObjectInfo{
+				ID:     fileObj.ID,
+				PID:    fileObj.PID,
+				Type:   fileObj.Type,
+				Name:   fileObj.Name,
+				DataID: core.EmptyDataID,
+				Size:   0,
+				MTime:  core.Now(),
+			}
+			_, putErr := n.fs.h.Put(n.fs.c, n.fs.bktID, []*core.ObjectInfo{updateFileObj})
+			if putErr == nil {
+				fileObj = updateFileObj
+				DebugLog("[VFS Rename] Successfully set EmptyDataID for empty file: fileID=%d", fileID)
+			} else {
+				DebugLog("[VFS Rename] WARNING: Failed to set EmptyDataID for empty file: fileID=%d, error=%v", fileID, putErr)
+			}
+		}
 		fileObjCache.Put(cacheKey, fileObj)
 		DebugLog("[VFS Rename] Strong consistency: re-fetched from database after flush: fileID=%d, dataID=%d, size=%d, name=%s", fileID, fileObj.DataID, fileObj.Size, fileObj.Name)
 		if fileObj.DataID == 0 || fileObj.DataID == core.EmptyDataID || fileObj.Size == 0 {

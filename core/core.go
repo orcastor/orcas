@@ -348,8 +348,8 @@ func (lh *LocalHandler) Login(c Ctx, usr, pwd string) (Ctx, *UserInfo, []*Bucket
 	// 同步每个bucket的配置到SDKConfig
 	for _, bucket := range b {
 		if bucket != nil {
-		// CmprWay is now smart compression by default
-		lh.SetSDKConfig(bucket.ID, bucket.CmprWay, bucket.CmprQlty, bucket.EndecWay, bucket.EndecKey)
+			// CmprWay is now smart compression by default
+			lh.SetSDKConfig(bucket.ID, bucket.CmprWay, bucket.CmprQlty, bucket.EndecWay, bucket.EndecKey)
 		}
 	}
 
@@ -809,57 +809,6 @@ func (lh *LocalHandler) UpdateData(c Ctx, bktID, dataID int64, sn int, offset in
 	if sizeDiff > 0 {
 		// Get bucket info and check quota
 		buckets, err := lh.ma.GetBkt(c, []int64{bktID})
-	if err != nil {
-		return err
-	}
-		if len(buckets) == 0 {
-			return ERR_QUERY_DB
-		}
-		bucket := buckets[0]
-
-		// If quota >= 0, check if it exceeds quota
-		if bucket.Quota >= 0 {
-			if bucket.RealUsed+sizeDiff > bucket.Quota {
-				return ERR_QUOTA_EXCEED
-			}
-		}
-
-		// Increase usage (only when extending)
-		if err := lh.ma.IncBktRealUsed(c, bktID, sizeDiff); err != nil {
-		return err
-	}
-	}
-
-	// Update data block using DataAdapter.Update (supports partial update)
-	return lh.da.Update(c, bktID, dataID, sn, offset, buf)
-}
-
-// AppendData appends data to the end of an existing data chunk
-// If the chunk doesn't exist, it will be created
-// This is optimized for sequential writes as it always appends to the end
-func (lh *LocalHandler) AppendData(c Ctx, bktID, dataID int64, sn int, buf []byte) error {
-	if err := lh.acm.CheckPermission(c, DW, bktID); err != nil {
-		return err
-	}
-
-	if len(buf) == 0 {
-		return nil // Nothing to append
-	}
-
-	// For AppendData, we need to handle quota:
-	// Get old data size if exists
-	oldData, err := lh.da.Read(c, bktID, dataID, sn)
-	oldSize := int64(0)
-	if err == nil {
-		oldSize = int64(len(oldData))
-	}
-
-	// New size after append
-	newSize := oldSize + int64(len(buf))
-	sizeDiff := int64(len(buf))
-
-		// Get bucket info and check quota
-		buckets, err := lh.ma.GetBkt(c, []int64{bktID})
 		if err != nil {
 			return err
 		}
@@ -875,23 +824,14 @@ func (lh *LocalHandler) AppendData(c Ctx, bktID, dataID int64, sn int, buf []byt
 			}
 		}
 
-	// Increase usage
+		// Increase usage (only when extending)
 		if err := lh.ma.IncBktRealUsed(c, bktID, sizeDiff); err != nil {
 			return err
 		}
-
-	log.Printf("[Core AppendData] Appending data to disk: bktID=%d, dataID=%d, sn=%d, size=%d, oldSize=%d, newSize=%d", bktID, dataID, sn, len(buf), oldSize, newSize)
-	err = lh.da.Append(c, bktID, dataID, sn, buf)
-	if err != nil {
-		log.Printf("[Core AppendData] ERROR: Failed to append data to disk: bktID=%d, dataID=%d, sn=%d, size=%d, error=%v", bktID, dataID, sn, len(buf), err)
-		// Rollback quota on error
-		if rollbackErr := lh.ma.IncBktRealUsed(c, bktID, -sizeDiff); rollbackErr != nil {
-			log.Printf("[Core AppendData] ERROR: Failed to rollback quota: %v", rollbackErr)
-		}
-		return err
 	}
-	log.Printf("[Core AppendData] Successfully appended data to disk: bktID=%d, dataID=%d, sn=%d, size=%d, newSize=%d", bktID, dataID, sn, len(buf), newSize)
-	return nil
+
+	// Update data block using DataAdapter.Update (supports partial update)
+	return lh.da.Update(c, bktID, dataID, sn, offset, buf)
 }
 
 // Put creates objects
