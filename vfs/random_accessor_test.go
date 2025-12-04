@@ -303,6 +303,13 @@ func TestVFSRandomAccessorWithSDK(t *testing.T) {
 		})
 
 		Convey("test with encryption", func() {
+			// 设置bucket加密配置
+			bucket.EndecWay = core.DATA_ENDEC_AES256
+			bucket.EndecKey = "this-is-a-test-encryption-key-that-is-long-enough-for-aes256-encryption-12345678901234567890"
+			So(dma.PutBkt(testCtx, []*core.BucketInfo{bucket}), ShouldBeNil)
+			// 清除bucket配置缓存，确保使用新配置
+			bucketConfigCache.Del(formatCacheKey(testBktID))
+
 			// 创建OrcasFS（bucket配置已包含加密设置）
 			ofs := NewOrcasFS(lh, testCtx, testBktID)
 
@@ -318,6 +325,19 @@ func TestVFSRandomAccessorWithSDK(t *testing.T) {
 			// 刷新（触发加密）
 			_, err = ra.Flush()
 			So(err, ShouldBeNil)
+
+			// 强制 flush 特定 bucket 的 batch writer，确保数据持久化
+			batchMgr := ofs.getBatchWriteManager()
+			if batchMgr != nil {
+				batchMgr.FlushAll(testCtx)
+			}
+			// 等待 flush 完成
+			time.Sleep(100 * time.Millisecond)
+
+			// 清除缓存，确保从数据库获取最新数据
+			cacheKey := formatCacheKey(fileID)
+			fileObjCache.Del(cacheKey)
+			dataInfoCache.Del(formatCacheKey(0)) // 清除可能的 DataInfo 缓存
 
 			// 验证数据已写入 - 通过重新打开RandomAccessor来验证
 			ra2, err := NewRandomAccessor(ofs, fileID)
@@ -342,6 +362,15 @@ func TestVFSRandomAccessorWithSDK(t *testing.T) {
 		})
 
 		Convey("test with compression and encryption", func() {
+			// 设置bucket压缩和加密配置
+			bucket.CmprWay = core.DATA_CMPR_ZSTD
+			bucket.CmprQlty = 5
+			bucket.EndecWay = core.DATA_ENDEC_AES256
+			bucket.EndecKey = "this-is-a-test-encryption-key-that-is-long-enough-for-aes256-encryption-12345678901234567890"
+			So(dma.PutBkt(testCtx, []*core.BucketInfo{bucket}), ShouldBeNil)
+			// 清除bucket配置缓存，确保使用新配置
+			bucketConfigCache.Del(formatCacheKey(testBktID))
+
 			// 创建OrcasFS（bucket配置已包含压缩和加密设置）
 			ofs := NewOrcasFS(lh, testCtx, testBktID)
 
@@ -358,6 +387,19 @@ func TestVFSRandomAccessorWithSDK(t *testing.T) {
 			_, err = ra.Flush()
 			So(err, ShouldBeNil)
 
+			// 强制 flush 特定 bucket 的 batch writer，确保数据持久化
+			batchMgr := ofs.getBatchWriteManager()
+			if batchMgr != nil {
+				batchMgr.FlushAll(testCtx)
+			}
+			// 等待 flush 完成
+			time.Sleep(100 * time.Millisecond)
+
+			// 清除缓存，确保从数据库获取最新数据
+			cacheKey := formatCacheKey(fileID)
+			fileObjCache.Del(cacheKey)
+			dataInfoCache.Del(formatCacheKey(0)) // 清除可能的 DataInfo 缓存
+
 			// 验证数据已写入 - 通过重新打开RandomAccessor来验证
 			ra2, err := NewRandomAccessor(ofs, fileID)
 			So(err, ShouldBeNil)
@@ -369,13 +411,21 @@ func TestVFSRandomAccessorWithSDK(t *testing.T) {
 			So(fileObj2.DataID, ShouldNotEqual, 0)
 
 			// 验证可以读取（应该自动解压缩和解密）
-
 			readData, err := ra2.Read(0, len(testData))
 			So(err, ShouldBeNil)
 			So(string(readData), ShouldEqual, string(testData))
 		})
 
 		Convey("test random read and write with chunk-based compression and encryption", func() {
+			// 设置bucket压缩和加密配置
+			bucket.CmprWay = core.DATA_CMPR_ZSTD
+			bucket.CmprQlty = 5
+			bucket.EndecWay = core.DATA_ENDEC_AES256
+			bucket.EndecKey = "this-is-a-test-encryption-key-that-is-long-enough-for-aes256-encryption-12345678901234567890"
+			So(dma.PutBkt(testCtx, []*core.BucketInfo{bucket}), ShouldBeNil)
+			// 清除bucket配置缓存，确保使用新配置
+			bucketConfigCache.Del(formatCacheKey(testBktID))
+
 			// 创建OrcasFS（bucket配置已包含压缩和加密设置）
 			ofs := NewOrcasFS(lh, testCtx, testBktID)
 
@@ -478,6 +528,13 @@ func TestVFSRandomAccessorWithSDK(t *testing.T) {
 		})
 
 		Convey("test random write with overlapping chunks", func() {
+			// 设置bucket压缩配置
+			bucket.CmprWay = core.DATA_CMPR_ZSTD
+			bucket.CmprQlty = 5
+			So(dma.PutBkt(testCtx, []*core.BucketInfo{bucket}), ShouldBeNil)
+			// 清除bucket配置缓存，确保使用新配置
+			bucketConfigCache.Del(formatCacheKey(testBktID))
+
 			// 创建OrcasFS（bucket配置已包含压缩设置）
 			ofs := NewOrcasFS(lh, testCtx, testBktID)
 
@@ -784,6 +841,18 @@ func TestRandomAccessorReadOptimization(t *testing.T) {
 			_, err = ra.Flush()
 			So(err, ShouldBeNil)
 
+			// 强制 flush 特定 bucket 的 batch writer，确保数据持久化
+			batchMgr := ofs.getBatchWriteManager()
+			if batchMgr != nil {
+				batchMgr.FlushAll(testCtx)
+			}
+			// 等待 flush 完成
+			time.Sleep(100 * time.Millisecond)
+
+			// 清除缓存，确保从数据库获取最新数据
+			cacheKey := formatCacheKey(fileID)
+			fileObjCache.Del(cacheKey)
+
 			// 读取指定大小（应该不超过请求的大小）
 			readSize := 100
 			data, err := ra.Read(0, readSize)
@@ -1007,6 +1076,18 @@ func TestRandomAccessorReadOptimization(t *testing.T) {
 			So(err, ShouldBeNil)
 			_, err = ra.Flush()
 			So(err, ShouldBeNil)
+
+			// 强制 flush 特定 bucket 的 batch writer，确保数据持久化
+			batchMgr := ofs.getBatchWriteManager()
+			if batchMgr != nil {
+				batchMgr.FlushAll(testCtx)
+			}
+			// 等待 flush 完成
+			time.Sleep(100 * time.Millisecond)
+
+			// 清除缓存，确保从数据库获取最新数据
+			cacheKey := formatCacheKey(fileID)
+			fileObjCache.Del(cacheKey)
 
 			// 读取超出文件大小（应该返回可用数据，不超过请求大小）
 			readSize := 100
@@ -1523,13 +1604,21 @@ func TestLargeFileOperations(t *testing.T) {
 
 		ofs := NewOrcasFS(lh, testCtx, testBktID)
 
+		// 添加清理逻辑
+		defer func() {
+			sdk.FlushAllBatchWriters(testCtx)
+			os.RemoveAll(core.ORCAS_BASE)
+			os.RemoveAll(core.ORCAS_DATA)
+		}()
+
 		Convey("test write large file in chunks", func() {
 			ra, err := NewRandomAccessor(ofs, fileID)
 			So(err, ShouldBeNil)
 			defer ra.Close()
 
+			// 减少数据量以避免内存盘满
 			chunkSize := 1024 * 1024 // 1MB
-			numChunks := 50          // 50MB total
+			numChunks := 10          // 10MB total
 			totalSize := chunkSize * numChunks
 
 			// 写入多个chunk
@@ -2118,7 +2207,7 @@ func TestTruncateWithCompression(t *testing.T) {
 		So(dma.PutBkt(testCtx, []*core.BucketInfo{bucket}), ShouldBeNil)
 
 		// 使用压缩配置
-	ofs := NewOrcasFS(lh, testCtx, testBktID)
+		ofs := NewOrcasFS(lh, testCtx, testBktID)
 
 		Convey("test truncate compressed file", func() {
 			fileID, _ := ig.New()
@@ -2222,19 +2311,22 @@ func TestBatchWriteManagerSmallFile(t *testing.T) {
 			_, err = ra.Flush()
 			So(err, ShouldBeNil)
 
-			// 强制 flush 所有 batch writers，确保数据持久化
-			sdk.FlushAllBatchWriters(testCtx)
-			
+			// 强制 flush 特定 bucket 的 batch writer，确保数据持久化
+			batchMgr := ofs.getBatchWriteManager()
+			if batchMgr != nil {
+				batchMgr.FlushAll(testCtx)
+			}
+
 			// 强制刷新文件对象缓存，确保从数据库获取最新数据
 			cacheKey := formatCacheKey(fileID)
 			fileObjCache.Del(cacheKey)
-			
+
 			// 读取验证 - Read 方法应该能够从 batch writer 或数据库读取数据
 			// 不依赖时序，任何时间访问都应该能读取到数据
 			data, err := ra.Read(0, 200)
 			So(err, ShouldBeNil)
 			So(len(data), ShouldEqual, 100)
-			
+
 			// 验证数据内容
 			for i := 0; i < 100; i++ {
 				expected := byte('A' + (i % 26))
@@ -2248,7 +2340,7 @@ func TestBatchWriteManagerSmallFile(t *testing.T) {
 			// 文件应该有数据：要么 DataID > 0，要么在 batch writer 中，要么 buffer 有数据
 			hasDataID := fileObj2.DataID > 0 && fileObj2.DataID != core.EmptyDataID
 			isInBatchWriter := false
-			batchMgr := ofs.getBatchWriteManager()
+			batchMgr = ofs.getBatchWriteManager()
 			if batchMgr != nil {
 				_, isInBatchWriter = batchMgr.GetPendingObject(fileID)
 			}

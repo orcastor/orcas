@@ -579,15 +579,30 @@ func (n *OrcasNode) getDirListWithCache(dirID int64) ([]*core.ObjectInfo, syscal
 			}
 
 			// Then, add pending objects that are not already in cache
+			// IMPORTANT: Even if pending object has DataID (already flushed), if it's not in cache,
+			// it might be a race condition where file was flushed but cache wasn't updated yet
 			for _, pending := range pendingChildren {
-				// Check by ID first - if same ID exists in cache, skip (cache is authoritative)
+				// Check by ID first - if same ID exists in cache, prefer cache entry if it has DataID
 				if existing, exists := childrenMapByID[pending.ID]; exists {
-					// Same ID exists - cached entry is authoritative, skip pending
-					DebugLog("[VFS getDirListWithCache] Skipping pending object in cache (same ID in cache): dirID=%d, fileID=%d, name=%s, cacheDataID=%d", dirID, pending.ID, pending.Name, existing.DataID)
+					// Same ID exists - prefer cache entry if it has DataID, otherwise use pending
+					if existing.DataID > 0 {
+						// Cached entry has DataID (from database), skip pending
+						DebugLog("[VFS getDirListWithCache] Skipping pending object in cache (same ID in cache with DataID): dirID=%d, fileID=%d, name=%s, cacheDataID=%d", dirID, pending.ID, pending.Name, existing.DataID)
+						continue
+					}
+					// Cache entry has no DataID but pending has DataID, update cache entry with pending data
+					if pending.DataID > 0 {
+						existing.DataID = pending.DataID
+						existing.Size = pending.Size
+						DebugLog("[VFS getDirListWithCache] Updated cache entry with pending DataID: dirID=%d, fileID=%d, name=%s, DataID=%d", dirID, pending.ID, pending.Name, pending.DataID)
+						continue
+					}
+					// Both have no DataID, prefer cache entry
+					DebugLog("[VFS getDirListWithCache] Skipping pending object in cache (same ID, both no DataID, prefer cache): dirID=%d, fileID=%d, name=%s", dirID, pending.ID, pending.Name)
 					continue
 				}
 
-				// Check by name - if same name exists in cache (with DataID), skip pending
+				// Check by name - if same name exists in cache, prefer cache entry if it has DataID
 				if existing, exists := childrenMapByName[pending.Name]; exists {
 					if existing.DataID > 0 {
 						// Cached entry has DataID (from database), skip pending entry
@@ -595,9 +610,16 @@ func (n *OrcasNode) getDirListWithCache(dirID int64) ([]*core.ObjectInfo, syscal
 						continue
 					}
 					// Both are pending (no DataID), but existing is from cache
-					// This shouldn't happen normally, but if it does, prefer the one from cache
+					// If pending has DataID, update cache entry
+					if pending.DataID > 0 {
+						existing.DataID = pending.DataID
+						existing.Size = pending.Size
+						DebugLog("[VFS getDirListWithCache] Updated cache entry with pending DataID (by name): dirID=%d, fileID=%d, name=%s, DataID=%d", dirID, pending.ID, pending.Name, pending.DataID)
+						continue
+					}
+					// Both have no DataID, prefer cache entry
 					if existing.ID != pending.ID {
-						DebugLog("[VFS getDirListWithCache] Skipping pending object in cache (same name, different ID, prefer cache entry): dirID=%d, fileID=%d, name=%s, existingFileID=%d", dirID, pending.ID, pending.Name, existing.ID)
+						DebugLog("[VFS getDirListWithCache] Skipping pending object in cache (same name, different ID, both no DataID, prefer cache entry): dirID=%d, fileID=%d, name=%s, existingFileID=%d", dirID, pending.ID, pending.Name, existing.ID)
 						continue
 					}
 				}
@@ -606,7 +628,7 @@ func (n *OrcasNode) getDirListWithCache(dirID int64) ([]*core.ObjectInfo, syscal
 				childrenMapByID[pending.ID] = pending
 				childrenMapByName[pending.Name] = pending
 				children = append(children, pending)
-				DebugLog("[VFS getDirListWithCache] Added pending object to cached directory listing: dirID=%d, fileID=%d, name=%s", dirID, pending.ID, pending.Name)
+				DebugLog("[VFS getDirListWithCache] Added pending object to cached directory listing: dirID=%d, fileID=%d, name=%s, DataID=%d", dirID, pending.ID, pending.Name, pending.DataID)
 			}
 
 			// DebugLog("[VFS getDirListWithCache] Found in cache: dirID=%d, count=%d (with %d pending)", dirID, len(children), len(pendingChildren))
@@ -743,6 +765,8 @@ func (n *OrcasNode) getPendingObjectsForDir(dirID int64) []*core.ObjectInfo {
 
 	// Get pending objects from RandomAccessor registry
 	// These are files that are open for writing but may not be in batch writer
+	// IMPORTANT: Even if file has DataID (already flushed), if it's still in registry,
+	// it might not be in database List yet (cache/race condition), so include it
 	if n.fs != nil {
 		n.fs.raRegistry.Range(func(key, value interface{}) bool {
 			if fileID, ok := key.(int64); ok {
@@ -753,13 +777,16 @@ func (n *OrcasNode) getPendingObjectsForDir(dirID int64) []*core.ObjectInfo {
 						// Only add if not already in map (batch writer takes precedence)
 						if _, exists := pendingMap[fileID]; !exists {
 							// Create a copy to avoid modifying the original
+							// Note: Even if file has DataID, include it because:
+							// 1. Database List might not have it yet (cache/race condition)
+							// 2. RandomAccessor registry is authoritative for files being written
 							pendingMap[fileID] = &core.ObjectInfo{
 								ID:     fileObj.ID,
 								PID:    fileObj.PID,
 								Type:   core.OBJ_TYPE_FILE,
 								Name:   fileObj.Name,
 								Size:   fileObj.Size,
-								DataID: fileObj.DataID,
+								DataID: fileObj.DataID, // Keep DataID if file is already flushed
 								MTime:  fileObj.MTime,
 							}
 						}
@@ -1610,8 +1637,17 @@ func (n *OrcasNode) Rename(ctx context.Context, name string, newParent fs.InodeE
 		}
 
 		// First, try to find from cache for each child
+		// Also check if name matches with or without .tmp suffix (for files that may have been auto-renamed)
+		nameLower := strings.ToLower(name)
+		hasTmpSuffix := strings.HasSuffix(nameLower, ".tmp")
+		var nameWithoutTmp string
+		if hasTmpSuffix {
+			nameWithoutTmp = name[:len(name)-4] // Remove ".tmp" suffix
+		}
+
 		for _, child := range children {
-			if child.Name == name {
+			// Match exact name or name without .tmp suffix (for files that may have been auto-renamed)
+			if child.Name == name || (hasTmpSuffix && child.Name == nameWithoutTmp) {
 				// Found potential match, try to get from cache first
 				cacheKey := formatCacheKey(child.ID)
 				if cached, ok := fileObjCache.Get(cacheKey); ok {
@@ -1629,6 +1665,25 @@ func (n *OrcasNode) Rename(ctx context.Context, name string, newParent fs.InodeE
 					break
 				}
 			}
+		}
+
+		// If still not found, try to find from RandomAccessor registry
+		// This handles cases where file is being written and may not be in List yet
+		if sourceID == 0 {
+			n.fs.raRegistry.Range(func(key, value interface{}) bool {
+				if ra, ok := value.(*RandomAccessor); ok && ra != nil {
+					fileObj, err := ra.getFileObj()
+					if err == nil && fileObj != nil && fileObj.PID == obj.ID {
+						// Match exact name or name without .tmp suffix
+						if fileObj.Name == name || (hasTmpSuffix && fileObj.Name == nameWithoutTmp) {
+							sourceID = fileObj.ID
+							sourceObj = fileObj
+							return false // Stop iteration
+						}
+					}
+				}
+				return true // Continue iteration
+			})
 		}
 	} else {
 		// If found from RandomAccessor, get source object info
@@ -1754,6 +1809,7 @@ func (n *OrcasNode) Rename(ctx context.Context, name string, newParent fs.InodeE
 	}
 
 	// If not found in RandomAccessor, call List and check cache for each child
+	// Also check for files that may have had .tmp suffix removed by TempFileWriter.Flush()
 	if existingTargetID == 0 {
 		targetChildren, _, _, err := n.fs.h.List(n.fs.c, n.fs.bktID, newParentObj.ID, core.ListOptions{
 			Count: core.DefaultListPageSize,
@@ -1762,9 +1818,19 @@ func (n *OrcasNode) Rename(ctx context.Context, name string, newParent fs.InodeE
 			return syscall.EIO
 		}
 
+		// Check if newName has .tmp suffix - if so, also check for name without .tmp
+		// (in case old file had .tmp removed by TempFileWriter.Flush())
+		newNameLower := strings.ToLower(newName)
+		hasTmpSuffix := strings.HasSuffix(newNameLower, ".tmp")
+		var nameWithoutTmp string
+		if hasTmpSuffix {
+			nameWithoutTmp = newName[:len(newName)-4] // Remove ".tmp" suffix
+		}
+
 		// First, try to find from cache for each child
 		for _, child := range targetChildren {
-			if child.Name == newName {
+			// Match exact name or name without .tmp suffix (for files that may have been auto-renamed)
+			if child.Name == newName || (hasTmpSuffix && child.Name == nameWithoutTmp) {
 				// Found potential match, try to get from cache first
 				cacheKey := formatCacheKey(child.ID)
 				if cached, ok := fileObjCache.Get(cacheKey); ok {
@@ -1822,14 +1888,26 @@ func (n *OrcasNode) Rename(ctx context.Context, name string, newParent fs.InodeE
 		// If target is a file, handle it (create version, delete if .tmp, etc.)
 		if existingObj != nil && existingObj.Type == core.OBJ_TYPE_FILE {
 			// Check if existing target file is a .tmp file
+			// Also check if target name is .tmp and existing file name matches without .tmp suffix
+			// (in case old .tmp file had suffix removed by TempFileWriter.Flush())
 			existingNameLower := strings.ToLower(existingObj.Name)
+			newNameLower := strings.ToLower(newName)
 			isExistingTmpFile := strings.HasSuffix(existingNameLower, ".tmp")
+			isTargetTmpFile := strings.HasSuffix(newNameLower, ".tmp")
+			
+			// Check if existing file name matches target name without .tmp suffix
+			// This handles case where old .tmp file had suffix removed by Flush()
+			var nameWithoutTmp string
+			if isTargetTmpFile {
+				nameWithoutTmp = newName[:len(newName)-4] // Remove ".tmp" suffix
+			}
+			isOldTmpFileWithoutSuffix := isTargetTmpFile && existingObj.Name == nameWithoutTmp
 
-			if isExistingTmpFile {
-				// If target file is a .tmp file, we'll delete it after rename (synchronously with cache)
+			if isExistingTmpFile || isOldTmpFileWithoutSuffix {
+				// If target file is a .tmp file (or old .tmp file without suffix), we'll delete it after rename
 				// First, check if target file is in batch writer buffer
 				targetTmpFileID = existingTargetID
-				DebugLog("[VFS Rename] Target file is .tmp file, will delete after rename: fileID=%d, name=%s", existingTargetID, existingObj.Name)
+				DebugLog("[VFS Rename] Target file is .tmp file (or old .tmp without suffix), will delete after rename: fileID=%d, name=%s, targetName=%s", existingTargetID, existingObj.Name, newName)
 
 				batchMgr := n.fs.getBatchWriteManager()
 				if batchMgr != nil {
@@ -2308,7 +2386,7 @@ func (n *OrcasNode) Read(ctx context.Context, dest []byte, off int64) (fuse.Read
 
 	obj, err := n.getObj()
 	if err != nil {
-		DebugLog("[VFS Read] ERROR: Failed to get object: objID=%d, error=%v", n.objID, err)
+		// DebugLog("[VFS Read] ERROR: Failed to get object: objID=%d, error=%v", n.objID, err)
 		return nil, syscall.ENOENT
 	}
 
@@ -2316,38 +2394,38 @@ func (n *OrcasNode) Read(ctx context.Context, dest []byte, off int64) (fuse.Read
 		return nil, syscall.EISDIR
 	}
 
-	DebugLog("[VFS Read] Reading file: objID=%d, DataID=%d, Size=%d, offset=%d, size=%d", obj.ID, obj.DataID, obj.Size, off, len(dest))
+	// DebugLog("[VFS Read] Reading file: objID=%d, DataID=%d, Size=%d, offset=%d, size=%d", obj.ID, obj.DataID, obj.Size, off, len(dest))
 
 	if obj.DataID == 0 || obj.DataID == core.EmptyDataID {
 		// Empty file
-		DebugLog("[VFS Read] Empty file (no DataID): objID=%d, DataID=%d (EmptyDataID=%d)", obj.ID, obj.DataID, core.EmptyDataID)
+		// DebugLog("[VFS Read] Empty file (no DataID): objID=%d, DataID=%d (EmptyDataID=%d)", obj.ID, obj.DataID, core.EmptyDataID)
 		return fuse.ReadResultData(nil), 0
 	}
 
 	// Get dataReader (cached by dataID, one per file)
-	DebugLog("[VFS Read] Getting DataReader: objID=%d, DataID=%d, offset=%d", obj.ID, obj.DataID, off)
+	// DebugLog("[VFS Read] Getting DataReader: objID=%d, DataID=%d, offset=%d", obj.ID, obj.DataID, off)
 	reader, errno := n.getDataReader(off)
 	if errno != 0 {
-		DebugLog("[VFS Read] ERROR: Failed to get DataReader: objID=%d, DataID=%d, offset=%d, errno=%d (%s)", obj.ID, obj.DataID, off, errno, errno.Error())
+		// DebugLog("[VFS Read] ERROR: Failed to get DataReader: objID=%d, DataID=%d, offset=%d, errno=%d (%s)", obj.ID, obj.DataID, off, errno, errno.Error())
 		return nil, errno
 	}
 	if reader == nil {
-		DebugLog("[VFS Read] ERROR: DataReader is nil: objID=%d, DataID=%d, offset=%d", obj.ID, obj.DataID, off)
+		// DebugLog("[VFS Read] ERROR: DataReader is nil: objID=%d, DataID=%d, offset=%d", obj.ID, obj.DataID, off)
 		return nil, syscall.EIO
 	}
-	DebugLog("[VFS Read] Got DataReader: objID=%d, DataID=%d, offset=%d, reader=%p", obj.ID, obj.DataID, off, reader)
+	// DebugLog("[VFS Read] Got DataReader: objID=%d, DataID=%d, offset=%d, reader=%p", obj.ID, obj.DataID, off, reader)
 
 	// Use dataReader interface (Read(buf, offset))
-	DebugLog("[VFS Read] Calling reader.Read: objID=%d, DataID=%d, offset=%d, size=%d", obj.ID, obj.DataID, off, len(dest))
+	// DebugLog("[VFS Read] Calling reader.Read: objID=%d, DataID=%d, offset=%d, size=%d", obj.ID, obj.DataID, off, len(dest))
 	nRead, err := reader.Read(dest, off)
 	if err != nil && err != io.EOF {
-		DebugLog("[VFS Read] ERROR: Read failed: objID=%d, DataID=%d, offset=%d, size=%d, error=%v, errorType=%T", obj.ID, obj.DataID, off, len(dest), err, err)
+		// DebugLog("[VFS Read] ERROR: Read failed: objID=%d, DataID=%d, offset=%d, size=%d, error=%v, errorType=%T", obj.ID, obj.DataID, off, len(dest), err, err)
 		return nil, syscall.EIO
 	}
 	if err == io.EOF {
-		DebugLog("[VFS Read] Read reached EOF: objID=%d, DataID=%d, offset=%d, requested=%d, read=%d", obj.ID, obj.DataID, off, len(dest), nRead)
+		// DebugLog("[VFS Read] Read reached EOF: objID=%d, DataID=%d, offset=%d, requested=%d, read=%d", obj.ID, obj.DataID, off, len(dest), nRead)
 	} else {
-		DebugLog("[VFS Read] Successfully read data: objID=%d, DataID=%d, offset=%d, requested=%d, read=%d", obj.ID, obj.DataID, off, len(dest), nRead)
+		// DebugLog("[VFS Read] Successfully read data: objID=%d, DataID=%d, offset=%d, requested=%d, read=%d", obj.ID, obj.DataID, off, len(dest), nRead)
 	}
 
 	// Verify read data integrity (for debugging - can be disabled in production)
@@ -2356,7 +2434,7 @@ func (n *OrcasNode) Read(ctx context.Context, dest []byte, off int64) (fuse.Read
 		// Note: Full verification is expensive, so we only log a warning if size seems wrong
 		// Full verification can be triggered manually via VerifyFileData()
 		if obj.Size > 0 && int64(nRead) > obj.Size {
-			DebugLog("[VFS Read] WARNING: Read more than file size: objID=%d, read=%d, fileSize=%d", obj.ID, nRead, obj.Size)
+			// DebugLog("[VFS Read] WARNING: Read more than file size: objID=%d, read=%d, fileSize=%d", obj.ID, nRead, obj.Size)
 		}
 	}
 
@@ -2370,35 +2448,35 @@ func (n *OrcasNode) Read(ctx context.Context, dest []byte, off int64) (fuse.Read
 func (n *OrcasNode) getDataReader(offset int64) (dataReader, syscall.Errno) {
 	obj, err := n.getObj()
 	if err != nil {
-		DebugLog("[VFS getDataReader] ERROR: Failed to get object: objID=%d, error=%v", n.objID, err)
+		// DebugLog("[VFS getDataReader] ERROR: Failed to get object: objID=%d, error=%v", n.objID, err)
 		return nil, syscall.ENOENT
 	}
 
 	if obj.DataID == 0 || obj.DataID == core.EmptyDataID {
-		DebugLog("[VFS getDataReader] ERROR: Empty DataID: objID=%d, DataID=%d", obj.ID, obj.DataID)
+		// DebugLog("[VFS getDataReader] ERROR: Empty DataID: objID=%d, DataID=%d", obj.ID, obj.DataID)
 		return nil, syscall.EIO
 	}
 
 	// Get DataInfo
-	DebugLog("[VFS getDataReader] Getting DataInfo: objID=%d, DataID=%d, bktID=%d", obj.ID, obj.DataID, n.fs.bktID)
+	// DebugLog("[VFS getDataReader] Getting DataInfo: objID=%d, DataID=%d, bktID=%d", obj.ID, obj.DataID, n.fs.bktID)
 	dataInfo, err := n.fs.h.GetDataInfo(n.fs.c, n.fs.bktID, obj.DataID)
 	if err != nil {
-		DebugLog("[VFS getDataReader] ERROR: Failed to get DataInfo: objID=%d, DataID=%d, bktID=%d, error=%v, errorType=%T", obj.ID, obj.DataID, n.fs.bktID, err, err)
+		// DebugLog("[VFS getDataReader] ERROR: Failed to get DataInfo: objID=%d, DataID=%d, bktID=%d, error=%v, errorType=%T", obj.ID, obj.DataID, n.fs.bktID, err, err)
 		// Try to check if DataID exists in database
-		DebugLog("[VFS getDataReader] Attempting to verify DataID existence: objID=%d, DataID=%d", obj.ID, obj.DataID)
+		// DebugLog("[VFS getDataReader] Attempting to verify DataID existence: objID=%d, DataID=%d", obj.ID, obj.DataID)
 		return nil, syscall.EIO
 	}
 	if dataInfo == nil {
-		DebugLog("[VFS getDataReader] ERROR: GetDataInfo returned nil: objID=%d, DataID=%d", obj.ID, obj.DataID)
+		// DebugLog("[VFS getDataReader] ERROR: GetDataInfo returned nil: objID=%d, DataID=%d", obj.ID, obj.DataID)
 		return nil, syscall.EIO
 	}
-	DebugLog("[VFS getDataReader] Got DataInfo: objID=%d, DataID=%d, OrigSize=%d, Size=%d, Kind=0x%x, PkgID=%d, PkgOffset=%d",
-		obj.ID, obj.DataID, dataInfo.OrigSize, dataInfo.Size, dataInfo.Kind, dataInfo.PkgID, dataInfo.PkgOffset)
+	// DebugLog("[VFS getDataReader] Got DataInfo: objID=%d, DataID=%d, OrigSize=%d, Size=%d, Kind=0x%x, PkgID=%d, PkgOffset=%d",
+	//	obj.ID, obj.DataID, dataInfo.OrigSize, dataInfo.Size, dataInfo.Kind, dataInfo.PkgID, dataInfo.PkgOffset)
 
 	hasCompression := dataInfo.Kind&core.DATA_CMPR_MASK != 0
 	hasEncryption := dataInfo.Kind&core.DATA_ENDEC_MASK != 0
 
-	DebugLog("[VFS getDataReader] Has compression: %v, Has encryption: %v", hasCompression, hasEncryption)
+	// DebugLog("[VFS getDataReader] Has compression: %v, Has encryption: %v", hasCompression, hasEncryption)
 
 	// Always use bucket's default chunk size (force unified chunkSize)
 	chunkSize := n.fs.chunkSize
@@ -2414,7 +2492,7 @@ func (n *OrcasNode) getDataReader(offset int64) (dataReader, syscall.Errno) {
 	// Try to get cached reader
 	if cached, ok := decodingReaderCache.Get(cacheKey); ok {
 		if reader, ok := cached.(*chunkReader); ok && reader != nil {
-			DebugLog("[VFS getDataReader] Reusing cached reader: objID=%d, DataID=%d", obj.ID, obj.DataID)
+			// DebugLog("[VFS getDataReader] Reusing cached reader: objID=%d, DataID=%d", obj.ID, obj.DataID)
 			return reader, 0
 		}
 	}
@@ -2424,17 +2502,17 @@ func (n *OrcasNode) getDataReader(offset int64) (dataReader, syscall.Errno) {
 	bucket := n.fs.getBucketConfig()
 	if bucket != nil {
 		endecKey = bucket.EndecKey
-		DebugLog("[VFS getDataReader] Bucket config: bktID=%d, endecKey length=%d", n.fs.bktID, len(endecKey))
+		// DebugLog("[VFS getDataReader] Bucket config: bktID=%d, endecKey length=%d", n.fs.bktID, len(endecKey))
 	} else {
-		DebugLog("[VFS getDataReader] WARNING: Bucket config is nil: bktID=%d", n.fs.bktID)
+		// DebugLog("[VFS getDataReader] WARNING: Bucket config is nil: bktID=%d", n.fs.bktID)
 	}
 
 	// Create chunkReader (dataInfo is always available here)
 	var reader *chunkReader
 	if !hasCompression && !hasEncryption {
 		// Plain data: create chunkReader with plain DataInfo
-		DebugLog("[VFS getDataReader] Creating plain reader: objID=%d, DataID=%d, OrigSize=%d, Size=%d, chunkSize=%d",
-			obj.ID, obj.DataID, dataInfo.OrigSize, dataInfo.Size, chunkSize)
+		// DebugLog("[VFS getDataReader] Creating plain reader: objID=%d, DataID=%d, OrigSize=%d, Size=%d, chunkSize=%d",
+		//	obj.ID, obj.DataID, dataInfo.OrigSize, dataInfo.Size, chunkSize)
 		plainDataInfo := &core.DataInfo{
 			ID:       obj.DataID,
 			OrigSize: dataInfo.OrigSize,
@@ -2444,19 +2522,19 @@ func (n *OrcasNode) getDataReader(offset int64) (dataReader, syscall.Errno) {
 		reader = newChunkReader(n.fs.c, n.fs.h, n.fs.bktID, plainDataInfo, "", chunkSize)
 	} else {
 		// Compressed/encrypted: use chunkReader with processing
-		DebugLog("[VFS getDataReader] Creating compressed/encrypted reader: objID=%d, DataID=%d, OrigSize=%d, Size=%d, chunkSize=%d, hasCompression=%v, hasEncryption=%v",
-			obj.ID, obj.DataID, dataInfo.OrigSize, dataInfo.Size, chunkSize, hasCompression, hasEncryption)
+		// DebugLog("[VFS getDataReader] Creating compressed/encrypted reader: objID=%d, DataID=%d, OrigSize=%d, Size=%d, chunkSize=%d, hasCompression=%v, hasEncryption=%v",
+		//	obj.ID, obj.DataID, dataInfo.OrigSize, dataInfo.Size, chunkSize, hasCompression, hasEncryption)
 		reader = newChunkReader(n.fs.c, n.fs.h, n.fs.bktID, dataInfo, endecKey, chunkSize)
 	}
 
 	if reader == nil {
-		DebugLog("[VFS getDataReader] ERROR: Failed to create chunkReader: objID=%d, DataID=%d", obj.ID, obj.DataID)
+		// DebugLog("[VFS getDataReader] ERROR: Failed to create chunkReader: objID=%d, DataID=%d", obj.ID, obj.DataID)
 		return nil, syscall.EIO
 	}
 
 	// Cache the reader (one per dataID)
 	decodingReaderCache.Put(cacheKey, reader)
-	DebugLog("[VFS getDataReader] Created and cached new reader: objID=%d, DataID=%d, reader=%p", obj.ID, obj.DataID, reader)
+	// DebugLog("[VFS getDataReader] Created and cached new reader: objID=%d, DataID=%d, reader=%p", obj.ID, obj.DataID, reader)
 
 	return reader, 0
 }
@@ -2745,16 +2823,49 @@ func (n *OrcasNode) getRandomAccessor() (*RandomAccessor, error) {
 	}
 
 	// Reuse existing writer RandomAccessor for .tmp files to preserve buffered data
+	// IMPORTANT: For .tmp files, we must ensure all concurrent writers use the same RandomAccessor
+	// to avoid creating multiple TempFileWriter instances with different dataIDs
+	// Use mutex to protect creation of RandomAccessor for .tmp files
 	if n.fs != nil && isTempFile(obj) {
+		// First check without lock (fast path)
 		if existing := n.fs.getRandomAccessorByFileID(obj.ID); existing != nil && existing.hasTempFileWriter() {
 			n.ra.Store(existing)
+			DebugLog("[VFS getRandomAccessor] Reusing existing RandomAccessor with TempFileWriter (fast path): fileID=%d, ra=%p", obj.ID, existing)
+			return existing, nil
+		}
+
+		// Acquire lock to ensure only one RandomAccessor is created for this .tmp file
+		n.fs.raCreateMu.Lock()
+		defer n.fs.raCreateMu.Unlock()
+
+		// Double-check after acquiring lock
+		if existing := n.fs.getRandomAccessorByFileID(obj.ID); existing != nil && existing.hasTempFileWriter() {
+			n.ra.Store(existing)
+			DebugLog("[VFS getRandomAccessor] Reusing existing RandomAccessor with TempFileWriter (after lock): fileID=%d, ra=%p", obj.ID, existing)
 			return existing, nil
 		}
 	}
 
+	// Create RandomAccessor (no auto-registration in NewRandomAccessor anymore)
 	newRA, err := NewRandomAccessor(n.fs, obj.ID)
 	if err != nil {
 		return nil, err
+	}
+
+	// For .tmp files, we're still holding the lock, so register it now
+	// This ensures only one RandomAccessor is registered for the same .tmp file
+	if n.fs != nil && isTempFile(obj) {
+		// We're still holding the lock, so check again before registering
+		if existing := n.fs.getRandomAccessorByFileID(obj.ID); existing != nil && existing.hasTempFileWriter() {
+			// Another goroutine registered a RandomAccessor with TempFileWriter while we were creating newRA
+			// Close what we created and use the existing one
+			newRA.Close()
+			n.ra.Store(existing)
+			DebugLog("[VFS getRandomAccessor] Using existing RandomAccessor with TempFileWriter: fileID=%d, ra=%p", obj.ID, existing)
+			return existing, nil
+		}
+		// Register the new RandomAccessor (we're holding the lock, so this is safe)
+		n.fs.registerRandomAccessor(obj.ID, newRA)
 	}
 
 	// Try to atomically set ra (if already set by other goroutine, use existing)
@@ -2777,7 +2888,9 @@ func (n *OrcasNode) getRandomAccessor() (*RandomAccessor, error) {
 	}
 
 	// Register RandomAccessor globally for cross-node lookup (e.g., rename flush)
-	if n.fs != nil {
+	// For .tmp files, registration was already done above while holding the lock
+	// For non-.tmp files, register here
+	if n.fs != nil && !isTempFile(obj) {
 		DebugLog("[VFS getRandomAccessor] Registering RandomAccessor: fileID=%d", obj.ID)
 		n.fs.registerRandomAccessor(obj.ID, newRA)
 	}

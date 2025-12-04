@@ -272,7 +272,7 @@ func (bwm *BatchWriter) flush(ctx context.Context) {
 		if i < int64(len(currentBuf.fileInfos)) && currentBuf.fileInfos[i] != nil {
 			fileInfo := currentBuf.fileInfos[i]
 			fileInfos = append(fileInfos, fileInfo)
-			
+
 			// Track last offset and size for buffer size calculation
 			offset, size := bwm.getFileInfoOffsetSize(fileInfo)
 			if size > 0 {

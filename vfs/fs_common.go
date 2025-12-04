@@ -66,6 +66,8 @@ type OrcasFS struct {
 	chunkSize int64
 	// Batch writer is now managed globally by SDK, accessed via GetBatchWriterForBucket
 	raRegistry sync.Map // map[fileID]*RandomAccessor
+	// Mutex to protect RandomAccessor creation for .tmp files during concurrent writes
+	raCreateMu sync.Mutex // Protects creation of RandomAccessor for same fileID
 }
 
 // NewOrcasFS creates a new ORCAS filesystem
@@ -134,24 +136,37 @@ func (fs *OrcasFS) getBucketConfig() *core.BucketInfo {
 }
 
 // registerRandomAccessor tracks active RandomAccessor instances for a file
+// IMPORTANT: For .tmp files, we must ensure only one RandomAccessor with TempFileWriter is registered
+// to avoid creating multiple TempFileWriter instances with different dataIDs during concurrent writes
+// This function should be called while holding raCreateMu lock for .tmp files
 func (fs *OrcasFS) registerRandomAccessor(fileID int64, ra *RandomAccessor) {
 	if fs == nil || ra == nil {
 		return
 	}
 
+	// Check if there's already a registered RandomAccessor
 	if existing, ok := fs.raRegistry.Load(fileID); ok {
 		if current, ok := existing.(*RandomAccessor); ok && current != nil {
 			// Preserve existing writer accessor so .tmp flushes keep working
 			if current == ra {
 				return
 			}
-			if current.hasTempFileWriter() && !ra.hasTempFileWriter() {
-				DebugLog("[VFS RA Registry] Skipping register of non-writer RA: fileID=%d, ra=%p, existing=%p", fileID, ra, current)
-				return
+			// If existing RandomAccessor has TempFileWriter, don't replace it with a new one
+			// This ensures all concurrent writers use the same TempFileWriter
+			if current.hasTempFileWriter() {
+				if !ra.hasTempFileWriter() {
+					DebugLog("[VFS RA Registry] Skipping register of non-writer RA: fileID=%d, ra=%p, existing=%p (has TempFileWriter)", fileID, ra, current)
+					return
+				} else {
+					// Both have TempFileWriter, keep the existing one (first one wins)
+					DebugLog("[VFS RA Registry] Skipping register of RA with TempFileWriter (existing one already registered): fileID=%d, ra=%p, existing=%p", fileID, ra, current)
+					return
+				}
 			}
 		}
 	}
 
+	// Register the RandomAccessor
 	fs.raRegistry.Store(fileID, ra)
 	DebugLog("[VFS RA Registry] Registered RandomAccessor: fileID=%d, ra=%p", fileID, ra)
 }
