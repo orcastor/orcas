@@ -50,16 +50,6 @@ var (
 		},
 	}
 
-	// Object pool for async write data buffers (reuse buffers for async writes)
-	asyncWriteDataPool = sync.Pool{
-		New: func() interface{} {
-			return make([]byte, 0, 10<<20) // Pre-allocate 10MB capacity for async writes
-		},
-	}
-
-	// Worker pool for async writes: limit concurrent async writes to avoid too many goroutines
-	asyncWriteWorkers = make(chan struct{}, 16) // Max 16 concurrent async writes
-
 	// Object pool for int slices (used for remainingChunks, etc.)
 	intSlicePool = sync.Pool{
 		New: func() interface{} {
@@ -778,16 +768,22 @@ func (tw *TempFileWriter) Write(offset int64, data []byte) error {
 
 		if chunkComplete {
 			// Chunk is full, flush it immediately
-			// First and last chunks are synchronous, middle chunks are asynchronous
-			DebugLog("[VFS TempFileWriter Write] Chunk full, flushing: fileID=%d, dataID=%d, sn=%d, bufferSize=%d/%d",
+			// In Write(), we don't know if this is the last chunk, so always use async write
+			// The last chunk will be determined and flushed synchronously during Flush()
+			DebugLog("[VFS TempFileWriter Write] Chunk full, flushing asynchronously: fileID=%d, dataID=%d, sn=%d, bufferSize=%d/%d",
 				tw.fileID, tw.dataID, sn, bufferProgress, tw.chunkSize)
-			if err := tw.flushChunk(sn); err != nil {
+			// Note: buf.mu is already locked above, but we unlock it before flushChunk
+			// flushChunk will lock tw.mu and get the buffer again, so we need to ensure
+			// the buffer is still in tw.chunks when flushChunk is called
+			// Always use async write in Write() - last chunk will be handled in Flush()
+			if err := tw.flushChunk(sn, false); err != nil {
 				DebugLog("[VFS TempFileWriter Write] ERROR: Failed to flush chunk: fileID=%d, dataID=%d, sn=%d, error=%v", tw.fileID, tw.dataID, sn, err)
 				return err
 			}
-			completedChunks = append(completedChunks, sn)
+			// For async writes, don't remove chunk from tw.chunks immediately
+			// The chunk will be removed in Flush() after async write completes
 			currentFileSize := tw.size.Load()
-			DebugLog("[VFS TempFileWriter Write] Chunk flushed successfully: fileID=%d, dataID=%d, sn=%d, chunkSize=%d, currentFileSize=%d",
+			DebugLog("[VFS TempFileWriter Write] Chunk flushed asynchronously: fileID=%d, dataID=%d, sn=%d, chunkSize=%d, currentFileSize=%d",
 				tw.fileID, tw.dataID, sn, bufferProgress, currentFileSize)
 		} else {
 			// Chunk not full yet, just buffer the data
@@ -885,8 +881,8 @@ func (tw *TempFileWriter) checkPreviousAsyncWriteError(currentSN int) error {
 // flushChunk processes and writes a complete chunk
 // If real-time compression/encryption is enabled, processes the chunk before writing
 // Otherwise, writes raw data directly (for offline processing)
-// Semi-synchronous: first and last chunks are synchronous, middle chunks are asynchronous
-func (tw *TempFileWriter) flushChunk(sn int) error {
+// isLastChunk: if true, write synchronously; if false, write asynchronously (traceable)
+func (tw *TempFileWriter) flushChunk(sn int, isLastChunk bool) error {
 	tw.mu.Lock()
 	buf, exists := tw.chunks[sn]
 	tw.mu.Unlock()
@@ -903,7 +899,10 @@ func (tw *TempFileWriter) flushChunk(sn int) error {
 	}
 
 	// Extract chunk data (only up to written size)
-	chunkData := buf.data[:buf.offsetInChunk]
+	// IMPORTANT: Create a copy of the data to avoid data race when buffer is modified concurrently
+	// This is especially important for async writes where the buffer might be reused
+	chunkData := make([]byte, buf.offsetInChunk)
+	copy(chunkData, buf.data[:buf.offsetInChunk])
 	bucket := getBucketConfigWithCache(tw.fs)
 
 	DebugLog("[VFS TempFileWriter flushChunk] Processing chunk: fileID=%d, dataID=%d, sn=%d, originalSize=%d, enableRealtime=%v",
@@ -998,26 +997,109 @@ func (tw *TempFileWriter) flushChunk(sn int) error {
 			tw.fileID, tw.dataID, sn, len(finalData))
 	}
 
-	// Determine if this is first chunk, last chunk, or middle chunk
-	// For semi-synchronous writes: first and last chunks are synchronous, middle chunks are asynchronous
-	isFirstChunk := sn == 0
-	isLastChunk := false // Will be determined during Flush() or when we know it's the last chunk
+	// Write strategy: last chunk is synchronous, all other chunks are asynchronous (but traceable)
+	// isLastChunk is passed as parameter, determined by caller (e.g., during Flush() when renaming)
+	if isLastChunk {
+		// Last chunk: synchronous write to ensure data is persisted before flush completes
+		DebugLog("[VFS TempFileWriter flushChunk] Writing last chunk synchronously: fileID=%d, dataID=%d, sn=%d, size=%d, realtime=%v",
+			tw.fileID, tw.dataID, sn, len(finalData), tw.enableRealtime)
+		return tw.writeChunkSync(sn, finalData)
+	} else {
+		// Non-last chunk: asynchronous write (traceable)
+		DebugLog("[VFS TempFileWriter flushChunk] Writing chunk asynchronously: fileID=%d, dataID=%d, sn=%d, size=%d, realtime=%v",
+			tw.fileID, tw.dataID, sn, len(finalData), tw.enableRealtime)
+		return tw.writeChunkAsync(sn, finalData)
+	}
+}
 
-	// Check if this might be the last chunk (if size suggests it)
-	currentSize := tw.size.Load()
-	currentChunkSize := tw.chunkSize
-	nextChunkStart := int64(sn+1) * currentChunkSize
-	isLastChunk = nextChunkStart >= currentSize
+// writeChunkSync writes a chunk synchronously (used for last chunk)
+func (tw *TempFileWriter) writeChunkSync(sn int, finalData []byte) error {
+	_, err := tw.fs.h.PutData(tw.fs.c, tw.fs.bktID, tw.dataID, sn, finalData)
+	if err != nil {
+		// If error is due to file already existing (ERR_OPEN_FILE), delete it and retry
+		if err == core.ERR_OPEN_FILE {
+			// Delete existing chunk file before retrying using DataAdapter.Delete
+			if lh, ok := tw.fs.h.(*core.LocalHandler); ok {
+				// Use DataAdapter.Delete method
+				da := lh.GetDataAdapter()
+				if deleteErr := da.Delete(tw.fs.c, tw.fs.bktID, tw.dataID, sn); deleteErr != nil {
+					DebugLog("[VFS TempFileWriter writeChunkSync] WARNING: Failed to delete existing chunk file: fileID=%d, dataID=%d, sn=%d, error=%v",
+						tw.fileID, tw.dataID, sn, deleteErr)
+					// Continue anyway, PutData might still work if file was deleted
+				} else {
+					DebugLog("[VFS TempFileWriter writeChunkSync] Deleted existing chunk file before rewrite: fileID=%d, dataID=%d, sn=%d",
+						tw.fileID, tw.dataID, sn)
+				}
+			} else {
+				// Fallback to direct file removal if not LocalHandler
+				fileName := fmt.Sprintf("%d_%d", tw.dataID, sn)
+				hash := fmt.Sprintf("%X", md5.Sum([]byte(fileName)))
+				chunkPath := filepath.Join(core.ORCAS_DATA, fmt.Sprint(tw.fs.bktID), hash[21:24], hash[8:24], fileName)
+				if removeErr := os.Remove(chunkPath); removeErr != nil && !os.IsNotExist(removeErr) {
+					DebugLog("[VFS TempFileWriter writeChunkSync] WARNING: Failed to remove existing chunk file: fileID=%d, dataID=%d, sn=%d, path=%s, error=%v",
+						tw.fileID, tw.dataID, sn, chunkPath, removeErr)
+				} else {
+					DebugLog("[VFS TempFileWriter writeChunkSync] Removed existing chunk file before rewrite: fileID=%d, dataID=%d, sn=%d, path=%s",
+						tw.fileID, tw.dataID, sn, chunkPath)
+				}
+			}
 
-	// Write data block immediately when chunk is complete (synchronous)
-	// All chunks are written synchronously to ensure data is persisted immediately
-	DebugLog("[VFS TempFileWriter flushChunk] Writing chunk to disk synchronously: fileID=%d, dataID=%d, sn=%d, size=%d, realtime=%v, isFirst=%v, isLast=%v",
-		tw.fileID, tw.dataID, sn, len(finalData), tw.enableRealtime, isFirstChunk, isLastChunk)
+			// Retry PutData after removing existing file
+			_, err = tw.fs.h.PutData(tw.fs.c, tw.fs.bktID, tw.dataID, sn, finalData)
+			if err != nil {
+				DebugLog("[VFS TempFileWriter writeChunkSync] ERROR: Failed to put data after removing existing file: fileID=%d, dataID=%d, sn=%d, error=%v", tw.fileID, tw.dataID, sn, err)
+				return err
+			}
+		} else {
+			DebugLog("[VFS TempFileWriter writeChunkSync] ERROR: Failed to put data: fileID=%d, dataID=%d, sn=%d, error=%v", tw.fileID, tw.dataID, sn, err)
+			return err
+		}
+	}
 
-	// Synchronous write for all chunks - write immediately when chunk is complete
-	{
-		// Synchronous write for first and last chunks
-		_, err = tw.fs.h.PutData(tw.fs.c, tw.fs.bktID, tw.dataID, sn, finalData)
+	DebugLog("[VFS TempFileWriter writeChunkSync] Successfully wrote chunk to disk: fileID=%d, dataID=%d, sn=%d, size=%d",
+		tw.fileID, tw.dataID, sn, len(finalData))
+	return nil
+}
+
+// writeChunkAsync writes a chunk asynchronously (traceable)
+// The write is tracked in pendingWrites and errors are stored in writeErrors
+func (tw *TempFileWriter) writeChunkAsync(sn int, finalData []byte) error {
+	// Check if there's already a pending write for this chunk
+	if _, exists := tw.pendingWrites.Load(sn); exists {
+		DebugLog("[VFS TempFileWriter writeChunkAsync] WARNING: Chunk %d already has a pending write, waiting for completion: fileID=%d, dataID=%d", sn, tw.fileID, tw.dataID)
+		// Wait for existing write to complete
+		if pwVal, ok := tw.pendingWrites.Load(sn); ok {
+			pw := pwVal.(*pendingWrite)
+			<-pw.done
+			pw.mu.Lock()
+			err := pw.err
+			pw.mu.Unlock()
+			if err != nil {
+				return fmt.Errorf("previous async write failed for chunk %d: %w", sn, err)
+			}
+		}
+	}
+
+	// Create a copy of finalData for async write (to avoid data race)
+	dataCopy := make([]byte, len(finalData))
+	copy(dataCopy, finalData)
+
+	// Create pending write tracker
+	pw := &pendingWrite{
+		sn:   sn,
+		data: dataCopy,
+		done: make(chan struct{}),
+	}
+
+	// Store in pending writes map
+	tw.pendingWrites.Store(sn, pw)
+
+	// Start async write in goroutine
+	go func() {
+		defer close(pw.done)
+
+		// Perform the actual write
+		_, err := tw.fs.h.PutData(tw.fs.c, tw.fs.bktID, tw.dataID, sn, dataCopy)
 		if err != nil {
 			// If error is due to file already existing (ERR_OPEN_FILE), delete it and retry
 			if err == core.ERR_OPEN_FILE {
@@ -1026,11 +1108,11 @@ func (tw *TempFileWriter) flushChunk(sn int) error {
 					// Use DataAdapter.Delete method
 					da := lh.GetDataAdapter()
 					if deleteErr := da.Delete(tw.fs.c, tw.fs.bktID, tw.dataID, sn); deleteErr != nil {
-						DebugLog("[VFS TempFileWriter flushChunk] WARNING: Failed to delete existing chunk file: fileID=%d, dataID=%d, sn=%d, error=%v",
+						DebugLog("[VFS TempFileWriter writeChunkAsync] WARNING: Failed to delete existing chunk file: fileID=%d, dataID=%d, sn=%d, error=%v",
 							tw.fileID, tw.dataID, sn, deleteErr)
 						// Continue anyway, PutData might still work if file was deleted
 					} else {
-						DebugLog("[VFS TempFileWriter flushChunk] Deleted existing chunk file before rewrite: fileID=%d, dataID=%d, sn=%d",
+						DebugLog("[VFS TempFileWriter writeChunkAsync] Deleted existing chunk file before rewrite: fileID=%d, dataID=%d, sn=%d",
 							tw.fileID, tw.dataID, sn)
 					}
 				} else {
@@ -1039,31 +1121,35 @@ func (tw *TempFileWriter) flushChunk(sn int) error {
 					hash := fmt.Sprintf("%X", md5.Sum([]byte(fileName)))
 					chunkPath := filepath.Join(core.ORCAS_DATA, fmt.Sprint(tw.fs.bktID), hash[21:24], hash[8:24], fileName)
 					if removeErr := os.Remove(chunkPath); removeErr != nil && !os.IsNotExist(removeErr) {
-						DebugLog("[VFS TempFileWriter flushChunk] WARNING: Failed to remove existing chunk file: fileID=%d, dataID=%d, sn=%d, path=%s, error=%v",
+						DebugLog("[VFS TempFileWriter writeChunkAsync] WARNING: Failed to remove existing chunk file: fileID=%d, dataID=%d, sn=%d, path=%s, error=%v",
 							tw.fileID, tw.dataID, sn, chunkPath, removeErr)
 					} else {
-						DebugLog("[VFS TempFileWriter flushChunk] Removed existing chunk file before rewrite: fileID=%d, dataID=%d, sn=%d, path=%s",
+						DebugLog("[VFS TempFileWriter writeChunkAsync] Removed existing chunk file before rewrite: fileID=%d, dataID=%d, sn=%d, path=%s",
 							tw.fileID, tw.dataID, sn, chunkPath)
 					}
 				}
 
 				// Retry PutData after removing existing file
-				_, err = tw.fs.h.PutData(tw.fs.c, tw.fs.bktID, tw.dataID, sn, finalData)
-				if err != nil {
-					DebugLog("[VFS TempFileWriter flushChunk] ERROR: Failed to put data after removing existing file: fileID=%d, dataID=%d, sn=%d, error=%v", tw.fileID, tw.dataID, sn, err)
-					return err
-				}
-			} else {
-				DebugLog("[VFS TempFileWriter flushChunk] ERROR: Failed to put data: fileID=%d, dataID=%d, sn=%d, error=%v", tw.fileID, tw.dataID, sn, err)
-				return err
+				_, err = tw.fs.h.PutData(tw.fs.c, tw.fs.bktID, tw.dataID, sn, dataCopy)
 			}
 		}
-	}
-	
-	return nil
 
-	DebugLog("[VFS TempFileWriter flushChunk] Successfully wrote chunk to disk: fileID=%d, dataID=%d, sn=%d, size=%d, totalOrigSize=%d, totalSize=%d",
-		tw.fileID, tw.dataID, sn, len(finalData), tw.dataInfo.OrigSize, tw.dataInfo.Size)
+		// Store error in pending write
+		pw.mu.Lock()
+		pw.err = err
+		pw.mu.Unlock()
+
+		if err != nil {
+			// Store error in writeErrors map for later retrieval
+			tw.writeErrors.Store(sn, err)
+			DebugLog("[VFS TempFileWriter writeChunkAsync] ERROR: Async write failed: fileID=%d, dataID=%d, sn=%d, error=%v", tw.fileID, tw.dataID, sn, err)
+		} else {
+			DebugLog("[VFS TempFileWriter writeChunkAsync] Successfully wrote chunk to disk: fileID=%d, dataID=%d, sn=%d, size=%d",
+				tw.fileID, tw.dataID, sn, len(dataCopy))
+		}
+	}()
+
+	// Return immediately (async write is in progress)
 	return nil
 }
 
@@ -1256,6 +1342,7 @@ func (tw *TempFileWriter) Flush() error {
 	sort.Ints(remainingChunks)
 
 	// Wait for all pending async writes to complete before flushing remaining chunks
+	// This ensures all chunks written asynchronously in Write() are completed before we proceed
 	tw.waitForAllAsyncWrites()
 
 	// Check for any async write errors
@@ -1267,44 +1354,88 @@ func (tw *TempFileWriter) Flush() error {
 		return false // Stop iteration on first error
 	})
 	if asyncWriteErr != nil {
+		DebugLog("[VFS TempFileWriter Flush] ERROR: Async write error detected: fileID=%d, dataID=%d, error=%v", tw.fileID, tw.dataID, asyncWriteErr)
 		return asyncWriteErr
 	}
 
-	// Find the last chunk (highest sn)
-	var lastChunkSN int = -1
-	if len(remainingChunks) > 0 {
-		lastChunkSN = remainingChunks[len(remainingChunks)-1]
-		tw.lastChunkSN.Store(int64(lastChunkSN))
+	// Double-check: wait a bit more to ensure all async writes are truly completed
+	// This is a safety measure for concurrent writes
+	pendingCount := 0
+	tw.pendingWrites.Range(func(key, value interface{}) bool {
+		pendingCount++
+		return true
+	})
+	if pendingCount > 0 {
+		DebugLog("[VFS TempFileWriter Flush] WARNING: Still have %d pending async writes after waitForAllAsyncWrites, waiting again: fileID=%d, dataID=%d", pendingCount, tw.fileID, tw.dataID)
+		tw.waitForAllAsyncWrites()
+		// Check errors again
+		tw.writeErrors.Range(func(key, value interface{}) bool {
+			sn := key.(int)
+			err := value.(error)
+			asyncWriteErr = fmt.Errorf("async write error for chunk %d: %w", sn, err)
+			return false // Stop iteration on first error
+		})
+		if asyncWriteErr != nil {
+			DebugLog("[VFS TempFileWriter Flush] ERROR: Async write error detected after second wait: fileID=%d, dataID=%d, error=%v", tw.fileID, tw.dataID, asyncWriteErr)
+			return asyncWriteErr
+		}
 	}
 
-	for _, sn := range remainingChunks {
-		// Mark as last chunk if it's the highest sn
-		isLastChunk := sn == lastChunkSN
+	// Find the last chunk (highest sn) based on current file size
+	// This ensures we correctly identify the last chunk even if it was written asynchronously
+	currentSize := tw.size.Load()
+	currentChunkSize := tw.chunkSize
+	calculatedLastChunkSN := int((currentSize+currentChunkSize-1)/currentChunkSize) - 1
+	if calculatedLastChunkSN < 0 {
+		calculatedLastChunkSN = 0
+	}
 
-		// Force synchronous write for last chunk
-		if isLastChunk {
-			// Check if there's a pending async write for this chunk
-			if pwVal, ok := tw.pendingWrites.Load(sn); ok {
-				pw := pwVal.(*pendingWrite)
-				// Wait for it to complete
-				<-pw.done
-				pw.mu.Lock()
-				err := pw.err
-				pw.mu.Unlock()
-				if err != nil {
-					tw.pendingWrites.Delete(sn)
-					return fmt.Errorf("async write failed for last chunk %d: %w", sn, err)
-				}
+	// Also check remainingChunks for the highest sn (in case there are incomplete chunks)
+	// Note: remainingChunks is already sorted by sort.Ints(remainingChunks) above
+	var lastChunkSN int = calculatedLastChunkSN
+	if len(remainingChunks) > 0 {
+		// remainingChunks is already sorted, so the last element is the highest
+		highestSN := remainingChunks[len(remainingChunks)-1]
+		if highestSN > lastChunkSN {
+			lastChunkSN = highestSN
+		}
+	}
+	tw.lastChunkSN.Store(int64(lastChunkSN))
+	DebugLog("[VFS TempFileWriter Flush] Determined last chunk: fileID=%d, dataID=%d, calculatedLastChunkSN=%d, lastChunkSN=%d, currentSize=%d, remainingChunks=%v",
+		tw.fileID, tw.dataID, calculatedLastChunkSN, lastChunkSN, currentSize, remainingChunks)
+
+	for _, sn := range remainingChunks {
+		// Check if there's a pending async write for this chunk
+		if pwVal, ok := tw.pendingWrites.Load(sn); ok {
+			pw := pwVal.(*pendingWrite)
+			// Wait for async write to complete
+			<-pw.done
+			pw.mu.Lock()
+			err := pw.err
+			pw.mu.Unlock()
+			if err != nil {
 				tw.pendingWrites.Delete(sn)
-				// Chunk already written asynchronously, just remove from chunks map
-				tw.mu.Lock()
-				delete(tw.chunks, sn)
-				tw.mu.Unlock()
-				continue
+				DebugLog("[VFS TempFileWriter Flush] ERROR: Async write failed for chunk %d: fileID=%d, dataID=%d, error=%v", sn, tw.fileID, tw.dataID, err)
+				return fmt.Errorf("async write failed for chunk %d: %w", sn, err)
 			}
+			tw.pendingWrites.Delete(sn)
+			// Chunk already written asynchronously, just remove from chunks map
+			tw.mu.Lock()
+			delete(tw.chunks, sn)
+			tw.mu.Unlock()
+			DebugLog("[VFS TempFileWriter Flush] Async write completed for chunk %d: fileID=%d, dataID=%d", sn, tw.fileID, tw.dataID)
+			continue
 		}
 
-		if err := tw.flushChunk(sn); err != nil {
+		// No pending async write, flush it now (should be last chunk or incomplete chunk)
+		// Determine if this is the last chunk based on file size
+		isLastChunk := sn == lastChunkSN
+		if isLastChunk {
+			DebugLog("[VFS TempFileWriter Flush] Flushing last chunk synchronously: fileID=%d, dataID=%d, sn=%d", tw.fileID, tw.dataID, sn)
+		} else {
+			DebugLog("[VFS TempFileWriter Flush] Flushing incomplete chunk: fileID=%d, dataID=%d, sn=%d", tw.fileID, tw.dataID, sn)
+		}
+		if err := tw.flushChunk(sn, isLastChunk); err != nil {
 			// Return remainingChunks slice to pool on error
 			intSlicePool.Put(remainingChunks[:0])
 			DebugLog("[VFS TempFileWriter Flush] ERROR: Failed to flush remaining chunk: fileID=%d, dataID=%d, sn=%d, error=%v", tw.fileID, tw.dataID, sn, err)
@@ -1355,7 +1486,7 @@ func (tw *TempFileWriter) Flush() error {
 	originalObjName := obj.Name
 	objNameLower := strings.ToLower(originalObjName)
 	shouldRemoveTmp := strings.HasSuffix(objNameLower, ".tmp")
-	DebugLog("[VFS TempFileWriter Flush] Checking for .tmp suffix removal: fileID=%d, fileName=%s, shouldRemoveTmp=%v", tw.fileID, originalObjName, shouldRemoveTmp)
+	DebugLog("[VFS TempFileWriter Flush] Checking for .tmp suffix removal: fileID=%d, fileName=%s, shouldRemoveTmp=%v, objNameLower=%s", tw.fileID, originalObjName, shouldRemoveTmp, objNameLower)
 
 	// Upload DataInfo and ObjectInfo together
 	DebugLog("[VFS TempFileWriter Flush] Uploading metadata: fileID=%d, dataID=%d, fileName=%s, origSize=%d, size=%d, chunkSize=%d, realtime=%v, hasCompression=%v, hasEncryption=%v",
@@ -1366,7 +1497,7 @@ func (tw *TempFileWriter) Flush() error {
 		DebugLog("[VFS TempFileWriter Flush] ERROR: Failed to upload DataInfo and ObjectInfo: fileID=%d, dataID=%d, error=%v", tw.fileID, tw.dataID, err)
 		return err
 	}
-	
+
 	// Re-fetch file object from database to ensure we have the latest information
 	// This is important for directory cache updates
 	updatedFileObjs, err := tw.fs.h.Get(tw.fs.c, tw.fs.bktID, []int64{tw.fileID})
@@ -1444,49 +1575,49 @@ func (tw *TempFileWriter) Flush() error {
 							// Check if there's another .tmp file with the same name (different fileID)
 							if child.ID != tw.fileID && child.Name == originalObjName && child.Type == core.OBJ_TYPE_FILE {
 								DebugLog("[VFS TempFileWriter Flush] Found existing .tmp file with same name, deleting it: fileID=%d, name=%s", child.ID, child.Name)
-							// Delete the old .tmp file
-							deleteErr := tw.fs.h.Delete(tw.fs.c, tw.fs.bktID, child.ID)
-							if deleteErr != nil {
-								DebugLog("[VFS TempFileWriter Flush] WARNING: Failed to delete existing .tmp file: fileID=%d, name=%s, error=%v", child.ID, child.Name, deleteErr)
-							} else {
-								DebugLog("[VFS TempFileWriter Flush] Successfully deleted existing .tmp file: fileID=%d, name=%s", child.ID, child.Name)
-								// Remove from cache
-								fileObjCache.Del(formatCacheKey(child.ID))
-								// Remove from directory cache
-								dirNode := &OrcasNode{
-									fs:    tw.fs,
-									objID: obj.PID,
+								// Delete the old .tmp file
+								deleteErr := tw.fs.h.Delete(tw.fs.c, tw.fs.bktID, child.ID)
+								if deleteErr != nil {
+									DebugLog("[VFS TempFileWriter Flush] WARNING: Failed to delete existing .tmp file: fileID=%d, name=%s, error=%v", child.ID, child.Name, deleteErr)
+								} else {
+									DebugLog("[VFS TempFileWriter Flush] Successfully deleted existing .tmp file: fileID=%d, name=%s", child.ID, child.Name)
+									// Remove from cache
+									fileObjCache.Del(formatCacheKey(child.ID))
+									// Remove from directory cache
+									dirNode := &OrcasNode{
+										fs:    tw.fs,
+										objID: obj.PID,
+									}
+									dirNode.removeChildFromDirCache(obj.PID, child.ID)
 								}
-								dirNode.removeChildFromDirCache(obj.PID, child.ID)
+								break
 							}
-							break
 						}
 					}
 				}
-			}
 
 				// Use handler's Rename method to rename the file
 				renameErr := tw.fs.h.Rename(tw.fs.c, tw.fs.bktID, tw.fileID, newName)
 				if renameErr != nil {
 					DebugLog("[VFS TempFileWriter Flush] WARNING: Failed to auto-rename .tmp file: fileID=%d, oldName=%s, newName=%s, error=%v", tw.fileID, originalObjName, newName, renameErr)
-				// Don't return error - rename failure doesn't mean flush failed
+					// Don't return error - rename failure doesn't mean flush failed
 				} else {
 					DebugLog("[VFS TempFileWriter Flush] Successfully auto-renamed .tmp file: fileID=%d, oldName=%s, newName=%s", tw.fileID, originalObjName, newName)
-				// Update cache with new name
-				updatedFileObjs, err := tw.fs.h.Get(tw.fs.c, tw.fs.bktID, []int64{tw.fileID})
-				if err == nil && len(updatedFileObjs) > 0 {
-					updatedObj := updatedFileObjs[0]
-					fileObjCache.Put(formatCacheKey(tw.fileID), updatedObj)
-					// Update directory cache
-					if updatedObj.PID > 0 {
-						dirNode := &OrcasNode{
-							fs:    tw.fs,
-							objID: updatedObj.PID,
+					// Update cache with new name
+					updatedFileObjs, err := tw.fs.h.Get(tw.fs.c, tw.fs.bktID, []int64{tw.fileID})
+					if err == nil && len(updatedFileObjs) > 0 {
+						updatedObj := updatedFileObjs[0]
+						fileObjCache.Put(formatCacheKey(tw.fileID), updatedObj)
+						// Update directory cache
+						if updatedObj.PID > 0 {
+							dirNode := &OrcasNode{
+								fs:    tw.fs,
+								objID: updatedObj.PID,
+							}
+							dirNode.updateChildInDirCache(updatedObj.PID, updatedObj)
 						}
-						dirNode.updateChildInDirCache(updatedObj.PID, updatedObj)
 					}
 				}
-			}
 			}
 		}
 	}
