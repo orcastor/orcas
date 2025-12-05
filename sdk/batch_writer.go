@@ -73,7 +73,7 @@ var (
 	// Balanced: increased buffer size for better batching while maintaining responsiveness
 	defaultBufferSize     = int64(24 << 20) // 24MB - balanced increase for better batching of many small files
 	defaultMaxFileInfos   = int64(3 << 10)  // 3072 - balanced increase for more files per batch
-	defaultFlushWindow    = 5 * time.Second // 5s - increased window for better batching performance
+	defaultFlushWindow    = 1 * time.Second // 1s - default flush window for batch writer
 	defaultMaxPackageSize = int64(24 << 20) // 24MB - balanced for larger packages
 
 	// Threshold for determining if a file is too large for batch write
@@ -575,16 +575,33 @@ func (bwm *BatchWriter) getFileIDFromFileInfo(fileInfo *PackagedFileInfo) int64 
 // ReadPendingData reads data from buffer for a pending object
 // Returns data if object is in buffer, nil otherwise
 func (bwm *BatchWriter) ReadPendingData(fileID int64) []byte {
-	// Get current buffer (atomic load with memory barrier)
-	currentBuf := (*BatchWriterBuffer)(atomic.LoadPointer(&bwm.currentBuffer))
-	if fileInfo, ok := bwm.GetPendingObject(fileID); ok {
-		return currentBuf.buffer[fileInfo.Offset : fileInfo.Offset+fileInfo.Size]
+	// Get file info first to determine which buffer it's in
+	fileInfo, ok := bwm.GetPendingObject(fileID)
+	if !ok || fileInfo == nil {
+		return nil
 	}
 
-	bgBuf := (*BatchWriterBuffer)(atomic.LoadPointer(&bwm.bgBuffer))
-	if fileInfo, ok := bwm.GetPendingObject(fileID); ok {
-		return bgBuf.buffer[fileInfo.Offset : fileInfo.Offset+fileInfo.Size]
+	// Get current buffer (atomic load with memory barrier)
+	currentBuf := (*BatchWriterBuffer)(atomic.LoadPointer(&bwm.currentBuffer))
+	// Check if file is in current buffer (check offset range)
+	currentOffset := atomic.LoadInt64(&currentBuf.writeOffset)
+	if fileInfo.Offset < currentOffset {
+		// File is in current buffer
+		if fileInfo.Offset+fileInfo.Size <= int64(len(currentBuf.buffer)) {
+			return currentBuf.buffer[fileInfo.Offset : fileInfo.Offset+fileInfo.Size]
+		}
 	}
+
+	// Check background buffer
+	bgBuf := (*BatchWriterBuffer)(atomic.LoadPointer(&bwm.bgBuffer))
+	bgOffset := atomic.LoadInt64(&bgBuf.writeOffset)
+	if fileInfo.Offset < bgOffset {
+		// File is in background buffer
+		if fileInfo.Offset+fileInfo.Size <= int64(len(bgBuf.buffer)) {
+			return bgBuf.buffer[fileInfo.Offset : fileInfo.Offset+fileInfo.Size]
+		}
+	}
+
 	return nil
 }
 

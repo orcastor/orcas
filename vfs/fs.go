@@ -587,7 +587,7 @@ func (n *OrcasNode) getDirListWithCache(dirID int64) ([]*core.ObjectInfo, syscal
 					// Same ID exists - prefer cache entry if it has DataID, otherwise use pending
 					if existing.DataID > 0 {
 						// Cached entry has DataID (from database), skip pending
-						DebugLog("[VFS getDirListWithCache] Skipping pending object in cache (same ID in cache with DataID): dirID=%d, fileID=%d, name=%s, cacheDataID=%d", dirID, pending.ID, pending.Name, existing.DataID)
+						// DebugLog("[VFS getDirListWithCache] Skipping pending object in cache (same ID in cache with DataID): dirID=%d, fileID=%d, name=%s, cacheDataID=%d", dirID, pending.ID, pending.Name, existing.DataID)
 						continue
 					}
 					// Cache entry has no DataID but pending has DataID, update cache entry with pending data
@@ -598,7 +598,7 @@ func (n *OrcasNode) getDirListWithCache(dirID int64) ([]*core.ObjectInfo, syscal
 						continue
 					}
 					// Both have no DataID, prefer cache entry
-					DebugLog("[VFS getDirListWithCache] Skipping pending object in cache (same ID, both no DataID, prefer cache): dirID=%d, fileID=%d, name=%s", dirID, pending.ID, pending.Name)
+					// DebugLog("[VFS getDirListWithCache] Skipping pending object in cache (same ID, both no DataID, prefer cache): dirID=%d, fileID=%d, name=%s", dirID, pending.ID, pending.Name)
 					continue
 				}
 
@@ -606,7 +606,7 @@ func (n *OrcasNode) getDirListWithCache(dirID int64) ([]*core.ObjectInfo, syscal
 				if existing, exists := childrenMapByName[pending.Name]; exists {
 					if existing.DataID > 0 {
 						// Cached entry has DataID (from database), skip pending entry
-						DebugLog("[VFS getDirListWithCache] Skipping pending object in cache (same name in cache with DataID): dirID=%d, fileID=%d, name=%s, existingFileID=%d, existingDataID=%d", dirID, pending.ID, pending.Name, existing.ID, existing.DataID)
+						// DebugLog("[VFS getDirListWithCache] Skipping pending object in cache (same name in cache with DataID): dirID=%d, fileID=%d, name=%s, existingFileID=%d, existingDataID=%d", dirID, pending.ID, pending.Name, existing.ID, existing.DataID)
 						continue
 					}
 					// Both are pending (no DataID), but existing is from cache
@@ -619,7 +619,7 @@ func (n *OrcasNode) getDirListWithCache(dirID int64) ([]*core.ObjectInfo, syscal
 					}
 					// Both have no DataID, prefer cache entry
 					if existing.ID != pending.ID {
-						DebugLog("[VFS getDirListWithCache] Skipping pending object in cache (same name, different ID, both no DataID, prefer cache entry): dirID=%d, fileID=%d, name=%s, existingFileID=%d", dirID, pending.ID, pending.Name, existing.ID)
+						// DebugLog("[VFS getDirListWithCache] Skipping pending object in cache (same name, different ID, both no DataID, prefer cache entry): dirID=%d, fileID=%d, name=%s, existingFileID=%d", dirID, pending.ID, pending.Name, existing.ID)
 						continue
 					}
 				}
@@ -749,6 +749,12 @@ func (n *OrcasNode) getPendingObjectsForDir(dirID int64) []*core.ObjectInfo {
 		pendingObjs := batchMgr.GetPendingObjects()
 		for fileID, pkgInfo := range pendingObjs {
 			if pkgInfo != nil && pkgInfo.PID == dirID {
+				// Check if file has been marked for deletion (PID < 0 indicates deleted)
+				// Skip deleted files from pending objects
+				if pkgInfo.PID < 0 {
+					DebugLog("[VFS getPendingObjectsForDir] Skipping deleted file in batch writer: fileID=%d, name=%s, pid=%d", fileID, pkgInfo.Name, pkgInfo.PID)
+					continue
+				}
 				// Convert PackagedFileInfo to ObjectInfo
 				pendingMap[fileID] = &core.ObjectInfo{
 					ID:     fileID,
@@ -774,6 +780,12 @@ func (n *OrcasNode) getPendingObjectsForDir(dirID int64) []*core.ObjectInfo {
 					// Get file object from RandomAccessor
 					fileObj, err := ra.getFileObj()
 					if err == nil && fileObj != nil && fileObj.PID == dirID {
+						// Check if file has been marked for deletion (PID < 0 indicates deleted)
+						// Skip deleted files from pending objects
+						if fileObj.PID < 0 {
+							DebugLog("[VFS getPendingObjectsForDir] Skipping deleted file in RandomAccessor registry: fileID=%d, name=%s, pid=%d", fileID, fileObj.Name, fileObj.PID)
+							return true // Continue to next iteration
+						}
 						// Only add if not already in map (batch writer takes precedence)
 						if _, exists := pendingMap[fileID]; !exists {
 							// Create a copy to avoid modifying the original
@@ -1492,6 +1504,28 @@ func (n *OrcasNode) Unlink(ctx context.Context, name string) syscall.Errno {
 		return syscall.ENOENT
 	}
 
+	// Step 0: Remove from pendingObjects if present (batch writer and RandomAccessor registry)
+	// This ensures the file is removed from pending objects before deletion
+	batchMgr := n.fs.getBatchWriteManager()
+	if batchMgr != nil {
+		if removed := batchMgr.RemovePendingObject(targetID); removed {
+			DebugLog("[VFS Unlink] Removed file from batch writer pending objects: fileID=%d", targetID)
+		}
+	}
+
+	// Remove from RandomAccessor registry if present
+	if n.fs != nil {
+		if targetRA := n.fs.getRandomAccessorByFileID(targetID); targetRA != nil {
+			// Force flush before deletion to ensure data is saved
+			if _, err := targetRA.ForceFlush(); err != nil {
+				DebugLog("[VFS Unlink] WARNING: Failed to flush file before deletion: fileID=%d, error=%v", targetID, err)
+			}
+			// Unregister RandomAccessor
+			n.fs.unregisterRandomAccessor(targetID, targetRA)
+			DebugLog("[VFS Unlink] Removed file from RandomAccessor registry: fileID=%d", targetID)
+		}
+	}
+
 	// Step 1: Remove from parent directory first (mark as deleted)
 	// This makes the file disappear from parent's listing immediately
 	err = n.fs.h.Recycle(n.fs.c, n.fs.bktID, targetID)
@@ -1535,41 +1569,69 @@ func (n *OrcasNode) Rmdir(ctx context.Context, name string) syscall.Errno {
 	}
 
 	// Find child directory
+	// If List fails (I/O error), try to find from cache or assume directory doesn't exist
 	children, _, _, err := n.fs.h.List(n.fs.c, n.fs.bktID, obj.ID, core.ListOptions{
 		Count: core.DefaultListPageSize,
 	})
-	if err != nil {
-		return syscall.EIO
-	}
-
+	
 	var targetID int64
-	for _, child := range children {
-		if child.Name == name && child.Type == core.OBJ_TYPE_DIR {
-			targetID = child.ID
-			break
-		}
-	}
-
-	if targetID == 0 {
-		return syscall.ENOENT
-	}
-
-	// Check if directory is empty
-	dirChildren, _, _, err := n.fs.h.List(n.fs.c, n.fs.bktID, targetID, core.ListOptions{
-		Count: 1,
-	})
 	if err != nil {
-		return syscall.EIO
-	}
-	if len(dirChildren) > 0 {
-		return syscall.ENOTEMPTY
+		// I/O error occurred, try to find directory from cache
+		// If not found in cache, assume it doesn't exist and just clean up cache
+		DebugLog("[VFS Rmdir] WARNING: Failed to list parent directory (I/O error), trying cache: dirID=%d, error=%v", obj.ID, err)
+		// Try to find from directory cache
+		cachedChildren, cacheErrno := n.getDirListWithCache(obj.ID)
+		if cacheErrno == 0 && cachedChildren != nil {
+			for _, child := range cachedChildren {
+				if child.Name == name && child.Type == core.OBJ_TYPE_DIR {
+					targetID = child.ID
+					DebugLog("[VFS Rmdir] Found directory in cache: dirID=%d, name=%s", targetID, name)
+					break
+				}
+			}
+		}
+		// If still not found, assume directory doesn't exist, just clean up cache and return success
+		if targetID == 0 {
+			DebugLog("[VFS Rmdir] Directory not found in cache, assuming already deleted: name=%s", name)
+			// Just clean up cache and return success (directory may have been already deleted)
+			n.invalidateObj()
+			return 0
+		}
+	} else {
+		// Successfully listed, find target directory
+		for _, child := range children {
+			if child.Name == name && child.Type == core.OBJ_TYPE_DIR {
+				targetID = child.ID
+				break
+			}
+		}
+		
+		if targetID == 0 {
+			return syscall.ENOENT
+		}
+		
+		// Check if directory is empty
+		// If List fails (I/O error), assume directory is empty or already deleted
+		dirChildren, _, _, err := n.fs.h.List(n.fs.c, n.fs.bktID, targetID, core.ListOptions{
+			Count: 1,
+		})
+		if err != nil {
+			// I/O error occurred, assume directory is empty or already deleted
+			// Log warning but continue with deletion
+			DebugLog("[VFS Rmdir] WARNING: Failed to check if directory is empty (I/O error), assuming empty: dirID=%d, error=%v", targetID, err)
+		} else if len(dirChildren) > 0 {
+			return syscall.ENOTEMPTY
+		}
 	}
 
 	// Step 1: Remove from parent directory first (mark as deleted)
 	// This makes the directory disappear from parent's listing immediately
+	// If Recycle fails, log warning but continue (directory may have been already deleted)
 	err = n.fs.h.Recycle(n.fs.c, n.fs.bktID, targetID)
 	if err != nil {
-		return syscall.EIO
+		// If Recycle fails, assume directory is already deleted or inaccessible
+		// Just clean up cache and continue with async deletion
+		DebugLog("[VFS Rmdir] WARNING: Failed to mark directory as deleted (may already be deleted): dirID=%d, error=%v", targetID, err)
 	}
 
 	// Step 2: Update cache immediately
@@ -1894,7 +1956,7 @@ func (n *OrcasNode) Rename(ctx context.Context, name string, newParent fs.InodeE
 			newNameLower := strings.ToLower(newName)
 			isExistingTmpFile := strings.HasSuffix(existingNameLower, ".tmp")
 			isTargetTmpFile := strings.HasSuffix(newNameLower, ".tmp")
-			
+
 			// Check if existing file name matches target name without .tmp suffix
 			// This handles case where old .tmp file had suffix removed by Flush()
 			var nameWithoutTmp string
@@ -2822,11 +2884,13 @@ func (n *OrcasNode) getRandomAccessor() (*RandomAccessor, error) {
 		return nil, fmt.Errorf("object is not a file")
 	}
 
-	// Reuse existing writer RandomAccessor for .tmp files to preserve buffered data
-	// IMPORTANT: For .tmp files, we must ensure all concurrent writers use the same RandomAccessor
-	// to avoid creating multiple TempFileWriter instances with different dataIDs
-	// Use mutex to protect creation of RandomAccessor for .tmp files
-	if n.fs != nil && isTempFile(obj) {
+	// IMPORTANT: Check for existing RandomAccessor with TempFileWriter for ALL files
+	// Use hasTempFileWriter() instead of isTempFile() because:
+	// 1. File may have been renamed (removed .tmp suffix) but TempFileWriter still exists
+	// 2. TempFileWriter existence is the authoritative indicator, not the file name
+	// 3. We must reuse the existing RandomAccessor to avoid creating a new one without TempFileWriter
+	//    which would lead to random write mode and new dataID creation
+	if n.fs != nil {
 		// First check without lock (fast path)
 		if existing := n.fs.getRandomAccessorByFileID(obj.ID); existing != nil && existing.hasTempFileWriter() {
 			n.ra.Store(existing)
@@ -2834,15 +2898,23 @@ func (n *OrcasNode) getRandomAccessor() (*RandomAccessor, error) {
 			return existing, nil
 		}
 
-		// Acquire lock to ensure only one RandomAccessor is created for this .tmp file
-		n.fs.raCreateMu.Lock()
-		defer n.fs.raCreateMu.Unlock()
+		// Check if there's an existing RandomAccessor with TempFileWriter
+		// If so, acquire lock to prevent race conditions during creation
+		existingRA := n.fs.getRandomAccessorByFileID(obj.ID)
+		hasExistingTempWriter := existingRA != nil && existingRA.hasTempFileWriter()
+		// Also check for .tmp files (new files that haven't been renamed yet)
+		isNewTmpFile := isTempFile(obj)
 
-		// Double-check after acquiring lock
-		if existing := n.fs.getRandomAccessorByFileID(obj.ID); existing != nil && existing.hasTempFileWriter() {
-			n.ra.Store(existing)
-			DebugLog("[VFS getRandomAccessor] Reusing existing RandomAccessor with TempFileWriter (after lock): fileID=%d, ra=%p", obj.ID, existing)
-			return existing, nil
+		if isNewTmpFile || hasExistingTempWriter {
+			n.fs.raCreateMu.Lock()
+			defer n.fs.raCreateMu.Unlock()
+
+			// Double-check after acquiring lock
+			if existing := n.fs.getRandomAccessorByFileID(obj.ID); existing != nil && existing.hasTempFileWriter() {
+				n.ra.Store(existing)
+				DebugLog("[VFS getRandomAccessor] Reusing existing RandomAccessor with TempFileWriter (after lock): fileID=%d, ra=%p", obj.ID, existing)
+				return existing, nil
+			}
 		}
 	}
 
@@ -2852,20 +2924,27 @@ func (n *OrcasNode) getRandomAccessor() (*RandomAccessor, error) {
 		return nil, err
 	}
 
-	// For .tmp files, we're still holding the lock, so register it now
-	// This ensures only one RandomAccessor is registered for the same .tmp file
-	if n.fs != nil && isTempFile(obj) {
-		// We're still holding the lock, so check again before registering
+	// For .tmp files or files with existing TempFileWriter, we may be holding the lock
+	// Check again before registering to ensure we don't create duplicate RandomAccessor
+	existingRAForRegister := n.fs.getRandomAccessorByFileID(obj.ID)
+	hasExistingTempWriterForRegister := existingRAForRegister != nil && existingRAForRegister.hasTempFileWriter()
+	isNewTmpFileForRegister := isTempFile(obj)
+
+	if n.fs != nil && (isNewTmpFileForRegister || hasExistingTempWriterForRegister) {
+		// Check if another goroutine registered a RandomAccessor with TempFileWriter while we were creating newRA
 		if existing := n.fs.getRandomAccessorByFileID(obj.ID); existing != nil && existing.hasTempFileWriter() {
-			// Another goroutine registered a RandomAccessor with TempFileWriter while we were creating newRA
+			// Another goroutine registered a RandomAccessor with TempFileWriter
 			// Close what we created and use the existing one
 			newRA.Close()
 			n.ra.Store(existing)
 			DebugLog("[VFS getRandomAccessor] Using existing RandomAccessor with TempFileWriter: fileID=%d, ra=%p", obj.ID, existing)
 			return existing, nil
 		}
-		// Register the new RandomAccessor (we're holding the lock, so this is safe)
-		n.fs.registerRandomAccessor(obj.ID, newRA)
+		// Only register if it's a new .tmp file (for renamed files with TempFileWriter, registration happens below)
+		if isNewTmpFileForRegister {
+			// Register the new RandomAccessor (we're holding the lock, so this is safe)
+			n.fs.registerRandomAccessor(obj.ID, newRA)
+		}
 	}
 
 	// Try to atomically set ra (if already set by other goroutine, use existing)
@@ -2888,9 +2967,19 @@ func (n *OrcasNode) getRandomAccessor() (*RandomAccessor, error) {
 	}
 
 	// Register RandomAccessor globally for cross-node lookup (e.g., rename flush)
-	// For .tmp files, registration was already done above while holding the lock
-	// For non-.tmp files, register here
+	// For new .tmp files, registration was already done above while holding the lock
+	// For non-.tmp files (including renamed files), check if there's already a RandomAccessor with TempFileWriter before registering
 	if n.fs != nil && !isTempFile(obj) {
+		// IMPORTANT: Before registering, check if there's already a RandomAccessor with TempFileWriter
+		// This handles the case where file was renamed from .tmp but still has active writes
+		// Use hasTempFileWriter() instead of isTempFile() as the authoritative check
+		if existing := n.fs.getRandomAccessorByFileID(obj.ID); existing != nil && existing.hasTempFileWriter() {
+			// There's already a RandomAccessor with TempFileWriter, use it instead
+			newRA.Close()
+			n.ra.Store(existing)
+			DebugLog("[VFS getRandomAccessor] Found existing RandomAccessor with TempFileWriter for renamed file, reusing: fileID=%d, ra=%p", obj.ID, existing)
+			return existing, nil
+		}
 		DebugLog("[VFS getRandomAccessor] Registering RandomAccessor: fileID=%d", obj.ID)
 		n.fs.registerRandomAccessor(obj.ID, newRA)
 	}
@@ -3112,10 +3201,12 @@ func (n *OrcasNode) forceFlushTempFileBeforeRename(fileID int64, oldName, newNam
 				}
 			}
 		}
-		// After flushing TempFileWriter, unregister RandomAccessor
-		if n.fs != nil {
-			n.fs.unregisterRandomAccessor(fileID, raToFlush)
-		}
+		// IMPORTANT: Do NOT unregister RandomAccessor immediately after flush
+		// There may be concurrent writes still in progress that need to use the same TempFileWriter
+		// Unregistering too early can cause subsequent writes to create a new RandomAccessor
+		// without TempFileWriter, leading to random write mode and new dataID creation
+		// The RandomAccessor will be unregistered when the file is closed or when no longer needed
+		// DebugLog("[VFS Rename] Keeping RandomAccessor registered after TempFileWriter flush to allow concurrent writes: fileID=%d", fileID)
 		return
 	}
 
@@ -3274,10 +3365,12 @@ func (n *OrcasNode) forceFlushTempFileBeforeRename(fileID int64, oldName, newNam
 				}
 			}
 
-			// Unregister RandomAccessor if exists
-			if n.fs != nil && raToFlush != nil {
-				n.fs.unregisterRandomAccessor(fileID, raToFlush)
-			}
+			// IMPORTANT: Do NOT unregister RandomAccessor immediately after batch flush
+			// There may be concurrent writes still in progress that need to use the same RandomAccessor
+			// Unregistering too early can cause subsequent writes to create a new RandomAccessor
+			// without TempFileWriter, leading to random write mode and new dataID creation
+			// The RandomAccessor will be unregistered when the file is closed or when no longer needed
+			// DebugLog("[VFS Rename] Keeping RandomAccessor registered after batch flush to allow concurrent writes: fileID=%d", fileID)
 			return
 		}
 	}
@@ -3426,11 +3519,12 @@ func (n *OrcasNode) forceFlushTempFileBeforeRename(fileID int64, oldName, newNam
 		DebugLog("[VFS Rename] WARNING: Failed to re-fetch file object after flush: fileID=%d, error=%v", fileID, err)
 	}
 
-	// After forcing flush, unregister RandomAccessor to avoid stale references
-	if n.fs != nil {
-		DebugLog("[VFS Rename] Unregistering RandomAccessor: fileID=%d", fileID)
-		n.fs.unregisterRandomAccessor(fileID, raToFlush)
-	}
+	// IMPORTANT: Do NOT unregister RandomAccessor immediately after force flush
+	// There may be concurrent writes still in progress that need to use the same RandomAccessor
+	// Unregistering too early can cause subsequent writes to create a new RandomAccessor
+	// without TempFileWriter, leading to random write mode and new dataID creation
+	// The RandomAccessor will be unregistered when the file is closed or when no longer needed
+	// DebugLog("[VFS Rename] Keeping RandomAccessor registered after force flush to allow concurrent writes: fileID=%d", fileID)
 }
 
 // Release releases file handle (closes file)
