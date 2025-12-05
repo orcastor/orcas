@@ -65,6 +65,16 @@ type BatchWriter struct {
 	lastFlushTime int64        // Last flush time (UnixNano, atomic access)
 	flushTimer    atomic.Value // *time.Timer for periodic flush
 	flushCtx      atomic.Value // Stored context for scheduled flushes
+
+	// Callback function to update dirListCache after flush (optional, set by VFS layer)
+	onFlushComplete func(objectInfos []*core.ObjectInfo)
+
+	// Bucket configuration for compression/encryption (set by VFS layer)
+	// Used for package-level compression/encryption
+	cmprWay  uint32 // Compression method (DATA_CMPR_*)
+	cmprQlty uint32 // Compression quality
+	endecWay uint32 // Encryption method (DATA_ENDEC_*)
+	endecKey string // Encryption key
 }
 
 var (
@@ -307,7 +317,8 @@ func (bwm *BatchWriter) flush(ctx context.Context) {
 	}
 
 	// Flush package to disk (uses buffer slice directly, no data copying)
-	if err := bwm.flushPackage(ctx, pkgFileInfos, bufferSize, currentBuf.buffer); err != nil {
+	objectInfos, err := bwm.flushPackage(ctx, pkgFileInfos, bufferSize, currentBuf.buffer)
+	if err != nil {
 		fmt.Printf("Error flushing package: %v\n", err)
 		// If flush failed, restore the offset and index to the buffer that was swapped
 		// Note: currentBuf is now bgBuffer after swap, but we need to restore to the original currentBuffer
@@ -337,6 +348,13 @@ func (bwm *BatchWriter) flush(ctx context.Context) {
 		}
 	}
 
+	// Call callback to update dirListCache (if set by VFS layer)
+	// This ensures flushed objects are immediately added to dirListCache
+	// instead of requiring getDirListWithCache to merge from pendingObjects
+	if bwm.onFlushComplete != nil && len(objectInfos) > 0 {
+		bwm.onFlushComplete(objectInfos)
+	}
+
 	// Reset bgBuffer's offset to 0 to indicate it's ready for next swap
 	// Note: currentBuf is now bgBuffer after swap
 	atomic.StoreInt64(&currentBuf.writeOffset, 0)
@@ -351,24 +369,42 @@ func (bwm *BatchWriter) getFileInfoOffsetSize(fileInfo *PackagedFileInfo) (int64
 	return fileInfo.Offset, fileInfo.Size
 }
 
+// SetOnFlushComplete sets a callback function to be called after flush completes successfully
+// This allows VFS layer to update dirListCache when objects are flushed
+func (bwm *BatchWriter) SetOnFlushComplete(callback func(objectInfos []*core.ObjectInfo)) {
+	bwm.onFlushComplete = callback
+}
+
+// SetBucketConfig sets bucket configuration for compression/encryption
+// This allows package-level compression/encryption instead of per-file processing
+func (bwm *BatchWriter) SetBucketConfig(cmprWay, cmprQlty, endecWay uint32, endecKey string) {
+	bwm.cmprWay = cmprWay
+	bwm.cmprQlty = cmprQlty
+	bwm.endecWay = endecWay
+	bwm.endecKey = endecKey
+}
+
 // flushPackage flushes a single packaged data block
 // Uses buffer slice directly, no data copying
-func (bwm *BatchWriter) flushPackage(ctx context.Context, fileInfos []*PackagedFileInfo, bufferSize int64, buffer []byte) error {
+// Returns objectInfos for successfully flushed objects
+func (bwm *BatchWriter) flushPackage(ctx context.Context, fileInfos []*PackagedFileInfo, bufferSize int64, buffer []byte) ([]*core.ObjectInfo, error) {
 	if len(fileInfos) == 0 || bufferSize == 0 {
-		return nil
+		return nil, nil
 	}
 
 	// 1. Generate packaged data block ID
 	pkgID := core.NewID()
 	if pkgID <= 0 {
-		return fmt.Errorf("failed to generate package ID")
+		return nil, fmt.Errorf("failed to generate package ID")
 	}
 
-	// 2. Write packaged data block directly from buffer slice
-	bufferData := buffer[:bufferSize]
-	_, err := bwm.handler.PutData(ctx, bwm.bktID, pkgID, 0, bufferData)
+	// 2. Write package data block (files are already compressed/encrypted individually)
+	// Each file in the package has been processed (compressed/encrypted) separately
+	// Package data is the concatenation of processed file data
+	packageData := buffer[:bufferSize]
+	_, err := bwm.handler.PutData(ctx, bwm.bktID, pkgID, 0, packageData)
 	if err != nil {
-		return fmt.Errorf("failed to write package data (bktID=%d, pkgID=%d, size=%d): %v", bwm.bktID, pkgID, bufferSize, err)
+		return nil, fmt.Errorf("failed to write package data (bktID=%d, pkgID=%d, size=%d): %v", bwm.bktID, pkgID, len(packageData), err)
 	}
 
 	// 3. Create DataInfo and ObjectInfo for each file
@@ -395,13 +431,22 @@ func (bwm *BatchWriter) flushPackage(ctx context.Context, fileInfos []*PackagedF
 		}
 
 		// Create DataInfo (inline struct creation for better performance)
+		// For per-file compression/encryption:
+		// - Size: processed file size in package (after compression/encryption)
+		// - OrigSize: original file size (before compression/encryption)
+		// - PkgID: package ID (contains processed file data)
+		// - PkgOffset: offset in package (points to processed file data)
+		// - Kind: per-file compression/encryption flags
+		// Note: When reading, use PkgOffset to directly locate file data in package,
+		// then decrypt/decompress the file data individually
+		processedFileSize := pkgInfo.Size // Size of processed file data in package
 		dataInfos = append(dataInfos, &core.DataInfo{
 			ID:        dataID,
-			Size:      pkgInfo.Size,
-			OrigSize:  pkgInfo.OrigSize,
-			PkgID:     pkgID,
-			PkgOffset: pkgInfo.PkgOffset,
-			Kind:      pkgInfo.Kind, // Include compression/encryption flags
+			Size:      processedFileSize,  // Processed file size in package (after compression/encryption)
+			OrigSize:  pkgInfo.OrigSize,   // Original file size (before compression/encryption)
+			PkgID:     pkgID,               // Package ID (contains processed file data)
+			PkgOffset: pkgInfo.PkgOffset,  // Offset in package (points to processed file data)
+			Kind:      pkgInfo.Kind,        // Use per-file compression/encryption flags
 		})
 
 		// Create ObjectInfo (inline struct creation for better performance)
@@ -422,11 +467,11 @@ func (bwm *BatchWriter) flushPackage(ctx context.Context, fileInfos []*PackagedF
 		// Both DataInfo and ObjectInfo exist, use combined write
 		err = bwm.handler.PutDataInfoAndObj(ctx, bwm.bktID, dataInfos, objectInfos)
 		if err != nil {
-			return fmt.Errorf("failed to write data and object infos: %v", err)
+			return nil, fmt.Errorf("failed to write data and object infos: %v", err)
 		}
 	}
 
-	return nil
+	return objectInfos, nil
 }
 
 // AddFile adds file data to batch write buffer
