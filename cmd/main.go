@@ -55,6 +55,9 @@ var (
 
 	// Debug parameter
 	debug = flag.Bool("debug", false, "Enable debug mode (verbose output)")
+
+	// Mount options
+	requireKey = flag.Bool("requirekey", false, "Require KEY in context, return EPERM error if not provided (for mount action)")
 )
 
 type Config struct {
@@ -328,6 +331,9 @@ func handleMount() {
 	} else if sdkCfg.WiseCmpr == core.DATA_CMPR_BR {
 		fmt.Printf("  Smart Compression: BROTLI (level: %d)\n", sdkCfg.CmprQlty)
 	}
+	if *requireKey {
+		fmt.Printf("  Require Key: Enabled (EPERM if KEY not provided)\n")
+	}
 	fmt.Printf("\n")
 
 	// Mount filesystem
@@ -340,6 +346,7 @@ func handleMount() {
 		DefaultPermissions: true,
 		SDKConfig:          &sdkCfg,
 		Debug:              *debug,
+		RequireKey:         *requireKey,
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to mount filesystem: %v\n", err)
