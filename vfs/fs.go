@@ -878,6 +878,11 @@ func (n *OrcasNode) preloadChildDirs(children []*core.ObjectInfo) {
 
 // Create creates a file
 func (n *OrcasNode) Create(ctx context.Context, name string, flags uint32, mode uint32, out *fuse.EntryOut) (node *fs.Inode, fh fs.FileHandle, fuseFlags uint32, errno syscall.Errno) {
+	// Check if KEY is required
+	if errno := n.fs.checkKey(); errno != 0 {
+		return nil, nil, 0, errno
+	}
+
 	obj, err := n.getObj()
 	if err != nil {
 		DebugLog("[VFS Create] ERROR: Failed to get parent directory object: %v", err)
@@ -1340,6 +1345,11 @@ func (n *OrcasNode) Create(ctx context.Context, name string, flags uint32, mode 
 
 // Open opens a file
 func (n *OrcasNode) Open(ctx context.Context, flags uint32) (fh fs.FileHandle, fuseFlags uint32, errno syscall.Errno) {
+	// Check if KEY is required
+	if errno := n.fs.checkKey(); errno != 0 {
+		return nil, 0, errno
+	}
+
 	obj, err := n.getObj()
 	if err != nil {
 		DebugLog("[VFS Open] ERROR: Failed to get object: objID=%d, error=%v", n.objID, err)
@@ -1391,6 +1401,10 @@ func (n *OrcasNode) Open(ctx context.Context, flags uint32) (fh fs.FileHandle, f
 
 // Mkdir creates a directory
 func (n *OrcasNode) Mkdir(ctx context.Context, name string, mode uint32, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
+	// Check if KEY is required
+	if errno := n.fs.checkKey(); errno != 0 {
+		return nil, errno
+	}
 	obj, err := n.getObj()
 	if err != nil {
 		return nil, syscall.ENOENT
@@ -1475,6 +1489,10 @@ func (n *OrcasNode) Mkdir(ctx context.Context, name string, mode uint32, out *fu
 
 // Unlink deletes a file
 func (n *OrcasNode) Unlink(ctx context.Context, name string) syscall.Errno {
+	// Check if KEY is required
+	if errno := n.fs.checkKey(); errno != 0 {
+		return errno
+	}
 	obj, err := n.getObj()
 	if err != nil {
 		return syscall.ENOENT
@@ -1559,6 +1577,10 @@ func (n *OrcasNode) Unlink(ctx context.Context, name string) syscall.Errno {
 
 // Rmdir deletes a directory
 func (n *OrcasNode) Rmdir(ctx context.Context, name string) syscall.Errno {
+	// Check if KEY is required
+	if errno := n.fs.checkKey(); errno != 0 {
+		return errno
+	}
 	obj, err := n.getObj()
 	if err != nil {
 		return syscall.ENOENT
@@ -1573,7 +1595,7 @@ func (n *OrcasNode) Rmdir(ctx context.Context, name string) syscall.Errno {
 	children, _, _, err := n.fs.h.List(n.fs.c, n.fs.bktID, obj.ID, core.ListOptions{
 		Count: core.DefaultListPageSize,
 	})
-	
+
 	var targetID int64
 	if err != nil {
 		// I/O error occurred, try to find directory from cache
@@ -1605,11 +1627,11 @@ func (n *OrcasNode) Rmdir(ctx context.Context, name string) syscall.Errno {
 				break
 			}
 		}
-		
+
 		if targetID == 0 {
 			return syscall.ENOENT
 		}
-		
+
 		// Check if directory is empty
 		// If List fails (I/O error), assume directory is empty or already deleted
 		dirChildren, _, _, err := n.fs.h.List(n.fs.c, n.fs.bktID, targetID, core.ListOptions{
@@ -1661,6 +1683,10 @@ func (n *OrcasNode) Rmdir(ctx context.Context, name string) syscall.Errno {
 
 // Rename renames a file/directory
 func (n *OrcasNode) Rename(ctx context.Context, name string, newParent fs.InodeEmbedder, newName string, flags uint32) syscall.Errno {
+	// Check if KEY is required
+	if errno := n.fs.checkKey(); errno != 0 {
+		return errno
+	}
 	obj, err := n.getObj()
 	if err != nil {
 		return syscall.ENOENT
@@ -2442,6 +2468,11 @@ func (n *OrcasNode) Rename(ctx context.Context, name string, newParent fs.InodeE
 
 // Read reads file content
 func (n *OrcasNode) Read(ctx context.Context, dest []byte, off int64) (fuse.ReadResult, syscall.Errno) {
+	// Check if KEY is required
+	if errno := n.fs.checkKey(); errno != 0 {
+		return nil, errno
+	}
+
 	// Force refresh object cache to get latest DataID (important after writes)
 	// This ensures we get the latest DataID from database or fileObjCache
 	n.invalidateObj()
@@ -2604,6 +2635,11 @@ func (n *OrcasNode) getDataReader(offset int64) (dataReader, syscall.Errno) {
 // Write writes file content
 // Optimization: reduce lock hold time, ra.Write itself is thread-safe
 func (n *OrcasNode) Write(ctx context.Context, data []byte, off int64) (written uint32, errno syscall.Errno) {
+	// Check if KEY is required
+	if errno := n.fs.checkKey(); errno != 0 {
+		return 0, errno
+	}
+
 	obj, err := n.getObj()
 	if err != nil {
 		DebugLog("[VFS Write] ERROR: Failed to get object: objID=%d, error=%v", n.objID, err)

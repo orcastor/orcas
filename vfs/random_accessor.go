@@ -107,6 +107,10 @@ var (
 	// key: "flush_<dataID>_<sn>", ensures only one flush per chunk at a time
 	chunkFlushSingleFlight singleflight.Group
 
+	// singleflight group: prevent duplicate concurrent package file decoding
+	// key: "decode_pkg_<dataID>", ensures only one decode per package file at a time
+	packageDecodeSingleFlight singleflight.Group
+
 	tempFlushMgr     *delayedFlushManager
 	tempFlushMgrOnce sync.Once
 )
@@ -5128,75 +5132,99 @@ func (cr *chunkReader) ReadAt(buf []byte, offset int64) (int, error) {
 		}
 
 		if fileData == nil {
-			// DebugLog("[VFS chunkReader ReadAt] Reading packaged file: dataID=%d, pkgOffset=%d, origSize=%d, offset=%d, bufSize=%d",
-			//	cr.dataID, cr.pkgOffset, cr.origSize, offset, len(buf))
-			pkgData, err := cr.getChunk(0)
+			// Use singleflight to ensure only one goroutine decodes this package file at a time
+			// Key format: "decode_pkg_<dataID>" to uniquely identify each package file
+			sfKey := fmt.Sprintf("decode_pkg_%d", cr.dataID)
+
+			result, err, _ := packageDecodeSingleFlight.Do(sfKey, func() (interface{}, error) {
+				// Double-check cache after acquiring singleflight lock
+				// Another goroutine might have already decoded it
+				if cached, ok := cr.decodedFileCache.Get("decoded"); ok {
+					if decoded, ok := cached.([]byte); ok && len(decoded) > 0 {
+						return decoded, nil
+					}
+				}
+
+				// DebugLog("[VFS chunkReader ReadAt] Reading packaged file: dataID=%d, pkgOffset=%d, origSize=%d, offset=%d, bufSize=%d",
+				//	cr.dataID, cr.pkgOffset, cr.origSize, offset, len(buf))
+				pkgData, err := cr.getChunk(0)
+				if err != nil {
+					// DebugLog("[VFS chunkReader ReadAt] ERROR: Failed to get package chunk: dataID=%d, error=%v", cr.dataID, err)
+					return nil, err
+				}
+				// DebugLog("[VFS chunkReader ReadAt] Got package data: dataID=%d, pkgDataLen=%d", cr.dataID, len(pkgData))
+				// Extract file data from package
+				// PkgOffset is the offset of compressed/encrypted file data in the package
+				// Use compressedSize (not origSize) to calculate the range
+				pkgStart := int64(cr.pkgOffset)
+				pkgEnd := pkgStart + cr.compressedSize
+				if int64(len(pkgData)) < pkgEnd {
+					// DebugLog("[VFS chunkReader ReadAt] ERROR: Package data incomplete: dataID=%d, pkgOffset=%d, compressedSize=%d, expected %d bytes, got %d",
+					//	cr.dataID, cr.pkgOffset, cr.compressedSize, pkgEnd, len(pkgData))
+					return nil, fmt.Errorf("package data incomplete: expected %d bytes, got %d", pkgEnd, len(pkgData))
+				}
+				encryptedFileData := pkgData[pkgStart:pkgEnd]
+				// DebugLog("[VFS chunkReader ReadAt] Extracted encrypted file data: dataID=%d, encryptedFileDataLen=%d", cr.dataID, len(encryptedFileData))
+
+				// Decrypt and decompress the file data
+				decodedFileData := encryptedFileData
+
+				// 1. Decrypt first (if enabled)
+				if cr.kind&core.DATA_ENDEC_MASK != 0 {
+					if cr.kind&core.DATA_ENDEC_AES256 != 0 {
+						decodedFileData, err = aes256.Decrypt(cr.endecKey, encryptedFileData)
+						if err != nil {
+							// DebugLog("[VFS chunkReader ReadAt] ERROR: AES256 decryption failed: dataID=%d, error=%v", cr.dataID, err)
+							return nil, fmt.Errorf("AES256 decryption failed: %v", err)
+						}
+					} else if cr.kind&core.DATA_ENDEC_SM4 != 0 {
+						decodedFileData, err = sm4.Sm4Cbc([]byte(cr.endecKey), encryptedFileData, false)
+						if err != nil {
+							// DebugLog("[VFS chunkReader ReadAt] ERROR: SM4 decryption failed: dataID=%d, error=%v", cr.dataID, err)
+							return nil, fmt.Errorf("SM4 decryption failed: %v", err)
+						}
+					}
+				}
+
+				// 2. Decompress next (if enabled)
+				if cr.kind&core.DATA_CMPR_MASK != 0 {
+					var decompressor archiver.Decompressor
+					if cr.kind&core.DATA_CMPR_SNAPPY != 0 {
+						decompressor = &archiver.Snappy{}
+					} else if cr.kind&core.DATA_CMPR_ZSTD != 0 {
+						decompressor = &archiver.Zstd{}
+					} else if cr.kind&core.DATA_CMPR_GZIP != 0 {
+						decompressor = &archiver.Gz{}
+					} else if cr.kind&core.DATA_CMPR_BR != 0 {
+						decompressor = &archiver.Brotli{}
+					}
+
+					if decompressor != nil {
+						var decompressedBuf bytes.Buffer
+						err := decompressor.Decompress(bytes.NewReader(decodedFileData), &decompressedBuf)
+						if err != nil {
+							// DebugLog("[VFS chunkReader ReadAt] ERROR: Decompression failed: dataID=%d, error=%v", cr.dataID, err)
+							return nil, fmt.Errorf("decompression failed: %v", err)
+						}
+						decodedFileData = decompressedBuf.Bytes()
+					}
+				}
+
+				// Cache decoded file data for future reads
+				cr.decodedFileCache.Put("decoded", decodedFileData)
+				// DebugLog("[VFS chunkReader ReadAt] Decoded file data: dataID=%d, decodedFileDataLen=%d, origSize=%d", cr.dataID, len(decodedFileData), cr.origSize)
+				return decodedFileData, nil
+			})
+
 			if err != nil {
-				// DebugLog("[VFS chunkReader ReadAt] ERROR: Failed to get package chunk: dataID=%d, error=%v", cr.dataID, err)
 				return 0, err
 			}
-			// DebugLog("[VFS chunkReader ReadAt] Got package data: dataID=%d, pkgDataLen=%d", cr.dataID, len(pkgData))
-			// Extract file data from package
-			// PkgOffset is the offset of compressed/encrypted file data in the package
-			// Use compressedSize (not origSize) to calculate the range
-			pkgStart := int64(cr.pkgOffset)
-			pkgEnd := pkgStart + cr.compressedSize
-			if int64(len(pkgData)) < pkgEnd {
-				// DebugLog("[VFS chunkReader ReadAt] ERROR: Package data incomplete: dataID=%d, pkgOffset=%d, compressedSize=%d, expected %d bytes, got %d",
-				//	cr.dataID, cr.pkgOffset, cr.compressedSize, pkgEnd, len(pkgData))
-				return 0, fmt.Errorf("package data incomplete: expected %d bytes, got %d", pkgEnd, len(pkgData))
+
+			if decoded, ok := result.([]byte); ok {
+				fileData = decoded
+			} else {
+				return 0, fmt.Errorf("invalid decoded file data type")
 			}
-			encryptedFileData := pkgData[pkgStart:pkgEnd]
-			// DebugLog("[VFS chunkReader ReadAt] Extracted encrypted file data: dataID=%d, encryptedFileDataLen=%d", cr.dataID, len(encryptedFileData))
-
-			// Decrypt and decompress the file data
-			decodedFileData := encryptedFileData
-
-			// 1. Decrypt first (if enabled)
-			if cr.kind&core.DATA_ENDEC_MASK != 0 {
-				if cr.kind&core.DATA_ENDEC_AES256 != 0 {
-					decodedFileData, err = aes256.Decrypt(cr.endecKey, encryptedFileData)
-					if err != nil {
-						// DebugLog("[VFS chunkReader ReadAt] ERROR: AES256 decryption failed: dataID=%d, error=%v", cr.dataID, err)
-						return 0, fmt.Errorf("AES256 decryption failed: %v", err)
-					}
-				} else if cr.kind&core.DATA_ENDEC_SM4 != 0 {
-					decodedFileData, err = sm4.Sm4Cbc([]byte(cr.endecKey), encryptedFileData, false)
-					if err != nil {
-						// DebugLog("[VFS chunkReader ReadAt] ERROR: SM4 decryption failed: dataID=%d, error=%v", cr.dataID, err)
-						return 0, fmt.Errorf("SM4 decryption failed: %v", err)
-					}
-				}
-			}
-
-			// 2. Decompress next (if enabled)
-			if cr.kind&core.DATA_CMPR_MASK != 0 {
-				var decompressor archiver.Decompressor
-				if cr.kind&core.DATA_CMPR_SNAPPY != 0 {
-					decompressor = &archiver.Snappy{}
-				} else if cr.kind&core.DATA_CMPR_ZSTD != 0 {
-					decompressor = &archiver.Zstd{}
-				} else if cr.kind&core.DATA_CMPR_GZIP != 0 {
-					decompressor = &archiver.Gz{}
-				} else if cr.kind&core.DATA_CMPR_BR != 0 {
-					decompressor = &archiver.Brotli{}
-				}
-
-				if decompressor != nil {
-					var decompressedBuf bytes.Buffer
-					err := decompressor.Decompress(bytes.NewReader(decodedFileData), &decompressedBuf)
-					if err != nil {
-						// DebugLog("[VFS chunkReader ReadAt] ERROR: Decompression failed: dataID=%d, error=%v", cr.dataID, err)
-						return 0, fmt.Errorf("decompression failed: %v", err)
-					}
-					decodedFileData = decompressedBuf.Bytes()
-				}
-			}
-
-			fileData = decodedFileData
-			// Cache decoded file data for future reads
-			cr.decodedFileCache.Put("decoded", fileData)
-			// DebugLog("[VFS chunkReader ReadAt] Decoded file data: dataID=%d, decodedFileDataLen=%d, origSize=%d", cr.dataID, len(fileData), cr.origSize)
 		}
 
 		// Now read from decoded fileData
@@ -5214,6 +5242,11 @@ func (cr *chunkReader) ReadAt(buf []byte, offset int64) (int, error) {
 	}
 
 	// For non-packaged files, use normal chunk-based reading
+	// Note: ReadAt should be safe for concurrent use, but we add mutex to prevent
+	// issues with concurrent reads that might cause confusion in logs
+	// However, since ReadAt is designed to be safe for concurrent use (each call has its own offset),
+	// we don't lock the entire method. Instead, we rely on singleflight for chunk reads.
+	// The mutex is only used for package file decoding to prevent race conditions.
 	totalRead := 0
 	currentOffset := offset
 	remaining := readSize
@@ -5223,8 +5256,12 @@ func (cr *chunkReader) ReadAt(buf []byte, offset int64) (int, error) {
 		chunkStart := int64(currentSn) * cr.chunkSize
 		currentOffsetInChunk := currentOffset - chunkStart
 
-		DebugLog("[VFS chunkReader ReadAt] Reading chunk: dataID=%d, sn=%d, offset=%d, offsetInChunk=%d, remaining=%d, origSize=%d, totalRead=%d",
-			cr.dataID, currentSn, currentOffset, currentOffsetInChunk, remaining, cr.origSize, totalRead)
+		// Only log once per unique read request to avoid spam from concurrent reads
+		// Use a simple check: only log if this is the first iteration (totalRead == 0 and currentOffset == offset)
+		if totalRead == 0 && currentOffset == offset {
+			DebugLog("[VFS chunkReader ReadAt] Reading chunk: dataID=%d, sn=%d, offset=%d, offsetInChunk=%d, remaining=%d, origSize=%d, totalRead=%d",
+				cr.dataID, currentSn, currentOffset, currentOffsetInChunk, remaining, cr.origSize, totalRead)
+		}
 
 		// Get or load chunk (with cache and singleflight)
 		chunkData, err := cr.getChunk(currentSn)

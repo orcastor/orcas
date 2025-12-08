@@ -31,6 +31,8 @@ type MountOptions struct {
 	SDKConfig *sdk.Config
 	// Enable debug mode (verbose output with timestamps)
 	Debug bool
+	// RequireKey: if true, return EPERM error when KEY is not provided in context
+	RequireKey bool
 }
 
 // Mount mounts ORCAS filesystem
@@ -66,7 +68,7 @@ func Mount(h core.Handler, c core.Ctx, bktID int64, opts *MountOptions) (*fuse.S
 	}
 
 	// Create filesystem
-	ofs := NewOrcasFS(h, c, bktID)
+	ofs := NewOrcasFS(h, c, bktID, opts.RequireKey)
 
 	// Build FUSE mount options
 	fuseOpts := &fuse.MountOptions{

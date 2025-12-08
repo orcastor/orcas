@@ -6,6 +6,7 @@ import (
 	"os"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/orcastor/orcas/core"
@@ -58,12 +59,13 @@ func DebugLog(format string, args ...interface{}) {
 // OrcasFS implements ORCAS filesystem, mapping ORCAS object storage to filesystem
 // This struct is available on all platforms
 type OrcasFS struct {
-	h         core.Handler
-	c         core.Ctx
-	bktID     int64
-	root      *OrcasNode
-	bucket    *core.BucketInfo // Bucket configuration (includes compression/encryption settings)
-	chunkSize int64
+	h          core.Handler
+	c          core.Ctx
+	bktID      int64
+	root       *OrcasNode
+	bucket     *core.BucketInfo // Bucket configuration (includes compression/encryption settings)
+	chunkSize  int64
+	requireKey bool // If true, return EPERM error when KEY is not provided
 	// Batch writer is now managed globally by SDK, accessed via GetBatchWriterForBucket
 	raRegistry sync.Map // map[fileID]*RandomAccessor
 	// Mutex to protect RandomAccessor creation for .tmp files during concurrent writes
@@ -72,7 +74,8 @@ type OrcasFS struct {
 
 // NewOrcasFS creates a new ORCAS filesystem
 // This function is available on all platforms
-func NewOrcasFS(h core.Handler, c core.Ctx, bktID int64) *OrcasFS {
+// requireKey: if true, return EPERM error when KEY is not provided in context
+func NewOrcasFS(h core.Handler, c core.Ctx, bktID int64, requireKey ...bool) *OrcasFS {
 	// Get bucket configuration (includes chunkSize, compression, encryption settings)
 	var chunkSize int64
 	bucket, err := h.GetBktInfo(c, bktID)
@@ -100,12 +103,19 @@ func NewOrcasFS(h core.Handler, c core.Ctx, bktID int64) *OrcasFS {
 		}
 	}
 
+	// Check if requireKey option is provided
+	reqKey := false
+	if len(requireKey) > 0 {
+		reqKey = requireKey[0]
+	}
+
 	ofs := &OrcasFS{
-		h:         h,
-		c:         c,
-		bktID:     bktID,
-		bucket:    bucket,
-		chunkSize: chunkSize,
+		h:          h,
+		c:          c,
+		bktID:      bktID,
+		bucket:     bucket,
+		chunkSize:  chunkSize,
+		requireKey: reqKey,
 	}
 
 	// Root node initialization
@@ -133,6 +143,23 @@ func (fs *OrcasFS) getBucketConfig() *core.BucketInfo {
 		ID:        fs.bktID,
 		ChunkSize: fs.chunkSize,
 	}
+}
+
+// checkKey checks if KEY is required and present in context
+// Returns EPERM if requireKey is true but KEY is not provided
+func (fs *OrcasFS) checkKey() syscall.Errno {
+	if !fs.requireKey {
+		return 0 // Key not required
+	}
+	// Check if KEY exists in context
+	// Use core.getKey function to extract key from context
+	if v, ok := fs.c.Value("o").(map[string]interface{}); ok {
+		if key, okk := v["key"].(string); okk && key != "" {
+			return 0 // Key is present
+		}
+	}
+	// Key is required but not provided
+	return syscall.EPERM
 }
 
 // registerRandomAccessor tracks active RandomAccessor instances for a file

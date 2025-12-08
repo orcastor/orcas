@@ -219,6 +219,8 @@ type MountOptions struct {
 	SDKConfig *sdk.Config
 	// Enable debug mode (verbose output with timestamps)
 	Debug bool
+	// RequireKey: if true, return EPERM error when KEY is not provided in context
+	RequireKey bool
 }
 
 // Mount mounts ORCAS filesystem using Dokany (Windows)
@@ -253,8 +255,9 @@ func Mount(h core.Handler, c core.Ctx, bktID int64, opts *MountOptions) (*Dokany
 		SetDebugEnabled(true)
 	}
 
-	// Create filesystem, pass SDK configuration
-	ofs := NewOrcasFS(h, c, bktID, opts.SDKConfig)
+	// Create filesystem, pass RequireKey option
+	// Note: SDKConfig is handled separately in Windows version if needed
+	ofs := NewOrcasFS(h, c, bktID, opts.RequireKey)
 
 	// Set default thread count
 	if opts.ThreadCount == 0 {
