@@ -13,7 +13,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/orca-zhang/ecache"
+	"github.com/orca-zhang/ecache2"
 	"github.com/orcastor/orcas/core"
 	"github.com/orcastor/orcas/rpc/middleware"
 	"github.com/orcastor/orcas/s3/util"
@@ -25,27 +25,27 @@ var (
 
 	// pathCache caches path to object mapping
 	// key: "<bktID>:<path>", value: *core.ObjectInfo
-	pathCache = ecache.NewLRUCache(16, 512, 30*time.Second)
+	pathCache = ecache2.NewLRUCache[string](16, 512, 30*time.Second)
 
 	// dirListCache caches directory listing
-	// key: "<bktID>:<pid>", value: []*core.ObjectInfo
-	dirListCache = ecache.NewLRUCache(16, 512, 30*time.Second)
+	// key: pid (int64), value: []*core.ObjectInfo
+	dirListCache = ecache2.NewLRUCache[int64](16, 512, 30*time.Second)
 
 	// objectCache caches object by ID
-	// key: "<bktID>:<objectID>", value: *core.ObjectInfo
-	objectCache = ecache.NewLRUCache(16, 512, 30*time.Second)
+	// key: objectID (int64), value: *core.ObjectInfo
+	objectCache = ecache2.NewLRUCache[int64](16, 512, 30*time.Second)
 
 	// bucketListCache caches bucket list by user ID
-	// key: "<uid>", value: []*core.BucketInfo
-	bucketListCache = ecache.NewLRUCache(16, 512, 30*time.Second)
+	// key: uid (int64), value: []*core.BucketInfo
+	bucketListCache = ecache2.NewLRUCache[int64](16, 512, 30*time.Second)
 
-	// bucketCache caches bucket by name and user ID
-	// key: "<uid>:<bucketName>", value: *core.BucketInfo
-	bucketCache = ecache.NewLRUCache(16, 512, 30*time.Second)
+	// bucketCache caches bucket by ID
+	// key: bktID (int64), value: *core.BucketInfo
+	bucketCache = ecache2.NewLRUCache[int64](16, 512, 30*time.Second)
 
 	// bucketInfoCache caches bucket info by bucket ID to avoid repeated GetBktInfo calls
-	// key: "<bktID>", value: *core.BucketInfo
-	bucketInfoCache = ecache.NewLRUCache(16, 512, 30*time.Second)
+	// key: bktID (int64), value: *core.BucketInfo
+	bucketInfoCache = ecache2.NewLRUCache[int64](16, 512, 30*time.Second)
 
 	// multipartUploads stores ongoing multipart uploads
 	// key: "<bktID>:<uploadId>", value: *MultipartUpload
@@ -57,9 +57,8 @@ var (
 // STANDARD: bucket does not support instant upload (RefLevel = 0), data is unique (standard redundancy)
 func getStorageClass(ctx context.Context, bktID int64) string {
 	// Get bucket info from cache or database
-	cacheKey := fmt.Sprintf("%d", bktID)
 	var bucket *core.BucketInfo
-	if cached, ok := bucketInfoCache.Get(cacheKey); ok {
+	if cached, ok := bucketInfoCache.Get(bktID); ok {
 		if bktInfo, ok := cached.(*core.BucketInfo); ok && bktInfo != nil {
 			bucket = bktInfo
 		}
@@ -71,7 +70,7 @@ func getStorageClass(ctx context.Context, bktID int64) string {
 		if err == nil && bktInfo != nil {
 			bucket = bktInfo
 			// Update cache
-			bucketInfoCache.Put(cacheKey, bucket)
+			bucketInfoCache.Put(bktID, bucket)
 		}
 	}
 
@@ -108,34 +107,24 @@ type Part struct {
 	UploadTime time.Time // Upload time
 }
 
+// FormatCacheKeyString formats a cache key with int64 and string
+var cacheKeyPool = sync.Pool{
+	New: func() interface{} {
+		buf := make([]byte, 0, 64) // Pre-allocate for typical cache keys
+		return &buf
+	},
+}
+
 // formatPathCacheKey formats cache key for path lookup
-// Optimized: uses fast formatting function
 func formatPathCacheKey(bktID int64, path string) string {
-	return util.FormatCacheKeyString(bktID, path)
-}
-
-// formatDirListCacheKey formats cache key for directory listing
-// Optimized: uses fast formatting function
-func formatDirListCacheKey(bktID, pid int64) string {
-	return util.FormatCacheKeyInt(bktID, pid)
-}
-
-// formatObjectCacheKey formats cache key for object by ID
-// Optimized: uses fast formatting function
-func formatObjectCacheKey(bktID, objectID int64) string {
-	return util.FormatCacheKeyInt(bktID, objectID)
-}
-
-// formatBucketListCacheKey formats cache key for bucket list
-// Optimized: uses fixed 8-byte binary encoding
-func formatBucketListCacheKey(uid int64) string {
-	return util.FormatCacheKeySingleInt(uid)
-}
-
-// formatBucketCacheKey formats cache key for bucket by name
-// Optimized: uses fast formatting function
-func formatBucketCacheKey(uid int64, bucketName string) string {
-	return util.FormatCacheKeyString(uid, bucketName)
+	buf := cacheKeyPool.Get().(*[]byte)
+	*buf = (*buf)[:0]
+	*buf = strconv.AppendInt(*buf, bktID, 10)
+	*buf = append(*buf, ':')
+	*buf = append(*buf, path...)
+	result := string(*buf)
+	cacheKeyPool.Put(buf)
+	return result
 }
 
 // invalidatePathCache invalidates cache for a path and its parent directories
@@ -151,32 +140,28 @@ func invalidatePathCache(bktID int64, path string) {
 	}
 
 	// Invalidate directory listing for all parent directories
-	var pid int64 = 0
-	for i := 0; i < len(parts); i++ {
-		dirListCache.Del(formatDirListCacheKey(bktID, pid))
-		// Note: We can't easily get parent directory IDs here without querying
-		// The directory listing cache will be naturally invalidated on next access
-	}
+	// Note: We can't easily get parent directory IDs here without querying
+	// The directory listing cache will be naturally invalidated on next access
 }
 
 // invalidateObjectCache invalidates object cache by ID
-func invalidateObjectCache(bktID, objectID int64) {
-	objectCache.Del(formatObjectCacheKey(bktID, objectID))
+func invalidateObjectCache(objectID int64) {
+	objectCache.Del(objectID)
 }
 
 // invalidateBucketListCache invalidates bucket list cache for a user
 func invalidateBucketListCache(uid int64) {
-	bucketListCache.Del(formatBucketListCacheKey(uid))
+	bucketListCache.Del(uid)
 }
 
-// invalidateBucketCache invalidates bucket cache by name
-func invalidateBucketCache(uid int64, bucketName string) {
-	bucketCache.Del(formatBucketCacheKey(uid, bucketName))
+// invalidateBucketCache invalidates bucket cache by ID
+func invalidateBucketCache(bktID int64) {
+	bucketCache.Del(bktID)
 }
 
 // invalidateDirListCache invalidates directory listing cache
-func invalidateDirListCache(bktID, pid int64) {
-	dirListCache.Del(formatDirListCacheKey(bktID, pid))
+func invalidateDirListCache(pid int64) {
+	dirListCache.Del(pid)
 }
 
 // getBucketByName gets bucket by name (with cache)
@@ -184,26 +169,6 @@ func getBucketByName(c *gin.Context, name string) (*core.BucketInfo, error) {
 	uid := middleware.GetUID(c)
 	if uid == 0 {
 		return nil, fmt.Errorf("unauthorized")
-	}
-
-	// Try cache first
-	cacheKey := formatBucketCacheKey(uid, name)
-	if cached, ok := bucketCache.Get(cacheKey); ok {
-		if bkt, ok := cached.(*core.BucketInfo); ok && bkt != nil {
-			// Verify the cached bucket still exists in current database
-			// This is important for tests where each test has its own database
-			ctx := c.Request.Context()
-			ma := &core.DefaultMetadataAdapter{}
-			buckets, err := ma.GetBkt(ctx, []int64{bkt.ID})
-			if err == nil && len(buckets) > 0 && buckets[0].ID == bkt.ID {
-				// Bucket exists in current database, use cached value
-				return bkt, nil
-			}
-			// Bucket doesn't exist in current database, clear cache and query again
-			bucketCache.Del(cacheKey)
-			// Also clear bucket list cache to force fresh query
-			bucketListCache.Del(formatBucketListCacheKey(uid))
-		}
 	}
 
 	// Get all buckets for the user (with cache)
@@ -215,8 +180,24 @@ func getBucketByName(c *gin.Context, name string) (*core.BucketInfo, error) {
 	// Find bucket by name
 	for _, bkt := range allBuckets {
 		if bkt.Name == name {
-			// Cache the bucket
-			bucketCache.Put(cacheKey, bkt)
+			// Try cache first by bktID
+			if cached, ok := bucketCache.Get(bkt.ID); ok {
+				if cachedBkt, ok := cached.(*core.BucketInfo); ok && cachedBkt != nil {
+					// Verify the cached bucket still exists in current database
+					// This is important for tests where each test has its own database
+					ctx := c.Request.Context()
+					ma := &core.DefaultMetadataAdapter{}
+					buckets, err := ma.GetBkt(ctx, []int64{cachedBkt.ID})
+					if err == nil && len(buckets) > 0 && buckets[0].ID == cachedBkt.ID {
+						// Bucket exists in current database, use cached value
+						return cachedBkt, nil
+					}
+					// Bucket doesn't exist in current database, clear cache
+					bucketCache.Del(bkt.ID)
+				}
+			}
+			// Cache the bucket by bktID
+			bucketCache.Put(bkt.ID, bkt)
 			return bkt, nil
 		}
 	}
@@ -229,8 +210,7 @@ func getBucketsByUser(c *gin.Context, uid int64) ([]*core.BucketInfo, error) {
 	ctx := c.Request.Context()
 
 	// Try cache first
-	cacheKey := formatBucketListCacheKey(uid)
-	if cached, ok := bucketListCache.Get(cacheKey); ok {
+	if cached, ok := bucketListCache.Get(uid); ok {
 		if buckets, ok := cached.([]*core.BucketInfo); ok {
 			return buckets, nil
 		}
@@ -244,7 +224,7 @@ func getBucketsByUser(c *gin.Context, uid int64) ([]*core.BucketInfo, error) {
 	}
 
 	// Update cache
-	bucketListCache.Put(cacheKey, buckets)
+	bucketListCache.Put(uid, buckets)
 
 	return buckets, nil
 }
@@ -289,9 +269,8 @@ func findObjectByPath(c *gin.Context, bktID int64, key string) (*core.ObjectInfo
 		}
 
 		// Try directory listing cache
-		dirCacheKey := formatDirListCacheKey(bktID, pid)
 		var objs []*core.ObjectInfo
-		if cached, ok := dirListCache.Get(dirCacheKey); ok {
+		if cached, ok := dirListCache.Get(pid); ok {
 			if cachedObjs, ok := cached.([]*core.ObjectInfo); ok {
 				objs = cachedObjs
 			}
@@ -308,7 +287,7 @@ func findObjectByPath(c *gin.Context, bktID int64, key string) (*core.ObjectInfo
 				return nil, err
 			}
 			// Update cache
-			dirListCache.Put(dirCacheKey, objs)
+			dirListCache.Put(pid, objs)
 		}
 
 		// Find matching object by exact name
@@ -332,7 +311,7 @@ func findObjectByPath(c *gin.Context, bktID int64, key string) (*core.ObjectInfo
 			// Last part, cache and return the object
 			pathCache.Put(cacheKey, found)
 			// Also cache by object ID
-			objectCache.Put(formatObjectCacheKey(bktID, found.ID), found)
+			objectCache.Put(found.ID, found)
 			return found, nil
 		}
 
@@ -503,9 +482,8 @@ func ensurePath(c *gin.Context, bktID int64, key string) (int64, error) {
 		}
 
 		// Try directory listing cache
-		dirCacheKey := formatDirListCacheKey(bktID, pid)
 		var objs []*core.ObjectInfo
-		if cached, ok := dirListCache.Get(dirCacheKey); ok {
+		if cached, ok := dirListCache.Get(pid); ok {
 			if cachedObjs, ok := cached.([]*core.ObjectInfo); ok {
 				objs = cachedObjs
 			}
@@ -522,7 +500,7 @@ func ensurePath(c *gin.Context, bktID int64, key string) (int64, error) {
 				return 0, err
 			}
 			// Update cache
-			dirListCache.Put(dirCacheKey, objs)
+			dirListCache.Put(pid, objs)
 		}
 
 		// Find matching object by exact name
@@ -576,7 +554,7 @@ func ensurePath(c *gin.Context, bktID int64, key string) (int64, error) {
 		// Invalidate caches for all created directories
 		for i, dirObj := range dirsToCreate {
 			if i < len(ids) && ids[i] > 0 {
-				invalidateDirListCache(bktID, dirObj.PID)
+				invalidateDirListCache(dirObj.PID)
 				// Build parent path for cache invalidation
 				pathParts := parts[:i+1]
 				parentPath := strings.Join(pathParts, "/")
@@ -714,9 +692,8 @@ func CreateBucket(c *gin.Context) {
 
 	// Invalidate cache after creating bucket
 	invalidateBucketListCache(uid)
-	invalidateBucketCache(uid, bucketName)
-	// Also cache the new bucket
-	bucketCache.Put(formatBucketCacheKey(uid, bucketName), bkt)
+	// Cache the new bucket by bktID
+	bucketCache.Put(bkt.ID, bkt)
 
 	c.Status(http.StatusOK)
 }
@@ -751,7 +728,7 @@ func DeleteBucket(c *gin.Context) {
 
 	// Invalidate cache after deleting bucket
 	invalidateBucketListCache(uid)
-	invalidateBucketCache(uid, bucketName)
+	invalidateBucketCache(bktID)
 
 	c.Status(http.StatusNoContent)
 }
@@ -920,8 +897,7 @@ func buildPathFromPID(ctx context.Context, bktID int64, pid int64, name string) 
 
 	for currentPID != 0 {
 		// Try object cache
-		objCacheKey := formatObjectCacheKey(bktID, currentPID)
-		if cached, ok := objectCache.Get(objCacheKey); ok {
+		if cached, ok := objectCache.Get(currentPID); ok {
 			if parent, ok := cached.(*core.ObjectInfo); ok && parent != nil {
 				parts = append([]string{parent.Name}, parts...)
 				currentPID = parent.PID
@@ -952,7 +928,7 @@ func buildPathFromPID(ctx context.Context, bktID int64, pid int64, name string) 
 		}
 
 		// Cache parent
-		objectCache.Put(objCacheKey, parent)
+		objectCache.Put(currentPID, parent)
 
 		parts = append([]string{parent.Name}, parts...)
 		currentPID = parent.PID
@@ -1075,7 +1051,7 @@ func GetObject(c *gin.Context) {
 	}
 
 	// Cache the object for future lookups by ID
-	objectCache.Put(formatObjectCacheKey(bktID, obj.ID), obj)
+	objectCache.Put(obj.ID, obj)
 
 	// Get object size
 	objectSize := obj.Size
@@ -1373,7 +1349,7 @@ func PutObject(c *gin.Context) {
 			objID = obj.ID
 			isUpdate = true
 			// Invalidate object cache as it will be updated
-			invalidateObjectCache(bktID, objID)
+			invalidateObjectCache(objID)
 		} else {
 			// New object, create ID early
 			objID = core.NewID()
@@ -1551,8 +1527,7 @@ func PutObject(c *gin.Context) {
 			// Get chunk size from bucket configuration
 			// Use cache to avoid repeated GetBktInfo queries
 			chunkSize := int64(4 * 1024 * 1024) // Default 4MB
-			cacheKey := fmt.Sprintf("%d", bktID)
-			if cached, ok := bucketInfoCache.Get(cacheKey); ok {
+			if cached, ok := bucketInfoCache.Get(bktID); ok {
 				if bktInfo, ok := cached.(*core.BucketInfo); ok && bktInfo != nil && bktInfo.ChunkSize > 0 {
 					chunkSize = bktInfo.ChunkSize
 				}
@@ -1561,7 +1536,7 @@ func PutObject(c *gin.Context) {
 				bktInfo, err := handler.GetBktInfo(ctx, bktID)
 				if err == nil && bktInfo != nil {
 					// Cache the result
-					bucketInfoCache.Put(cacheKey, bktInfo)
+					bucketInfoCache.Put(bktID, bktInfo)
 					if bktInfo.ChunkSize > 0 {
 						chunkSize = bktInfo.ChunkSize
 					}
@@ -1684,13 +1659,13 @@ func PutObject(c *gin.Context) {
 	// Update caches with new/updated object
 	if objInfo != nil {
 		// Update object cache (only once, avoid duplicate)
-		objectCache.Put(formatObjectCacheKey(bktID, objID), objInfo)
+		objectCache.Put(objID, objInfo)
 
 		// Update directory listing cache
 		// For updates, we need to refresh the cache to get the latest data
 		// For new objects, we can add to cache, but to avoid ecache slice reuse issues,
 		// we invalidate and let next query refresh from database
-		invalidateDirListCache(bktID, pid)
+		invalidateDirListCache(pid)
 
 		// Invalidate path caches to ensure consistency
 		// Invalidate the object's path cache
@@ -1740,8 +1715,7 @@ func DeleteObject(c *gin.Context) {
 	if parentPath != "." && parentPath != "/" {
 		parentObj, err := findObjectByPath(c, bktID, parentPath)
 		if err == nil && parentObj != nil {
-			dirCacheKey := formatDirListCacheKey(bktID, parentObj.ID)
-			if cached, ok := dirListCache.Get(dirCacheKey); ok {
+			if cached, ok := dirListCache.Get(parentObj.ID); ok {
 				if cachedObjs, ok := cached.([]*core.ObjectInfo); ok {
 					// Remove deleted object from cache
 					filteredObjs := make([]*core.ObjectInfo, 0, len(cachedObjs))
@@ -1750,17 +1724,16 @@ func DeleteObject(c *gin.Context) {
 							filteredObjs = append(filteredObjs, cachedObj)
 						}
 					}
-					dirListCache.Put(dirCacheKey, filteredObjs)
+					dirListCache.Put(parentObj.ID, filteredObjs)
 				}
 			} else {
 				// Cache miss, invalidate to force refresh
-				invalidateDirListCache(bktID, parentObj.ID)
+				invalidateDirListCache(parentObj.ID)
 			}
 		}
 	} else {
 		// Root directory
-		dirCacheKey := formatDirListCacheKey(bktID, 0)
-		if cached, ok := dirListCache.Get(dirCacheKey); ok {
+		if cached, ok := dirListCache.Get(0); ok {
 			if cachedObjs, ok := cached.([]*core.ObjectInfo); ok {
 				// Remove deleted object from cache
 				filteredObjs := make([]*core.ObjectInfo, 0, len(cachedObjs))
@@ -1769,16 +1742,16 @@ func DeleteObject(c *gin.Context) {
 						filteredObjs = append(filteredObjs, cachedObj)
 					}
 				}
-				dirListCache.Put(dirCacheKey, filteredObjs)
+				dirListCache.Put(0, filteredObjs)
 			}
 		} else {
-			invalidateDirListCache(bktID, 0)
+			invalidateDirListCache(0)
 		}
 	}
 
 	// Invalidate cache after deleting object
 	invalidatePathCache(bktID, key)
-	invalidateObjectCache(bktID, obj.ID)
+	invalidateObjectCache(obj.ID)
 	if parentPath != "." && parentPath != "/" {
 		invalidatePathCache(bktID, parentPath)
 	}
@@ -1882,7 +1855,7 @@ func copyObject(c *gin.Context) {
 	if err == nil && destObj != nil {
 		// Object exists, update it
 		destObjID = destObj.ID
-		invalidateObjectCache(destBktID, destObjID)
+		invalidateObjectCache(destObjID)
 	} else {
 		// Create new object
 		destObjID = core.NewID()
@@ -1981,8 +1954,8 @@ func copyObject(c *gin.Context) {
 	}
 
 	// Update caches
-	objectCache.Put(formatObjectCacheKey(destBktID, destObjID), objInfo)
-	invalidateDirListCache(destBktID, pid)
+	objectCache.Put(destObjID, objInfo)
+	invalidateDirListCache(pid)
 	invalidatePathCache(destBktID, destKey)
 	if parentPath != "." && parentPath != "/" {
 		invalidatePathCache(destBktID, parentPath)
@@ -2076,7 +2049,7 @@ func moveObject(c *gin.Context) {
 			util.S3ErrorResponse(c, http.StatusInternalServerError, "InternalError", fmt.Sprintf("Failed to delete existing destination object: %v", err))
 			return
 		}
-		invalidateObjectCache(destBktID, destObj.ID)
+		invalidateObjectCache(destObj.ID)
 		destObjID = destObj.ID
 	} else {
 		// Create new object ID
@@ -2214,13 +2187,13 @@ func moveObject(c *gin.Context) {
 		}
 
 		// Update caches
-		objectCache.Put(formatObjectCacheKey(destBktID, destObjID), objInfo)
-		invalidateObjectCache(sourceBktID, sourceObj.ID)
+		objectCache.Put(destObjID, objInfo)
+		invalidateObjectCache(sourceObj.ID)
 		invalidatePathCache(sourceBktID, sourceKey)
 	}
 
 	// Update caches
-	invalidateDirListCache(destBktID, pid)
+	invalidateDirListCache(pid)
 	invalidatePathCache(destBktID, destKey)
 	if parentPath != "." && parentPath != "/" {
 		invalidatePathCache(destBktID, parentPath)
@@ -2230,10 +2203,10 @@ func moveObject(c *gin.Context) {
 	if sourceParentPath != "." && sourceParentPath != "/" {
 		sourceParentObj, err := findObjectByPath(c, sourceBktID, sourceParentPath)
 		if err == nil && sourceParentObj != nil {
-			invalidateDirListCache(sourceBktID, sourceParentObj.ID)
+			invalidateDirListCache(sourceParentObj.ID)
 		}
 	} else {
-		invalidateDirListCache(sourceBktID, 0)
+		invalidateDirListCache(0)
 	}
 
 	c.Header("ETag", util.FormatETag(destObjID))
@@ -2725,10 +2698,10 @@ func completeMultipartUpload(c *gin.Context) {
 
 	// Invalidate caches
 	invalidatePathCache(bktID, key)
-	invalidateObjectCache(bktID, objID)
+	invalidateObjectCache(objID)
 	if parentPath != "." && parentPath != "/" {
 		invalidatePathCache(bktID, parentPath)
-		invalidateDirListCache(bktID, pid)
+		invalidateDirListCache(pid)
 	}
 
 	// Return XML response

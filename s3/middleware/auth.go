@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/orca-zhang/ecache"
+	"github.com/orca-zhang/ecache2"
 	"github.com/orcastor/orcas/core"
 	"github.com/orcastor/orcas/rpc/middleware"
 	s3util "github.com/orcastor/orcas/s3/util"
@@ -18,11 +18,11 @@ import (
 var (
 	// tokenCache caches JWT token parsing results
 	// key: token string, value: *middleware.Claims
-	tokenCache = ecache.NewLRUCache(16, 512, 30*time.Second)
+	tokenCache = ecache2.NewLRUCache[string](16, 512, 30*time.Second)
 
 	// tokenUIDCache caches token to UID mapping for fast lookup
 	// key: token string, value: int64 (UID)
-	tokenUIDCache = ecache.NewLRUCache(16, 512, 30*time.Second)
+	tokenUIDCache = ecache2.NewLRUCache[string](16, 512, 30*time.Second)
 )
 
 // S3Auth handles S3 authentication

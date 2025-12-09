@@ -11,13 +11,12 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-	"unsafe"
 
 	"github.com/h2non/filetype"
 	"github.com/klauspost/compress/zstd"
 	"github.com/mholt/archiver/v3"
 	"github.com/mkmueller/aes256"
-	"github.com/orca-zhang/ecache"
+	"github.com/orca-zhang/ecache2"
 	"github.com/orcastor/orcas/core"
 	"github.com/orcastor/orcas/sdk"
 	"github.com/tjfoc/gmsm/sm4"
@@ -65,21 +64,21 @@ var (
 	}
 
 	// ecache cache: cache DataInfo to reduce database queries
-	// key: "<dataID>", value: *core.DataInfo (dataID is globally unique)
-	dataInfoCache = ecache.NewLRUCache(16, 512, 30*time.Second)
+	// key: dataID (int64), value: *core.DataInfo (dataID is globally unique)
+	dataInfoCache = ecache2.NewLRUCache[int64](16, 512, 30*time.Second)
 
 	// ecache cache: cache file object information to reduce database queries
-	// key: "<fileID>", value: *core.ObjectInfo (fileID is globally unique)
-	fileObjCache = ecache.NewLRUCache(16, 512, 30*time.Second)
+	// key: fileID (int64), value: *core.ObjectInfo (fileID is globally unique)
+	fileObjCache = ecache2.NewLRUCache[int64](16, 512, 30*time.Second)
 
 	// ecache cache: cache directory listing to reduce database queries
-	// key: "<dirID>", value: []*core.ObjectInfo (dirID is globally unique)
-	dirListCache = ecache.NewLRUCache(16, 512, 30*time.Second)
+	// key: dirID (int64), value: []*core.ObjectInfo (dirID is globally unique)
+	dirListCache = ecache2.NewLRUCache[int64](16, 512, 30*time.Second)
 
 	// ecache cache: cache Readdir entries (DirStream) to avoid rebuilding entries every time
-	// key: "<dirID>", value: *cachedDirStream (dirID is globally unique)
+	// key: dirID (int64), value: *cachedDirStream (dirID is globally unique)
 	// This cache stores the final DirStream entries, avoiding data merging on every Readdir call
-	readdirCache = ecache.NewLRUCache(16, 512, 30*time.Second)
+	readdirCache = ecache2.NewLRUCache[int64](16, 512, 30*time.Second)
 
 	// Map to track directories that need delayed cache refresh
 	// key: "<dirID>", value: true (if true, cache needs refresh on next access)
@@ -87,13 +86,13 @@ var (
 	readdirCacheStale sync.Map // map[int64]bool
 
 	// ecache cache: cache chunkReader by dataID (one reader per file)
-	// key: "<dataID>", value: *chunkReader
+	// key: dataID (int64), value: *chunkReader
 	// This ensures one file uses the same reader, sharing chunk cache
-	decodingReaderCache = ecache.NewLRUCache(4, 64, 5*time.Minute)
+	decodingReaderCache = ecache2.NewLRUCache[int64](4, 64, 5*time.Minute)
 
 	// ecache cache: cache bucket configuration to reduce database queries
-	// key: "<bktID>", value: *core.BucketInfo (bktID is globally unique)
-	bucketConfigCache = ecache.NewLRUCache(4, 64, 5*time.Minute)
+	// key: bktID (int64), value: *core.BucketInfo (bktID is globally unique)
+	bucketConfigCache = ecache2.NewLRUCache[int64](4, 64, 5*time.Minute)
 
 	// singleflight group: prevent duplicate concurrent requests for the same directory
 	// key: "<dirID>", ensures only one request per directory at a time
@@ -123,7 +122,7 @@ func getBucketConfigWithCache(fs *OrcasFS) *core.BucketInfo {
 	}
 
 	// Check cache first
-	cacheKey := formatCacheKey(fs.bktID)
+	cacheKey := fs.bktID
 	if cached, ok := bucketConfigCache.Get(cacheKey); ok {
 		if bucket, ok := cached.(*core.BucketInfo); ok && bucket != nil {
 			return bucket
@@ -503,7 +502,7 @@ func addFileToBatchWrite(ra *RandomAccessor, data []byte) (bool, int64, error) {
 						} else {
 							DebugLog("[VFS addFileToBatchWrite] Successfully deleted existing .tmp file: fileID=%d, name=%s", child.ID, tmpFileName)
 							// Remove from cache
-							fileObjCache.Del(formatCacheKey(child.ID))
+							fileObjCache.Del(child.ID)
 							// Remove from directory cache
 							dirNode := &OrcasNode{
 								fs:    ra.fs,
@@ -571,18 +570,6 @@ func addFileToBatchWrite(ra *RandomAccessor, data []byte) (bool, int64, error) {
 	// Do NOT call FlushAll here to avoid unnecessary flushes
 
 	return true, dataID, nil
-}
-
-// formatCacheKey formats cache key (optimized: direct memory copy, highest performance)
-// id is globally unique, so no need for bktID
-func formatCacheKey(id int64) string {
-	// Create fixed-size byte array on stack
-	var buf [8]byte
-
-	// Directly use unsafe to copy 8-byte int64 memory to byte array (highest performance)
-	// Avoid function call overhead, direct memory operation
-	*(*int64)(unsafe.Pointer(&buf[0])) = id
-	return string(buf[:])
 }
 
 // WriteOperation represents a single write operation
@@ -727,7 +714,7 @@ type RandomAccessor struct {
 	buffer       *WriteBuffer           // Random write buffer
 	seqBuffer    *SequentialWriteBuffer // Sequential write buffer (optimized)
 	fileObj      atomic.Value
-	fileObjKey   string // Pre-computed file_obj cache key (optimized: avoid repeated conversion)
+	fileObjKey   int64 // Pre-computed file_obj cache key (optimized: avoid repeated conversion)
 	lastActivity atomic.Int64
 	sparseSize   atomic.Int64                  // Sparse file size (for pre-allocated files, e.g., qBittorrent)
 	lastOffset   atomic.Int64                  // Last write offset (for sequential write detection)
@@ -1799,8 +1786,8 @@ func (tw *TempFileWriter) Flush() error {
 	}
 
 	// Update cache
-	fileObjCache.Put(formatCacheKey(tw.fileID), obj)
-	dataInfoCache.Put(formatCacheKey(tw.dataID), dataInfo)
+	fileObjCache.Put(tw.fileID, obj)
+	dataInfoCache.Put(tw.dataID, dataInfo)
 
 	// After sync flush, append file to directory listing cache
 	// This ensures the file is immediately visible in Readdir
@@ -1913,7 +1900,7 @@ func (tw *TempFileWriter) Flush() error {
 									} else {
 										DebugLog("[VFS TempFileWriter Flush] Successfully deleted existing .tmp file: fileID=%d, name=%s", child.ID, child.Name)
 										// Remove from cache
-										fileObjCache.Del(formatCacheKey(child.ID))
+										fileObjCache.Del(child.ID)
 										// Remove from directory cache
 										dirNode := &OrcasNode{
 											fs:    tw.fs,
@@ -1947,7 +1934,7 @@ func (tw *TempFileWriter) Flush() error {
 									// Temporarily update name in cache (batch writer will update database during flush)
 									tempObj := *updatedObj
 									tempObj.Name = newName
-									fileObjCache.Put(formatCacheKey(tw.fileID), &tempObj)
+									fileObjCache.Put(tw.fileID, &tempObj)
 									if ra := tw.fs.getRandomAccessorByFileID(tw.fileID); ra != nil {
 										ra.fileObj.Store(&tempObj)
 									}
@@ -2031,7 +2018,7 @@ func (tw *TempFileWriter) Flush() error {
 										}
 
 										// Update cache
-										fileObjCache.Put(formatCacheKey(existingTargetID), updateTargetFile)
+										fileObjCache.Put(existingTargetID, updateTargetFile)
 										if ra := tw.fs.getRandomAccessorByFileID(existingTargetID); ra != nil {
 											ra.fileObj.Store(updateTargetFile)
 										}
@@ -2054,7 +2041,7 @@ func (tw *TempFileWriter) Flush() error {
 						updatedFileObjs, err := tw.fs.h.Get(tw.fs.c, tw.fs.bktID, []int64{tw.fileID})
 						if err == nil && len(updatedFileObjs) > 0 {
 							updatedObj := updatedFileObjs[0]
-							fileObjCache.Put(formatCacheKey(tw.fileID), updatedObj)
+							fileObjCache.Put(tw.fileID, updatedObj)
 
 							// IMPORTANT: Update RandomAccessor's fileObj cache to reflect the new name
 							// This ensures that subsequent Write() calls will see the updated name
@@ -2097,7 +2084,7 @@ func NewRandomAccessor(fs *OrcasFS, fileID int64) (*RandomAccessor, error) {
 	ra := &RandomAccessor{
 		fs:         fs,
 		fileID:     fileID,
-		fileObjKey: formatCacheKey(fileID), // Pre-compute and cache key
+		fileObjKey: fileID, // Pre-compute and cache key
 		buffer: &WriteBuffer{
 			fileID:     fileID,
 			operations: make([]WriteOperation, maxBufferWrites), // Fixed-length array
@@ -2867,7 +2854,7 @@ func (ra *RandomAccessor) flushSequentialBuffer() error {
 	DebugLog("[VFS flushSequentialBuffer] Successfully wrote DataInfo and ObjectInfo to disk: fileID=%d, dataID=%d, size=%d", ra.fileID, ra.seqBuffer.dataID, fileObj.Size)
 
 	// Update caches
-	dataInfoCache.Put(formatCacheKey(ra.seqBuffer.dataID), ra.seqBuffer.dataInfo)
+	dataInfoCache.Put(ra.seqBuffer.dataID, ra.seqBuffer.dataInfo)
 	fileObjCache.Put(ra.fileObjKey, fileObj)
 	ra.fileObj.Store(fileObj)
 
@@ -3027,7 +3014,7 @@ func (ra *RandomAccessor) Read(offset int64, size int) ([]byte, error) {
 	// Even if file is still in batch writer cache, database has the authoritative data
 
 	// Get DataInfo
-	dataInfoCacheKey := formatCacheKey(fileObj.DataID)
+	dataInfoCacheKey := fileObj.DataID
 	var dataInfo *core.DataInfo
 	if cached, ok := dataInfoCache.Get(dataInfoCacheKey); ok {
 		if info, ok := cached.(*core.DataInfo); ok && info != nil {
@@ -3688,7 +3675,7 @@ func (ra *RandomAccessor) flushInternal(force bool) (int64, error) {
 						fileObj, err = ra.getFileObj()
 						if err == nil && fileObj.DataID > 0 && fileObj.DataID != core.EmptyDataID {
 							// Update cache with fresh data
-							cacheKey := formatCacheKey(ra.fileID)
+							cacheKey := ra.fileID
 							fileObjCache.Put(cacheKey, fileObj)
 							DebugLog("[VFS RandomAccessor Flush] File flushed from BatchWriter: fileID=%d, dataID=%d, size=%d", ra.fileID, fileObj.DataID, fileObj.Size)
 							return core.NewID(), nil
@@ -3707,7 +3694,7 @@ func (ra *RandomAccessor) flushInternal(force bool) (int64, error) {
 						fileObj, err = ra.getFileObj()
 						if err == nil && fileObj.DataID > 0 && fileObj.DataID != core.EmptyDataID {
 							// Update cache with fresh data
-							cacheKey := formatCacheKey(ra.fileID)
+							cacheKey := ra.fileID
 							fileObjCache.Put(cacheKey, fileObj)
 							DebugLog("[VFS RandomAccessor Flush] File flushed from BatchWriter: fileID=%d, dataID=%d, size=%d", ra.fileID, fileObj.DataID, fileObj.Size)
 							return core.NewID(), nil
@@ -3851,7 +3838,7 @@ func (ra *RandomAccessor) flushInternal(force bool) (int64, error) {
 		var oldDataInfo *core.DataInfo
 		oldDataID := fileObj.DataID
 		if oldDataID > 0 && oldDataID != core.EmptyDataID {
-			dataInfoCacheKey := formatCacheKey(oldDataID)
+			dataInfoCacheKey := oldDataID
 			if cached, ok := dataInfoCache.Get(dataInfoCacheKey); ok {
 				if info, ok := cached.(*core.DataInfo); ok && info != nil {
 					oldDataInfo = info
@@ -4024,7 +4011,7 @@ func (ra *RandomAccessor) applyRandomWritesWithSDK(fileObj *core.ObjectInfo, wri
 	oldDataID := fileObj.DataID
 	if oldDataID > 0 && oldDataID != core.EmptyDataID {
 		// Optimization: use more efficient key generation (function internally uses object pool)
-		dataInfoCacheKey := formatCacheKey(oldDataID)
+		dataInfoCacheKey := oldDataID
 
 		if cached, ok := dataInfoCache.Get(dataInfoCacheKey); ok {
 			if info, ok := cached.(*core.DataInfo); ok && info != nil {
@@ -4381,7 +4368,7 @@ func (ra *RandomAccessor) applyWritesWithWritingVersion(fileObj *core.ObjectInfo
 	if newSize != fileObj.Size {
 		// Get current DataInfo to update its size
 		var dataInfo *core.DataInfo
-		dataInfoCacheKey := formatCacheKey(dataID)
+		dataInfoCacheKey := dataID
 		if cached, ok := dataInfoCache.Get(dataInfoCacheKey); ok {
 			if info, ok := cached.(*core.DataInfo); ok && info != nil {
 				dataInfo = info
@@ -4664,7 +4651,7 @@ func (ra *RandomAccessor) applyWritesStreamingUncompressed(fileObj *core.ObjectI
 		DebugLog("[VFS applyWritesStreamingUncompressed] Successfully wrote DataInfo to disk: fileID=%d, dataID=%d, OrigSize=%d, Size=%d", ra.fileID, dataInfo.ID, dataInfo.OrigSize, dataInfo.Size)
 
 		// Optimization: use more efficient key generation (function internally uses object pool)
-		dataInfoCache.Put(formatCacheKey(dataInfo.ID), dataInfo)
+		dataInfoCache.Put(dataInfo.ID, dataInfo)
 
 		newVersionID := core.NewID()
 		return newVersionID, nil
@@ -4934,7 +4921,7 @@ func (ra *RandomAccessor) processWritesStreaming(
 	DebugLog("[VFS applyWritesStreamingCompressed] Successfully wrote DataInfo to disk: fileID=%d, dataID=%d, OrigSize=%d, Size=%d", ra.fileID, dataInfo.ID, dataInfo.OrigSize, dataInfo.Size)
 
 	// Update cache
-	dataInfoCache.Put(formatCacheKey(dataInfo.ID), dataInfo)
+	dataInfoCache.Put(dataInfo.ID, dataInfo)
 
 	newVersionID := core.NewID()
 	return newVersionID, nil
@@ -5043,15 +5030,15 @@ type chunkReader struct {
 	h                 core.Handler
 	bktID             int64
 	dataID            int64
-	kind              uint32        // Compression/encryption kind (0 for plain)
-	endecKey          string        // Encryption key (empty for plain)
-	origSize          int64         // Original data size (decompressed size)
-	compressedSize    int64         // Compressed/encrypted data size (for packaged files)
-	chunkSize         int64         // Chunk size for original data
-	chunkCache        *ecache.Cache // Cache for chunks: key "<sn>", value []byte
-	decodedFileCache  *ecache.Cache // Cache for decoded file data (for packaged files): key "decoded", value []byte
-	prefetchThreshold float64       // Threshold percentage to trigger prefetch (default: 0.8 = 80%)
-	pkgOffset         uint32        // Package offset (for packaged files, 0 for non-packaged files)
+	kind              uint32                // Compression/encryption kind (0 for plain)
+	endecKey          string                // Encryption key (empty for plain)
+	origSize          int64                 // Original data size (decompressed size)
+	compressedSize    int64                 // Compressed/encrypted data size (for packaged files)
+	chunkSize         int64                 // Chunk size for original data
+	chunkCache        *ecache2.Cache[int64] // Cache for chunks: key sn (int64), value []byte
+	decodedFileCache  *ecache2.Cache[int64] // Cache for decoded file data (for packaged files): key dataID (int64), value []byte
+	prefetchThreshold float64               // Threshold percentage to trigger prefetch (default: 0.8 = 80%)
+	pkgOffset         uint32                // Package offset (for packaged files, 0 for non-packaged files)
 }
 
 // newChunkReader creates a unified chunk reader for both plain and compressed/encrypted data
@@ -5065,9 +5052,9 @@ func newChunkReader(c core.Ctx, h core.Handler, bktID int64, dataInfo *core.Data
 		h:                 h,
 		bktID:             bktID,
 		chunkSize:         chunkSize,
-		chunkCache:        ecache.NewLRUCache(4, 64, 5*time.Minute),
-		decodedFileCache:  ecache.NewLRUCache(1, 1, 5*time.Minute), // Cache decoded file data for packaged files
-		prefetchThreshold: 0.8,                                     // 80% threshold
+		chunkCache:        ecache2.NewLRUCache[int64](4, 64, 5*time.Minute),
+		decodedFileCache:  ecache2.NewLRUCache[int64](1, 1, 5*time.Minute), // Cache decoded file data for packaged files
+		prefetchThreshold: 0.8,                                             // 80% threshold
 	}
 
 	if dataInfo != nil {
@@ -5124,7 +5111,7 @@ func (cr *chunkReader) ReadAt(buf []byte, offset int64) (int, error) {
 	if cr.pkgOffset > 0 {
 		// This is a packaged file, read entire package (sn=0)
 		// Check cache first for decoded file data
-		if cached, ok := cr.decodedFileCache.Get("decoded"); ok {
+		if cached, ok := cr.decodedFileCache.Get(cr.dataID); ok {
 			if decoded, ok := cached.([]byte); ok && len(decoded) > 0 {
 				fileData = decoded
 				// DebugLog("[VFS chunkReader ReadAt] Using cached decoded file data: dataID=%d, decodedLen=%d", cr.dataID, len(fileData))
@@ -5139,7 +5126,7 @@ func (cr *chunkReader) ReadAt(buf []byte, offset int64) (int, error) {
 			result, err, _ := packageDecodeSingleFlight.Do(sfKey, func() (interface{}, error) {
 				// Double-check cache after acquiring singleflight lock
 				// Another goroutine might have already decoded it
-				if cached, ok := cr.decodedFileCache.Get("decoded"); ok {
+				if cached, ok := cr.decodedFileCache.Get(cr.dataID); ok {
 					if decoded, ok := cached.([]byte); ok && len(decoded) > 0 {
 						return decoded, nil
 					}
@@ -5211,7 +5198,7 @@ func (cr *chunkReader) ReadAt(buf []byte, offset int64) (int, error) {
 				}
 
 				// Cache decoded file data for future reads
-				cr.decodedFileCache.Put("decoded", decodedFileData)
+				cr.decodedFileCache.Put(cr.dataID, decodedFileData)
 				// DebugLog("[VFS chunkReader ReadAt] Decoded file data: dataID=%d, decodedFileDataLen=%d, origSize=%d", cr.dataID, len(decodedFileData), cr.origSize)
 				return decodedFileData, nil
 			})
@@ -5401,8 +5388,7 @@ func (cr *chunkReader) ReadAt(buf []byte, offset int64) (int, error) {
 				go func() {
 					// Check if next chunk exists and not already cached
 					if currentOffset+toRead < cr.origSize {
-						cacheKey := fmt.Sprintf("%d", nextSn)
-						if _, ok := cr.chunkCache.Get(cacheKey); !ok {
+						if _, ok := cr.chunkCache.Get(int64(nextSn)); !ok {
 							// Prefetch next chunk (ignore errors)
 							_, _ = cr.getChunk(nextSn)
 						}
@@ -5423,11 +5409,8 @@ func (cr *chunkReader) ReadAt(buf []byte, offset int64) (int, error) {
 
 // getChunk gets a chunk (plain or decompressed/decrypted), using cache and singleflight
 func (cr *chunkReader) getChunk(sn int) ([]byte, error) {
-	// Generate cache key for this chunk
-	cacheKey := fmt.Sprintf("%d", sn)
-
 	// Check cache first (fast path)
-	if cached, ok := cr.chunkCache.Get(cacheKey); ok {
+	if cached, ok := cr.chunkCache.Get(int64(sn)); ok {
 		if chunkData, ok := cached.([]byte); ok && len(chunkData) > 0 {
 			return chunkData, nil
 		}
@@ -5440,7 +5423,7 @@ func (cr *chunkReader) getChunk(sn int) ([]byte, error) {
 	result, err, _ := chunkReadSingleFlight.Do(sfKey, func() (interface{}, error) {
 		// Double-check cache after acquiring singleflight lock
 		// Another goroutine might have already loaded it
-		if cached, ok := cr.chunkCache.Get(cacheKey); ok {
+		if cached, ok := cr.chunkCache.Get(int64(sn)); ok {
 			if chunkData, ok := cached.([]byte); ok && len(chunkData) > 0 {
 				return chunkData, nil
 			}
@@ -5504,7 +5487,7 @@ func (cr *chunkReader) getChunk(sn int) ([]byte, error) {
 		}
 
 		// Cache the processed chunk before returning
-		cr.chunkCache.Put(cacheKey, finalChunk)
+		cr.chunkCache.Put(int64(sn), finalChunk)
 
 		return finalChunk, nil
 	})
@@ -5894,7 +5877,7 @@ func (ra *RandomAccessor) Truncate(newSize int64) (int64, error) {
 		}
 		DebugLog("[VFS applyRandomWritesWithSDK] Successfully wrote DataInfo and ObjectInfo to disk: fileID=%d, newDataID=%d, newSize=%d", ra.fileID, newDataID, newSize)
 		// Update cache
-		dataInfoCache.Put(formatCacheKey(newDataID), newDataInfo)
+		dataInfoCache.Put(newDataID, newDataInfo)
 	} else {
 		// Only write ObjectInfo (no DataInfo to write)
 		DebugLog("[VFS applyRandomWritesWithSDK] Writing ObjectInfo to disk (no DataInfo): fileID=%d, newSize=%d", ra.fileID, newSize)
@@ -5934,7 +5917,7 @@ func (ra *RandomAccessor) Truncate(newSize int64) (int64, error) {
 
 	// Invalidate old DataInfo cache if DataID changed
 	if fileObj.DataID > 0 && fileObj.DataID != core.EmptyDataID && fileObj.DataID != newDataID {
-		oldDataInfoCacheKey := formatCacheKey(fileObj.DataID)
+		oldDataInfoCacheKey := fileObj.DataID
 		dataInfoCache.Del(oldDataInfoCacheKey)
 	}
 

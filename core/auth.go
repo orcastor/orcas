@@ -2,10 +2,9 @@ package core
 
 import (
 	"context"
-	"fmt"
 	"time"
 
-	"github.com/orca-zhang/ecache"
+	"github.com/orca-zhang/ecache2"
 )
 
 const (
@@ -38,7 +37,9 @@ type AccessCtrlMgr interface {
 	CheckOwn(c Ctx, bktID int64) error
 }
 
-var cache = ecache.NewLRUCache(16, 256, 30*time.Second)
+// cache for bucket ownership: key [2]int64{1, bktID}, value: ownerUID (int64)
+// cache for user role: key [2]int64{2, uid}, value: role (int64)
+var cache = ecache2.NewLRUCache[[2]int64](16, 256, 30*time.Second)
 
 type DefaultAccessCtrlMgr struct {
 	ma MetadataAdapter
@@ -53,9 +54,9 @@ func (dacm *DefaultAccessCtrlMgr) CheckPermission(c Ctx, action int, bktID int64
 	if uid <= 0 {
 		return ERR_NEED_LOGIN
 	}
-	bk := fmt.Sprintf("bkt:%d", bktID)
-	if u, ok := cache.GetInt64(bk); ok {
-		if u == uid {
+	bk := [2]int64{1, bktID} // Type 1 = bucket ownership
+	if v, ok := cache.Get(bk); ok {
+		if u, ok := v.(int64); ok && u == uid {
 			return nil
 		} else {
 			return ERR_NO_PERM
@@ -67,7 +68,7 @@ func (dacm *DefaultAccessCtrlMgr) CheckPermission(c Ctx, action int, bktID int64
 	}
 	// check is owner of the bucket
 	if len(b) > 0 {
-		cache.PutInt64(bk, b[0].UID)
+		cache.Put(bk, b[0].UID)
 		if b[0].UID == uid {
 			return nil
 		}
@@ -90,9 +91,9 @@ func (dacm *DefaultAccessCtrlMgr) CheckRole(c Ctx, role uint32) error {
 		}
 	}
 
-	rk := fmt.Sprintf("role:%d", uid)
-	if r, ok := cache.GetInt64(rk); ok {
-		if uint32(r) == role {
+	rk := [2]int64{2, uid} // Type 2 = user role
+	if v, ok := cache.Get(rk); ok {
+		if r, ok := v.(int64); ok && uint32(r) == role {
 			return nil
 		} else {
 			return ERR_NO_ROLE
@@ -103,7 +104,7 @@ func (dacm *DefaultAccessCtrlMgr) CheckRole(c Ctx, role uint32) error {
 		return err
 	}
 	if len(u) > 0 {
-		cache.PutInt64(rk, int64(u[0].Role))
+		cache.Put(rk, int64(u[0].Role))
 		if u[0].Role == role {
 			return nil
 		}
@@ -117,9 +118,9 @@ func (dacm *DefaultAccessCtrlMgr) CheckOwn(c Ctx, bktID int64) error {
 	if uid <= 0 {
 		return ERR_NEED_LOGIN
 	}
-	bk := fmt.Sprintf("bkt:%d", bktID)
-	if u, ok := cache.GetInt64(bk); ok {
-		if u == uid {
+	bk := [2]int64{1, bktID} // Type 1 = bucket ownership
+	if v, ok := cache.Get(bk); ok {
+		if u, ok := v.(int64); ok && u == uid {
 			return nil
 		} else {
 			return ERR_NO_PERM
@@ -131,7 +132,7 @@ func (dacm *DefaultAccessCtrlMgr) CheckOwn(c Ctx, bktID int64) error {
 	}
 	// Check if user is the owner of the bucket
 	if len(b) > 0 {
-		cache.PutInt64(bk, b[0].UID)
+		cache.Put(bk, b[0].UID)
 		if b[0].UID == uid {
 			return nil
 		}

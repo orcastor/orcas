@@ -783,7 +783,7 @@ func TestTmpFileRenameCacheUpdate(t *testing.T) {
 	}
 
 	// Step 4: Verify cache is updated with new name
-	fileObjKey := formatCacheKey(ofs.bktID, tmpFileObj.ID)
+	fileObjKey := tmpFileObj.ID
 	cachedObj, ok := fileObjCache.Get(fileObjKey)
 	if !ok {
 		t.Fatalf("File object not found in cache after rename")
@@ -943,7 +943,7 @@ func TestRenameBeforeFlush(t *testing.T) {
 		fileObjBeforeRename.Name, fileObjBeforeRename.DataID)
 
 	// Verify file is in cache
-	fileObjKey := formatCacheKey(ofs.bktID, newFileObj.ID)
+	fileObjKey := newFileObj.ID
 	cachedObj, ok := fileObjCache.Get(fileObjKey)
 	if !ok {
 		t.Fatalf("File object should be in cache before rename")

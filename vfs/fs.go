@@ -16,7 +16,7 @@ import (
 
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
-	"github.com/orca-zhang/ecache"
+	"github.com/orca-zhang/ecache2"
 	"github.com/orcastor/orcas/core"
 	"github.com/orcastor/orcas/sdk"
 )
@@ -102,7 +102,7 @@ var (
 	_                  = fs.FileReleaser(&OrcasNode{})
 )
 
-var streamingReaderCache = ecache.NewLRUCache(4, 256, 15*time.Second)
+var streamingReaderCache = ecache2.NewLRUCache[int64](4, 256, 15*time.Second)
 
 type cachedReader struct {
 	reader     io.Reader
@@ -122,7 +122,7 @@ func (n *OrcasNode) getObj() (*core.ObjectInfo, error) {
 			// For file objects, also check global fileObjCache to get latest size
 			// This ensures we get the most up-to-date file size after writes
 			if obj.Type == core.OBJ_TYPE_FILE {
-				cacheKey := formatCacheKey(obj.ID)
+				cacheKey := obj.ID
 				if cached, ok := fileObjCache.Get(cacheKey); ok {
 					if cachedObj, ok := cached.(*core.ObjectInfo); ok && cachedObj != nil {
 						// DebugLog("[VFS getObj] Found in global cache (for file): objID=%d, type=%d, name=%s, size=%d",
@@ -151,7 +151,7 @@ func (n *OrcasNode) getObj() (*core.ObjectInfo, error) {
 	// Check global fileObjCache first (before database query) for both files and directories
 	// This ensures we get cached information from Readdir/Lookup operations
 	if !n.isRoot {
-		cacheKey := formatCacheKey(n.objID)
+		cacheKey := n.objID
 		if cached, ok := fileObjCache.Get(cacheKey); ok {
 			if cachedObj, ok := cached.(*core.ObjectInfo); ok && cachedObj != nil {
 				// Verify that cached object ID matches expected ID
@@ -204,7 +204,7 @@ func (n *OrcasNode) getObj() (*core.ObjectInfo, error) {
 	}
 
 	// Verify that cached object in global cache matches database type
-	cacheKey := formatCacheKey(n.objID)
+	cacheKey := n.objID
 	if cached, ok := fileObjCache.Get(cacheKey); ok {
 		if cachedObj, ok := cached.(*core.ObjectInfo); ok && cachedObj != nil {
 			// If cached object type doesn't match database, clear it
@@ -234,7 +234,7 @@ func (n *OrcasNode) invalidateObj() {
 // invalidateDirListCache invalidates directory listing cache
 // Uses delayed refresh: marks cache as stale instead of immediately deleting
 func (n *OrcasNode) invalidateDirListCache(dirID int64) {
-	cacheKey := formatCacheKey(dirID)
+		cacheKey := dirID
 	// Mark Readdir cache as stale (delayed refresh)
 	readdirCacheStale.Store(dirID, true)
 	// Also invalidate dirListCache for consistency
@@ -249,7 +249,7 @@ func (n *OrcasNode) appendChildToDirCache(dirID int64, child *core.ObjectInfo) {
 	if child == nil {
 		return
 	}
-	cacheKey := formatCacheKey(dirID)
+		cacheKey := dirID
 	if cached, ok := dirListCache.Get(cacheKey); ok {
 		if children, ok := cached.([]*core.ObjectInfo); ok && children != nil {
 			// Check if child already exists
@@ -276,7 +276,7 @@ func (n *OrcasNode) appendChildToDirCache(dirID int64, child *core.ObjectInfo) {
 // removeChildFromDirCache removes a child object from the cached directory listing
 // instead of invalidating the entire cache. This preserves other cached children.
 func (n *OrcasNode) removeChildFromDirCache(dirID int64, childID int64) {
-	cacheKey := formatCacheKey(dirID)
+		cacheKey := dirID
 	if cached, ok := dirListCache.Get(cacheKey); ok {
 		if children, ok := cached.([]*core.ObjectInfo); ok && children != nil {
 			updatedChildren := make([]*core.ObjectInfo, 0, len(children))
@@ -304,7 +304,7 @@ func (n *OrcasNode) updateChildInDirCache(dirID int64, updatedChild *core.Object
 	if updatedChild == nil {
 		return
 	}
-	cacheKey := formatCacheKey(dirID)
+		cacheKey := dirID
 	if cached, ok := dirListCache.Get(cacheKey); ok {
 		if children, ok := cached.([]*core.ObjectInfo); ok && children != nil {
 			updated := false
@@ -406,7 +406,7 @@ func (n *OrcasNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut)
 
 	// Verify that the matched object type is correct by querying database
 	// This prevents issues where cache might have incorrect type information
-	cacheKey := formatCacheKey(matchedChild.ID)
+	cacheKey := matchedChild.ID
 	if cached, ok := fileObjCache.Get(cacheKey); ok {
 		if cachedObj, ok := cached.(*core.ObjectInfo); ok && cachedObj != nil {
 			// If cached object type doesn't match, invalidate cache and fetch from database
@@ -477,7 +477,7 @@ func (n *OrcasNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
 	}
 
 	// Check if cache is marked as stale (delayed refresh)
-	cacheKey := formatCacheKey(obj.ID)
+	cacheKey := obj.ID
 	if _, isStale := readdirCacheStale.Load(obj.ID); isStale {
 		// Cache is stale, delete it and clear stale marker
 		readdirCache.Del(cacheKey)
@@ -552,7 +552,7 @@ func (n *OrcasNode) getDirListWithCache(dirID int64) ([]*core.ObjectInfo, syscal
 	pendingChildren := n.getPendingObjectsForDir(dirID)
 
 	// Check cache first
-	cacheKey := formatCacheKey(dirID)
+		cacheKey := dirID
 	if cached, ok := dirListCache.Get(cacheKey); ok {
 		if children, ok := cached.([]*core.ObjectInfo); ok && children != nil {
 			// Merge pending objects with cached children
@@ -829,7 +829,7 @@ func (n *OrcasNode) preloadChildDirs(children []*core.ObjectInfo) {
 		}
 
 		// Check if already cached
-		cacheKey := formatCacheKey(child.ID)
+		cacheKey := child.ID
 		fileObjCache.Put(cacheKey, child)
 
 		if _, ok := dirListCache.Get(cacheKey); ok {
@@ -840,7 +840,7 @@ func (n *OrcasNode) preloadChildDirs(children []*core.ObjectInfo) {
 		// Preload directory listing asynchronously
 		// Use singleflight to prevent duplicate requests
 		key := fmt.Sprintf("%d", child.ID)
-		go func(dirID int64, cacheKey string, key string) {
+		go func(dirID int64, cacheKey int64, key string) {
 			_, err, _ := dirListSingleFlight.Do(key, func() (interface{}, error) {
 				// Double-check cache
 				if _, ok := dirListCache.Get(cacheKey); ok {
@@ -863,7 +863,7 @@ func (n *OrcasNode) preloadChildDirs(children []*core.ObjectInfo) {
 
 				// Cache child objects for GetAttr optimization
 				for _, grandchild := range children {
-					grandchildCacheKey := formatCacheKey(grandchild.ID)
+					grandchildCacheKey := grandchild.ID
 					fileObjCache.Put(grandchildCacheKey, grandchild)
 				}
 
@@ -898,7 +898,7 @@ func (n *OrcasNode) Create(ctx context.Context, name string, flags uint32, mode 
 
 	// Check if file already exists
 	// First check cache for directory listing to see if there's a directory with the same name
-	parentCacheKey := formatCacheKey(obj.ID)
+	parentCacheKey := obj.ID
 	var children []*core.ObjectInfo
 	if cachedChildren, ok := dirListCache.Get(parentCacheKey); ok {
 		if cachedList, ok := cachedChildren.([]*core.ObjectInfo); ok && cachedList != nil {
@@ -936,7 +936,7 @@ func (n *OrcasNode) Create(ctx context.Context, name string, flags uint32, mode 
 				// A directory with the same name exists, cannot create a file
 				DebugLog("[VFS Create] ERROR: A directory with the same name already exists: name=%s, dirID=%d", name, child.ID)
 				// Clear any cached directory object to prevent confusion
-				dirCacheKey := formatCacheKey(child.ID)
+				dirCacheKey := child.ID
 				fileObjCache.Del(dirCacheKey)
 				return nil, nil, 0, syscall.EISDIR
 			}
@@ -952,7 +952,7 @@ func (n *OrcasNode) Create(ctx context.Context, name string, flags uint32, mode 
 
 		// File exists and O_EXCL is not set, open existing file
 		// Try to get from cache first
-		cacheKey := formatCacheKey(existingFileID)
+		cacheKey := existingFileID
 		if cached, ok := fileObjCache.Get(cacheKey); ok {
 			if cachedObj, ok := cached.(*core.ObjectInfo); ok && cachedObj != nil {
 				// Verify that cached object is actually a file, not a directory
@@ -1044,7 +1044,7 @@ func (n *OrcasNode) Create(ctx context.Context, name string, flags uint32, mode 
 					DebugLog("[VFS Create] WARNING: Found directory with same name in cache, clearing cache to ensure file creation: name=%s, dirID=%d", name, child.ID)
 					dirListCache.Del(parentCacheKey)
 					// Also clear the directory object cache if it exists
-					dirCacheKey := formatCacheKey(child.ID)
+					dirCacheKey := child.ID
 					fileObjCache.Del(dirCacheKey)
 					// Also invalidate the directory node's local cache if it exists
 					// This ensures that if the directory node is already created, it will be refreshed
@@ -1217,7 +1217,7 @@ func (n *OrcasNode) Create(ctx context.Context, name string, flags uint32, mode 
 	if existingFileID > 0 {
 		// Get file object if not already set
 		if existingFileObj == nil {
-			cacheKey := formatCacheKey(existingFileID)
+			cacheKey := existingFileID
 			if cached, ok := fileObjCache.Get(cacheKey); ok {
 				if cachedObj, ok := cached.(*core.ObjectInfo); ok && cachedObj != nil && cachedObj.Type == core.OBJ_TYPE_FILE {
 					existingFileObj = cachedObj
@@ -1289,7 +1289,7 @@ func (n *OrcasNode) Create(ctx context.Context, name string, flags uint32, mode 
 				if child.Name == name && child.Type == core.OBJ_TYPE_DIR {
 					// Remove directory with same name from cache
 					DebugLog("[VFS Create] Removing directory with same name from cache: name=%s, dirID=%d", name, child.ID)
-					dirCacheKey := formatCacheKey(child.ID)
+					dirCacheKey := child.ID
 					fileObjCache.Del(dirCacheKey)
 					// Invalidate the directory node's local cache
 					dirNode := &OrcasNode{
@@ -1311,7 +1311,7 @@ func (n *OrcasNode) Create(ctx context.Context, name string, flags uint32, mode 
 	}
 
 	// Cache new file object for GetAttr optimization
-	cacheKey := formatCacheKey(fileObj.ID)
+		cacheKey := fileObj.ID
 	fileObjCache.Put(cacheKey, fileObj)
 	n.appendChildToDirCache(obj.ID, fileObj)
 
@@ -1363,7 +1363,7 @@ func (n *OrcasNode) Open(ctx context.Context, flags uint32) (fh fs.FileHandle, f
 		DebugLog("[VFS Open] ERROR: Object is not a file (type=%d, expected FILE=%d): objID=%d, name=%s, PID=%d",
 			obj.Type, core.OBJ_TYPE_FILE, obj.ID, obj.Name, obj.PID)
 		// Check cache to see what's stored
-		cacheKey := formatCacheKey(obj.ID)
+		cacheKey := obj.ID
 		if cached, ok := fileObjCache.Get(cacheKey); ok {
 			if cachedObj, ok := cached.(*core.ObjectInfo); ok && cachedObj != nil {
 				DebugLog("[VFS Open] Cached object info: objID=%d, type=%d, name=%s, PID=%d",
@@ -1455,7 +1455,7 @@ func (n *OrcasNode) Mkdir(ctx context.Context, name string, mode uint32, out *fu
 	dirObj.ID = ids[0]
 
 	// Cache new directory object for GetAttr optimization
-	cacheKey := formatCacheKey(dirObj.ID)
+		cacheKey := dirObj.ID
 	fileObjCache.Put(cacheKey, dirObj)
 	n.appendChildToDirCache(obj.ID, dirObj)
 
@@ -1737,7 +1737,7 @@ func (n *OrcasNode) Rename(ctx context.Context, name string, newParent fs.InodeE
 			// Match exact name or name without .tmp suffix (for files that may have been auto-renamed)
 			if child.Name == name || (hasTmpSuffix && child.Name == nameWithoutTmp) {
 				// Found potential match, try to get from cache first
-				cacheKey := formatCacheKey(child.ID)
+				cacheKey := child.ID
 				if cached, ok := fileObjCache.Get(cacheKey); ok {
 					if cachedObj, ok := cached.(*core.ObjectInfo); ok && cachedObj != nil {
 						// Use cached object (may have more up-to-date information)
@@ -1776,7 +1776,7 @@ func (n *OrcasNode) Rename(ctx context.Context, name string, newParent fs.InodeE
 	} else {
 		// If found from RandomAccessor, get source object info
 		// Try cache first
-		cacheKey := formatCacheKey(sourceID)
+		cacheKey := sourceID
 		if cached, ok := fileObjCache.Get(cacheKey); ok {
 			if cachedObj, ok := cached.(*core.ObjectInfo); ok && cachedObj != nil {
 				sourceObj = cachedObj
@@ -1809,7 +1809,7 @@ func (n *OrcasNode) Rename(ctx context.Context, name string, newParent fs.InodeE
 			// Re-fetch source object after flush to ensure we have latest DataID
 			// This is critical for files that were in batch writer buffer
 			// Invalidate cache for source file (not current node)
-			cacheKey := formatCacheKey(sourceID)
+			cacheKey := sourceID
 			fileObjCache.Del(cacheKey)
 			// Re-fetch source object from database
 			objs, err := n.fs.h.Get(n.fs.c, n.fs.bktID, []int64{sourceID})
@@ -1920,7 +1920,7 @@ func (n *OrcasNode) Rename(ctx context.Context, name string, newParent fs.InodeE
 			// Match exact name or name without .tmp suffix (for files that may have been auto-renamed)
 			if child.Name == newName || (hasTmpSuffix && child.Name == nameWithoutTmp) {
 				// Found potential match, try to get from cache first
-				cacheKey := formatCacheKey(child.ID)
+				cacheKey := child.ID
 				if cached, ok := fileObjCache.Get(cacheKey); ok {
 					if cachedObj, ok := cached.(*core.ObjectInfo); ok && cachedObj != nil {
 						// Use cached object (may have more up-to-date information)
@@ -1954,7 +1954,7 @@ func (n *OrcasNode) Rename(ctx context.Context, name string, newParent fs.InodeE
 			existingObj = existingTargetObj
 		} else {
 			// Try to get from cache first
-			targetCacheKey := formatCacheKey(existingTargetID)
+			targetCacheKey := existingTargetID
 			if cached, ok := fileObjCache.Get(targetCacheKey); ok {
 				if obj, ok := cached.(*core.ObjectInfo); ok && obj != nil {
 					existingObj = obj
@@ -2017,7 +2017,7 @@ func (n *OrcasNode) Rename(ctx context.Context, name string, newParent fs.InodeE
 				}
 
 				// Remove from file object cache immediately (before database delete)
-				targetCacheKey := formatCacheKey(existingTargetID)
+				targetCacheKey := existingTargetID
 				fileObjCache.Del(targetCacheKey)
 			} else {
 				// Target file is not a .tmp file
@@ -2061,7 +2061,7 @@ func (n *OrcasNode) Rename(ctx context.Context, name string, newParent fs.InodeE
 				return syscall.EIO
 			}
 			// Invalidate cache
-			cacheKey := formatCacheKey(sourceID)
+			cacheKey := sourceID
 			fileObjCache.Del(cacheKey)
 			n.removeChildFromDirCache(obj.ID, sourceID)
 			DebugLog("[VFS Rename] Successfully deleted empty source .tmp file: sourceID=%d", sourceID)
@@ -2072,7 +2072,7 @@ func (n *OrcasNode) Rename(ctx context.Context, name string, newParent fs.InodeE
 		if sourceObj.DataID == 0 || sourceObj.DataID == core.EmptyDataID {
 			DebugLog("[VFS Rename] WARNING: Source .tmp file has no DataID before merge, retrying: sourceID=%d, targetID=%d, targetName=%s, size=%d", sourceID, existingTargetID, newName, sourceObj.Size)
 			// Try multiple times to get DataID (error retry case)
-			cacheKey := formatCacheKey(sourceID)
+			cacheKey := sourceID
 			maxRetries := 10
 			for retry := 0; retry < maxRetries; retry++ {
 				fileObjCache.Del(cacheKey)
@@ -2183,7 +2183,7 @@ func (n *OrcasNode) Rename(ctx context.Context, name string, newParent fs.InodeE
 			// Update target file in directory listing cache
 			n.updateChildInDirCache(newParentObj.ID, targetObjs[0])
 			// Also update fileObjCache with latest data
-			targetCacheKey := formatCacheKey(existingTargetID)
+			targetCacheKey := existingTargetID
 			fileObjCache.Put(targetCacheKey, targetObjs[0])
 		}
 
@@ -2281,7 +2281,7 @@ func (n *OrcasNode) Rename(ctx context.Context, name string, newParent fs.InodeE
 					}
 
 					// Remove from cache
-					conflictCacheKey := formatCacheKey(conflictFileID)
+					conflictCacheKey := conflictFileID
 					fileObjCache.Del(conflictCacheKey)
 				}
 
@@ -2408,7 +2408,7 @@ func (n *OrcasNode) Rename(ctx context.Context, name string, newParent fs.InodeE
 	// Invalidate DataInfo cache for source file to ensure fresh data after flush
 	// This is important for .tmp files that were just flushed
 	if sourceObj.Type == core.OBJ_TYPE_FILE && sourceObj.DataID > 0 {
-		dataInfoCacheKey := formatCacheKey(sourceObj.DataID)
+		dataInfoCacheKey := sourceObj.DataID
 		dataInfoCache.Del(dataInfoCacheKey)
 		DebugLog("[VFS Rename] Invalidated DataInfo cache: fileID=%d, dataID=%d", sourceID, sourceObj.DataID)
 	}
@@ -2426,7 +2426,7 @@ func (n *OrcasNode) Rename(ctx context.Context, name string, newParent fs.InodeE
 
 	// Add/update source in new parent directory listing
 	// Re-fetch source object from database to get latest data (including updated name and PID)
-	cacheKey := formatCacheKey(sourceID)
+	cacheKey := sourceID
 	fileObjCache.Del(cacheKey)
 	objs, err := n.fs.h.Get(n.fs.c, n.fs.bktID, []int64{sourceID})
 	if err == nil && len(objs) > 0 {
@@ -2580,7 +2580,7 @@ func (n *OrcasNode) getDataReader(offset int64) (dataReader, syscall.Errno) {
 	// Use unified chunkReader for both plain and compressed/encrypted data
 	// Use dataID as cache key to ensure one file uses the same reader
 	// This allows sharing chunk cache across all reads of the same file
-	cacheKey := formatCacheKey(obj.DataID)
+		cacheKey := obj.DataID
 
 	// Try to get cached reader
 	if cached, ok := decodingReaderCache.Get(cacheKey); ok {
@@ -2653,7 +2653,7 @@ func (n *OrcasNode) Write(ctx context.Context, data []byte, off int64) (written 
 		DebugLog("[VFS Write] ERROR: Object is not a file (type=%d, expected FILE=%d): objID=%d, name=%s, PID=%d",
 			obj.Type, core.OBJ_TYPE_FILE, obj.ID, obj.Name, obj.PID)
 		// Check cache to see what's stored
-		cacheKey := formatCacheKey(obj.ID)
+		cacheKey := obj.ID
 		if cached, ok := fileObjCache.Get(cacheKey); ok {
 			if cachedObj, ok := cached.(*core.ObjectInfo); ok && cachedObj != nil {
 				DebugLog("[VFS Write] Cached object info: objID=%d, type=%d, name=%s, PID=%d",
@@ -3046,7 +3046,7 @@ func (n *OrcasNode) updateFileObjCache(fileID int64, newName string, newPID int6
 
 	// If this node doesn't have the RandomAccessor, try to update global cache
 	// by getting the file object and updating it
-	cacheKey := formatCacheKey(fileID)
+	cacheKey := fileID
 	if cached, ok := fileObjCache.Get(cacheKey); ok {
 		if fileObj, ok := cached.(*core.ObjectInfo); ok && fileObj != nil {
 			// Update cached object with new name and parent
@@ -3106,7 +3106,7 @@ func (n *OrcasNode) forceFlushTempFileBeforeRename(fileID int64, oldName, newNam
 	if !isInBatchWriter {
 		// Ensure file has a DataID - if not, pre-allocate one
 		// This ensures the file always has a DataID even before flush completes
-		cacheKey := formatCacheKey(fileID)
+		cacheKey := fileID
 		fileObjCache.Del(cacheKey) // Invalidate cache to get fresh data
 		objs, err := n.fs.h.Get(n.fs.c, n.fs.bktID, []int64{fileID})
 		if err == nil && len(objs) > 0 {
@@ -3171,7 +3171,7 @@ func (n *OrcasNode) forceFlushTempFileBeforeRename(fileID int64, oldName, newNam
 	}
 
 	// Get file object to check size
-	cacheKey := formatCacheKey(fileID)
+	cacheKey := fileID
 	fileObjCache.Del(cacheKey) // Invalidate cache to get fresh data
 	objs, err := n.fs.h.Get(n.fs.c, n.fs.bktID, []int64{fileID})
 	var fileObj *core.ObjectInfo
@@ -3199,7 +3199,7 @@ func (n *OrcasNode) forceFlushTempFileBeforeRename(fileID int64, oldName, newNam
 		} else {
 			DebugLog("[VFS Rename] Successfully flushed TempFileWriter: fileID=%d", fileID)
 			// Strong consistency: invalidate cache and re-fetch from database
-			cacheKey := formatCacheKey(fileID)
+			cacheKey := fileID
 			fileObjCache.Del(cacheKey)
 			objs, err := n.fs.h.Get(n.fs.c, n.fs.bktID, []int64{fileID})
 			if err == nil && len(objs) > 0 {
@@ -3254,7 +3254,7 @@ func (n *OrcasNode) forceFlushTempFileBeforeRename(fileID int64, oldName, newNam
 		} else {
 			DebugLog("[VFS Rename] Successfully force flushed: fileID=%d", fileID)
 			// Re-fetch to check if empty file needs EmptyDataID
-			cacheKey := formatCacheKey(fileID)
+			cacheKey := fileID
 			fileObjCache.Del(cacheKey)
 			objs, err := n.fs.h.Get(n.fs.c, n.fs.bktID, []int64{fileID})
 			if err == nil && len(objs) > 0 {
@@ -3337,7 +3337,7 @@ func (n *OrcasNode) forceFlushTempFileBeforeRename(fileID int64, oldName, newNam
 
 			// Strong consistency: re-fetch from database
 			// Note: FlushAll is synchronous, so data should be available immediately
-			cacheKey := formatCacheKey(fileID)
+			cacheKey := fileID
 			fileObjCache.Del(cacheKey)
 
 			// Fetch from database (should have DataID immediately after sync flush)
@@ -3433,7 +3433,7 @@ func (n *OrcasNode) forceFlushTempFileBeforeRename(fileID int64, oldName, newNam
 				}
 			}
 			// Strong consistency: invalidate cache and re-fetch from database
-			cacheKey := formatCacheKey(fileID)
+			cacheKey := fileID
 			fileObjCache.Del(cacheKey)
 			objs, err := n.fs.h.Get(n.fs.c, n.fs.bktID, []int64{fileID})
 			if err == nil && len(objs) > 0 {
@@ -3512,7 +3512,7 @@ func (n *OrcasNode) forceFlushTempFileBeforeRename(fileID int64, oldName, newNam
 	}
 
 	// Strong consistency: always re-fetch from database and update cache
-	cacheKey = formatCacheKey(fileID)
+		cacheKey = fileID
 	fileObjCache.Del(cacheKey)
 	objs, err = n.fs.h.Get(n.fs.c, n.fs.bktID, []int64{fileID})
 	if err == nil && len(objs) > 0 {

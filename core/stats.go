@@ -1,11 +1,10 @@
 package core
 
 import (
-	"fmt"
 	"sync"
 	"time"
 
-	"github.com/orca-zhang/ecache"
+	"github.com/orca-zhang/ecache2"
 )
 
 // BucketStatsDelta incremental update for bucket space statistics
@@ -46,14 +45,14 @@ func (bsd *BucketStatsDelta) Reset() {
 
 // bucketStatsCache Async cache for bucket space statistics
 // key: "bkt_stats_<bktID>", value: *BucketStatsDelta
-var bucketStatsCache = ecache.NewLRUCache(16, 1024, 2*time.Second)
+var bucketStatsCache = ecache2.NewLRUCache[int64](16, 1024, 2*time.Second)
 
 func init() {
 	// When cache item is updated or expired, asynchronously flush to database
-	bucketStatsCache.Inspect(func(action int, key string, iface *interface{}, bytes []byte, status int) {
+	bucketStatsCache.Inspect(func(action int, key int64, iface *interface{}, bytes []byte, status int) {
 		// action: PUT means update/add, DEL means delete/expire
 		// status: 0 means new item, 1 means update, 2 means delete
-		if action == ecache.DEL && status == 1 {
+		if action == ecache2.DEL && status == 1 {
 			// Cache item expired, need to flush to database
 			if iface != nil && *iface != nil {
 				if delta, ok := (*iface).(*BucketStatsDelta); ok {
@@ -70,7 +69,7 @@ func init() {
 		defer ticker.Stop()
 		for range ticker.C {
 			// Traverse all cache items, trigger flush
-			bucketStatsCache.Walk(func(key string, iface *interface{}, bytes []byte, expireAt int64) bool {
+			bucketStatsCache.Walk(func(key int64, iface *interface{}, bytes []byte, expireAt int64) bool {
 				if iface != nil && *iface != nil {
 					if delta, ok := (*iface).(*BucketStatsDelta); ok {
 						// Check if there is data to flush
@@ -88,12 +87,8 @@ func init() {
 }
 
 // flushBucketStats Flush bucket space statistics to database
-func flushBucketStats(key string, delta *BucketStatsDelta) {
-	// Parse bucket ID
-	// key format: "bkt_stats_<bktID>"
-	var bktID int64
-	_, err := fmt.Sscanf(key, "bkt_stats_%d", &bktID)
-	if err != nil || bktID <= 0 {
+func flushBucketStats(bktID int64, delta *BucketStatsDelta) {
+	if bktID <= 0 {
 		return
 	}
 
@@ -145,11 +140,9 @@ func flushBucketStats(key string, delta *BucketStatsDelta) {
 
 // updateBucketStatsCache Update bucket space statistics cache (async)
 func updateBucketStatsCache(bktID int64, used, realUsed, logicalUsed, dedupSavings int64) {
-	key := fmt.Sprintf("bkt_stats_%d", bktID)
-
 	// Get or create BucketStatsDelta
 	var delta *BucketStatsDelta
-	if v, ok := bucketStatsCache.Get(key); ok {
+	if v, ok := bucketStatsCache.Get(bktID); ok {
 		if d, ok := v.(*BucketStatsDelta); ok {
 			delta = d
 		}
@@ -157,12 +150,12 @@ func updateBucketStatsCache(bktID int64, used, realUsed, logicalUsed, dedupSavin
 
 	if delta == nil {
 		delta = &BucketStatsDelta{}
-		bucketStatsCache.Put(key, delta)
+		bucketStatsCache.Put(bktID, delta)
 	}
 
 	// Add delta
 	delta.Add(used, realUsed, logicalUsed, dedupSavings)
 
 	// Trigger update (let ecache know there are changes, may trigger flush)
-	bucketStatsCache.Put(key, delta)
+	bucketStatsCache.Put(bktID, delta)
 }

@@ -14,13 +14,14 @@ require (
 	github.com/mholt/archiver/v3 v3.5.1
 	github.com/mkmueller/aes256 v0.0.0-20171112015946-1ce9e9b3f91a
 	github.com/orca-zhang/borm v0.0.0-20250923160046-6f14fa36e5bb
-	github.com/orca-zhang/ecache v1.1.1
+	github.com/orca-zhang/ecache2 v0.0.1
 	github.com/orca-zhang/idgen v0.0.0-20220909041521-2662ff4c3c3e
 	github.com/prometheus/client_golang v1.12.1
 	github.com/smartystreets/goconvey v1.7.2
 	github.com/tjfoc/gmsm v1.4.1
 	golang.org/x/crypto v0.17.0
 	golang.org/x/net v0.19.0
+	golang.org/x/sync v0.10.0
 )
 
 require (
@@ -65,6 +66,7 @@ require (
 	github.com/modern-go/concurrent v0.0.0-20180306012644-bacd9c7ef1dd // indirect
 	github.com/modern-go/reflect2 v1.0.2 // indirect
 	github.com/nwaples/rardecode v1.1.0 // indirect
+	github.com/orca-zhang/ecache v1.1.1 // indirect
 	github.com/pelletier/go-toml/v2 v2.0.1 // indirect
 	github.com/pierrec/lz4/v4 v4.1.2 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
@@ -94,7 +96,6 @@ require (
 	go.uber.org/automaxprocs v1.5.1 // indirect
 	go.uber.org/multierr v1.6.0 // indirect
 	go.uber.org/zap v1.21.0 // indirect
-	golang.org/x/sync v0.10.0 // indirect
 	golang.org/x/sys v0.28.0 // indirect
 	golang.org/x/text v0.14.0 // indirect
 	google.golang.org/genproto v0.0.0-20220505152158-f39f71e6c8f3 // indirect

@@ -1,7 +1,6 @@
 package sdk
 
 import (
-	"encoding/binary"
 	"strconv"
 	"sync"
 	"time"
@@ -145,48 +144,6 @@ func FastSplitPath(path string) []string {
 	}
 
 	return parts
-}
-
-// FormatCacheKeyInt formats a cache key with two int64 values
-// Optimized: uses fixed 16-byte binary encoding instead of string formatting
-// Returns a string with exactly 16 bytes (8 bytes per int64, big-endian)
-func FormatCacheKeyInt(id1, id2 int64) string {
-	// Use fixed 16-byte array: 8 bytes for id1 + 8 bytes for id2
-	var buf [16]byte
-	binary.BigEndian.PutUint64(buf[0:8], uint64(id1))
-	binary.BigEndian.PutUint64(buf[8:16], uint64(id2))
-	// Convert to string - this creates a copy, which is safe
-	return string(buf[:])
-}
-
-// FormatCacheKeySingleInt formats a cache key with a single int64 value
-// Optimized: uses fixed 8-byte binary encoding instead of string formatting
-// Returns a string with exactly 8 bytes (big-endian)
-func FormatCacheKeySingleInt(id int64) string {
-	// Use fixed 8-byte array
-	var buf [8]byte
-	binary.BigEndian.PutUint64(buf[0:8], uint64(id))
-	// Convert to string - this creates a copy, which is safe
-	return string(buf[:])
-}
-
-// FormatCacheKeyString formats a cache key with int64 and string
-var cacheKeyPool = sync.Pool{
-	New: func() interface{} {
-		buf := make([]byte, 0, 64) // Pre-allocate for typical cache keys
-		return &buf
-	},
-}
-
-func FormatCacheKeyString(id int64, s string) string {
-	buf := cacheKeyPool.Get().(*[]byte)
-	*buf = (*buf)[:0]
-	*buf = strconv.AppendInt(*buf, id, 10)
-	*buf = append(*buf, ':')
-	*buf = append(*buf, s...)
-	result := string(*buf)
-	cacheKeyPool.Put(buf)
-	return result
 }
 
 // FastBase extracts the base name from a path (like filepath.Base but faster)

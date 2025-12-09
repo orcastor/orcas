@@ -308,7 +308,7 @@ func TestVFSRandomAccessorWithSDK(t *testing.T) {
 			bucket.EndecKey = "this-is-a-test-encryption-key-that-is-long-enough-for-aes256-encryption-12345678901234567890"
 			So(dma.PutBkt(testCtx, []*core.BucketInfo{bucket}), ShouldBeNil)
 			// 清除bucket配置缓存，确保使用新配置
-			bucketConfigCache.Del(formatCacheKey(testBktID))
+			bucketConfigCache.Del(testBktID)
 
 			// 创建OrcasFS（bucket配置已包含加密设置）
 			ofs := NewOrcasFS(lh, testCtx, testBktID)
@@ -335,9 +335,9 @@ func TestVFSRandomAccessorWithSDK(t *testing.T) {
 			time.Sleep(100 * time.Millisecond)
 
 			// 清除缓存，确保从数据库获取最新数据
-			cacheKey := formatCacheKey(fileID)
+			cacheKey := fileID
 			fileObjCache.Del(cacheKey)
-			dataInfoCache.Del(formatCacheKey(0)) // 清除可能的 DataInfo 缓存
+			dataInfoCache.Del(int64(0)) // 清除可能的 DataInfo 缓存
 
 			// 验证数据已写入 - 通过重新打开RandomAccessor来验证
 			ra2, err := NewRandomAccessor(ofs, fileID)
@@ -369,7 +369,7 @@ func TestVFSRandomAccessorWithSDK(t *testing.T) {
 			bucket.EndecKey = "this-is-a-test-encryption-key-that-is-long-enough-for-aes256-encryption-12345678901234567890"
 			So(dma.PutBkt(testCtx, []*core.BucketInfo{bucket}), ShouldBeNil)
 			// 清除bucket配置缓存，确保使用新配置
-			bucketConfigCache.Del(formatCacheKey(testBktID))
+			bucketConfigCache.Del(testBktID)
 
 			// 创建OrcasFS（bucket配置已包含压缩和加密设置）
 			ofs := NewOrcasFS(lh, testCtx, testBktID)
@@ -396,9 +396,9 @@ func TestVFSRandomAccessorWithSDK(t *testing.T) {
 			time.Sleep(100 * time.Millisecond)
 
 			// 清除缓存，确保从数据库获取最新数据
-			cacheKey := formatCacheKey(fileID)
+			cacheKey := fileID
 			fileObjCache.Del(cacheKey)
-			dataInfoCache.Del(formatCacheKey(0)) // 清除可能的 DataInfo 缓存
+			dataInfoCache.Del(int64(0)) // 清除可能的 DataInfo 缓存
 
 			// 验证数据已写入 - 通过重新打开RandomAccessor来验证
 			ra2, err := NewRandomAccessor(ofs, fileID)
@@ -424,7 +424,7 @@ func TestVFSRandomAccessorWithSDK(t *testing.T) {
 			bucket.EndecKey = "this-is-a-test-encryption-key-that-is-long-enough-for-aes256-encryption-12345678901234567890"
 			So(dma.PutBkt(testCtx, []*core.BucketInfo{bucket}), ShouldBeNil)
 			// 清除bucket配置缓存，确保使用新配置
-			bucketConfigCache.Del(formatCacheKey(testBktID))
+			bucketConfigCache.Del(testBktID)
 
 			// 创建OrcasFS（bucket配置已包含压缩和加密设置）
 			ofs := NewOrcasFS(lh, testCtx, testBktID)
@@ -533,7 +533,7 @@ func TestVFSRandomAccessorWithSDK(t *testing.T) {
 			bucket.CmprQlty = 5
 			So(dma.PutBkt(testCtx, []*core.BucketInfo{bucket}), ShouldBeNil)
 			// 清除bucket配置缓存，确保使用新配置
-			bucketConfigCache.Del(formatCacheKey(testBktID))
+			bucketConfigCache.Del(testBktID)
 
 			// 创建OrcasFS（bucket配置已包含压缩设置）
 			ofs := NewOrcasFS(lh, testCtx, testBktID)
@@ -850,7 +850,7 @@ func TestRandomAccessorReadOptimization(t *testing.T) {
 			time.Sleep(100 * time.Millisecond)
 
 			// 清除缓存，确保从数据库获取最新数据
-			cacheKey := formatCacheKey(fileID)
+			cacheKey := fileID
 			fileObjCache.Del(cacheKey)
 
 			// 读取指定大小（应该不超过请求的大小）
@@ -1086,7 +1086,7 @@ func TestRandomAccessorReadOptimization(t *testing.T) {
 			time.Sleep(100 * time.Millisecond)
 
 			// 清除缓存，确保从数据库获取最新数据
-			cacheKey := formatCacheKey(fileID)
+			cacheKey := fileID
 			fileObjCache.Del(cacheKey)
 
 			// 读取超出文件大小（应该返回可用数据，不超过请求大小）
@@ -2318,7 +2318,7 @@ func TestBatchWriteManagerSmallFile(t *testing.T) {
 			}
 
 			// 强制刷新文件对象缓存，确保从数据库获取最新数据
-			cacheKey := formatCacheKey(fileID)
+			cacheKey := fileID
 			fileObjCache.Del(cacheKey)
 
 			// 读取验证 - Read 方法应该能够从 batch writer 或数据库读取数据

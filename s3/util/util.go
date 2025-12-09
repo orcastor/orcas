@@ -171,24 +171,6 @@ func FastSplitPath(path string) []string {
 	return sdk.FastSplitPath(path)
 }
 
-// FormatCacheKeyInt formats a cache key with two int64 values
-// Delegates to sdk.FormatCacheKeyInt for consistency
-func FormatCacheKeyInt(id1, id2 int64) string {
-	return sdk.FormatCacheKeyInt(id1, id2)
-}
-
-// FormatCacheKeySingleInt formats a cache key with a single int64 value
-// Delegates to sdk.FormatCacheKeySingleInt for consistency
-func FormatCacheKeySingleInt(id int64) string {
-	return sdk.FormatCacheKeySingleInt(id)
-}
-
-// FormatCacheKeyString formats a cache key with int64 and string
-// Delegates to sdk.FormatCacheKeyString for consistency
-func FormatCacheKeyString(id int64, s string) string {
-	return sdk.FormatCacheKeyString(id, s)
-}
-
 // FastBase extracts the base name from a path (like filepath.Base but faster)
 // Delegates to sdk.FastBase for consistency
 func FastBase(path string) string {
