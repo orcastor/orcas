@@ -917,3 +917,91 @@ func (instance *DokanyInstance) Unmount() error {
 	// For now, return success (actual unmount would be done by Dokany driver)
 	return nil
 }
+
+// appendChildToDirCache appends a newly created child object into the
+// cached directory listing instead of invalidating the entire cache.
+// If cache doesn't exist, creates a new cache entry with the child.
+func (n *OrcasNode) appendChildToDirCache(dirID int64, child *core.ObjectInfo) {
+	if child == nil {
+		return
+	}
+	cacheKey := dirID
+	if cached, ok := dirListCache.Get(cacheKey); ok {
+		if children, ok := cached.([]*core.ObjectInfo); ok && children != nil {
+			// Check if child already exists
+			for _, existing := range children {
+				if existing != nil && existing.ID == child.ID {
+					return
+				}
+			}
+			// Append child to existing cache
+			newChildren := make([]*core.ObjectInfo, len(children)+1)
+			copy(newChildren, children)
+			newChildren[len(children)] = child
+			dirListCache.Put(cacheKey, newChildren)
+			DebugLog("[VFS appendChildToDirCache] Appended child to existing cache: dirID=%d, childID=%d", dirID, child.ID)
+			return
+		}
+	}
+	// Cache doesn't exist, create new cache entry with the child
+	newChildren := []*core.ObjectInfo{child}
+	dirListCache.Put(cacheKey, newChildren)
+	DebugLog("[VFS appendChildToDirCache] Created new cache entry with child: dirID=%d, childID=%d", dirID, child.ID)
+}
+
+// removeChildFromDirCache removes a child object from the cached directory listing
+// instead of invalidating the entire cache. This preserves other cached children.
+func (n *OrcasNode) removeChildFromDirCache(dirID int64, childID int64) {
+	cacheKey := dirID
+	if cached, ok := dirListCache.Get(cacheKey); ok {
+		if children, ok := cached.([]*core.ObjectInfo); ok && children != nil {
+			updatedChildren := make([]*core.ObjectInfo, 0, len(children))
+			found := false
+			for _, child := range children {
+				if child != nil && child.ID == childID {
+					found = true
+					continue // Skip this child
+				}
+				updatedChildren = append(updatedChildren, child)
+			}
+			if found {
+				dirListCache.Put(cacheKey, updatedChildren)
+				DebugLog("[VFS removeChildFromDirCache] Removed child from cache: dirID=%d, childID=%d", dirID, childID)
+			}
+		}
+	}
+}
+
+// updateChildInDirCache updates a child object in the cached directory listing
+// instead of invalidating the entire cache. This preserves other cached children.
+// If the child is not found in cache, it will append it instead (for newly created files).
+// Also marks Readdir cache as stale for delayed refresh.
+func (n *OrcasNode) updateChildInDirCache(dirID int64, updatedChild *core.ObjectInfo) {
+	if updatedChild == nil {
+		return
+	}
+	cacheKey := dirID
+	if cached, ok := dirListCache.Get(cacheKey); ok {
+		if children, ok := cached.([]*core.ObjectInfo); ok && children != nil {
+			updated := false
+			for i, child := range children {
+				if child != nil && child.ID == updatedChild.ID {
+					// Update the child in place
+					children[i] = updatedChild
+					updated = true
+					break
+				}
+			}
+			if updated {
+				dirListCache.Put(cacheKey, children)
+				// Mark Readdir cache as stale (delayed refresh)
+				readdirCacheStale.Store(dirID, true)
+				// DebugLog("[VFS updateChildInDirCache] Updated child in cache: dirID=%d, childID=%d, newName=%s", dirID, updatedChild.ID, updatedChild.Name)
+				return
+			}
+		}
+	}
+	// If child not found in cache (e.g., newly created file), append it instead
+	// DebugLog("[VFS updateChildInDirCache] Child not found in cache, appending instead: dirID=%d, childID=%d, newName=%s", dirID, updatedChild.ID, updatedChild.Name)
+	n.appendChildToDirCache(dirID, updatedChild)
+}

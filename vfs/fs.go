@@ -234,7 +234,7 @@ func (n *OrcasNode) invalidateObj() {
 // invalidateDirListCache invalidates directory listing cache
 // Uses delayed refresh: marks cache as stale instead of immediately deleting
 func (n *OrcasNode) invalidateDirListCache(dirID int64) {
-		cacheKey := dirID
+	cacheKey := dirID
 	// Mark Readdir cache as stale (delayed refresh)
 	readdirCacheStale.Store(dirID, true)
 	// Also invalidate dirListCache for consistency
@@ -249,7 +249,7 @@ func (n *OrcasNode) appendChildToDirCache(dirID int64, child *core.ObjectInfo) {
 	if child == nil {
 		return
 	}
-		cacheKey := dirID
+	cacheKey := dirID
 	if cached, ok := dirListCache.Get(cacheKey); ok {
 		if children, ok := cached.([]*core.ObjectInfo); ok && children != nil {
 			// Check if child already exists
@@ -276,7 +276,7 @@ func (n *OrcasNode) appendChildToDirCache(dirID int64, child *core.ObjectInfo) {
 // removeChildFromDirCache removes a child object from the cached directory listing
 // instead of invalidating the entire cache. This preserves other cached children.
 func (n *OrcasNode) removeChildFromDirCache(dirID int64, childID int64) {
-		cacheKey := dirID
+	cacheKey := dirID
 	if cached, ok := dirListCache.Get(cacheKey); ok {
 		if children, ok := cached.([]*core.ObjectInfo); ok && children != nil {
 			updatedChildren := make([]*core.ObjectInfo, 0, len(children))
@@ -304,7 +304,7 @@ func (n *OrcasNode) updateChildInDirCache(dirID int64, updatedChild *core.Object
 	if updatedChild == nil {
 		return
 	}
-		cacheKey := dirID
+	cacheKey := dirID
 	if cached, ok := dirListCache.Get(cacheKey); ok {
 		if children, ok := cached.([]*core.ObjectInfo); ok && children != nil {
 			updated := false
@@ -552,7 +552,7 @@ func (n *OrcasNode) getDirListWithCache(dirID int64) ([]*core.ObjectInfo, syscal
 	pendingChildren := n.getPendingObjectsForDir(dirID)
 
 	// Check cache first
-		cacheKey := dirID
+	cacheKey := dirID
 	if cached, ok := dirListCache.Get(cacheKey); ok {
 		if children, ok := cached.([]*core.ObjectInfo); ok && children != nil {
 			// Merge pending objects with cached children
@@ -1311,7 +1311,7 @@ func (n *OrcasNode) Create(ctx context.Context, name string, flags uint32, mode 
 	}
 
 	// Cache new file object for GetAttr optimization
-		cacheKey := fileObj.ID
+	cacheKey := fileObj.ID
 	fileObjCache.Put(cacheKey, fileObj)
 	n.appendChildToDirCache(obj.ID, fileObj)
 
@@ -1455,7 +1455,7 @@ func (n *OrcasNode) Mkdir(ctx context.Context, name string, mode uint32, out *fu
 	dirObj.ID = ids[0]
 
 	// Cache new directory object for GetAttr optimization
-		cacheKey := dirObj.ID
+	cacheKey := dirObj.ID
 	fileObjCache.Put(cacheKey, dirObj)
 	n.appendChildToDirCache(obj.ID, dirObj)
 
@@ -2210,7 +2210,8 @@ func (n *OrcasNode) Rename(ctx context.Context, name string, newParent fs.InodeE
 	if err != nil {
 		// Check if error is due to unique constraint violation
 		// This can happen if target file still exists (race condition or delete failed)
-		if err == core.ERR_DUP_KEY || (err != nil && strings.Contains(err.Error(), "UNIQUE constraint failed")) {
+		// Note: err is guaranteed to be non-nil here, so err.Error() is safe
+		if err == core.ERR_DUP_KEY || strings.Contains(err.Error(), "UNIQUE constraint failed") {
 			DebugLog("[VFS Rename] Unique constraint violation detected, attempting to resolve: sourceID=%d, targetName=%s, error=%v", sourceID, newName, err)
 
 			// Directly query database to find the conflicting file (including deleted ones)
@@ -2320,7 +2321,7 @@ func (n *OrcasNode) Rename(ctx context.Context, name string, newParent fs.InodeE
 					}
 
 					// Check if still unique constraint error
-					if err == core.ERR_DUP_KEY || (err != nil && strings.Contains(err.Error(), "UNIQUE constraint failed")) {
+					if err != nil && (err == core.ERR_DUP_KEY || strings.Contains(err.Error(), "UNIQUE constraint failed")) {
 						if retry < maxRetries-1 {
 							DebugLog("[VFS Rename] Still unique constraint error after delete, retrying (retry %d/%d): sourceID=%d, targetName=%s", retry+1, maxRetries, sourceID, newName)
 							time.Sleep(100 * time.Millisecond * time.Duration(retry+1)) // Exponential backoff
@@ -2580,7 +2581,7 @@ func (n *OrcasNode) getDataReader(offset int64) (dataReader, syscall.Errno) {
 	// Use unified chunkReader for both plain and compressed/encrypted data
 	// Use dataID as cache key to ensure one file uses the same reader
 	// This allows sharing chunk cache across all reads of the same file
-		cacheKey := obj.DataID
+	cacheKey := obj.DataID
 
 	// Try to get cached reader
 	if cached, ok := decodingReaderCache.Get(cacheKey); ok {
@@ -3480,39 +3481,38 @@ func (n *OrcasNode) forceFlushTempFileBeforeRename(fileID int64, oldName, newNam
 	// Flush RandomAccessor normally (if not already flushed above)
 	// Note: We already flushed above if there were pending writes, but we still need to ensure
 	// any data that might have been added to batch writer during flush is also flushed
-	if raToFlush != nil {
-		// Check if file is now in batch writer (after flush above)
-		if batchMgr != nil {
-			if _, ok := batchMgr.GetPendingObject(fileID); ok {
-				// File is now in batch writer, flush it
-				// DebugLog("[VFS Rename] File moved to batch writer after RandomAccessor flush, flushing batch writer: fileID=%d", fileID)
-				batchMgr.FlushAll(n.fs.c)
-				// DebugLog("[VFS Rename] Batch flush completed: fileID=%d", fileID)
-			}
+	// Note: raToFlush is guaranteed to be non-nil here because if it was nil, we would have returned above
+	// Check if file is now in batch writer (after flush above)
+	if batchMgr != nil {
+		if _, ok := batchMgr.GetPendingObject(fileID); ok {
+			// File is now in batch writer, flush it
+			// DebugLog("[VFS Rename] File moved to batch writer after RandomAccessor flush, flushing batch writer: fileID=%d", fileID)
+			batchMgr.FlushAll(n.fs.c)
+			// DebugLog("[VFS Rename] Batch flush completed: fileID=%d", fileID)
 		}
-		// Also ensure RandomAccessor is fully flushed (in case there's any remaining data)
-		writeIndex := atomic.LoadInt64(&raToFlush.buffer.writeIndex)
-		totalSize := atomic.LoadInt64(&raToFlush.buffer.totalSize)
-		if writeIndex > 0 || totalSize > 0 {
-			DebugLog("[VFS Rename] RandomAccessor still has pending writes after initial flush, flushing again: fileID=%d, writeIndex=%d, totalSize=%d", fileID, writeIndex, totalSize)
-			if _, err := raToFlush.ForceFlush(); err != nil {
-				DebugLog("[VFS Rename] ERROR: Failed to force flush .tmp file: fileID=%d, error=%v", fileID, err)
-			} else {
-				DebugLog("[VFS Rename] Successfully forced flush .tmp file: fileID=%d", fileID)
-			}
+	}
+	// Also ensure RandomAccessor is fully flushed (in case there's any remaining data)
+	writeIndex := atomic.LoadInt64(&raToFlush.buffer.writeIndex)
+	totalSize := atomic.LoadInt64(&raToFlush.buffer.totalSize)
+	if writeIndex > 0 || totalSize > 0 {
+		DebugLog("[VFS Rename] RandomAccessor still has pending writes after initial flush, flushing again: fileID=%d, writeIndex=%d, totalSize=%d", fileID, writeIndex, totalSize)
+		if _, err := raToFlush.ForceFlush(); err != nil {
+			DebugLog("[VFS Rename] ERROR: Failed to force flush .tmp file: fileID=%d, error=%v", fileID, err)
 		} else {
-			// No pending writes, but still try to flush to ensure any cached data is written
-			DebugLog("[VFS Rename] RandomAccessor has no pending writes, but flushing to ensure data is written: fileID=%d", fileID)
-			if _, err := raToFlush.ForceFlush(); err != nil {
-				DebugLog("[VFS Rename] WARNING: Failed to force flush .tmp file (may be empty): fileID=%d, error=%v", fileID, err)
-			} else {
-				DebugLog("[VFS Rename] Successfully forced flush .tmp file: fileID=%d", fileID)
-			}
+			DebugLog("[VFS Rename] Successfully forced flush .tmp file: fileID=%d", fileID)
+		}
+	} else {
+		// No pending writes, but still try to flush to ensure any cached data is written
+		DebugLog("[VFS Rename] RandomAccessor has no pending writes, but flushing to ensure data is written: fileID=%d", fileID)
+		if _, err := raToFlush.ForceFlush(); err != nil {
+			DebugLog("[VFS Rename] WARNING: Failed to force flush .tmp file (may be empty): fileID=%d, error=%v", fileID, err)
+		} else {
+			DebugLog("[VFS Rename] Successfully forced flush .tmp file: fileID=%d", fileID)
 		}
 	}
 
 	// Strong consistency: always re-fetch from database and update cache
-		cacheKey = fileID
+	cacheKey = fileID
 	fileObjCache.Del(cacheKey)
 	objs, err = n.fs.h.Get(n.fs.c, n.fs.bktID, []int64{fileID})
 	if err == nil && len(objs) > 0 {
