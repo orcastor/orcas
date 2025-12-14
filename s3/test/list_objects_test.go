@@ -15,6 +15,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/orca-zhang/idgen"
 	"github.com/orcastor/orcas/core"
+	"github.com/orcastor/orcas/s3"
 )
 
 // ensureTestUserForListObjects ensures test user exists for list objects tests
@@ -103,14 +104,14 @@ func setupTestEnvironmentForListObjects(t *testing.T) (int64, *gin.Engine) {
 	})
 
 	// Register routes
-	router.GET("/", listBuckets)
-	router.PUT("/:bucket", createBucket)
-	router.DELETE("/:bucket", deleteBucket)
-	router.GET("/:bucket", listObjects)
-	router.GET("/:bucket/*key", getObject)
-	router.PUT("/:bucket/*key", putObject)
-	router.DELETE("/:bucket/*key", deleteObject)
-	router.HEAD("/:bucket/*key", headObject)
+	router.GET("/", s3.ListBuckets)
+	router.PUT("/:bucket", s3.CreateBucket)
+	router.DELETE("/:bucket", s3.DeleteBucket)
+	router.GET("/:bucket", s3.ListObjects)
+	router.GET("/:bucket/*key", s3.GetObject)
+	router.PUT("/:bucket/*key", s3.PutObject)
+	router.DELETE("/:bucket/*key", s3.DeleteObject)
+	router.HEAD("/:bucket/*key", s3.HeadObject)
 
 	return testBktID, router
 }
@@ -157,7 +158,7 @@ func TestListObjectsWithSlashes(t *testing.T) {
 			t.Fatalf("ListObjects failed: status=%d, body=%s", w.Code, w.Body.String())
 		}
 
-		var result ListBucketResult
+		var result s3.ListBucketResult
 		if err := xml.Unmarshal(w.Body.Bytes(), &result); err != nil {
 			t.Fatalf("Failed to parse XML: %v", err)
 		}
@@ -206,7 +207,7 @@ func TestListObjectsWithSlashes(t *testing.T) {
 			t.Fatalf("ListObjects with prefix failed: status=%d, body=%s", w.Code, w.Body.String())
 		}
 
-		var result ListBucketResult
+		var result s3.ListBucketResult
 		if err := xml.Unmarshal(w.Body.Bytes(), &result); err != nil {
 			t.Fatalf("Failed to parse XML: %v", err)
 		}
@@ -235,7 +236,7 @@ func TestListObjectsWithSlashes(t *testing.T) {
 			t.Fatalf("ListObjects with delimiter failed: status=%d, body=%s", w.Code, w.Body.String())
 		}
 
-		var result ListBucketResult
+		var result s3.ListBucketResult
 		if err := xml.Unmarshal(w.Body.Bytes(), &result); err != nil {
 			t.Fatalf("Failed to parse XML: %v", err)
 		}
@@ -272,7 +273,7 @@ func TestListObjectsWithSlashes(t *testing.T) {
 			t.Fatalf("ListObjects with prefix and delimiter failed: status=%d, body=%s", w.Code, w.Body.String())
 		}
 
-		var result ListBucketResult
+		var result s3.ListBucketResult
 		if err := xml.Unmarshal(w.Body.Bytes(), &result); err != nil {
 			t.Fatalf("Failed to parse XML: %v", err)
 		}
@@ -298,7 +299,7 @@ func TestListObjectsWithSlashes(t *testing.T) {
 			t.Fatalf("ListObjects failed: status=%d", w.Code)
 		}
 
-		var result ListBucketResult
+		var result s3.ListBucketResult
 		if err := xml.Unmarshal(w.Body.Bytes(), &result); err != nil {
 			t.Fatalf("Failed to parse XML: %v", err)
 		}
@@ -335,7 +336,7 @@ func TestListObjectsWithSlashes(t *testing.T) {
 			t.Fatalf("ListObjects with prefix dir1/f failed: status=%d, body=%s", w.Code, w.Body.String())
 		}
 
-		var result ListBucketResult
+		var result s3.ListBucketResult
 		if err := xml.Unmarshal(w.Body.Bytes(), &result); err != nil {
 			t.Fatalf("Failed to parse XML: %v", err)
 		}
@@ -366,7 +367,7 @@ func TestListObjectsWithSlashes(t *testing.T) {
 			t.Fatalf("ListObjects with prefix file failed: status=%d", w2.Code)
 		}
 
-		var result2 ListBucketResult
+		var result2 s3.ListBucketResult
 		if err := xml.Unmarshal(w2.Body.Bytes(), &result2); err != nil {
 			t.Fatalf("Failed to parse XML: %v", err)
 		}
@@ -396,7 +397,7 @@ func TestListObjectsWithSlashes(t *testing.T) {
 			t.Fatalf("ListObjects with prefix dir2/subdir2/f failed: status=%d", w3.Code)
 		}
 
-		var result3 ListBucketResult
+		var result3 s3.ListBucketResult
 		if err := xml.Unmarshal(w3.Body.Bytes(), &result3); err != nil {
 			t.Fatalf("Failed to parse XML: %v", err)
 		}
@@ -430,7 +431,7 @@ func TestListObjectsEmptyBucket(t *testing.T) {
 		t.Fatalf("ListObjects failed: status=%d, body=%s", w.Code, w.Body.String())
 	}
 
-	var result ListBucketResult
+	var result s3.ListBucketResult
 	if err := xml.Unmarshal(w.Body.Bytes(), &result); err != nil {
 		t.Fatalf("Failed to parse XML: %v", err)
 	}
@@ -466,7 +467,7 @@ func TestListObjectsMaxKeys(t *testing.T) {
 		t.Fatalf("ListObjects failed: status=%d", w.Code)
 	}
 
-	var result ListBucketResult
+	var result s3.ListBucketResult
 	if err := xml.Unmarshal(w.Body.Bytes(), &result); err != nil {
 		t.Fatalf("Failed to parse XML: %v", err)
 	}

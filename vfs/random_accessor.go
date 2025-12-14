@@ -202,7 +202,7 @@ func (m *delayedFlushManager) process() {
 			delete(m.entries, fileID)
 			continue
 		}
-		last := entry.ra.lastActivity.Load()
+		last := atomic.LoadInt64(&entry.ra.lastActivity)
 		if last == 0 {
 			continue
 		}
@@ -630,15 +630,15 @@ type TempFileWriter struct {
 	dataID          int64                // Data ID for this .tmp file
 	fileName        string               // File name (for smart compression suffix check)
 	chunkSize       int64                // Chunk size for this file (always 10MB)
-	size            atomic.Int64         // Total file size (atomic for concurrent access)
+	size            int64                // Total file size (atomic for concurrent access)
 	mu              sync.Mutex           // Mutex for thread-safe operations on chunks map
 	chunks          map[int]*chunkBuffer // Chunk buffers for each chunk (key: sn)
 	dataInfo        *core.DataInfo       // DataInfo for tracking compression/encryption
 	enableRealtime  bool                 // Whether to enable real-time compression/encryption (default: false for offline processing)
 	realtimeDecided bool                 // Whether realtime capability has been determined
 	lh              *core.LocalHandler   // Cached LocalHandler (nil if not LocalHandler)
-	firstChunkSN    atomic.Int64         // First chunk sequence number (sn=0)
-	lastChunkSN     atomic.Int64         // Last chunk sequence number (updated when flushing)
+	firstChunkSN    int64                // First chunk sequence number (sn=0)
+	lastChunkSN     int64                // Last chunk sequence number (updated when flushing)
 }
 
 // writeRange represents a contiguous range of written data within a chunk
@@ -715,9 +715,9 @@ type RandomAccessor struct {
 	seqBuffer    *SequentialWriteBuffer // Sequential write buffer (optimized)
 	fileObj      atomic.Value
 	fileObjKey   int64 // Pre-computed file_obj cache key (optimized: avoid repeated conversion)
-	lastActivity atomic.Int64
-	sparseSize   atomic.Int64                  // Sparse file size (for pre-allocated files, e.g., qBittorrent)
-	lastOffset   atomic.Int64                  // Last write offset (for sequential write detection)
+	lastActivity int64 // Last activity timestamp (atomic access)
+	sparseSize   int64 // Sparse file size (for pre-allocated files, e.g., qBittorrent) (atomic access)
+	lastOffset   int64 // Last write offset (for sequential write detection) (atomic access)
 	seqDetector  *ConcurrentSequentialDetector // Concurrent sequential write detector
 	tempWriter   atomic.Value                  // TempFileWriter for .tmp files (atomic.Value stores *TempFileWriter)
 }
@@ -800,16 +800,16 @@ func (ra *RandomAccessor) getOrCreateTempWriter() (*TempFileWriter, error) {
 		dataID:          dataID,
 		fileName:        fileObj.Name,
 		chunkSize:       chunkSize, // Always use 10MB
-		size:            atomic.Int64{},
+		size:            0,
 		chunks:          make(map[int]*chunkBuffer),
 		dataInfo:        dataInfo,
 		enableRealtime:  false,
 		realtimeDecided: false,
 		lh:              lh,
-		firstChunkSN:    atomic.Int64{},
-		lastChunkSN:     atomic.Int64{},
+		firstChunkSN:    0,
+		lastChunkSN:     0,
 	}
-	tw.firstChunkSN.Store(0) // First chunk is always sn=0
+	atomic.StoreInt64(&tw.firstChunkSN, 0) // First chunk is always sn=0
 
 	// Store in atomic.Value (lock-free for subsequent reads)
 	ra.tempWriter.Store(tw)
@@ -836,7 +836,7 @@ func (tw *TempFileWriter) Write(offset int64, data []byte) error {
 	}
 
 	writeEnd := offset + int64(len(data))
-	currentSize := tw.size.Load()
+	currentSize := atomic.LoadInt64(&tw.size)
 	DebugLog("[VFS TempFileWriter Write] Writing data to large file: fileID=%d, dataID=%d, offset=%d, size=%d, currentFileSize=%d, writeEnd=%d",
 		tw.fileID, tw.dataID, offset, len(data), currentSize, writeEnd)
 
@@ -1136,7 +1136,7 @@ func (tw *TempFileWriter) Write(offset int64, data []byte) error {
 						chunkBufferPool.Put(buf)
 					}
 
-					currentFileSize := tw.size.Load()
+					currentFileSize := atomic.LoadInt64(&tw.size)
 					DebugLog("[VFS TempFileWriter Write] Chunk flushed asynchronously: fileID=%d, dataID=%d, sn=%d, chunkSize=%d, currentFileSize=%d",
 						tw.fileID, tw.dataID, sn, bufferProgress, currentFileSize)
 
@@ -1162,12 +1162,12 @@ func (tw *TempFileWriter) Write(offset int64, data []byte) error {
 	// Update size atomically (always update to maximum writeEnd)
 	// This ensures that concurrent writes correctly track the maximum file size
 	for {
-		currentSize := tw.size.Load()
+		currentSize := atomic.LoadInt64(&tw.size)
 		if writeEnd <= currentSize {
 			// Already updated by another concurrent write, no need to update
 			break
 		}
-		if tw.size.CompareAndSwap(currentSize, writeEnd) {
+		if atomic.CompareAndSwapInt64(&tw.size, currentSize, writeEnd) {
 			DebugLog("[VFS TempFileWriter Write] Updated file size: fileID=%d, dataID=%d, oldSize=%d, newSize=%d",
 				tw.fileID, tw.dataID, currentSize, writeEnd)
 			break
@@ -1557,7 +1557,7 @@ func (tw *TempFileWriter) decideRealtimeProcessing(firstChunk []byte) {
 // Flush uploads DataInfo and ObjectInfo for .tmp file
 // Data chunks are already on disk via AppendData, so we only need to upload metadata
 func (tw *TempFileWriter) Flush() error {
-	size := tw.size.Load()
+	size := atomic.LoadInt64(&tw.size)
 	DebugLog("[VFS TempFileWriter Flush] Starting flush for large file: fileID=%d, dataID=%d, fileSize=%d",
 		tw.fileID, tw.dataID, size)
 
@@ -1606,7 +1606,7 @@ func (tw *TempFileWriter) Flush() error {
 	// All chunks are written synchronously, no need to wait for async writes
 
 	// Find the last chunk (highest sn) based on current file size
-	currentSize := tw.size.Load()
+	currentSize := atomic.LoadInt64(&tw.size)
 	// Calculate last chunk SN (always use fixed chunk size)
 	calculatedLastChunkSN := int((currentSize+tw.chunkSize-1)/tw.chunkSize) - 1
 	if calculatedLastChunkSN < 0 {
@@ -1623,7 +1623,7 @@ func (tw *TempFileWriter) Flush() error {
 			lastChunkSN = highestSN
 		}
 	}
-	tw.lastChunkSN.Store(int64(lastChunkSN))
+	atomic.StoreInt64(&tw.lastChunkSN, int64(lastChunkSN))
 	DebugLog("[VFS TempFileWriter Flush] Determined last chunk: fileID=%d, dataID=%d, calculatedLastChunkSN=%d, lastChunkSN=%d, currentSize=%d, remainingChunks=%v",
 		tw.fileID, tw.dataID, calculatedLastChunkSN, lastChunkSN, currentSize, remainingChunks)
 
@@ -1858,7 +1858,7 @@ func (tw *TempFileWriter) Flush() error {
 					if batchWriteThreshold <= 0 {
 						batchWriteThreshold = 64 << 10 // Default 64KB
 					}
-					fileSize := tw.size.Load()
+					fileSize := atomic.LoadInt64(&tw.size)
 					isSmallFile := fileSize < batchWriteThreshold
 
 					// Check if a .tmp file with the same name already exists (different fileID)
@@ -2091,7 +2091,7 @@ func NewRandomAccessor(fs *OrcasFS, fileID int64) (*RandomAccessor, error) {
 			writeIndex: 0,                                       // Start from 0
 			totalSize:  0,
 		},
-		lastOffset: atomic.Int64{},
+		lastOffset: 0,
 		seqDetector: &ConcurrentSequentialDetector{
 			pendingWrites:    make(map[int64]*PendingWrite),
 			expectedOffset:   -1,
@@ -2112,7 +2112,7 @@ func NewRandomAccessor(fs *OrcasFS, fileID int64) (*RandomAccessor, error) {
 // MarkSparseFile marks file as sparse (pre-allocated) for optimization
 // This is used when SetAllocationSize is called to pre-allocate space
 func (ra *RandomAccessor) MarkSparseFile(size int64) {
-	ra.sparseSize.Store(size)
+	atomic.StoreInt64(&ra.sparseSize, size)
 }
 
 // Write adds write operation to buffer
@@ -2285,7 +2285,7 @@ func (ra *RandomAccessor) Write(offset int64, data []byte) error {
 
 	// Detect sequential write pattern (even if file already has data)
 	// Sequential writes are writes that continue from the last write position
-	lastOffset := ra.lastOffset.Load()
+	lastOffset := atomic.LoadInt64(&ra.lastOffset)
 	isSequentialWrite := false
 	if lastOffset >= 0 {
 		// Check if this write continues from the last write position
@@ -2309,7 +2309,7 @@ func (ra *RandomAccessor) Write(offset int64, data []byte) error {
 	// Aggressive optimization: for sparse files (pre-allocated), use larger buffer threshold to reduce flush frequency
 	// This is critical for qBittorrent random write performance
 	// For small files, use larger buffer to allow more batching (balanced approach)
-	sparseSize := ra.sparseSize.Load()
+	sparseSize := atomic.LoadInt64(&ra.sparseSize)
 	isSparseFile := sparseSize > 0
 	maxBufferSize := config.MaxBufferSize
 
@@ -2370,7 +2370,7 @@ func (ra *RandomAccessor) Write(offset int64, data []byte) error {
 	}
 
 	// Update last write offset for sequential write detection
-	ra.lastOffset.Store(offset + int64(len(data)))
+	atomic.StoreInt64(&ra.lastOffset, offset+int64(len(data)))
 
 	// Aggressive optimization: for small file writes, use batch write manager
 	// If data size is small and hasn't reached force flush condition, add to batch write manager
@@ -3310,7 +3310,7 @@ func (ra *RandomAccessor) requestDelayedFlush(force bool) {
 	if ra == nil {
 		return
 	}
-	ra.lastActivity.Store(core.Now())
+	atomic.StoreInt64(&ra.lastActivity, core.Now())
 	getDelayedFlushManager().schedule(ra, force)
 }
 
@@ -3379,7 +3379,7 @@ func (ra *RandomAccessor) flushInternal(force bool) (int64, error) {
 		if val := ra.tempWriter.Load(); val != nil {
 			if tw, ok := val.(*TempFileWriter); ok && tw != nil {
 				// Check if TempFileWriter has data (size > 0)
-				twSize := tw.size.Load()
+				twSize := atomic.LoadInt64(&tw.size)
 				hasTempWriterData = twSize > 0
 				DebugLog("[VFS RandomAccessor Flush] .tmp file with TempFileWriter: fileID=%d, twSize=%d, writeIndex=%d, totalSize=%d", ra.fileID, twSize, writeIndex, totalSize)
 			}
@@ -3522,7 +3522,7 @@ func (ra *RandomAccessor) flushInternal(force bool) (int64, error) {
 	}
 
 	// Reset lastOffset after flush to allow detection of new sequential write pattern
-	ra.lastOffset.Store(-1)
+	atomic.StoreInt64(&ra.lastOffset, -1)
 
 	// Check if it's a small file, suitable for batch write
 	// When force=true, still allow batch write but flush immediately
@@ -3825,7 +3825,7 @@ func (ra *RandomAccessor) flushInternal(force bool) (int64, error) {
 
 	// Only use writing version for sparse files (pre-allocated files with holes, e.g., qBittorrent)
 	// For non-sparse files, use SDK path which handles compression/encryption properly
-	sparseSize := ra.sparseSize.Load()
+	sparseSize := atomic.LoadInt64(&ra.sparseSize)
 	isSparseFile := sparseSize > 0
 
 	if isSparseFile {
