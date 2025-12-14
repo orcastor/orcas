@@ -47,10 +47,22 @@ func TestUpload(t *testing.T) {
 		sdk := New(core.NewLocalHandler())
 		defer sdk.Close()
 
-		c, _, b, err := sdk.Login(cfg)
+		c, u, b, err := sdk.Login(cfg)
 		So(err, ShouldBeNil)
 
-		So(sdk.Upload(c, b[0].ID, core.ROOT_OID, path), ShouldBeNil)
+		var bktID int64
+		if len(b) <= 0 {
+			// Create bucket if none exists
+			bktID, _ = idgen.NewIDGen(nil, 0).New()
+			core.InitBucketDB(c, bktID)
+			admin := core.NewLocalAdmin()
+			err = admin.PutBkt(c, []*core.BucketInfo{{ID: bktID, Name: "下载", UID: u.ID, Type: 1}})
+			So(err, ShouldBeNil)
+		} else {
+			bktID = b[0].ID
+		}
+
+		So(sdk.Upload(c, bktID, core.ROOT_OID, path), ShouldBeNil)
 	})
 }
 
@@ -59,13 +71,25 @@ func TestDownload(t *testing.T) {
 		sdk := New(core.NewLocalHandler())
 		defer sdk.Close()
 
-		c, _, b, err := sdk.Login(cfg)
+		c, u, b, err := sdk.Login(cfg)
 		So(err, ShouldBeNil)
 
-		id, _ := sdk.Path2ID(c, b[0].ID, core.ROOT_OID, filepath.Base(path))
-		So(sdk.Download(c, b[0].ID, id, mntPath), ShouldBeNil)
+		var bktID int64
+		if len(b) <= 0 {
+			// Create bucket if none exists
+			bktID, _ = idgen.NewIDGen(nil, 0).New()
+			core.InitBucketDB(c, bktID)
+			admin := core.NewLocalAdmin()
+			err = admin.PutBkt(c, []*core.BucketInfo{{ID: bktID, Name: "下载", UID: u.ID, Type: 1}})
+			So(err, ShouldBeNil)
+		} else {
+			bktID = b[0].ID
+		}
 
-		fmt.Println(sdk.ID2Path(c, b[0].ID, id))
+		id, _ := sdk.Path2ID(c, bktID, core.ROOT_OID, filepath.Base(path))
+		So(sdk.Download(c, bktID, id, mntPath), ShouldBeNil)
+
+		fmt.Println(sdk.ID2Path(c, bktID, id))
 	})
 }
 
