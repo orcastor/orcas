@@ -1056,6 +1056,13 @@ func TestQuotaAndUsed(t *testing.T) {
 		}
 		So(dma.PutBkt(c, []*BucketInfo{bucket}), ShouldBeNil)
 
+		// 创建用户上下文用于权限检查
+		userInfo := &UserInfo{
+			ID:   uid,
+			Role: USER,
+		}
+		testCtx := UserInfo2Ctx(c, userInfo)
+
 		// 创建LocalHandler用于测试
 		lh := NewLocalHandler().(*LocalHandler)
 		lh.SetAdapter(dma, dda)
@@ -1067,12 +1074,12 @@ func TestQuotaAndUsed(t *testing.T) {
 			dataSize := int64(len(testData))
 
 			// 使用PutData上传（应该成功）
-			resultID, err := lh.PutData(c, testBktID, dataID, 0, testData)
+			resultID, err := lh.PutData(testCtx, testBktID, dataID, 0, testData)
 			So(err, ShouldBeNil)
 			So(resultID, ShouldEqual, dataID)
 
 			// 验证实际使用量已增加
-			buckets, err := dma.GetBkt(c, []int64{testBktID})
+			buckets, err := dma.GetBkt(testCtx, []int64{testBktID})
 			So(err, ShouldBeNil)
 			So(len(buckets), ShouldEqual, 1)
 			So(buckets[0].RealUsed, ShouldEqual, dataSize)
@@ -1088,11 +1095,11 @@ func TestQuotaAndUsed(t *testing.T) {
 				Size:   dataSize,
 				MTime:  Now(),
 			}
-			_, err = lh.Put(c, testBktID, []*ObjectInfo{obj})
+			_, err = lh.Put(testCtx, testBktID, []*ObjectInfo{obj})
 			So(err, ShouldBeNil)
 
 			// 验证逻辑使用量已增加（即使秒传也要计算）
-			buckets, err = dma.GetBkt(c, []int64{testBktID})
+			buckets, err = dma.GetBkt(testCtx, []int64{testBktID})
 			So(err, ShouldBeNil)
 			So(buckets[0].Used, ShouldEqual, dataSize)
 		})
@@ -1101,7 +1108,7 @@ func TestQuotaAndUsed(t *testing.T) {
 			// 先使用一些配额
 			dataID1, _ := ig.New()
 			testData1 := []byte("data1")
-			_, err := lh.PutData(c, testBktID, dataID1, 0, testData1)
+			_, err := lh.PutData(testCtx, testBktID, dataID1, 0, testData1)
 			So(err, ShouldBeNil)
 
 			// 尝试上传超过配额的数据
@@ -1113,48 +1120,48 @@ func TestQuotaAndUsed(t *testing.T) {
 			}
 
 			// 应该失败并返回配额超限错误
-			_, err = lh.PutData(c, testBktID, dataID2, 0, largeData)
+			_, err = lh.PutData(testCtx, testBktID, dataID2, 0, largeData)
 			So(err, ShouldNotBeNil)
 			So(err, ShouldEqual, ERR_QUOTA_EXCEED)
 
 			// 验证实际使用量没有增加（应该还是只有testData1的大小）
-			buckets, err := dma.GetBkt(c, []int64{testBktID})
+			buckets, err := dma.GetBkt(testCtx, []int64{testBktID})
 			So(err, ShouldBeNil)
 			So(buckets[0].RealUsed, ShouldEqual, int64(len(testData1)))
 		})
 
 		Convey("upload with unlimited quota (quota < 0)", func() {
 			// 设置配额为负数（不限制）
-			buckets, err := dma.GetBkt(c, []int64{testBktID})
+			buckets, err := dma.GetBkt(testCtx, []int64{testBktID})
 			So(err, ShouldBeNil)
 			buckets[0].Quota = -1
-			So(dma.UpdateBktQuota(c, testBktID, -1), ShouldBeNil)
+			So(dma.UpdateBktQuota(testCtx, testBktID, -1), ShouldBeNil)
 
 			// 上传大文件应该成功
 			dataID, _ := ig.New()
 			largeData := make([]byte, 5000) // 5KB
-			_, err = lh.PutData(c, testBktID, dataID, 0, largeData)
+			_, err = lh.PutData(testCtx, testBktID, dataID, 0, largeData)
 			So(err, ShouldBeNil)
 
 			// 验证实际使用量已增加
-			buckets, err = dma.GetBkt(c, []int64{testBktID})
+			buckets, err = dma.GetBkt(testCtx, []int64{testBktID})
 			So(err, ShouldBeNil)
 			So(buckets[0].RealUsed, ShouldBeGreaterThan, int64(5000))
 		})
 
 		Convey("used increases on instant upload (秒传)", func() {
 			// 恢复配额
-			So(dma.UpdateBktQuota(c, testBktID, 10000), ShouldBeNil)
+			So(dma.UpdateBktQuota(testCtx, testBktID, 10000), ShouldBeNil)
 
 			// 创建一个数据并上传
 			dataID, _ := ig.New()
 			testData := []byte("test data for instant upload")
 			dataSize := int64(len(testData))
-			_, err := lh.PutData(c, testBktID, dataID, 0, testData)
+			_, err := lh.PutData(testCtx, testBktID, dataID, 0, testData)
 			So(err, ShouldBeNil)
 
 			// 记录初始使用量
-			buckets, err := dma.GetBkt(c, []int64{testBktID})
+			buckets, err := dma.GetBkt(testCtx, []int64{testBktID})
 			So(err, ShouldBeNil)
 			initialUsed := buckets[0].Used
 
@@ -1169,11 +1176,11 @@ func TestQuotaAndUsed(t *testing.T) {
 				Size:   dataSize,
 				MTime:  Now(),
 			}
-			_, err = lh.Put(c, testBktID, []*ObjectInfo{obj1})
+			_, err = lh.Put(testCtx, testBktID, []*ObjectInfo{obj1})
 			So(err, ShouldBeNil)
 
 			// 验证逻辑使用量增加
-			buckets, err = dma.GetBkt(c, []int64{testBktID})
+			buckets, err = dma.GetBkt(testCtx, []int64{testBktID})
 			So(err, ShouldBeNil)
 			So(buckets[0].Used, ShouldEqual, initialUsed+dataSize)
 
@@ -1188,11 +1195,11 @@ func TestQuotaAndUsed(t *testing.T) {
 				Size:   dataSize,
 				MTime:  Now(),
 			}
-			_, err = lh.Put(c, testBktID, []*ObjectInfo{obj2})
+			_, err = lh.Put(testCtx, testBktID, []*ObjectInfo{obj2})
 			So(err, ShouldBeNil)
 
 			// 验证逻辑使用量再次增加（即使秒传也要计算）
-			buckets, err = dma.GetBkt(c, []int64{testBktID})
+			buckets, err = dma.GetBkt(testCtx, []int64{testBktID})
 			So(err, ShouldBeNil)
 			So(buckets[0].Used, ShouldEqual, initialUsed+dataSize*2)
 			// 实际使用量不应该增加（因为是秒传）
@@ -1204,7 +1211,7 @@ func TestQuotaAndUsed(t *testing.T) {
 			dataID, _ := ig.New()
 			testData := []byte("test delete data")
 			dataSize := int64(len(testData))
-			_, err := lh.PutData(c, testBktID, dataID, 0, testData)
+			_, err := lh.PutData(testCtx, testBktID, dataID, 0, testData)
 			So(err, ShouldBeNil)
 
 			// 创建对象
@@ -1218,20 +1225,20 @@ func TestQuotaAndUsed(t *testing.T) {
 				Size:   dataSize,
 				MTime:  Now(),
 			}
-			_, err = lh.Put(c, testBktID, []*ObjectInfo{obj})
+			_, err = lh.Put(testCtx, testBktID, []*ObjectInfo{obj})
 			So(err, ShouldBeNil)
 
 			// 记录删除前的使用量
-			buckets, err := dma.GetBkt(c, []int64{testBktID})
+			buckets, err := dma.GetBkt(testCtx, []int64{testBktID})
 			So(err, ShouldBeNil)
 			beforeUsed := buckets[0].Used
 			beforeRealUsed := buckets[0].RealUsed
 
 			// 删除对象
-			So(lh.Delete(c, testBktID, objID), ShouldBeNil)
+			So(lh.Delete(testCtx, testBktID, objID), ShouldBeNil)
 
 			// 验证逻辑使用量减少
-			buckets, err = dma.GetBkt(c, []int64{testBktID})
+			buckets, err = dma.GetBkt(testCtx, []int64{testBktID})
 			So(err, ShouldBeNil)
 			So(buckets[0].Used, ShouldEqual, beforeUsed-dataSize)
 
@@ -1240,31 +1247,31 @@ func TestQuotaAndUsed(t *testing.T) {
 		})
 
 		Convey("SetQuota interface", func() {
-			// Create Admin instance for SetQuota
-			admin := NewLocalAdmin()
+			// Create Admin instance for SetQuota with no auth (for testing)
+			admin := NewNoAuthAdmin()
 
 			// Set quota
-			err := admin.SetQuota(c, testBktID, 2000)
+			err := admin.SetQuota(testCtx, testBktID, 2000)
 			So(err, ShouldBeNil)
 
 			// Verify quota has been updated
-			buckets, err := dma.GetBkt(c, []int64{testBktID})
+			buckets, err := dma.GetBkt(testCtx, []int64{testBktID})
 			So(err, ShouldBeNil)
 			So(buckets[0].Quota, ShouldEqual, 2000)
 
 			// Set quota to unlimited
-			err = admin.SetQuota(c, testBktID, -1)
+			err = admin.SetQuota(testCtx, testBktID, -1)
 			So(err, ShouldBeNil)
 
 			// Verify quota has been updated to -1
-			buckets, err = dma.GetBkt(c, []int64{testBktID})
+			buckets, err = dma.GetBkt(testCtx, []int64{testBktID})
 			So(err, ShouldBeNil)
 			So(buckets[0].Quota, ShouldEqual, -1)
 		})
 
 		Convey("directory does not count in used", func() {
 			// 记录初始使用量
-			buckets, err := dma.GetBkt(c, []int64{testBktID})
+			buckets, err := dma.GetBkt(testCtx, []int64{testBktID})
 			So(err, ShouldBeNil)
 			initialUsed := buckets[0].Used
 
@@ -1278,11 +1285,11 @@ func TestQuotaAndUsed(t *testing.T) {
 				Size:  0,
 				MTime: Now(),
 			}
-			_, err = lh.Put(c, testBktID, []*ObjectInfo{dir})
+			_, err = lh.Put(testCtx, testBktID, []*ObjectInfo{dir})
 			So(err, ShouldBeNil)
 
 			// 验证逻辑使用量没有增加（目录不计算）
-			buckets, err = dma.GetBkt(c, []int64{testBktID})
+			buckets, err = dma.GetBkt(testCtx, []int64{testBktID})
 			So(err, ShouldBeNil)
 			So(buckets[0].Used, ShouldEqual, initialUsed)
 		})

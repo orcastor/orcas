@@ -1316,7 +1316,8 @@ func (dma *DefaultMetadataAdapter) PutBkt(c Ctx, o []*BucketInfo) error {
 
 func (dma *DefaultMetadataAdapter) GetBkt(c Ctx, ids []int64) (o []*BucketInfo, err error) {
 	// Use read connection for bucket retrieval
-	db, err := GetReadDB()
+	// Pass context to ensure proper database access (for key extraction if needed)
+	db, err := GetReadDB(c)
 	if err != nil {
 		return nil, ERR_OPEN_DB
 	}

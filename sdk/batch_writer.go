@@ -65,6 +65,7 @@ type BatchWriter struct {
 	lastFlushTime int64        // Last flush time (UnixNano, atomic access)
 	flushTimer    atomic.Value // *time.Timer for periodic flush
 	flushCtx      atomic.Value // Stored context for scheduled flushes
+	flushUID      atomic.Value // Stored UID for scheduled flushes (int64, fallback if context doesn't have UID)
 
 	// Callback function to update dirListCache after flush (optional, set by VFS layer)
 	onFlushComplete func(objectInfos []*core.ObjectInfo)
@@ -225,12 +226,54 @@ func (bwm *BatchWriter) FlushAll(ctx context.Context) {
 	bwm.flush(ctx)
 }
 
+// ensureContextWithUID ensures the context has a valid UID for permission checks
+// If the context doesn't have UID, uses the stored UID from SetFlushContext
+func (bwm *BatchWriter) ensureContextWithUID(ctx context.Context) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	
+	// Check if context already has UID
+	if v, ok := ctx.Value("o").(map[string]interface{}); ok {
+		if uid, okk := v["uid"].(int64); okk && uid > 0 {
+			// Context already has valid UID
+			return ctx
+		}
+	}
+	
+	// Context doesn't have UID, try to use stored UID from SetFlushContext
+	if val := bwm.flushUID.Load(); val != nil {
+		if uid, ok := val.(int64); ok && uid > 0 {
+			// Create context with stored UID
+			o := map[string]interface{}{
+				"uid": uid,
+			}
+			// Preserve other context values if they exist
+			if v, ok := ctx.Value("o").(map[string]interface{}); ok {
+				for k, val := range v {
+					if k != "uid" {
+						o[k] = val
+					}
+				}
+			}
+			return context.WithValue(ctx, "o", o)
+		}
+	}
+	
+	// If we can't get UID, return original context
+	// The permission check will fail, but at least we tried
+	return ctx
+}
+
 // flush flushes all pending write data (lock-free)
 // Atomically gets current write position and file info, then packages and writes
 func (bwm *BatchWriter) flush(ctx context.Context) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	
+	// Ensure context has UID before flushing
+	ctx = bwm.ensureContextWithUID(ctx)
 	// Get current buffer (for writing) - atomic load
 	currentBuf := (*BatchWriterBuffer)(atomic.LoadPointer(&bwm.currentBuffer))
 
@@ -765,11 +808,20 @@ func (bwm *BatchWriter) schedulePeriodicFlush() {
 }
 
 // SetFlushContext stores the context used for asynchronous flush operations
+// Also extracts and stores UID from context as fallback for permission checks
 func (bwm *BatchWriter) SetFlushContext(ctx context.Context) {
 	if bwm == nil || ctx == nil {
 		return
 	}
 	bwm.flushCtx.Store(ctx)
+	
+	// Extract UID from context and store it separately as fallback
+	// This ensures we have UID even if context is lost or doesn't have UID
+	if v, ok := ctx.Value("o").(map[string]interface{}); ok {
+		if uid, okk := v["uid"].(int64); okk && uid > 0 {
+			bwm.flushUID.Store(uid)
+		}
+	}
 }
 
 func (bwm *BatchWriter) getFlushContext() context.Context {
