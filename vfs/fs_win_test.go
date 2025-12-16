@@ -13,7 +13,6 @@ import (
 
 	"github.com/orca-zhang/idgen"
 	"github.com/orcastor/orcas/core"
-	"github.com/orcastor/orcas/sdk"
 )
 
 // TestDokanyInitialization tests Dokany DLL loading
@@ -74,8 +73,7 @@ func TestDokanyMountOptions(t *testing.T) {
 	}
 
 	// Create filesystem
-	sdkCfg := &sdk.Config{}
-	ofs := NewOrcasFS(handler, ctx, testBktID, sdkCfg)
+	ofs := NewOrcasFS(handler, ctx, testBktID)
 
 	// Test mount options
 	mountPoint := filepath.Join(os.TempDir(), "orcas_test_mount")
@@ -145,8 +143,7 @@ func TestDokanyOperations(t *testing.T) {
 	}
 
 	// Create filesystem
-	sdkCfg := &sdk.Config{}
-	ofs := NewOrcasFS(handler, ctx, testBktID, sdkCfg)
+	ofs := NewOrcasFS(handler, ctx, testBktID)
 
 	// Test create file
 	testData := []byte("Hello, Dokany!")
@@ -260,8 +257,7 @@ func TestDokanyDirectoryOperations(t *testing.T) {
 	}
 
 	// Create filesystem
-	sdkCfg := &sdk.Config{}
-	ofs := NewOrcasFS(handler, ctx, testBktID, sdkCfg)
+	ofs := NewOrcasFS(handler, ctx, testBktID)
 
 	// Create test directory
 	dirObj := &core.ObjectInfo{
@@ -403,8 +399,7 @@ func TestDokanyCreateFile(t *testing.T) {
 	}
 
 	// Create filesystem
-	sdkCfg := &sdk.Config{}
-	ofs := NewOrcasFS(handler, ctx, testBktID, sdkCfg)
+	ofs := NewOrcasFS(handler, ctx, testBktID)
 
 	// Test creating a new file
 	fileName := "/new-file.txt"
@@ -472,8 +467,7 @@ func TestDokanyWriteAndRead(t *testing.T) {
 	}
 
 	// Create filesystem
-	sdkCfg := &sdk.Config{}
-	ofs := NewOrcasFS(handler, ctx, testBktID, sdkCfg)
+	ofs := NewOrcasFS(handler, ctx, testBktID)
 
 	// Create file with data directly (simpler test)
 	testData := []byte("Hello, World!")
@@ -730,8 +724,7 @@ func TestTmpFileRenameCacheUpdate(t *testing.T) {
 	}
 
 	// Create filesystem
-	sdkCfg := &sdk.Config{}
-	ofs := NewOrcasFS(handler, ctx, testBktID, sdkCfg)
+	ofs := NewOrcasFS(handler, ctx, testBktID)
 
 	// Step 1: Create a .tmp file (simulating file upload)
 	tmpFileName := "/test-file.tmp"
@@ -886,8 +879,7 @@ func TestRenameBeforeFlush(t *testing.T) {
 	}
 
 	// Create filesystem
-	sdkCfg := &sdk.Config{}
-	ofs := NewOrcasFS(handler, ctx, testBktID, sdkCfg)
+	ofs := NewOrcasFS(handler, ctx, testBktID)
 
 	// Step 1: Create a new file (simulating new file upload)
 	originalFileName := "/new-file.tmp"

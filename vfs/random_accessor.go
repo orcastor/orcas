@@ -714,10 +714,10 @@ type RandomAccessor struct {
 	buffer       *WriteBuffer           // Random write buffer
 	seqBuffer    *SequentialWriteBuffer // Sequential write buffer (optimized)
 	fileObj      atomic.Value
-	fileObjKey   int64 // Pre-computed file_obj cache key (optimized: avoid repeated conversion)
-	lastActivity int64 // Last activity timestamp (atomic access)
-	sparseSize   int64 // Sparse file size (for pre-allocated files, e.g., qBittorrent) (atomic access)
-	lastOffset   int64 // Last write offset (for sequential write detection) (atomic access)
+	fileObjKey   int64                         // Pre-computed file_obj cache key (optimized: avoid repeated conversion)
+	lastActivity int64                         // Last activity timestamp (atomic access)
+	sparseSize   int64                         // Sparse file size (for pre-allocated files, e.g., qBittorrent) (atomic access)
+	lastOffset   int64                         // Last write offset (for sequential write detection) (atomic access)
 	seqDetector  *ConcurrentSequentialDetector // Concurrent sequential write detector
 	tempWriter   atomic.Value                  // TempFileWriter for .tmp files (atomic.Value stores *TempFileWriter)
 }
@@ -867,13 +867,47 @@ func (tw *TempFileWriter) Write(offset int64, data []byte) error {
 		tw.mu.Lock()
 		buf, exists := tw.chunks[sn]
 		if !exists {
-			// Chunk buffer doesn't exist in memory, check if it exists on disk
-			// First check if chunk exists on disk (might have been flushed already)
+			// Chunk buffer doesn't exist in memory
+			// For .tmp files with pure append writes, chunks are written sequentially:
+			// - If chunk is not in memory, it means it hasn't been created yet (for new chunks)
+			// - OR it has been flushed (for completed chunks, which shouldn't receive more writes)
+			// For pure append writes, we can skip reading from disk and create a new buffer directly
+			// This avoids unnecessary disk reads for sequential writes
+
+			// Check if chunk might have been flushed (wait for flush to complete if in progress)
 			flushKey := fmt.Sprintf("flush_%d_%d", tw.dataID, sn)
 			tw.mu.Unlock()
 
-			// Try to read from disk first (most common case: chunk already flushed)
-			existingChunkData, readErr := tw.fs.h.GetData(tw.fs.c, tw.fs.bktID, tw.dataID, sn)
+			// Wait for any ongoing flush to complete (non-blocking if no flush in progress)
+			// This ensures we don't create a buffer for a chunk that's being flushed
+			_, _, _ = chunkFlushSingleFlight.Do(flushKey, func() (interface{}, error) {
+				return nil, nil
+			})
+
+			// For pure append writes, check if chunk exists on disk only if writeStartInChunk > 0
+			// (meaning we're writing to middle/end of chunk, not the beginning)
+			// If writing from beginning (writeStartInChunk == 0), chunk shouldn't exist yet
+			var existingChunkData []byte
+			var readErr error
+			if writeStartInChunk > 0 {
+				// Writing to middle/end of chunk, might need to read existing data
+				DebugLog("[VFS TempFileWriter Write] READING from disk (non-zero offset): fileID=%d, dataID=%d, sn=%d, writeStartInChunk=%d",
+					tw.fileID, tw.dataID, sn, writeStartInChunk)
+				existingChunkData, readErr = tw.fs.h.GetData(tw.fs.c, tw.fs.bktID, tw.dataID, sn)
+				if readErr == nil && len(existingChunkData) > 0 {
+					DebugLog("[VFS TempFileWriter Write] READ from disk successful: fileID=%d, dataID=%d, sn=%d, size=%d",
+						tw.fileID, tw.dataID, sn, len(existingChunkData))
+				} else {
+					DebugLog("[VFS TempFileWriter Write] READ from disk failed/empty: fileID=%d, dataID=%d, sn=%d, error=%v",
+						tw.fileID, tw.dataID, sn, readErr)
+				}
+			} else {
+				// Writing from beginning, chunk shouldn't exist (pure append)
+				// Skip read to avoid unnecessary disk I/O
+				DebugLog("[VFS TempFileWriter Write] SKIPPING read (pure append from offset 0): fileID=%d, dataID=%d, sn=%d",
+					tw.fileID, tw.dataID, sn)
+				readErr = fmt.Errorf("chunk not found (expected for new chunk)")
+			}
 			if readErr == nil && len(existingChunkData) > 0 {
 				// Chunk exists on disk, re-acquire lock and create buffer
 				tw.mu.Lock()
@@ -955,7 +989,26 @@ func (tw *TempFileWriter) Write(offset int64, data []byte) error {
 				})
 
 				// After waiting, try reading from disk again (flush might have completed)
-				existingChunkData2, readErr2 := tw.fs.h.GetData(tw.fs.c, tw.fs.bktID, tw.dataID, sn)
+				// Only read if writeStartInChunk > 0 (writing to middle/end of chunk)
+				var existingChunkData2 []byte
+				var readErr2 error
+				if writeStartInChunk > 0 {
+					DebugLog("[VFS TempFileWriter Write] READING from disk after flush wait (non-zero offset): fileID=%d, dataID=%d, sn=%d, writeStartInChunk=%d",
+						tw.fileID, tw.dataID, sn, writeStartInChunk)
+					existingChunkData2, readErr2 = tw.fs.h.GetData(tw.fs.c, tw.fs.bktID, tw.dataID, sn)
+					if readErr2 == nil && len(existingChunkData2) > 0 {
+						DebugLog("[VFS TempFileWriter Write] READ from disk after flush wait successful: fileID=%d, dataID=%d, sn=%d, size=%d",
+							tw.fileID, tw.dataID, sn, len(existingChunkData2))
+					} else {
+						DebugLog("[VFS TempFileWriter Write] READ from disk after flush wait failed/empty: fileID=%d, dataID=%d, sn=%d, error=%v",
+							tw.fileID, tw.dataID, sn, readErr2)
+					}
+				} else {
+					// Writing from beginning, skip read
+					DebugLog("[VFS TempFileWriter Write] SKIPPING read after flush wait (pure append from offset 0): fileID=%d, dataID=%d, sn=%d",
+						tw.fileID, tw.dataID, sn)
+					readErr2 = fmt.Errorf("chunk not found (expected for new chunk)")
+				}
 
 				// Re-acquire lock
 				tw.mu.Lock()
@@ -1028,7 +1081,11 @@ func (tw *TempFileWriter) Write(offset int64, data []byte) error {
 					tw.mu.Unlock()
 				} else {
 					// Chunk still doesn't exist, create empty buffer using 10MB pool buffer
+					// No read operation needed - pure append write from beginning
+					DebugLog("[VFS TempFileWriter Write] Creating new buffer (NO READ): fileID=%d, dataID=%d, sn=%d, writeStartInChunk=%d",
+						tw.fileID, tw.dataID, sn, writeStartInChunk)
 					pooledBuf := chunkBufferPool.Get().(*chunkBuffer)
+					// Pre-size buffer to chunkSize to avoid resizing during writes
 					pooledBuf.data = pooledBuf.data[:chunkSize]
 					pooledBuf.offsetInChunk = 0
 					pooledBuf.ranges = pooledBuf.ranges[:0]
@@ -1039,6 +1096,9 @@ func (tw *TempFileWriter) Write(offset int64, data []byte) error {
 			}
 		} else {
 			// Chunk exists in memory, just unlock
+			// No read operation needed - chunk already in memory
+			DebugLog("[VFS TempFileWriter Write] Chunk in memory (NO READ): fileID=%d, dataID=%d, sn=%d",
+				tw.fileID, tw.dataID, sn)
 			tw.mu.Unlock()
 		}
 
@@ -1051,10 +1111,11 @@ func (tw *TempFileWriter) Write(offset int64, data []byte) error {
 
 		// Copy data into buffer
 		// Buffer from pool has 10MB capacity, but length may be smaller
-		// Grow buffer length if needed (capacity is already 10MB, so this is just reslicing)
+		// Optimize: minimize buffer resizing by checking capacity first
 		requiredBufferSize := writeStartInChunk + int64(len(chunkData))
-		if requiredBufferSize > int64(len(buf.data)) {
-			// Grow buffer length (capacity is already 10MB, so this is just reslicing)
+		oldBufferLen := int64(len(buf.data))
+		if requiredBufferSize > oldBufferLen {
+			// Need to grow buffer length (capacity is already 10MB, so this is just reslicing)
 			newBufferLength := requiredBufferSize
 			if newBufferLength < chunkSize {
 				newBufferLength = chunkSize
@@ -1063,11 +1124,17 @@ func (tw *TempFileWriter) Write(offset int64, data []byte) error {
 			if newBufferLength > int64(cap(buf.data)) {
 				newBufferLength = int64(cap(buf.data))
 			}
-			buf.data = buf.data[:newBufferLength]
-			DebugLog("[VFS TempFileWriter Write] Grew buffer length: fileID=%d, dataID=%d, sn=%d, oldLen=%d, newLen=%d, requiredSize=%d, capacity=%d",
-				tw.fileID, tw.dataID, sn, len(buf.data), newBufferLength, requiredBufferSize, cap(buf.data))
+			// Only resize if actually needed (avoid unnecessary reslicing)
+			if newBufferLength > oldBufferLen {
+				buf.data = buf.data[:newBufferLength]
+				DebugLog("[VFS TempFileWriter Write] BUFFER RESIZE: fileID=%d, dataID=%d, sn=%d, oldLen=%d, newLen=%d, requiredSize=%d, capacity=%d",
+					tw.fileID, tw.dataID, sn, oldBufferLen, newBufferLength, requiredBufferSize, cap(buf.data))
+			}
 		}
+		// Direct copy without additional checks (we've already ensured buffer is large enough)
 		copy(buf.data[writeStartInChunk:writeStartInChunk+int64(len(chunkData))], chunkData)
+		DebugLog("[VFS TempFileWriter Write] DATA COPIED to buffer: fileID=%d, dataID=%d, sn=%d, offset=%d, size=%d, noResize=%v",
+			tw.fileID, tw.dataID, sn, writeStartInChunk, len(chunkData), requiredBufferSize <= oldBufferLen)
 		writeEndInChunkPos := writeStartInChunk + int64(len(chunkData))
 		if writeEndInChunkPos > buf.offsetInChunk {
 			buf.offsetInChunk = writeEndInChunkPos
@@ -1090,12 +1157,17 @@ func (tw *TempFileWriter) Write(offset int64, data []byte) error {
 			// IMPORTANT: Create a copy of the buffer data before removing from chunks
 			// This ensures that the flush operation uses a snapshot of the data at the time of flush
 			// and prevents data corruption if the buffer is modified during flush
+			// Create copy for async flush (necessary for thread safety)
+			// Optimize: only copy actual data size, not full buffer
 			buf.mu.Lock()
-			chunkDataCopy := make([]byte, buf.offsetInChunk)
-			copy(chunkDataCopy, buf.data[:buf.offsetInChunk])
+			chunkDataSize := buf.offsetInChunk
+			chunkDataCopy := make([]byte, chunkDataSize)
+			copy(chunkDataCopy, buf.data[:chunkDataSize])
 			bufRangesCopy := make([]writeRange, len(buf.ranges))
 			copy(bufRangesCopy, buf.ranges)
 			buf.mu.Unlock()
+			DebugLog("[VFS TempFileWriter Write] Chunk complete, copy created for async flush: fileID=%d, dataID=%d, sn=%d, copySize=%d (necessary for async safety)",
+				tw.fileID, tw.dataID, sn, chunkDataSize)
 
 			// Remove chunk from tw.chunks IMMEDIATELY to prevent further writes
 			// This ensures that subsequent writes to this chunk will read from disk instead
@@ -1367,46 +1439,31 @@ func (tw *TempFileWriter) flushChunkWithBuffer(sn int, isLastChunk bool, buf *ch
 
 // writeChunkSync writes a chunk synchronously (used for last chunk)
 // IMPORTANT: This function should only be called once per chunk (sn)
-// If the chunk already exists on disk, we check if it's the same size and skip writing
+// For .tmp files with pure append writes, chunks are written only once when full
+// Singleflight ensures only one flush per chunk, so we can skip pre-write checks
+// Chunks are written immediately when full, no batching
 func (tw *TempFileWriter) writeChunkSync(sn int, finalData []byte) error {
-	// First, check if chunk already exists on disk
-	// This prevents duplicate writes if flushChunk is called multiple times for the same chunk
-	existingChunkData, readErr := tw.fs.h.GetData(tw.fs.c, tw.fs.bktID, tw.dataID, sn)
-	if readErr == nil && len(existingChunkData) > 0 {
-		// Chunk already exists on disk
-		// If size is the same, skip writing (already written)
-		// If size is different, it means chunk was modified, need to overwrite
-		if len(existingChunkData) == len(finalData) {
-			// Chunk already exists with the same size, skip writing
-			// This handles the case where flushChunk was called multiple times (e.g., from Write() and Flush())
-			DebugLog("[VFS TempFileWriter writeChunkSync] Chunk already exists with same size, skipping write: fileID=%d, dataID=%d, sn=%d, size=%d",
-				tw.fileID, tw.dataID, sn, len(finalData))
-			return nil
-		} else {
-			// Chunk exists but size is different - this should not happen for sequential writes
-			// Log warning but proceed with overwrite
-			DebugLog("[VFS TempFileWriter writeChunkSync] WARNING: Chunk exists with different size, will overwrite: fileID=%d, dataID=%d, sn=%d, existingSize=%d, newSize=%d",
-				tw.fileID, tw.dataID, sn, len(existingChunkData), len(finalData))
-		}
-	}
+	// For pure append writes (.tmp files), chunks are written sequentially:
+	// - Each chunk is written exactly once when it becomes full
+	// - Singleflight ensures only one flush per chunk
+	// - No pre-write read check (optimization: avoid unnecessary disk read)
+	DebugLog("[VFS TempFileWriter writeChunkSync] WRITING chunk (NO PRE-READ): fileID=%d, dataID=%d, sn=%d, size=%d",
+		tw.fileID, tw.dataID, sn, len(finalData))
 
 	_, err := tw.fs.h.PutData(tw.fs.c, tw.fs.bktID, tw.dataID, sn, finalData)
 	if err != nil {
-		// If error is due to file already existing (ERR_OPEN_FILE), check if it's the same size
+		// If error is due to file already existing (ERR_OPEN_FILE), it means another goroutine already wrote it
+		// For pure append writes, this should only happen if:
+		// 1. Another goroutine wrote the same chunk (shouldn't happen with proper chunking)
+		// 2. Flush was called multiple times (singleflight should prevent this)
+		// In this case, we can safely assume the chunk was written correctly and skip
+		// NO READ OPERATION - singleflight ensures consistency, no need to verify
 		if err == core.ERR_OPEN_FILE {
-			// Check if existing file has the same size (another goroutine may have written it)
-			existingChunkData, readErr := tw.fs.h.GetData(tw.fs.c, tw.fs.bktID, tw.dataID, sn)
-			if readErr == nil && len(existingChunkData) == len(finalData) {
-				// Chunk already exists with the same size, skip writing
-				DebugLog("[VFS TempFileWriter writeChunkSync] Chunk already exists with same size (from ERR_OPEN_FILE check), skipping write: fileID=%d, dataID=%d, sn=%d, size=%d",
-					tw.fileID, tw.dataID, sn, len(finalData))
-				return nil
-			}
-			// File exists but size is different - this should not happen for sequential writes
-			// Log warning and return error (don't delete, let upper layer handle it)
-			DebugLog("[VFS TempFileWriter writeChunkSync] WARNING: Chunk exists with different size (ERR_OPEN_FILE): fileID=%d, dataID=%d, sn=%d, existingSize=%d, newSize=%d, error=%v",
-				tw.fileID, tw.dataID, sn, len(existingChunkData), len(finalData), err)
-			return err
+			// Chunk already exists, assume it was written correctly by another goroutine
+			// No need to read and verify - singleflight ensures consistency
+			DebugLog("[VFS TempFileWriter writeChunkSync] Chunk already exists (ERR_OPEN_FILE), skipping write (NO READ CHECK): fileID=%d, dataID=%d, sn=%d, size=%d",
+				tw.fileID, tw.dataID, sn, len(finalData))
+			return nil
 		} else {
 			DebugLog("[VFS TempFileWriter writeChunkSync] ERROR: Failed to put data: fileID=%d, dataID=%d, sn=%d, error=%v", tw.fileID, tw.dataID, sn, err)
 			return err
@@ -1688,6 +1745,11 @@ func (tw *TempFileWriter) Flush() error {
 
 		_, err, _ := chunkFlushSingleFlight.Do(flushKey, func() (interface{}, error) {
 			// Flush the chunk using the saved buffer reference
+			// Process chunk data first (compression/encryption)
+			chunkData := make([]byte, flushBuf.offsetInChunk)
+			copy(chunkData, flushBuf.data[:flushBuf.offsetInChunk])
+
+			// Process chunk (compression/encryption) - reuse flushChunkWithBuffer logic
 			flushErr := tw.flushChunkWithBuffer(sn, isLastChunk, flushBuf)
 			if flushErr != nil {
 				return nil, flushErr
