@@ -136,7 +136,7 @@ func runPerformanceTest(t *testing.T, name string, dataSize, chunkSize int64, wr
 		testData[i] = byte(i % 256)
 	}
 
-	hasCompression := sdkCfg != nil && sdkCfg.WiseCmpr > 0
+	hasCompression := sdkCfg != nil && sdkCfg.CmprWay > 0
 	hasEncryption := sdkCfg != nil && sdkCfg.EndecWay > 0
 
 	// Record start state
@@ -302,7 +302,7 @@ func TestPerformanceComprehensive(t *testing.T) {
 	// Test scenario 5: Compression, single thread (increase data volume)
 	t.Run("Compressed_SingleThread", func(t *testing.T) {
 		sdkCfg := &sdk.Config{
-			WiseCmpr: core.DATA_CMPR_SNAPPY,
+			CmprWay: core.DATA_CMPR_SNAPPY,
 			CmprQlty: 1,
 		}
 		result := runPerformanceTest(t, "compressed_single", 256*1024, 4*1024*1024, 20, 1, sdkCfg) // Increased from 5 to 20
@@ -312,7 +312,7 @@ func TestPerformanceComprehensive(t *testing.T) {
 	// Test scenario 6: Compression+Encryption, single thread (increase data volume)
 	t.Run("CompressedEncrypted_SingleThread", func(t *testing.T) {
 		sdkCfg := &sdk.Config{
-			WiseCmpr: core.DATA_CMPR_SNAPPY,
+			CmprWay: core.DATA_CMPR_SNAPPY,
 			CmprQlty: 1,
 			EndecWay: core.DATA_ENDEC_AES256,
 			EndecKey: "this is a test encryption key that is long enough for AES256",
@@ -330,7 +330,7 @@ func TestPerformanceComprehensive(t *testing.T) {
 	// Test scenario 8: Large file+Compression+Encryption, single thread (100MB)
 	t.Run("LargeFile_CompressedEncrypted_SingleThread", func(t *testing.T) {
 		sdkCfg := &sdk.Config{
-			WiseCmpr: core.DATA_CMPR_SNAPPY,
+			CmprWay: core.DATA_CMPR_SNAPPY,
 			CmprQlty: 1,
 			EndecWay: core.DATA_ENDEC_AES256,
 			EndecKey: "this is a test encryption key that is long enough for AES256",
@@ -348,7 +348,7 @@ func TestPerformanceComprehensive(t *testing.T) {
 	// Test scenario 10: Sequential write+Compression+Encryption optimization
 	t.Run("SequentialWrite_CompressedEncrypted", func(t *testing.T) {
 		sdkCfg := &sdk.Config{
-			WiseCmpr: core.DATA_CMPR_SNAPPY,
+			CmprWay: core.DATA_CMPR_SNAPPY,
 			CmprQlty: 1,
 			EndecWay: core.DATA_ENDEC_AES256,
 			EndecKey: "this is a test encryption key that is long enough for AES256",
@@ -366,7 +366,7 @@ func TestPerformanceComprehensive(t *testing.T) {
 	// Test scenario 12: Random write+Compression+Encryption
 	t.Run("RandomWrite_CompressedEncrypted", func(t *testing.T) {
 		sdkCfg := &sdk.Config{
-			WiseCmpr: core.DATA_CMPR_SNAPPY,
+			CmprWay: core.DATA_CMPR_SNAPPY,
 			CmprQlty: 1,
 			EndecWay: core.DATA_ENDEC_AES256,
 			EndecKey: "this is a test encryption key that is long enough for AES256",
@@ -500,7 +500,7 @@ func runSequentialWriteTest(t *testing.T, name string, totalSize, chunkSize int6
 		writeCount = 1
 	}
 
-	hasCompression := sdkCfg != nil && sdkCfg.WiseCmpr > 0
+	hasCompression := sdkCfg != nil && sdkCfg.CmprWay > 0
 	hasEncryption := sdkCfg != nil && sdkCfg.EndecWay > 0
 
 	// Record start state
@@ -649,7 +649,7 @@ func runRandomWriteTest(t *testing.T, name string, totalSize, chunkSize int64, s
 	writeCount := 20                    // Write 20 times
 	writeSize := writeChunkSize
 
-	hasCompression := sdkCfg != nil && sdkCfg.WiseCmpr > 0
+	hasCompression := sdkCfg != nil && sdkCfg.CmprWay > 0
 	hasEncryption := sdkCfg != nil && sdkCfg.EndecWay > 0
 
 	// Record start state
@@ -799,7 +799,7 @@ func runRandomWriteOverlappingTest(t *testing.T, name string, totalSize, chunkSi
 	writeCount := 15                     // Write 15 times
 	overlapSize := int64(256 * 1024)     // Overlap 256KB each time
 
-	hasCompression := sdkCfg != nil && sdkCfg.WiseCmpr > 0
+	hasCompression := sdkCfg != nil && sdkCfg.CmprWay > 0
 	hasEncryption := sdkCfg != nil && sdkCfg.EndecWay > 0
 
 	// Record start state
@@ -938,7 +938,7 @@ func runRandomWriteSmallChunksTest(t *testing.T, name string, totalSize, chunkSi
 	writeChunkSize := int64(64 * 1024) // 64KB per write
 	writeCount := 100                  // Write 100 times
 
-	hasCompression := sdkCfg != nil && sdkCfg.WiseCmpr > 0
+	hasCompression := sdkCfg != nil && sdkCfg.CmprWay > 0
 	hasEncryption := sdkCfg != nil && sdkCfg.EndecWay > 0
 
 	// Record start state

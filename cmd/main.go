@@ -37,7 +37,7 @@ var (
 	userName = flag.String("user", "", "Username")
 	password = flag.String("pass", "", "Password")
 	refLevel = flag.String("reflevel", "", "Instant upload level: OFF, FULL, FAST")
-	wiseCmpr = flag.String("wisecmpr", "", "Smart compression: SNAPPY, ZSTD, GZIP, BR")
+	cmprWay  = flag.String("cmprway", "", "Compression method (smart compression by default): SNAPPY, ZSTD, GZIP, BR")
 	cmprQlty = flag.Int("cmprqlty", 0, "Compression level")
 	endecWay = flag.String("endecway", "", "Encryption method: AES256, SM4")
 	endecKey = flag.String("endeckey", "", "Encryption key")
@@ -64,7 +64,7 @@ type Config struct {
 	UserName string `json:"user_name"`
 	Password string `json:"password"`
 	RefLevel string `json:"ref_level"`
-	WiseCmpr string `json:"wise_cmpr"`
+	CmprWay  string `json:"cmpr_way"`
 	CmprQlty int    `json:"cmpr_qlty"`
 	EndecWay string `json:"endec_way"`
 	EndecKey string `json:"endec_key"`
@@ -247,25 +247,6 @@ func handleMount() {
 
 	// Convert configuration to SDK Config
 	sdkCfg := convertToSDKConfig(cfg)
-
-	// Ensure encryption and smart compression are enabled
-	if sdkCfg.EndecWay == 0 {
-		// Default to AES256 if not specified
-		sdkCfg.EndecWay = core.DATA_ENDEC_AES256
-		if sdkCfg.EndecKey == "" {
-			// Generate a default key or prompt user
-			fmt.Fprintf(os.Stderr, "Warning: Encryption enabled but no key provided. Using default key (not secure for production!)\n")
-			sdkCfg.EndecKey = "default-encryption-key-12345678901234567890" // 32 chars for AES256
-		}
-	}
-	if sdkCfg.WiseCmpr == 0 {
-		// Default to ZSTD if not specified
-		sdkCfg.WiseCmpr = core.DATA_CMPR_ZSTD
-		if sdkCfg.CmprQlty == 0 {
-			sdkCfg.CmprQlty = 5 // Default compression level
-		}
-	}
-
 	// Validate encryption key length
 	if sdkCfg.EndecWay == core.DATA_ENDEC_AES256 && len(sdkCfg.EndecKey) <= 16 {
 		fmt.Fprintf(os.Stderr, "Error: AES256 encryption key must be longer than 16 characters (current length: %d)\n", len(sdkCfg.EndecKey))
@@ -322,14 +303,14 @@ func handleMount() {
 	} else if sdkCfg.EndecWay == core.DATA_ENDEC_SM4 {
 		fmt.Printf("  Encryption: SM4\n")
 	}
-	if sdkCfg.WiseCmpr == core.DATA_CMPR_SNAPPY {
-		fmt.Printf("  Smart Compression: SNAPPY (level: %d)\n", sdkCfg.CmprQlty)
-	} else if sdkCfg.WiseCmpr == core.DATA_CMPR_ZSTD {
-		fmt.Printf("  Smart Compression: ZSTD (level: %d)\n", sdkCfg.CmprQlty)
-	} else if sdkCfg.WiseCmpr == core.DATA_CMPR_GZIP {
-		fmt.Printf("  Smart Compression: GZIP (level: %d)\n", sdkCfg.CmprQlty)
-	} else if sdkCfg.WiseCmpr == core.DATA_CMPR_BR {
-		fmt.Printf("  Smart Compression: BROTLI (level: %d)\n", sdkCfg.CmprQlty)
+	if sdkCfg.CmprWay == core.DATA_CMPR_SNAPPY {
+		fmt.Printf("  Compression: SNAPPY (level: %d)\n", sdkCfg.CmprQlty)
+	} else if sdkCfg.CmprWay == core.DATA_CMPR_ZSTD {
+		fmt.Printf("  Compression: ZSTD (level: %d)\n", sdkCfg.CmprQlty)
+	} else if sdkCfg.CmprWay == core.DATA_CMPR_GZIP {
+		fmt.Printf("  Compression: GZIP (level: %d)\n", sdkCfg.CmprQlty)
+	} else if sdkCfg.CmprWay == core.DATA_CMPR_BR {
+		fmt.Printf("  Compression: BROTLI (level: %d)\n", sdkCfg.CmprQlty)
 	}
 	if *requireKey {
 		fmt.Printf("  Require Key: Enabled (EPERM if KEY not provided)\n")
@@ -393,8 +374,8 @@ func loadConfig() (*Config, error) {
 	if *refLevel != "" {
 		cfg.RefLevel = *refLevel
 	}
-	if *wiseCmpr != "" {
-		cfg.WiseCmpr = *wiseCmpr
+	if *cmprWay != "" {
+		cfg.CmprWay = *cmprWay
 	}
 	// cmprqlty default value is 0, if command line sets a value greater than 0, use it
 	if *cmprQlty > 0 {
@@ -528,16 +509,16 @@ func convertToSDKConfig(cfg *Config) sdk.Config {
 		sdkCfg.RefLevel = sdk.OFF
 	}
 
-	// Convert WiseCmpr
-	switch cfg.WiseCmpr {
+	// Convert CmprWay
+	switch cfg.CmprWay {
 	case "SNAPPY":
-		sdkCfg.WiseCmpr = core.DATA_CMPR_SNAPPY
+		sdkCfg.CmprWay = core.DATA_CMPR_SNAPPY
 	case "ZSTD":
-		sdkCfg.WiseCmpr = core.DATA_CMPR_ZSTD
+		sdkCfg.CmprWay = core.DATA_CMPR_ZSTD
 	case "GZIP":
-		sdkCfg.WiseCmpr = core.DATA_CMPR_GZIP
+		sdkCfg.CmprWay = core.DATA_CMPR_GZIP
 	case "BR":
-		sdkCfg.WiseCmpr = core.DATA_CMPR_BR
+		sdkCfg.CmprWay = core.DATA_CMPR_BR
 	}
 
 	if cfg.CmprQlty > 0 {
@@ -838,8 +819,8 @@ func handleBucketManagement() {
 		}
 
 		// Set compression configuration if provided
-		if *wiseCmpr != "" {
-			switch *wiseCmpr {
+		if *cmprWay != "" {
+			switch *cmprWay {
 			case "SNAPPY":
 				bucket.CmprWay = core.DATA_CMPR_SNAPPY
 			case "ZSTD":
@@ -987,8 +968,8 @@ func handleBucketManagement() {
 
 		// Update compression configuration if provided
 		updated := false
-		if *wiseCmpr != "" {
-			switch *wiseCmpr {
+		if *cmprWay != "" {
+			switch *cmprWay {
 			case "SNAPPY":
 				bucket.CmprWay = core.DATA_CMPR_SNAPPY
 			case "ZSTD":

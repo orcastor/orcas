@@ -95,17 +95,17 @@ func (l *listener) OnData(c core.Ctx, h core.Handler, dp *dataPkger, buf []byte)
 			}
 		}
 		// If smart compression is enabled, check file type to determine whether to compress
-		if l.cfg.WiseCmpr > 0 {
+		if l.cfg.CmprWay > 0 {
 			kind, _ := filetype.Match(buf)
 			if kind == filetype.Unknown { // Multimedia, archive, application
-				l.d.Kind |= l.cfg.WiseCmpr
-				if l.cfg.WiseCmpr&core.DATA_CMPR_SNAPPY != 0 {
+				l.d.Kind |= l.cfg.CmprWay
+				if l.cfg.CmprWay&core.DATA_CMPR_SNAPPY != 0 {
 					l.cmpr = &archiver.Snappy{}
-				} else if l.cfg.WiseCmpr&core.DATA_CMPR_ZSTD != 0 {
+				} else if l.cfg.CmprWay&core.DATA_CMPR_ZSTD != 0 {
 					l.cmpr = &archiver.Zstd{EncoderOptions: []zstd.EOption{zstd.WithEncoderLevel(zstd.EncoderLevelFromZstd(int(l.cfg.CmprQlty)))}}
-				} else if l.cfg.WiseCmpr&core.DATA_CMPR_GZIP != 0 {
+				} else if l.cfg.CmprWay&core.DATA_CMPR_GZIP != 0 {
 					l.cmpr = &archiver.Gz{CompressionLevel: int(l.cfg.CmprQlty)}
-				} else if l.cfg.WiseCmpr&core.DATA_CMPR_BR != 0 {
+				} else if l.cfg.CmprWay&core.DATA_CMPR_BR != 0 {
 					l.cmpr = &archiver.Brotli{Quality: int(l.cfg.CmprQlty)}
 				}
 			}

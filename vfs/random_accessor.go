@@ -248,7 +248,6 @@ func (m *delayedFlushManager) cancel(ra *RandomAccessor) {
 	m.mu.Unlock()
 }
 
-
 // processFileDataForBatchWrite processes file data (compression/encryption) for batch write
 // This is a helper function to process data before passing to SDK's BatchWriter
 // Returns: (processedData, origSize, kind)
@@ -559,6 +558,15 @@ type WriteBuffer struct {
 	totalSize  int64            // Total buffer size (optimized with atomic operation)
 }
 
+// SimpleBuffer manages a simple buffer for small files (10MB per chunk, write directly to PutData when full)
+type SimpleBuffer struct {
+	chunks    map[int][]byte // Chunks by sequence number (sn)
+	chunkSize int64          // Chunk size (10MB)
+	dataID    int64          // Data ID (created when first write)
+	totalSize int64          // Total buffer size (atomic access)
+	mu        sync.Mutex     // Mutex for buffer access
+}
+
 // SequentialWriteBuffer sequential write buffer (optimized: sequential writes starting from 0)
 type SequentialWriteBuffer struct {
 	fileID    int64          // File object ID
@@ -666,6 +674,7 @@ type RandomAccessor struct {
 	fileID       int64
 	buffer       *WriteBuffer           // Random write buffer
 	seqBuffer    *SequentialWriteBuffer // Sequential write buffer (optimized)
+	simpleBuffer *SimpleBuffer          // Simple buffer for small files (10MB max, direct PutData)
 	fileObj      atomic.Value
 	fileObjKey   int64                         // Pre-computed file_obj cache key (optimized: avoid repeated conversion)
 	lastActivity int64                         // Last activity timestamp (atomic access)
@@ -789,9 +798,6 @@ func (tw *TempFileWriter) Write(offset int64, data []byte) error {
 	}
 
 	writeEnd := offset + int64(len(data))
-	currentSize := atomic.LoadInt64(&tw.size)
-	DebugLog("[VFS TempFileWriter Write] Writing data to large file: fileID=%d, dataID=%d, offset=%d, size=%d, currentFileSize=%d, writeEnd=%d",
-		tw.fileID, tw.dataID, offset, len(data), currentSize, writeEnd)
 
 	currentOffset := offset
 	dataPos := 0
@@ -844,21 +850,15 @@ func (tw *TempFileWriter) Write(offset int64, data []byte) error {
 			var readErr error
 			if writeStartInChunk > 0 {
 				// Writing to middle/end of chunk, might need to read existing data
-				DebugLog("[VFS TempFileWriter Write] READING from disk (non-zero offset): fileID=%d, dataID=%d, sn=%d, writeStartInChunk=%d",
-					tw.fileID, tw.dataID, sn, writeStartInChunk)
 				existingChunkData, readErr = tw.fs.h.GetData(tw.fs.c, tw.fs.bktID, tw.dataID, sn)
 				if readErr == nil && len(existingChunkData) > 0 {
 					DebugLog("[VFS TempFileWriter Write] READ from disk successful: fileID=%d, dataID=%d, sn=%d, size=%d",
 						tw.fileID, tw.dataID, sn, len(existingChunkData))
 				} else {
-					DebugLog("[VFS TempFileWriter Write] READ from disk failed/empty: fileID=%d, dataID=%d, sn=%d, error=%v",
-						tw.fileID, tw.dataID, sn, readErr)
 				}
 			} else {
 				// Writing from beginning, chunk shouldn't exist (pure append)
 				// Skip read to avoid unnecessary disk I/O
-				DebugLog("[VFS TempFileWriter Write] SKIPPING read (pure append from offset 0): fileID=%d, dataID=%d, sn=%d",
-					tw.fileID, tw.dataID, sn)
 				readErr = fmt.Errorf("chunk not found (expected for new chunk)")
 			}
 			if readErr == nil && len(existingChunkData) > 0 {
@@ -1043,73 +1043,6 @@ func (tw *TempFileWriter) Write(offset int64, data []byte) error {
 				} else {
 					// Chunk still doesn't exist, create empty buffer using 10MB pool buffer
 					// No read operation needed - pure append write from beginning
-					DebugLog("[VFS TempFileWriter Write] Creating new buffer (NO READ): fileID=%d, dataID=%d, sn=%d, writeStartInChunk=%d",
-						tw.fileID, tw.dataID, sn, writeStartInChunk)
-
-					// Check if we need to flush a chunk to free memory (limit concurrent chunks)
-					// Limit to 3 chunks in memory to keep memory usage bounded (30MB + overhead)
-					const maxConcurrentChunks = 3
-					if len(tw.chunks) >= maxConcurrentChunks {
-						// Find the most complete chunk to flush (highest offsetInChunk)
-						var bestSN int = -1
-						var bestProgress int64 = 0
-						for checkSN, checkBuf := range tw.chunks {
-							checkBuf.mu.Lock()
-							progress := checkBuf.offsetInChunk
-							checkBuf.mu.Unlock()
-							// Prefer chunks that are at least 50% complete
-							if progress >= chunkSize/2 && progress > bestProgress {
-								bestSN = checkSN
-								bestProgress = progress
-							}
-						}
-
-						// If no chunk is 50% complete, find the one with most progress
-						if bestSN == -1 {
-							for checkSN, checkBuf := range tw.chunks {
-								checkBuf.mu.Lock()
-								progress := checkBuf.offsetInChunk
-								checkBuf.mu.Unlock()
-								if progress > bestProgress {
-									bestSN = checkSN
-									bestProgress = progress
-								}
-							}
-						}
-
-						// Flush the selected chunk if found
-						if bestSN >= 0 && bestProgress > 0 {
-							DebugLog("[VFS TempFileWriter Write] Memory limit reached (%d chunks), flushing chunk %d (progress: %d/%d) before creating new: fileID=%d, dataID=%d",
-								len(tw.chunks), bestSN, bestProgress, chunkSize, tw.fileID, tw.dataID)
-
-							flushBuf, exists := tw.chunks[bestSN]
-							if exists {
-								// Remove from chunks before flushing
-								delete(tw.chunks, bestSN)
-								tw.mu.Unlock()
-
-								// Flush the chunk (partial flush)
-								flushKey := fmt.Sprintf("flush_%d_%d", tw.dataID, bestSN)
-								_, _, _ = chunkFlushSingleFlight.Do(flushKey, func() (interface{}, error) {
-									flushErr := tw.flushChunkWithBuffer(bestSN, false, flushBuf)
-									if flushErr == nil {
-										// Return buffer to pool
-										if cap(flushBuf.data) <= 10<<20 {
-											flushBuf.data = flushBuf.data[:0]
-											flushBuf.offsetInChunk = 0
-											flushBuf.ranges = flushBuf.ranges[:0]
-											chunkBufferPool.Put(flushBuf)
-										}
-									}
-									return nil, flushErr
-								})
-
-								// Re-acquire lock
-								tw.mu.Lock()
-							}
-						}
-					}
-
 					pooledBuf := chunkBufferPool.Get().(*chunkBuffer)
 					// Pre-size buffer to chunkSize to avoid resizing during writes
 					pooledBuf.data = pooledBuf.data[:chunkSize]
@@ -1123,81 +1056,6 @@ func (tw *TempFileWriter) Write(offset int64, data []byte) error {
 		} else {
 			// Chunk exists in memory, just unlock
 			// No read operation needed - chunk already in memory
-			DebugLog("[VFS TempFileWriter Write] Chunk in memory (NO READ): fileID=%d, dataID=%d, sn=%d",
-				tw.fileID, tw.dataID, sn)
-
-			// Check if we need to flush a chunk to free memory (limit concurrent chunks)
-			// Limit to 3 chunks in memory to keep memory usage bounded (30MB + overhead)
-			const maxConcurrentChunks = 3
-			if len(tw.chunks) > maxConcurrentChunks {
-				// Find the most complete chunk to flush (highest offsetInChunk)
-				var bestSN int = -1
-				var bestProgress int64 = 0
-				for checkSN, checkBuf := range tw.chunks {
-					if checkSN == sn {
-						continue // Don't flush the chunk we're about to write to
-					}
-					checkBuf.mu.Lock()
-					progress := checkBuf.offsetInChunk
-					checkBuf.mu.Unlock()
-					// Prefer chunks that are at least 50% complete
-					if progress >= chunkSize/2 && progress > bestProgress {
-						bestSN = checkSN
-						bestProgress = progress
-					}
-				}
-
-				// If no chunk is 50% complete, find the one with most progress
-				if bestSN == -1 {
-					for checkSN, checkBuf := range tw.chunks {
-						if checkSN == sn {
-							continue
-						}
-						checkBuf.mu.Lock()
-						progress := checkBuf.offsetInChunk
-						checkBuf.mu.Unlock()
-						if progress > bestProgress {
-							bestSN = checkSN
-							bestProgress = progress
-						}
-					}
-				}
-
-				// Flush the selected chunk if found
-				if bestSN >= 0 && bestProgress > 0 {
-					DebugLog("[VFS TempFileWriter Write] Memory limit reached (%d chunks), flushing chunk %d (progress: %d/%d): fileID=%d, dataID=%d",
-						len(tw.chunks), bestSN, bestProgress, chunkSize, tw.fileID, tw.dataID)
-
-					flushBuf, exists := tw.chunks[bestSN]
-					if exists {
-						// Remove from chunks before flushing
-						delete(tw.chunks, bestSN)
-						tw.mu.Unlock()
-
-						// Flush the chunk (partial flush)
-						flushKey := fmt.Sprintf("flush_%d_%d", tw.dataID, bestSN)
-						_, _, _ = chunkFlushSingleFlight.Do(flushKey, func() (interface{}, error) {
-							flushErr := tw.flushChunkWithBuffer(bestSN, false, flushBuf)
-							if flushErr == nil {
-								// Return buffer to pool
-								if cap(flushBuf.data) <= 10<<20 {
-									flushBuf.data = flushBuf.data[:0]
-									flushBuf.offsetInChunk = 0
-									flushBuf.ranges = flushBuf.ranges[:0]
-									chunkBufferPool.Put(flushBuf)
-								}
-							}
-							return nil, flushErr
-						})
-
-						// Re-acquire lock
-						tw.mu.Lock()
-					} else {
-						// Chunk was already removed, just continue
-					}
-				}
-			}
-
 			tw.mu.Unlock()
 		}
 
@@ -1226,14 +1084,10 @@ func (tw *TempFileWriter) Write(offset int64, data []byte) error {
 			// Only resize if actually needed (avoid unnecessary reslicing)
 			if newBufferLength > oldBufferLen {
 				buf.data = buf.data[:newBufferLength]
-				DebugLog("[VFS TempFileWriter Write] BUFFER RESIZE: fileID=%d, dataID=%d, sn=%d, oldLen=%d, newLen=%d, requiredSize=%d, capacity=%d",
-					tw.fileID, tw.dataID, sn, oldBufferLen, newBufferLength, requiredBufferSize, cap(buf.data))
 			}
 		}
 		// Direct copy without additional checks (we've already ensured buffer is large enough)
 		copy(buf.data[writeStartInChunk:writeStartInChunk+int64(len(chunkData))], chunkData)
-		DebugLog("[VFS TempFileWriter Write] DATA COPIED to buffer: fileID=%d, dataID=%d, sn=%d, offset=%d, size=%d, noResize=%v",
-			tw.fileID, tw.dataID, sn, writeStartInChunk, len(chunkData), requiredBufferSize <= oldBufferLen)
 		writeEndInChunkPos := writeStartInChunk + int64(len(chunkData))
 		if writeEndInChunkPos > buf.offsetInChunk {
 			buf.offsetInChunk = writeEndInChunkPos
@@ -1248,15 +1102,10 @@ func (tw *TempFileWriter) Write(offset int64, data []byte) error {
 		chunkComplete := buf.isChunkComplete(chunkSize)
 		buf.mu.Unlock()
 
-		DebugLog("[VFS TempFileWriter Write] Chunk status: fileID=%d, dataID=%d, sn=%d, chunkSize=%d, bufferProgress=%d, remaining=%d, complete=%v",
-			tw.fileID, tw.dataID, sn, chunkSize, buf.offsetInChunk, chunkSize-buf.offsetInChunk, chunkComplete)
-
 		if chunkComplete {
 			// Chunk is full, flush it synchronously for memory efficiency
 			// For sequential writes, synchronous flushing prevents memory accumulation
 			// by freeing the buffer immediately after flush
-			DebugLog("[VFS TempFileWriter Write] Chunk full, flushing synchronously: fileID=%d, dataID=%d, sn=%d, bufferSize=%d/%d",
-				tw.fileID, tw.dataID, sn, bufferProgress, chunkSize)
 
 			// Remove chunk from tw.chunks IMMEDIATELY to prevent further writes
 			// This ensures that subsequent writes to this chunk will read from disk instead
@@ -2213,6 +2062,169 @@ func (tw *TempFileWriter) Flush() error {
 	return nil
 }
 
+// writeSimpleBuffer writes data to simple buffer (10MB per chunk, direct PutData when full)
+func (ra *RandomAccessor) writeSimpleBuffer(offset int64, data []byte) error {
+	if len(data) == 0 {
+		return nil
+	}
+
+	// Get chunk size (10MB)
+	chunkSize := ra.fs.chunkSize
+	if chunkSize <= 0 {
+		chunkSize = 10 << 20 // Default 10MB
+	}
+
+	// Initialize simple buffer if needed
+	if ra.simpleBuffer == nil {
+		ra.simpleBuffer = &SimpleBuffer{
+			chunks:    make(map[int][]byte),
+			chunkSize: chunkSize,
+		}
+	}
+
+	sb := ra.simpleBuffer
+	sb.mu.Lock()
+	defer sb.mu.Unlock()
+
+	// Create dataID if not exists
+	if sb.dataID == 0 {
+		sb.dataID = core.NewID()
+		DebugLog("[VFS RandomAccessor writeSimpleBuffer] Created new DataID: fileID=%d, dataID=%d", ra.fileID, sb.dataID)
+	}
+
+	// Process data across chunks
+	currentOffset := offset
+	dataPos := 0
+
+	for dataPos < len(data) {
+		// Calculate which chunk this offset belongs to
+		sn := int(currentOffset / chunkSize)
+		offsetInChunk := currentOffset % chunkSize
+
+		// Get or create chunk
+		chunk, exists := sb.chunks[sn]
+		if !exists {
+			chunk = make([]byte, 0, chunkSize)
+			sb.chunks[sn] = chunk
+		}
+
+		// Calculate how much data we can write to this chunk
+		availableInChunk := chunkSize - offsetInChunk
+		toWrite := int64(len(data) - dataPos)
+		if toWrite > availableInChunk {
+			toWrite = availableInChunk
+		}
+
+		// Ensure chunk is large enough
+		requiredSize := offsetInChunk + toWrite
+		if int64(len(chunk)) < requiredSize {
+			// Extend chunk
+			newChunk := make([]byte, requiredSize)
+			copy(newChunk, chunk)
+			chunk = newChunk
+		}
+
+		// Copy data to chunk
+		copy(chunk[offsetInChunk:offsetInChunk+toWrite], data[dataPos:dataPos+int(toWrite)])
+		sb.chunks[sn] = chunk
+
+		// Update total size
+		sb.totalSize += toWrite
+
+		// Check if chunk is full
+		if int64(len(chunk)) >= chunkSize {
+			// Chunk is full, write it to PutData
+			chunkData := make([]byte, len(chunk))
+			copy(chunkData, chunk)
+			sb.mu.Unlock() // Unlock before PutData (may take time)
+
+			DebugLog("[VFS RandomAccessor writeSimpleBuffer] Chunk full, writing to PutData: fileID=%d, dataID=%d, sn=%d, size=%d", ra.fileID, sb.dataID, sn, len(chunkData))
+			if _, err := ra.fs.h.PutData(ra.fs.c, ra.fs.bktID, sb.dataID, sn, chunkData); err != nil {
+				sb.mu.Lock()
+				return fmt.Errorf("failed to write chunk %d to PutData: %w", sn, err)
+			}
+
+			sb.mu.Lock()
+			// Remove chunk from buffer after successful write
+			delete(sb.chunks, sn)
+			DebugLog("[VFS RandomAccessor writeSimpleBuffer] Successfully wrote chunk: fileID=%d, dataID=%d, sn=%d", ra.fileID, sb.dataID, sn)
+		}
+
+		// Move to next chunk if needed
+		dataPos += int(toWrite)
+		currentOffset += toWrite
+	}
+
+	return nil
+}
+
+// flushSimpleBuffer flushes all remaining chunks in simple buffer to PutData
+func (ra *RandomAccessor) flushSimpleBuffer() error {
+	if ra.simpleBuffer == nil {
+		return nil
+	}
+
+	sb := ra.simpleBuffer
+	sb.mu.Lock()
+	defer sb.mu.Unlock()
+
+	if len(sb.chunks) == 0 {
+		return nil
+	}
+
+	// Get file object to update metadata
+	fileObj, err := ra.getFileObj()
+	if err != nil {
+		return fmt.Errorf("failed to get file object: %w", err)
+	}
+
+	// Write all remaining chunks
+	for sn, chunk := range sb.chunks {
+		if len(chunk) == 0 {
+			continue
+		}
+
+		chunkData := make([]byte, len(chunk))
+		copy(chunkData, chunk)
+		sb.mu.Unlock() // Unlock before PutData
+
+		DebugLog("[VFS RandomAccessor flushSimpleBuffer] Writing chunk: fileID=%d, dataID=%d, sn=%d, size=%d", ra.fileID, sb.dataID, sn, len(chunkData))
+		if _, err := ra.fs.h.PutData(ra.fs.c, ra.fs.bktID, sb.dataID, sn, chunkData); err != nil {
+			sb.mu.Lock()
+			return fmt.Errorf("failed to write chunk %d to PutData: %w", sn, err)
+		}
+
+		sb.mu.Lock()
+		DebugLog("[VFS RandomAccessor flushSimpleBuffer] Successfully wrote chunk: fileID=%d, dataID=%d, sn=%d", ra.fileID, sb.dataID, sn)
+	}
+
+	// Clear chunks after successful write
+	sb.chunks = make(map[int][]byte)
+
+	// Update file object with DataID and size
+	if fileObj.DataID == 0 || fileObj.DataID == core.EmptyDataID {
+		fileObj.DataID = sb.dataID
+		fileObj.Size = sb.totalSize
+		// Create DataInfo
+		dataInfo := &core.DataInfo{
+			ID:       sb.dataID,
+			OrigSize: sb.totalSize,
+			Size:     sb.totalSize,
+			Kind:     0, // No compression/encryption for simple buffer
+		}
+		// Update file object and DataInfo in database
+		if err := ra.fs.h.PutDataInfoAndObj(ra.fs.c, ra.fs.bktID, []*core.DataInfo{dataInfo}, []*core.ObjectInfo{fileObj}); err != nil {
+			return fmt.Errorf("failed to update file object: %w", err)
+		}
+		// Update cache
+		ra.fileObj.Store(fileObj)
+		fileObjCache.Put(ra.fileObjKey, fileObj)
+		DebugLog("[VFS RandomAccessor flushSimpleBuffer] Updated file object: fileID=%d, dataID=%d, size=%d", ra.fileID, sb.dataID, sb.totalSize)
+	}
+
+	return nil
+}
+
 // NewRandomAccessor creates a random access object
 func NewRandomAccessor(fs *OrcasFS, fileID int64) (*RandomAccessor, error) {
 	// Get configuration to initialize fixed-length operations array (optimized: avoid temporary object creation)
@@ -2308,10 +2320,9 @@ func (ra *RandomAccessor) Write(offset int64, data []byte) error {
 
 	if isTmpFile || hasTempWriter {
 		if isSmallTmpFile {
-			// Small .tmp file, use batch write instead of TempFileWriter
-			// Don't create TempFileWriter, let it fall through to random write mode
-			// which will handle batch write in flushInternal
-			DebugLog("[VFS RandomAccessor Write] Small .tmp file detected, will use batch write: fileID=%d, size=%d, threshold=%d", ra.fileID, len(data), batchWriteThreshold)
+			// Small .tmp file, use simple buffer (10MB per chunk, direct PutData when full)
+			// This avoids storing operations and directly writes to PutData when chunk is full
+			return ra.writeSimpleBuffer(offset, data)
 		} else {
 			// For .tmp files, all writes should go through TempFileWriter
 			// This ensures consistent data handling and avoids triggering applyRandomWritesWithSDK
@@ -3036,7 +3047,7 @@ func (ra *RandomAccessor) Read(offset int64, size int) ([]byte, error) {
 				}
 			}
 		}
-		
+
 		// Check if random buffer has data
 		writeIndex := atomic.LoadInt64(&ra.buffer.writeIndex)
 		if writeIndex > 0 {
@@ -3666,12 +3677,46 @@ func (ra *RandomAccessor) flushInternal(force bool) (int64, error) {
 			// TempFileWriter exists, check if there are any pending writes in buffer
 			writeIndex := atomic.LoadInt64(&ra.buffer.writeIndex)
 			if writeIndex > 0 {
-				DebugLog("[VFS RandomAccessor Flush] WARNING: .tmp file has pending writes in buffer but TempFileWriter exists: fileID=%d, writeIndex=%d. This should not happen - all writes should go through TempFileWriter. Clearing buffer.", ra.fileID, writeIndex)
-				// Clear the buffer to avoid processing stale writes
-				atomic.StoreInt64(&ra.buffer.writeIndex, 0)
-				atomic.StoreInt64(&ra.buffer.totalSize, 0)
+				DebugLog("[VFS RandomAccessor Flush] .tmp file has pending writes in buffer but TempFileWriter exists: fileID=%d, writeIndex=%d. Writing buffer data to TempFileWriter.", ra.fileID, writeIndex)
+				// Get TempFileWriter
+				if val := ra.tempWriter.Load(); val != nil {
+					if tw, ok := val.(*TempFileWriter); ok && tw != nil {
+						// Write all pending operations from buffer to TempFileWriter
+						// Note: We need to read operations before clearing writeIndex
+						// But we can't use atomic.Swap here because we need to read the operations
+						// So we'll read them first, then clear
+						opsCount := int(writeIndex)
+						for i := 0; i < opsCount; i++ {
+							op := ra.buffer.operations[i]
+							if len(op.Data) > 0 {
+								if err := tw.Write(op.Offset, op.Data); err != nil {
+									DebugLog("[VFS RandomAccessor Flush] ERROR: Failed to write buffer operation to TempFileWriter: fileID=%d, offset=%d, size=%d, error=%v", ra.fileID, op.Offset, len(op.Data), err)
+									return 0, fmt.Errorf("failed to write buffer operation to TempFileWriter: %w", err)
+								}
+								DebugLog("[VFS RandomAccessor Flush] Wrote buffer operation to TempFileWriter: fileID=%d, offset=%d, size=%d", ra.fileID, op.Offset, len(op.Data))
+							}
+						}
+						// Clear the buffer after writing to TempFileWriter
+						atomic.StoreInt64(&ra.buffer.writeIndex, 0)
+						atomic.StoreInt64(&ra.buffer.totalSize, 0)
+						DebugLog("[VFS RandomAccessor Flush] Successfully wrote %d buffer operations to TempFileWriter: fileID=%d", opsCount, ra.fileID)
+					}
+				}
 			}
 			// For .tmp files, after TempFileWriter flush, return new version ID
+			if fileObj.DataID > 0 && fileObj.DataID != core.EmptyDataID {
+				return core.NewID(), nil
+			}
+			return 0, nil
+		}
+
+		// Check if simple buffer exists (for small .tmp files)
+		if ra.simpleBuffer != nil {
+			// Flush all remaining chunks in simple buffer
+			if err := ra.flushSimpleBuffer(); err != nil {
+				return 0, fmt.Errorf("failed to flush simple buffer: %w", err)
+			}
+			// For .tmp files, after simple buffer flush, return new version ID
 			if fileObj.DataID > 0 && fileObj.DataID != core.EmptyDataID {
 				return core.NewID(), nil
 			}
@@ -5497,8 +5542,72 @@ func (cr *chunkReader) ReadAt(buf []byte, offset int64) (int, error) {
 	totalRead := 0
 	currentOffset := offset
 	remaining := readSize
+	// Track the last chunk we read from to handle non-aligned chunk boundaries
+	// This is critical for compressed files where actual chunk size may be smaller than chunkSize
+	var lastChunkSn int = -1
+	var lastChunkStart int64 = -1
+	var lastChunkEnd int64 = -1
 
 	for remaining > 0 && currentOffset < cr.origSize {
+		// First, check if currentOffset is within the last chunk we read from
+		// This handles the case where actualChunkEnd is not aligned to chunkSize boundary
+		if lastChunkSn >= 0 && currentOffset >= lastChunkStart && currentOffset < lastChunkEnd {
+			// We're still in the last chunk, use it directly
+			currentSn := lastChunkSn
+			chunkStart := lastChunkStart
+			currentOffsetInChunk := currentOffset - chunkStart
+
+			// Get the chunk data (should be cached)
+			chunkData, err := cr.getChunk(currentSn)
+			if err != nil {
+				// Chunk not found, fall through to normal calculation
+				lastChunkSn = -1
+				lastChunkStart = -1
+				lastChunkEnd = -1
+				// Fall through to normal calculation below
+			} else {
+				// We have the chunk, check if we're still within its bounds
+				// IMPORTANT: Use actual data size to check bounds, not chunkSize
+				actualChunkDataSize := int64(len(chunkData))
+				actualChunkEndForData := chunkStart + actualChunkDataSize
+				// Recalculate currentOffsetInChunk to ensure it's within bounds
+				if currentOffset < actualChunkEndForData {
+					currentOffsetInChunk = currentOffset - chunkStart
+					// We're within the chunk, proceed with reading
+					availableInChunk := actualChunkDataSize - currentOffsetInChunk
+					if availableInChunk > 0 {
+						toRead := remaining
+						if toRead > availableInChunk {
+							toRead = availableInChunk
+						}
+
+						// Copy data from chunk
+						copy(buf[totalRead:totalRead+int(toRead)], chunkData[currentOffsetInChunk:currentOffsetInChunk+toRead])
+						DebugLog("[VFS chunkReader ReadAt] Read from chunk (using last chunk): dataID=%d, sn=%d, chunkSize=%d, toRead=%d, totalRead=%d, remaining=%d",
+							cr.dataID, currentSn, len(chunkData), toRead, totalRead+int(toRead), remaining-toRead)
+						totalRead += int(toRead)
+						currentOffset += toRead
+						remaining -= toRead
+						// Update last chunk info: use chunkSize for non-last chunks, actual data size for last chunk
+						nextChunkStartForLastChunkEnd := chunkStart + cr.chunkSize
+						if nextChunkStartForLastChunkEnd >= cr.origSize {
+							// This is the last chunk, use actual data size
+							lastChunkEnd = actualChunkEndForData
+						} else {
+							// This is not the last chunk, use chunkSize
+							lastChunkEnd = nextChunkStartForLastChunkEnd
+						}
+						continue
+					}
+				}
+				// We've moved beyond this chunk, reset tracking
+				lastChunkSn = -1
+				lastChunkStart = -1
+				lastChunkEnd = -1
+			}
+		}
+
+		// Normal calculation: use chunkSize to determine which chunk we're in
 		currentSn := int(currentOffset / cr.chunkSize)
 		chunkStart := int64(currentSn) * cr.chunkSize
 		currentOffsetInChunk := currentOffset - chunkStart
@@ -5544,9 +5653,25 @@ func (cr *chunkReader) ReadAt(buf []byte, offset int64) (int, error) {
 
 		// Calculate how much to read from this chunk
 		// If currentOffsetInChunk is beyond the actual chunk data, we need to move to next chunk
-		if currentOffsetInChunk >= int64(len(chunkData)) {
+		// IMPORTANT: Always use len(chunkData) to determine if we've reached the end of this chunk's data
+		// The actual chunk end in file coordinates: for non-last chunks, use chunkSize; for last chunk, use actual data size
+		actualChunkDataSize := int64(len(chunkData))
+		// Calculate actual chunk end in file coordinates: for non-last chunks, use chunkSize; for last chunk, use actual data size
+		// This is used to determine where the next chunk starts in the file coordinate system
+		nextChunkStart := chunkStart + cr.chunkSize
+		var actualChunkEnd int64
+		if nextChunkStart >= cr.origSize {
+			// This is the last chunk, use actual data size
+			actualChunkEnd = chunkStart + actualChunkDataSize
+		} else {
+			// This is not the last chunk, use chunkSize for file coordinate system
+			// Even if len(chunkData) < chunkSize (compressed), the next chunk still starts at chunkStart + chunkSize
+			actualChunkEnd = nextChunkStart
+		}
+
+		// Check if we've read all data from this chunk (use actual data size, not chunkSize)
+		if currentOffsetInChunk >= actualChunkDataSize {
 			// Current offset is beyond this chunk's data, move to next chunk
-			actualChunkEnd := chunkStart + int64(len(chunkData))
 			// Check if we've reached the end of file
 			if actualChunkEnd >= cr.origSize {
 				// End of file
@@ -5554,16 +5679,112 @@ func (cr *chunkReader) ReadAt(buf []byte, offset int64) (int, error) {
 				break
 			}
 			// Move to next chunk
+			// If currentOffset is already at or beyond actualChunkEnd, we're already past this chunk
+			// This can happen when offset is beyond the chunk size (e.g., offset=49152 but chunk only has 32768 bytes)
+			// IMPORTANT: For compressed files, chunk actual size may be smaller than chunkSize
+			// So the next chunk starts at actualChunkEnd, not at nextChunkStart (which is based on chunkSize)
+			// For uncompressed files, actualChunkEnd should equal chunkStart + chunkSize (except last chunk)
+			if currentOffset >= actualChunkEnd {
+				// We're already past this chunk, try to read next chunk
+				// Check if we've reached the end of file
+				if actualChunkEnd >= cr.origSize {
+					DebugLog("[VFS chunkReader ReadAt] Reached end of file: dataID=%d, actualChunkEnd=%d, origSize=%d", cr.dataID, actualChunkEnd, cr.origSize)
+					break
+				}
+				// Try to read next chunk (sn+1) to see if it exists
+				nextSn := currentSn + 1
+				nextChunkData, nextErr := cr.getChunk(nextSn)
+				if nextErr != nil {
+					// Next chunk doesn't exist, check if we've reached the end of file
+					if actualChunkEnd >= cr.origSize {
+						DebugLog("[VFS chunkReader ReadAt] Next chunk doesn't exist, reached end: dataID=%d, actualChunkEnd=%d, origSize=%d", cr.dataID, actualChunkEnd, cr.origSize)
+						break
+					}
+					// If we've read some data, return it
+					if totalRead > 0 {
+						DebugLog("[VFS chunkReader ReadAt] Next chunk doesn't exist, returning partial read: dataID=%d, totalRead=%d, actualChunkEnd=%d, origSize=%d", cr.dataID, totalRead, actualChunkEnd, cr.origSize)
+						return totalRead, nil
+					}
+					// No data read yet, return error
+					return 0, nextErr
+				}
+				// Next chunk exists, read from it directly to avoid infinite loop
+				// The next chunk starts at actualChunkEnd in file coordinates
+				// But within the chunk, we read from offset 0
+				nextChunkOffsetInChunk := int64(0)
+				nextAvailableInChunk := int64(len(nextChunkData)) - nextChunkOffsetInChunk
+				if nextAvailableInChunk <= 0 {
+					// Next chunk is empty, move to next chunk
+					nextChunkStart := int64(nextSn) * cr.chunkSize
+					nextActualChunkEnd := nextChunkStart + int64(len(nextChunkData))
+					// Check if we've reached the end of file
+					if nextActualChunkEnd >= cr.origSize {
+						DebugLog("[VFS chunkReader ReadAt] Reached end of file after empty chunk: dataID=%d, actualChunkEnd=%d, origSize=%d", cr.dataID, nextActualChunkEnd, cr.origSize)
+						break
+					}
+					// Move to next chunk
+					currentOffset = nextActualChunkEnd
+					currentSn = nextSn + 1
+					// Reset last chunk tracking since we're moving to a new chunk
+					lastChunkSn = -1
+					lastChunkStart = -1
+					lastChunkEnd = -1
+					continue
+				}
+				// Read from next chunk
+				toReadFromNext := remaining
+				if toReadFromNext > nextAvailableInChunk {
+					toReadFromNext = nextAvailableInChunk
+				}
+				copy(buf[totalRead:totalRead+int(toReadFromNext)], nextChunkData[nextChunkOffsetInChunk:nextChunkOffsetInChunk+toReadFromNext])
+				DebugLog("[VFS chunkReader ReadAt] Read from next chunk: dataID=%d, currentSn=%d, nextSn=%d, toRead=%d, totalRead=%d",
+					cr.dataID, currentSn, nextSn, toReadFromNext, totalRead+int(toReadFromNext))
+				totalRead += int(toReadFromNext)
+				// Update currentOffset: next chunk starts at actualChunkEnd in file coordinates
+				// After reading toReadFromNext bytes from nextSn chunk, the new file offset is actualChunkEnd + toReadFromNext
+				currentOffset = actualChunkEnd + toReadFromNext
+				remaining -= toReadFromNext
+				// Update last chunk tracking: we're now in nextSn chunk
+				// This is critical for handling non-aligned chunk boundaries
+				lastChunkSn = nextSn
+				lastChunkStart = actualChunkEnd
+				// Calculate lastChunkEnd: for non-last chunks, use chunkSize; for last chunk, use actual data size
+				nextNextChunkStart := actualChunkEnd + cr.chunkSize
+				if nextNextChunkStart >= cr.origSize {
+					// nextSn is the last chunk, use actual data size
+					lastChunkEnd = actualChunkEnd + int64(len(nextChunkData))
+				} else {
+					// nextSn is not the last chunk, use chunkSize
+					lastChunkEnd = nextNextChunkStart
+				}
+				// Continue loop to read more if needed
+				continue
+			}
+			// Normal case: move to end of current chunk
 			currentOffset = actualChunkEnd
+			// Reset last chunk tracking since we're moving to chunk boundary
+			lastChunkSn = -1
+			lastChunkStart = -1
+			lastChunkEnd = -1
 			continue
 		}
 
 		availableInChunk := int64(len(chunkData)) - currentOffsetInChunk
 		if availableInChunk <= 0 {
 			// This chunk has no more data, move to next chunk
-			// Calculate the actual end of current chunk based on actual data size
-			// The actual end is the start of this chunk plus the actual data length
-			actualChunkEnd := chunkStart + int64(len(chunkData))
+			// Calculate the actual end of current chunk
+			// IMPORTANT: For uncompressed files, each chunk (except last) should have chunkSize bytes
+			// The actual chunk end should be chunkStart + chunkSize for non-last chunks
+			// For the last chunk, it should be chunkStart + len(chunkData) (which may be < chunkSize)
+			nextChunkStart := chunkStart + cr.chunkSize
+			var actualChunkEnd int64
+			if nextChunkStart >= cr.origSize {
+				// This is the last chunk, use actual data size
+				actualChunkEnd = chunkStart + int64(len(chunkData))
+			} else {
+				// This is not the last chunk, use chunkSize
+				actualChunkEnd = nextChunkStart
+			}
 			// Check if we've reached the end of file
 			if actualChunkEnd >= cr.origSize {
 				// End of file
@@ -5602,11 +5823,23 @@ func (cr *chunkReader) ReadAt(buf []byte, offset int64) (int, error) {
 			nextChunkOffsetInChunk := int64(0)
 			nextAvailableInChunk := int64(len(nextChunkData)) - nextChunkOffsetInChunk
 			if nextAvailableInChunk <= 0 {
-				// Next chunk is empty, move to next
+				// Next chunk is empty, move to next chunk
+				// Update actualChunkEnd to the end of this empty chunk
+				nextChunkStart := int64(nextSn) * cr.chunkSize
+				actualChunkEnd = nextChunkStart + int64(len(nextChunkData))
+				// Check if we've reached the end of file
+				if actualChunkEnd >= cr.origSize {
+					DebugLog("[VFS chunkReader ReadAt] Reached end of file after empty chunk: dataID=%d, actualChunkEnd=%d, origSize=%d", cr.dataID, actualChunkEnd, cr.origSize)
+					break
+				}
+				// Move to next chunk
 				currentOffset = actualChunkEnd
+				// Continue to try next chunk
 				continue
 			}
 			// Read from next chunk
+			// IMPORTANT: The next chunk starts at actualChunkEnd in the file coordinate system
+			// But we read from offset 0 within the next chunk
 			toReadFromNext := remaining
 			if toReadFromNext > nextAvailableInChunk {
 				toReadFromNext = nextAvailableInChunk
@@ -5615,11 +5848,25 @@ func (cr *chunkReader) ReadAt(buf []byte, offset int64) (int, error) {
 			DebugLog("[VFS chunkReader ReadAt] Read from next chunk: dataID=%d, currentSn=%d, nextSn=%d, toRead=%d, totalRead=%d",
 				cr.dataID, currentSn, nextSn, toReadFromNext, totalRead+int(toReadFromNext))
 			totalRead += int(toReadFromNext)
-			// Update currentOffset correctly: next chunk starts at actualChunkEnd, and we read toReadFromNext bytes from it
-			// So the new currentOffset should be actualChunkEnd + toReadFromNext
-			// However, we need to ensure currentOffset is correctly aligned for the next iteration
+			// Update currentOffset correctly: next chunk starts at actualChunkEnd in file coordinates
+			// We read toReadFromNext bytes from the next chunk, so new offset is actualChunkEnd + toReadFromNext
+			// IMPORTANT: actualChunkEnd is the file offset where the next chunk (nextSn) starts
+			// After reading toReadFromNext bytes from nextSn chunk, the new file offset is actualChunkEnd + toReadFromNext
 			currentOffset = actualChunkEnd + toReadFromNext
 			remaining -= toReadFromNext
+			// Update last chunk tracking: we're now in nextSn chunk
+			// This is critical for handling non-aligned chunk boundaries
+			lastChunkSn = nextSn
+			lastChunkStart = actualChunkEnd
+			// Calculate lastChunkEnd: for non-last chunks, use chunkSize; for last chunk, use actual data size
+			nextNextChunkStart := actualChunkEnd + cr.chunkSize
+			if nextNextChunkStart >= cr.origSize {
+				// nextSn is the last chunk, use actual data size
+				lastChunkEnd = actualChunkEnd + int64(len(nextChunkData))
+			} else {
+				// nextSn is not the last chunk, use chunkSize
+				lastChunkEnd = nextNextChunkStart
+			}
 			// Continue loop to read more if needed
 			continue
 		}
@@ -5638,6 +5885,19 @@ func (cr *chunkReader) ReadAt(buf []byte, offset int64) (int, error) {
 		totalRead += int(toRead)
 		currentOffset += toRead
 		remaining -= toRead
+		// Update last chunk tracking: we're still in currentSn chunk
+		// This helps handle non-aligned chunk boundaries in next iteration
+		lastChunkSn = currentSn
+		lastChunkStart = chunkStart
+		// Calculate lastChunkEnd: for non-last chunks, use chunkSize; for last chunk, use actual data size
+		nextChunkStartForLastChunkEnd := chunkStart + cr.chunkSize
+		if nextChunkStartForLastChunkEnd >= cr.origSize {
+			// currentSn is the last chunk, use actual data size
+			lastChunkEnd = chunkStart + int64(len(chunkData))
+		} else {
+			// currentSn is not the last chunk, use chunkSize
+			lastChunkEnd = nextChunkStartForLastChunkEnd
+		}
 
 		// Trigger prefetch if we've read past the threshold percentage of current chunk
 		if len(chunkData) > 0 {

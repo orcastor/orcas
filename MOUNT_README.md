@@ -36,7 +36,7 @@ go build -o main ./cmd/main.go
 - `-owner <用户名或用户ID>`: 桶所有者（默认是当前用户）
   - 可以是用户名或用户ID
   - 例如：`-owner user1` 或 `-owner 12345`
-- `-wisecmpr <算法>`: 智能压缩算法
+- `-cmprway <算法>`: 压缩方式（默认智能压缩）
   - `SNAPPY`: Snappy 压缩（快速）
   - `ZSTD`: Zstd 压缩（推荐，平衡速度和压缩率）
   - `GZIP`: Gzip 压缩（兼容性好）
@@ -86,7 +86,7 @@ go build -o main ./cmd/main.go
   -quota -1 \
   -endecway AES256 \
   -endeckey "my-secure-encryption-key-12345678901234567890" \
-  -wisecmpr ZSTD \
+  -cmprway ZSTD \
   -cmprqlty 5 \
   -reflevel FULL
 ```
@@ -116,7 +116,7 @@ go build -o main ./cmd/main.go
   -user <管理员用户名> \
   -pass <管理员密码> \
   -bucket <桶ID> \
-  -wisecmpr ZSTD \
+  -cmprway ZSTD \
   -cmprqlty 6
 ```
 
@@ -155,7 +155,7 @@ go build -o main ./cmd/main.go
   -pass <密码> \
   -endecway AES256 \
   -endeckey "your-encryption-key-here-must-be-longer-than-16-chars" \
-  -wisecmpr ZSTD \
+  -cmprway ZSTD \
   -cmprqlty 5
 ```
 
@@ -169,7 +169,7 @@ go build -o main ./cmd/main.go
   "password": "your_password",
   "endec_way": "AES256",
   "endec_key": "your-encryption-key-here-must-be-longer-than-16-chars",
-  "wise_cmpr": "ZSTD",
+  "cmpr_way": "ZSTD",
   "cmpr_qlty": 5
 }
 ```
@@ -200,7 +200,7 @@ go build -o main ./cmd/main.go
 
 ### 压缩参数
 
-- `-wisecmpr`: 智能压缩算法
+- `-cmprway`: 压缩方式（默认智能压缩）
   - `SNAPPY`: Snappy 压缩（快速）
   - `ZSTD`: Zstd 压缩（推荐，平衡速度和压缩率）
   - `GZIP`: Gzip 压缩（兼容性好）
@@ -245,7 +245,7 @@ sudo fusermount -u /DATA/orcas_test
   -pass orcas \
   -endecway AES256 \
   -endeckey "my-secure-encryption-key-12345678901234567890" \
-  -wisecmpr ZSTD \
+  -cmprway ZSTD \
   -cmprqlty 5
 ```
 
@@ -256,7 +256,7 @@ sudo fusermount -u /DATA/orcas_test
   -mountpoint /DATA/orcas_test \
   -user orcas \
   -pass orcas \
-  -wisecmpr ZSTD \
+  -cmprway ZSTD \
   -cmprqlty 5
 ```
 

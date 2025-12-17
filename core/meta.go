@@ -544,7 +544,6 @@ func InitDB(key ...string) error {
 		key TEXT NOT NULL DEFAULT '',
 		ref_level INTEGER NOT NULL DEFAULT 0,
 		cmpr_way INTEGER NOT NULL DEFAULT 0,
-		wise_cmpr INTEGER NOT NULL DEFAULT 0,
 		cmpr_qlty INTEGER NOT NULL DEFAULT 0,
 		endec_way INTEGER NOT NULL DEFAULT 0,
 		endec_key TEXT NOT NULL DEFAULT ''

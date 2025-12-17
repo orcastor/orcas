@@ -50,7 +50,7 @@ func main() {
     // 配置SDK选项（加密、压缩、秒传等）
     sdkCfg := &sdk.Config{
         RefLevel:  sdk.FULL,                    // 秒传级别：FULL（完整文件秒传）
-        WiseCmpr:  core.DATA_CMPR_GZIP,         // 智能压缩：Gzip
+        CmprWay:   core.DATA_CMPR_GZIP,         // 压缩方式：Gzip（默认智能压缩）
         CmprQlty:  5,                           // 压缩级别：5
         EndecWay:  core.DATA_ENDEC_AES256,      // 加密方式：AES256
         EndecKey:  "your-encryption-key-here",   // 加密密钥（AES256需要>16字符）
@@ -82,7 +82,7 @@ func main() {
 - `FuseOptions`: 自定义FUSE选项
 - `SDKConfig`: SDK配置（用于加密、压缩、秒传等特性）
   - `RefLevel`: 秒传级别（OFF/FULL/FAST）
-  - `WiseCmpr`: 智能压缩（根据文件类型自动决定）
+  - `CmprWay`: 压缩方式（默认智能压缩，根据文件类型自动决定）
   - `CmprQlty`: 压缩级别
   - `EndecWay`: 加密方式（AES256/SM4）
   - `EndecKey`: 加密密钥

@@ -18,7 +18,7 @@ go build -o main ./cmd/main.go
   -pass <你的密码> \
   -endecway AES256 \
   -endeckey "your-encryption-key-must-be-longer-than-16-chars" \
-  -wisecmpr ZSTD \
+  -cmprway ZSTD \
   -cmprqlty 5
 ```
 
@@ -39,7 +39,7 @@ go build -o main ./cmd/main.go
   -pass orcas \
   -endecway AES256 \
   -endeckey "orcas-encryption-key-12345678901234567890" \
-  -wisecmpr ZSTD \
+  -cmprway ZSTD \
   -cmprqlty 5
 ```
 

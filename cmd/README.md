@@ -84,7 +84,7 @@ orcas-cli -action download -local /path/to/save -remote /remote/path -config con
 #### Advanced Configuration Parameters
 
 - `-reflevel`: Instant upload level, `OFF`, `FULL`, `FAST`
-- `-wisecmpr`: Smart compression, `SNAPPY`, `ZSTD`, `GZIP`, `BR`
+- `-cmprway`: Compression method (smart compression by default), `SNAPPY`, `ZSTD`, `GZIP`, `BR`
 - `-cmprqlty`: Compression level (br: 0-11, gzip: -3-9, zstd: 0-10)
 - `-endecway`: Encryption method, `AES256` or `SM4`
 - `-endeckey`: Encryption key (AES256 requires >16 characters, SM4 requires 16 characters)
@@ -109,7 +109,7 @@ Refer to `config.example.json`
 - `FULL`: Full file instant upload, read entire file to calculate checksum
 - `FAST`: Fast instant upload, check file header first, then read entire file if match succeeds
 
-#### Smart Compression (wise_cmpr)
+#### Compression (cmpr_way)
 
 Automatically decide whether to compress based on file type:
 
@@ -143,7 +143,7 @@ Automatically decide whether to compress based on file type:
   "password": "orcas",
   "data_sync": true,
   "ref_level": "FULL",
-  "wise_cmpr": "GZIP",
+  "cmpr_way": "GZIP",
   "cmpr_qlty": 5
 }
 ```

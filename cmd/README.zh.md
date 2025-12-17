@@ -84,7 +84,7 @@ orcas-cli -action download -local /path/to/save -remote /remote/path -config con
 #### 高级配置参数
 
 - `-reflevel`: 秒传级别，`OFF`、`FULL`、`FAST`
-- `-wisecmpr`: 智能压缩，`SNAPPY`、`ZSTD`、`GZIP`、`BR`
+- `-cmprway`: 压缩方式（默认智能压缩），`SNAPPY`、`ZSTD`、`GZIP`、`BR`
 - `-cmprqlty`: 压缩级别（br: 0-11, gzip: -3-9, zstd: 0-10）
 - `-endecway`: 加密方式，`AES256` 或 `SM4`
 - `-endeckey`: 加密密钥（AES256需要>16字符，SM4需要16字符）
@@ -109,7 +109,7 @@ orcas-cli -action download -local /path/to/save -remote /remote/path -config con
 - `FULL`: 完整文件秒传，读取整个文件计算校验值
 - `FAST`: 快速秒传，先检查文件头部，匹配成功后再读取整个文件
 
-#### 智能压缩 (wise_cmpr)
+#### 压缩方式 (cmpr_way)
 
 根据文件类型自动决定是否压缩：
 
@@ -143,7 +143,7 @@ orcas-cli -action download -local /path/to/save -remote /remote/path -config con
   "password": "orcas",
   "data_sync": true,
   "ref_level": "FULL",
-  "wise_cmpr": "GZIP",
+  "cmpr_way": "GZIP",
   "cmpr_qlty": 5
 }
 ```

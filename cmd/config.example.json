@@ -3,7 +3,7 @@
   "password": "orcas",
   "data_sync": true,
   "ref_level": "FULL",
-  "wise_cmpr": "GZIP",
+  "cmpr_way": "GZIP",
   "cmpr_qlty": 5,
   "endec_way": "",
   "endec_key": "",

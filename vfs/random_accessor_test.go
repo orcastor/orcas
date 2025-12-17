@@ -25,6 +25,12 @@ func init() {
 	if core.ORCAS_BASE == "" {
 		// 使用临时目录
 		tmpDir := filepath.Join(os.TempDir(), "orcas_test")
+		// Remove if exists (could be a file from previous test)
+		if info, err := os.Stat(tmpDir); err == nil {
+			if !info.IsDir() {
+				os.Remove(tmpDir)
+			}
+		}
 		os.MkdirAll(tmpDir, 0o755)
 		os.Setenv("ORCAS_BASE", tmpDir)
 		core.ORCAS_BASE = tmpDir
@@ -32,6 +38,12 @@ func init() {
 	if core.ORCAS_DATA == "" {
 		// 使用临时目录
 		tmpDir := filepath.Join(os.TempDir(), "orcas_test_data")
+		// Remove if exists (could be a file from previous test)
+		if info, err := os.Stat(tmpDir); err == nil {
+			if !info.IsDir() {
+				os.Remove(tmpDir)
+			}
+		}
 		os.MkdirAll(tmpDir, 0o755)
 		os.Setenv("ORCAS_DATA", tmpDir)
 		core.ORCAS_DATA = tmpDir
@@ -40,7 +52,12 @@ func init() {
 	// This makes tests more predictable and easier to understand
 	os.Setenv("ORCAS_BATCH_WRITE_ENABLED", "false")
 	// 初始化主数据库
-	core.InitDB("")
+	// IMPORTANT: Ensure ORCAS_BASE and ORCAS_DATA are set before calling InitDB
+	if err := core.InitDB(""); err != nil {
+		// If InitDB fails, log the error but don't fail the test setup
+		// The actual test will handle the error
+		fmt.Printf("Warning: InitDB failed in init(): %v\n", err)
+	}
 }
 
 func TestVFSRandomAccessor(t *testing.T) {

@@ -193,7 +193,7 @@ type LocalHandler struct {
 // SDKConfigInfo stores SDK configuration for a bucket
 // This is a simplified version of sdk.Config, containing only compression/encryption settings
 type SDKConfigInfo struct {
-	WiseCmpr uint32 // Compression method (core.DATA_CMPR_MASK)
+	CmprWay  uint32 // Compression method (core.DATA_CMPR_MASK), smart compression by default
 	CmprQlty uint32 // Compression quality
 	EndecWay uint32 // Encryption method (core.DATA_ENDEC_MASK)
 	EndecKey string // Encryption key
@@ -288,7 +288,7 @@ func (lh *LocalHandler) GetDataAdapter() DataAdapter {
 // cmprWay is smart compression by default (checks file type)
 func (lh *LocalHandler) SetSDKConfig(bktID int64, cmprWay, cmprQlty, endecWay uint32, endecKey string) {
 	lh.sdkConfigs.Store(bktID, &SDKConfigInfo{
-		WiseCmpr: cmprWay, // Store as WiseCmpr for SDK compatibility (smart compression)
+		CmprWay:  cmprWay, // Smart compression by default (checks file type)
 		CmprQlty: cmprQlty,
 		EndecWay: endecWay,
 		EndecKey: endecKey,

@@ -512,7 +512,7 @@ func processChunkData(originalData []byte, needsCompression, needsEncryption boo
 	data := originalData
 
 	// 1. Apply compression (if needed)
-	if needsCompression && sdkCfg.WiseCmpr > 0 {
+	if needsCompression && sdkCfg.CmprWay > 0 {
 		var cmpr archiver.Compressor
 		if dataInfo.Kind&DATA_CMPR_SNAPPY != 0 {
 			cmpr = &archiver.Snappy{}

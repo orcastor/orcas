@@ -34,7 +34,7 @@ type Config struct {
 	Password string // Password
 	RefLevel uint32 // Instant upload level setting: OFF (default) / FULL: Ref / FAST: TryRef+Ref
 	PkgThres uint32 // Package count limit, default 1000 if not set
-	WiseCmpr uint32 // Smart compression, decide whether to compress based on file type, see core.DATA_CMPR_MASK
+	CmprWay uint32 // Compression method (smart compression by default, decides whether to compress based on file type), see core.DATA_CMPR_MASK
 	CmprQlty uint32 // Compression level, br:[0,11], gzip:[-3,9], zstd:[0,10]
 	EndecWay uint32 // Encryption method, see core.DATA_ENDEC_MASK
 	EndecKey string // Encryption KEY, SM4 requires exactly 16 characters, AES256 requires more than 16 characters

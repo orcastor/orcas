@@ -52,7 +52,7 @@ func main() {
     // Configure SDK options (encryption, compression, instant upload, etc.)
     sdkCfg := &sdk.Config{
         RefLevel:  sdk.FULL,                    // Instant upload level: FULL (full file instant upload)
-        WiseCmpr:  core.DATA_CMPR_GZIP,         // Smart compression: Gzip
+        CmprWay:   core.DATA_CMPR_GZIP,         // Compression: Gzip (smart compression by default)
         CmprQlty:  5,                           // Compression level: 5
         EndecWay:  core.DATA_ENDEC_AES256,      // Encryption method: AES256
         EndecKey:  "your-encryption-key-here",   // Encryption key (AES256 requires >16 characters)
@@ -84,7 +84,7 @@ func main() {
 - `FuseOptions`: Custom FUSE options
 - `SDKConfig`: SDK configuration (for encryption, compression, instant upload, etc.)
   - `RefLevel`: Instant upload level (OFF/FULL/FAST)
-  - `WiseCmpr`: Smart compression (automatically decide based on file type)
+  - `CmprWay`: Compression method (smart compression by default, automatically decides based on file type)
   - `CmprQlty`: Compression level
   - `EndecWay`: Encryption method (AES256/SM4)
   - `EndecKey`: Encryption key

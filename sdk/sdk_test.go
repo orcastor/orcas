@@ -21,7 +21,7 @@ var (
 		RefLevel: FULL,
 		//	EndecWay: core.DATA_ENDEC_AES256,
 		//	EndecKey: "1234567890abcdef12345678",
-		WiseCmpr: core.DATA_CMPR_GZIP,
+		CmprWay: core.DATA_CMPR_GZIP,
 		CmprQlty: 5,
 		DontSync: ".*",
 	}
