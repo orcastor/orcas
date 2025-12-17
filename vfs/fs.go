@@ -744,7 +744,7 @@ func (n *OrcasNode) getPendingObjectsForDir(dirID int64) []*core.ObjectInfo {
 	pendingMap := make(map[int64]*core.ObjectInfo)
 
 	// Get pending objects from batch writer
-	batchMgr := n.fs.getBatchWriteManager()
+	batchMgr := sdk.GetBatchWriterForBucket(n.fs.h, n.fs.bktID)
 	if batchMgr != nil {
 		pendingObjs := batchMgr.GetPendingObjects()
 		for fileID, pkgInfo := range pendingObjs {
@@ -1524,7 +1524,7 @@ func (n *OrcasNode) Unlink(ctx context.Context, name string) syscall.Errno {
 
 	// Step 0: Remove from pendingObjects if present (batch writer and RandomAccessor registry)
 	// This ensures the file is removed from pending objects before deletion
-	batchMgr := n.fs.getBatchWriteManager()
+	batchMgr := sdk.GetBatchWriterForBucket(n.fs.h, n.fs.bktID)
 	if batchMgr != nil {
 		if removed := batchMgr.RemovePendingObject(targetID); removed {
 			DebugLog("[VFS Unlink] Removed file from batch writer pending objects: fileID=%d", targetID)
@@ -1997,7 +1997,7 @@ func (n *OrcasNode) Rename(ctx context.Context, name string, newParent fs.InodeE
 				targetTmpFileID = existingTargetID
 				DebugLog("[VFS Rename] Target file is .tmp file (or old .tmp without suffix), will delete after rename: fileID=%d, name=%s, targetName=%s", existingTargetID, existingObj.Name, newName)
 
-				batchMgr := n.fs.getBatchWriteManager()
+				batchMgr := sdk.GetBatchWriterForBucket(n.fs.h, n.fs.bktID)
 				if batchMgr != nil {
 					// Note: We do NOT flush batch writer here
 					// FlushAll is only called when buffer is full (AddFile returns false) or by periodic timer
@@ -2276,7 +2276,7 @@ func (n *OrcasNode) Rename(ctx context.Context, name string, newParent fs.InodeE
 					}
 
 					// Remove from batch writer if present
-					batchMgr := n.fs.getBatchWriteManager()
+					batchMgr := sdk.GetBatchWriterForBucket(n.fs.h, n.fs.bktID)
 					if batchMgr != nil {
 						batchMgr.RemovePendingObject(conflictFileID)
 					}
@@ -2389,7 +2389,7 @@ func (n *OrcasNode) Rename(ctx context.Context, name string, newParent fs.InodeE
 		DebugLog("[VFS Rename] Source .tmp file renamed to new name (target didn't exist): fileID=%d, oldName=%s, newName=%s", sourceID, sourceObj.Name, newName)
 
 		// Remove from batch writer cache if present
-		batchMgr := n.fs.getBatchWriteManager()
+		batchMgr := sdk.GetBatchWriterForBucket(n.fs.h, n.fs.bktID)
 		if batchMgr != nil {
 			if removed := batchMgr.RemovePendingObject(sourceID); removed {
 				// DebugLog("[VFS Rename] Removed source .tmp file from batch writer cache: fileID=%d", sourceID)
@@ -3094,7 +3094,7 @@ func (n *OrcasNode) forceFlushTempFileBeforeRename(fileID int64, oldName, newNam
 
 	// First, check if file is in batch writer buffer and update cache before flushing
 	// Note: If file is in batch writer, don't pre-allocate DataID - let batch writer handle it
-	batchMgr := n.fs.getBatchWriteManager()
+	batchMgr := sdk.GetBatchWriterForBucket(n.fs.h, n.fs.bktID)
 	isInBatchWriter := false
 	if batchMgr != nil {
 		if _, ok := batchMgr.GetPendingObject(fileID); ok {

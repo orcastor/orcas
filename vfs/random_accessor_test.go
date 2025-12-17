@@ -338,7 +338,7 @@ func TestVFSRandomAccessorWithSDK(t *testing.T) {
 			So(err, ShouldBeNil)
 
 			// 强制 flush 特定 bucket 的 batch writer，确保数据持久化
-			batchMgr := ofs.getBatchWriteManager()
+			batchMgr := sdk.GetBatchWriterForBucket(ofs.h, ofs.bktID)
 			if batchMgr != nil {
 				batchMgr.FlushAll(testCtx)
 			}
@@ -399,7 +399,7 @@ func TestVFSRandomAccessorWithSDK(t *testing.T) {
 			So(err, ShouldBeNil)
 
 			// 强制 flush 特定 bucket 的 batch writer，确保数据持久化
-			batchMgr := ofs.getBatchWriteManager()
+			batchMgr := sdk.GetBatchWriterForBucket(ofs.h, ofs.bktID)
 			if batchMgr != nil {
 				batchMgr.FlushAll(testCtx)
 			}
@@ -853,7 +853,7 @@ func TestRandomAccessorReadOptimization(t *testing.T) {
 			So(err, ShouldBeNil)
 
 			// 强制 flush 特定 bucket 的 batch writer，确保数据持久化
-			batchMgr := ofs.getBatchWriteManager()
+			batchMgr := sdk.GetBatchWriterForBucket(ofs.h, ofs.bktID)
 			if batchMgr != nil {
 				batchMgr.FlushAll(testCtx)
 			}
@@ -1089,7 +1089,7 @@ func TestRandomAccessorReadOptimization(t *testing.T) {
 			So(err, ShouldBeNil)
 
 			// 强制 flush 特定 bucket 的 batch writer，确保数据持久化
-			batchMgr := ofs.getBatchWriteManager()
+			batchMgr := sdk.GetBatchWriterForBucket(ofs.h, ofs.bktID)
 			if batchMgr != nil {
 				batchMgr.FlushAll(testCtx)
 			}
@@ -1812,7 +1812,7 @@ func TestEmptyWrite(t *testing.T) {
 			So(versionID, ShouldBeGreaterThan, 0)
 
 			// If file is in BatchWriter, flush it explicitly to ensure data is persisted
-			batchMgr := ofs.getBatchWriteManager()
+			batchMgr := sdk.GetBatchWriterForBucket(ofs.h, ofs.bktID)
 			if batchMgr != nil {
 				if _, isPending := batchMgr.GetPendingObject(fileID); isPending {
 					batchMgr.FlushAll(testCtx)
@@ -2323,7 +2323,7 @@ func TestBatchWriteManagerSmallFile(t *testing.T) {
 			So(err, ShouldBeNil)
 
 			// 强制 flush 特定 bucket 的 batch writer，确保数据持久化
-			batchMgr := ofs.getBatchWriteManager()
+			batchMgr := sdk.GetBatchWriterForBucket(ofs.h, ofs.bktID)
 			if batchMgr != nil {
 				batchMgr.FlushAll(testCtx)
 			}
@@ -2351,7 +2351,7 @@ func TestBatchWriteManagerSmallFile(t *testing.T) {
 			// 文件应该有数据：要么 DataID > 0，要么在 batch writer 中，要么 buffer 有数据
 			hasDataID := fileObj2.DataID > 0 && fileObj2.DataID != core.EmptyDataID
 			isInBatchWriter := false
-			batchMgr = ofs.getBatchWriteManager()
+			batchMgr = sdk.GetBatchWriterForBucket(ofs.h, ofs.bktID)
 			if batchMgr != nil {
 				_, isInBatchWriter = batchMgr.GetPendingObject(fileID)
 			}

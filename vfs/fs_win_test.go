@@ -570,7 +570,7 @@ func TestDokanyWriteAndRead(t *testing.T) {
 	}
 
 	// Flush batch write manager if it exists
-	batchMgr := ofs.getBatchWriteManager()
+	batchMgr := sdk.GetBatchWriterForBucket(ofs.h, ofs.bktID)
 	if batchMgr != nil {
 		batchMgr.FlushAll(ctx)
 	}

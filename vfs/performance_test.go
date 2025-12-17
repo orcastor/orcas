@@ -228,7 +228,7 @@ func runPerformanceTest(t *testing.T, name string, dataSize, chunkSize int64, wr
 
 		// After all goroutines complete, ensure batch write manager flushes all data
 		// Note: Each RandomAccessor's Close will already trigger flush, this is a safeguard
-		batchMgr := ofs.getBatchWriteManager()
+		batchMgr := sdk.GetBatchWriterForBucket(ofs.h, ofs.bktID)
 		if batchMgr != nil {
 			batchMgr.FlushAll(testCtx)
 		}

@@ -248,51 +248,6 @@ func (m *delayedFlushManager) cancel(ra *RandomAccessor) {
 	m.mu.Unlock()
 }
 
-// getBatchWriteManager gets the batch writer for the specified bucket (thread-safe)
-// Returns nil if batch write is disabled
-// Uses SDK's global batch writer registry
-// Sets up callback to update dirListCache when objects are flushed
-// Sets bucket configuration for package-level compression/encryption
-func (fs *OrcasFS) getBatchWriteManager() *sdk.BatchWriter {
-	batchMgr := sdk.GetBatchWriterForBucket(fs.h, fs.bktID)
-	if batchMgr != nil {
-		// Get bucket configuration and set it on BatchWriter
-		// This enables package-level compression/encryption
-		bucket := getBucketConfigWithCache(fs)
-		if bucket != nil {
-			batchMgr.SetBucketConfig(bucket.CmprWay, bucket.CmprQlty, bucket.EndecWay, bucket.EndecKey)
-		}
-
-		// Set callback to update dirListCache after flush completes
-		// This ensures flushed objects are immediately added to dirListCache
-		// instead of requiring getDirListWithCache to merge from pendingObjects
-		batchMgr.SetOnFlushComplete(func(objectInfos []*core.ObjectInfo) {
-			if len(objectInfos) == 0 {
-				return
-			}
-			// Group objects by parent directory ID
-			objectsByDir := make(map[int64][]*core.ObjectInfo)
-			for _, obj := range objectInfos {
-				if obj != nil && obj.PID > 0 {
-					objectsByDir[obj.PID] = append(objectsByDir[obj.PID], obj)
-				}
-			}
-			// Update dirListCache for each directory
-			for dirID, objs := range objectsByDir {
-				dirNode := &OrcasNode{
-					fs:    fs,
-					objID: dirID,
-				}
-				for _, obj := range objs {
-					// Append to dirListCache (will check for duplicates)
-					dirNode.appendChildToDirCache(dirID, obj)
-					DebugLog("[VFS getBatchWriteManager] Updated dirListCache after flush: dirID=%d, fileID=%d, name=%s, DataID=%d", dirID, obj.ID, obj.Name, obj.DataID)
-				}
-			}
-		})
-	}
-	return batchMgr
-}
 
 // processFileDataForBatchWrite processes file data (compression/encryption) for batch write
 // This is a helper function to process data before passing to SDK's BatchWriter
@@ -475,7 +430,7 @@ func addFileToBatchWrite(ra *RandomAccessor, data []byte) (bool, int64, error) {
 						DebugLog("[VFS addFileToBatchWrite] Found existing .tmp file with same name, will delete during batch flush: fileID=%d, tmpFileID=%d, name=%s", ra.fileID, child.ID, tmpFileName)
 
 						// Remove from batch writer if present
-						batchMgr := ra.fs.getBatchWriteManager()
+						batchMgr := sdk.GetBatchWriterForBucket(ra.fs.h, ra.fs.bktID)
 						if batchMgr != nil {
 							batchMgr.RemovePendingObject(child.ID)
 						}
@@ -518,7 +473,7 @@ func addFileToBatchWrite(ra *RandomAccessor, data []byte) (bool, int64, error) {
 	}
 
 	// Get batch write manager
-	batchMgr := ra.fs.getBatchWriteManager()
+	batchMgr := sdk.GetBatchWriterForBucket(ra.fs.h, ra.fs.bktID)
 	if batchMgr == nil {
 		return false, 0, nil
 	}
@@ -2061,7 +2016,7 @@ func (tw *TempFileWriter) Flush() error {
 									DebugLog("[VFS TempFileWriter Flush] Found existing .tmp file with same name, deleting it: fileID=%d, name=%s", child.ID, child.Name)
 
 									// Remove from batch writer if present
-									batchMgr := tw.fs.getBatchWriteManager()
+									batchMgr := sdk.GetBatchWriterForBucket(tw.fs.h, tw.fs.bktID)
 									if batchMgr != nil {
 										batchMgr.RemovePendingObject(child.ID)
 									}
@@ -2103,7 +2058,7 @@ func (tw *TempFileWriter) Flush() error {
 					// Small files should be handled by batch writer, not TempFileWriter
 					if isSmallFile && config.BatchWriteEnabled {
 						// Update batch writer with new name (if file is in batch writer)
-						batchMgr := tw.fs.getBatchWriteManager()
+						batchMgr := sdk.GetBatchWriterForBucket(tw.fs.h, tw.fs.bktID)
 						if batchMgr != nil {
 							updated := batchMgr.UpdatePendingObject(tw.fileID, func(pkgInfo *sdk.PackagedFileInfo) {
 								pkgInfo.Name = newName
@@ -2878,7 +2833,7 @@ func (ra *RandomAccessor) flushSequentialBuffer() error {
 			}
 
 			// If instant upload failed, try batch write
-			batchMgr := ra.fs.getBatchWriteManager()
+			batchMgr := sdk.GetBatchWriterForBucket(ra.fs.h, ra.fs.bktID)
 			if batchMgr != nil {
 				added, _, err := addFileToBatchWrite(ra, allData)
 				if err == nil && added {
@@ -3007,7 +2962,7 @@ func (ra *RandomAccessor) Read(offset int64, size int) ([]byte, error) {
 	// BatchWriter's OrigSize may be stale after truncate
 	var actualFileSize int64 = fileObj.Size
 	var isInBatchWriter bool
-	batchMgr := ra.fs.getBatchWriteManager()
+	batchMgr := sdk.GetBatchWriterForBucket(ra.fs.h, ra.fs.bktID)
 	if batchMgr != nil {
 		if pkgInfo, isPending := batchMgr.GetPendingObject(ra.fileID); isPending {
 			// File is in batch writer, but only use OrigSize if fileObj.Size is 0 (file not yet flushed)
@@ -3760,7 +3715,7 @@ func (ra *RandomAccessor) flushInternal(force bool) (int64, error) {
 		// Check if file has existing data in database (not just in local cache)
 		// If file was added to BatchWriter before, local cache may have DataID but database doesn't
 		// First check if file is in BatchWriter's pending objects (not yet flushed to database)
-		batchMgr := ra.fs.getBatchWriteManager()
+		batchMgr := sdk.GetBatchWriterForBucket(ra.fs.h, ra.fs.bktID)
 		isPendingInBatchWriter := false
 		if batchMgr != nil {
 			_, isPendingInBatchWriter = batchMgr.GetPendingObject(ra.fileID)
@@ -3994,7 +3949,7 @@ func (ra *RandomAccessor) flushInternal(force bool) (int64, error) {
 					}
 
 					// Add to batch write manager (lock-free)
-					batchMgr := ra.fs.getBatchWriteManager()
+					batchMgr := sdk.GetBatchWriterForBucket(ra.fs.h, ra.fs.bktID)
 					if batchMgr != nil {
 						added, dataID, err := addFileToBatchWrite(ra, mergedData)
 						if err != nil {
@@ -5836,7 +5791,7 @@ func (ra *RandomAccessor) Truncate(newSize int64) (int64, error) {
 	// IMPORTANT: If fileObj.Size is 0 but file has data in BatchWriter, get correct size from BatchWriter
 	// This is critical because BatchWriter updates fileObj.Size in cache but database update is async
 	if oldSize == 0 {
-		batchMgr := ra.fs.getBatchWriteManager()
+		batchMgr := sdk.GetBatchWriterForBucket(ra.fs.h, ra.fs.bktID)
 		if batchMgr != nil {
 			if pkgInfo, isPending := batchMgr.GetPendingObject(ra.fileID); isPending {
 				// File is in batch writer, use OrigSize from batch writer
