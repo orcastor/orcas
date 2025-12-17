@@ -18,9 +18,6 @@ func TestRandomWriteRedundancy(t *testing.T) {
 
 	ig := idgen.NewIDGen(nil, 0)
 	testBktID, _ := ig.New()
-	if err := core.InitBucketDB(context.Background(), testBktID); err != nil {
-		t.Fatalf("InitBucketDB failed: %v", err)
-	}
 
 	dma := &core.DefaultMetadataAdapter{}
 	dda := &core.DefaultDataAdapter{}

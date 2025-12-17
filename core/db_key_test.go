@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	. "github.com/smartystreets/goconvey/convey"
 )
@@ -88,12 +89,17 @@ func TestChangeDBKey(t *testing.T) {
 			// Add some test data
 			db, err := GetDBWithKey("")
 			So(err, ShouldBeNil)
-			defer db.Close()
 
 			// Insert a test bucket
 			_, err = db.Exec(`INSERT INTO bkt (id, uid, quota, used, real_used, logical_used, dedup_savings, type, name, chunk_size) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 				1, 1, 1000, 0, 0, 0, 0, 1, "test-bucket", 0)
 			So(err, ShouldBeNil)
+			
+			// Close database connection before changing key
+			// This ensures the database file is not locked on Windows
+			db.Close()
+			// Wait a bit for connection to fully close (especially important on Windows)
+			time.Sleep(50 * time.Millisecond)
 
 			// Change key from empty to "new-key"
 			err = ChangeDBKey("", "new-key")
@@ -128,12 +134,15 @@ func TestChangeDBKey(t *testing.T) {
 			// Add some test data
 			db, err := GetDBWithKey("old-key")
 			So(err, ShouldBeNil)
-			defer db.Close()
 
 			// Insert a test bucket
 			_, err = db.Exec(`INSERT INTO bkt (id, uid, quota, used, real_used, logical_used, dedup_savings, type, name, chunk_size) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 				1, 1, 1000, 0, 0, 0, 0, 1, "test-bucket", 0)
 			So(err, ShouldBeNil)
+			
+			// Close database connection before changing key
+			db.Close()
+			time.Sleep(50 * time.Millisecond)
 
 			// Change key from "old-key" to "new-key"
 			err = ChangeDBKey("old-key", "new-key")
@@ -168,12 +177,15 @@ func TestChangeDBKey(t *testing.T) {
 			// Add some test data
 			db, err := GetDBWithKey("old-key")
 			So(err, ShouldBeNil)
-			defer db.Close()
 
 			// Insert a test bucket
 			_, err = db.Exec(`INSERT INTO bkt (id, uid, quota, used, real_used, logical_used, dedup_savings, type, name, chunk_size) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 				1, 1, 1000, 0, 0, 0, 0, 1, "test-bucket", 0)
 			So(err, ShouldBeNil)
+			
+			// Close database connection before changing key
+			db.Close()
+			time.Sleep(50 * time.Millisecond)
 
 			// Change key from "old-key" to empty (unencrypted)
 			err = ChangeDBKey("old-key", "")
@@ -236,7 +248,6 @@ func TestChangeDBKey(t *testing.T) {
 			// Add test data to multiple tables
 			db, err := GetDBWithKey("old-key")
 			So(err, ShouldBeNil)
-			defer db.Close()
 
 			// Insert buckets
 			_, err = db.Exec(`INSERT INTO bkt (id, uid, quota, used, real_used, logical_used, dedup_savings, type, name, chunk_size) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -253,6 +264,10 @@ func TestChangeDBKey(t *testing.T) {
 			_, err = db.Exec(`INSERT INTO usr (id, role, usr, pwd, name, avatar) VALUES (?, ?, ?, ?, ?, ?)`,
 				2, USER, "user2", "pwd2", "User 2", "")
 			So(err, ShouldBeNil)
+			
+			// Close database connection before changing key
+			db.Close()
+			time.Sleep(50 * time.Millisecond)
 
 			// Change key
 			err = ChangeDBKey("old-key", "new-key")
@@ -321,12 +336,15 @@ func TestChangeDBKey(t *testing.T) {
 			// Add data that uses indexes
 			db, err := GetDBWithKey("old-key")
 			So(err, ShouldBeNil)
-			defer db.Close()
 
 			// Insert bucket with unique name (uses uk_name index)
 			_, err = db.Exec(`INSERT INTO bkt (id, uid, quota, used, real_used, logical_used, dedup_savings, type, name, chunk_size) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 				1, 1, 1000, 0, 0, 0, 0, 1, "unique-bucket", 0)
 			So(err, ShouldBeNil)
+			
+			// Close database connection before changing key
+			db.Close()
+			time.Sleep(50 * time.Millisecond)
 
 			// Change key
 			err = ChangeDBKey("old-key", "new-key")
@@ -350,11 +368,14 @@ func TestChangeDBKey(t *testing.T) {
 			// Add test data
 			db, err := GetDBWithKey("same-key")
 			So(err, ShouldBeNil)
-			defer db.Close()
 
 			_, err = db.Exec(`INSERT INTO bkt (id, uid, quota, used, real_used, logical_used, dedup_savings, type, name, chunk_size) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 				1, 1, 1000, 0, 0, 0, 0, 1, "test-bucket", 0)
 			So(err, ShouldBeNil)
+			
+			// Close database connection before changing key
+			db.Close()
+			time.Sleep(50 * time.Millisecond)
 
 			// Change key to same key
 			err = ChangeDBKey("same-key", "same-key")

@@ -13,6 +13,7 @@ import (
 
 	"github.com/orca-zhang/idgen"
 	"github.com/orcastor/orcas/core"
+	"github.com/orcastor/orcas/sdk"
 )
 
 // TestDokanyInitialization tests Dokany DLL loading

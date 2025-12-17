@@ -171,7 +171,6 @@ func TestRandomWriteSparseFile(t *testing.T) {
 
 		ig := idgen.NewIDGen(nil, 0)
 		testBktID, _ := ig.New()
-		So(core.InitBucketDB(context.Background(), testBktID), ShouldBeNil)
 
 		dma := &core.DefaultMetadataAdapter{}
 		dda := &core.DefaultDataAdapter{}

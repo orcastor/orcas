@@ -467,15 +467,39 @@ func ChangeDBKey(oldKey, newKey string) error {
 		}
 	}
 
-	// Step 6: Close databases
+	// Step 6: Close databases and wait for connections to fully close
+	// This is especially important on Windows where SQLite files cannot be renamed
+	// while any connection is open
 	dbOld.Close()
 	dbNew.Close()
-
+	
+	// Wait for connections to fully close (especially important on Windows)
+	// SQLite connections may take a moment to fully release file handles
+	time.Sleep(100 * time.Millisecond)
+	
+	// Retry renaming with exponential backoff (up to 5 attempts)
+	// This handles cases where connections haven't fully closed yet
+	var renameErr error
+	backupPath := dbPath + ".backup"
+	for i := 0; i < 5; i++ {
+		if i > 0 {
+			// Exponential backoff: 100ms, 200ms, 400ms, 800ms
+			time.Sleep(time.Duration(100*(1<<uint(i-1))) * time.Millisecond)
+		}
+		renameErr = os.Rename(dbPath, backupPath)
+		if renameErr == nil {
+			break
+		}
+		// If rename failed, try to close any remaining connections
+		// Force close the database connections again
+		dbOld.Close()
+		dbNew.Close()
+	}
+	
 	// Step 7: Replace old database with new one
 	// Backup old database first
-	backupPath := dbPath + ".backup"
-	if err := os.Rename(dbPath, backupPath); err != nil {
-		return fmt.Errorf("failed to backup old database: %v", err)
+	if renameErr != nil {
+		return fmt.Errorf("failed to backup old database: %v", renameErr)
 	}
 
 	// Move new database to final location
@@ -1572,7 +1596,7 @@ func (dma *DefaultMetadataAdapter) ListVersions(c Ctx, bktID int64, fileID int64
 	// Use read connection for listing versions
 	db, err := GetReadDB(c, bktID)
 	if err != nil {
-		return nil, ERR_OPEN_DB
+		return nil, ERR_QUERY_DB
 	}
 	// Note: Don't close the connection, it's from the pool
 
