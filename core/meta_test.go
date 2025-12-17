@@ -13,6 +13,8 @@ import (
 var bktID = int64(0)
 
 func init() {
+	// Initialize test environment with in-memory filesystem
+	InitTestEnv()
 	bktID, _ = idgen.NewIDGen(nil, 0).New()
 }
 
@@ -373,10 +375,16 @@ func TestSetObj(t *testing.T) {
 
 func TestListObj(t *testing.T) {
 	Convey("normal", t, func() {
-		InitBucketDB(context.TODO(), bktID)
+		// Use unique bktID for this test
+		ig := idgen.NewIDGen(nil, 0)
+		testBktID, _ := ig.New()
+		// Clean up before test
+		CleanTestDB(testBktID)
+		CleanTestBucketData(testBktID)
+		InitDB() // Initialize main database first
+		InitBucketDB(context.TODO(), testBktID)
 
 		dma := &DefaultMetadataAdapter{}
-		ig := idgen.NewIDGen(nil, 0)
 		pid, _ := ig.New()
 
 		id1, _ := ig.New()
@@ -442,30 +450,30 @@ func TestListObj(t *testing.T) {
 			Size:   4,
 			Extra:  "{}",
 		}
-		ids, err := dma.PutObj(c, bktID, []*ObjectInfo{d1, d2, d3, d4, d5})
+		ids, err := dma.PutObj(c, testBktID, []*ObjectInfo{d1, d2, d3, d4, d5})
 		So(err, ShouldBeNil)
 		So(len(ids), ShouldEqual, 5)
 
 		Convey("list obj pagination", func() {
-			o, cnt, d, err := dma.ListObj(c, bktID, pid, "", "", "", 2)
+			o, cnt, d, err := dma.ListObj(c, testBktID, pid, "", "", "", 2)
 			So(err, ShouldBeNil)
 			So(len(o), ShouldEqual, 2)
 			So(cnt, ShouldEqual, 5)
 			So(d, ShouldEqual, fmt.Sprint(id2))
 
-			o, cnt, d, err = dma.ListObj(c, bktID, pid, "", d, "", 2)
+			o, cnt, d, err = dma.ListObj(c, testBktID, pid, "", d, "", 2)
 			So(err, ShouldBeNil)
 			So(len(o), ShouldEqual, 2)
 			So(cnt, ShouldEqual, 5)
 			So(d, ShouldEqual, fmt.Sprint(id4))
 
-			o, cnt, d, err = dma.ListObj(c, bktID, pid, "", d, "", 2)
+			o, cnt, d, err = dma.ListObj(c, testBktID, pid, "", d, "", 2)
 			So(err, ShouldBeNil)
 			So(len(o), ShouldEqual, 1)
 			So(cnt, ShouldEqual, 5)
 			So(d, ShouldEqual, fmt.Sprint(id5))
 
-			o, cnt, d, err = dma.ListObj(c, bktID, pid, "", d, "", 2)
+			o, cnt, d, err = dma.ListObj(c, testBktID, pid, "", d, "", 2)
 			So(err, ShouldBeNil)
 			So(len(o), ShouldEqual, 0)
 			So(cnt, ShouldEqual, 5)
@@ -473,19 +481,19 @@ func TestListObj(t *testing.T) {
 		})
 
 		Convey("word", func() {
-			o, cnt, d, err := dma.ListObj(c, bktID, pid, "xxx", "", "", 2)
+			o, cnt, d, err := dma.ListObj(c, testBktID, pid, "xxx", "", "", 2)
 			So(err, ShouldBeNil)
 			So(len(o), ShouldEqual, 0)
 			So(cnt, ShouldEqual, 0)
 			So(d, ShouldEqual, "")
 
-			o, cnt, d, err = dma.ListObj(c, bktID, pid, "test1", "", "", 2)
+			o, cnt, d, err = dma.ListObj(c, testBktID, pid, "test1", "", "", 2)
 			So(err, ShouldBeNil)
 			So(len(o), ShouldEqual, 1)
 			So(cnt, ShouldEqual, 1)
 			So(d, ShouldEqual, fmt.Sprint(id1))
 
-			o, cnt, d, err = dma.ListObj(c, bktID, pid, "?es*", "", "", 2)
+			o, cnt, d, err = dma.ListObj(c, testBktID, pid, "?es*", "", "", 2)
 			So(err, ShouldBeNil)
 			So(len(o), ShouldEqual, 2)
 			So(cnt, ShouldEqual, 5)
@@ -493,21 +501,21 @@ func TestListObj(t *testing.T) {
 		})
 
 		Convey("order", func() {
-			o, cnt, d, err := dma.ListObj(c, bktID, pid, "", "", "+id", 5)
+			o, cnt, d, err := dma.ListObj(c, testBktID, pid, "", "", "+id", 5)
 			So(err, ShouldBeNil)
 			So(len(o), ShouldEqual, 5)
 			So(cnt, ShouldEqual, 5)
 			So(d, ShouldEqual, fmt.Sprint(id5))
 			So(o, ShouldResemble, []*ObjectInfo{d1, d2, d3, d4, d5})
 
-			o, cnt, d, err = dma.ListObj(c, bktID, pid, "", "", "-id", 5)
+			o, cnt, d, err = dma.ListObj(c, testBktID, pid, "", "", "-id", 5)
 			So(err, ShouldBeNil)
 			So(len(o), ShouldEqual, 5)
 			So(cnt, ShouldEqual, 5)
 			So(d, ShouldEqual, fmt.Sprint(id1))
 			So(o, ShouldResemble, []*ObjectInfo{d5, d4, d3, d2, d1})
 
-			o, cnt, d, err = dma.ListObj(c, bktID, pid, "", "", "-name", 5)
+			o, cnt, d, err = dma.ListObj(c, testBktID, pid, "", "", "-name", 5)
 			So(err, ShouldBeNil)
 			So(len(o), ShouldEqual, 5)
 			So(cnt, ShouldEqual, 5)
@@ -515,63 +523,63 @@ func TestListObj(t *testing.T) {
 			So(o, ShouldResemble, []*ObjectInfo{d5, d4, d3, d2, d1})
 
 			// 比较非id或者name的时候，相同值的排序是否稳定
-			o, cnt, d, err = dma.ListObj(c, bktID, pid, "", "", "+mtime", 3)
+			o, cnt, d, err = dma.ListObj(c, testBktID, pid, "", "", "+mtime", 3)
 			So(err, ShouldBeNil)
 			So(len(o), ShouldEqual, 3)
 			So(cnt, ShouldEqual, 5)
 			So(d, ShouldEqual, fmt.Sprintf("%d:%d", now+3, id3))
 			So(o, ShouldResemble, []*ObjectInfo{d1, d2, d3})
 
-			o, cnt, d, err = dma.ListObj(c, bktID, pid, "", "", "-mtime", 2)
+			o, cnt, d, err = dma.ListObj(c, testBktID, pid, "", "", "-mtime", 2)
 			So(err, ShouldBeNil)
 			So(len(o), ShouldEqual, 2)
 			So(cnt, ShouldEqual, 5)
 			So(d, ShouldEqual, fmt.Sprintf("%d:%d", now+3, id3))
 			So(o, ShouldResemble, []*ObjectInfo{d5, d3})
 
-			o, cnt, d, err = dma.ListObj(c, bktID, pid, "", d, "-mtime", 2)
+			o, cnt, d, err = dma.ListObj(c, testBktID, pid, "", d, "-mtime", 2)
 			So(err, ShouldBeNil)
 			So(len(o), ShouldEqual, 2)
 			So(cnt, ShouldEqual, 5)
 			So(d, ShouldEqual, fmt.Sprintf("%d:%d", now+2, id2))
 			So(o, ShouldResemble, []*ObjectInfo{d4, d2})
 
-			o, cnt, d, err = dma.ListObj(c, bktID, pid, "", "", "+size", 3)
+			o, cnt, d, err = dma.ListObj(c, testBktID, pid, "", "", "+size", 3)
 			So(err, ShouldBeNil)
 			So(len(o), ShouldEqual, 3)
 			So(cnt, ShouldEqual, 5)
 			So(d, ShouldEqual, fmt.Sprintf("%d:%d", 3, id3))
 			So(o, ShouldResemble, []*ObjectInfo{d1, d2, d3})
 
-			o, cnt, d, err = dma.ListObj(c, bktID, pid, "", "", "-size", 2)
+			o, cnt, d, err = dma.ListObj(c, testBktID, pid, "", "", "-size", 2)
 			So(err, ShouldBeNil)
 			So(len(o), ShouldEqual, 2)
 			So(cnt, ShouldEqual, 5)
 			So(d, ShouldEqual, fmt.Sprintf("%d:%d", 3, id3))
 			So(o, ShouldResemble, []*ObjectInfo{d5, d3})
 
-			o, cnt, d, err = dma.ListObj(c, bktID, pid, "", d, "-size", 2)
+			o, cnt, d, err = dma.ListObj(c, testBktID, pid, "", d, "-size", 2)
 			So(err, ShouldBeNil)
 			So(len(o), ShouldEqual, 2)
 			So(cnt, ShouldEqual, 5)
 			So(d, ShouldEqual, fmt.Sprintf("%d:%d", 2, id2))
 			So(o, ShouldResemble, []*ObjectInfo{d4, d2})
 
-			o, cnt, d, err = dma.ListObj(c, bktID, pid, "", "", "+type", 3)
+			o, cnt, d, err = dma.ListObj(c, testBktID, pid, "", "", "+type", 3)
 			So(err, ShouldBeNil)
 			So(len(o), ShouldEqual, 3)
 			So(cnt, ShouldEqual, 5)
 			So(d, ShouldEqual, fmt.Sprintf("%d:%d", 3, id3))
 			So(o, ShouldResemble, []*ObjectInfo{d1, d2, d3})
 
-			o, cnt, d, err = dma.ListObj(c, bktID, pid, "", "", "-type", 1)
+			o, cnt, d, err = dma.ListObj(c, testBktID, pid, "", "", "-type", 1)
 			So(err, ShouldBeNil)
 			So(len(o), ShouldEqual, 1)
 			So(cnt, ShouldEqual, 5)
 			So(d, ShouldEqual, fmt.Sprintf("%d:%d", OBJ_TYPE_PREVIEW, id4))
 			So(o, ShouldResemble, []*ObjectInfo{d4})
 
-			o, cnt, d, err = dma.ListObj(c, bktID, pid, "", d, "-type", 1)
+			o, cnt, d, err = dma.ListObj(c, testBktID, pid, "", d, "-type", 1)
 			So(err, ShouldBeNil)
 			So(len(o), ShouldEqual, 1)
 			So(cnt, ShouldEqual, 5)
@@ -580,7 +588,7 @@ func TestListObj(t *testing.T) {
 		})
 
 		Convey("list obj with 0 count", func() {
-			o, cnt, d, err := dma.ListObj(c, bktID, pid, "", "", "", 0)
+			o, cnt, d, err := dma.ListObj(c, testBktID, pid, "", "", "", 0)
 			So(err, ShouldBeNil)
 			So(len(o), ShouldEqual, 0)
 			So(cnt, ShouldEqual, 5)
@@ -592,9 +600,15 @@ func TestListObj(t *testing.T) {
 // TestListObjsByType tests ListObjsByType with pagination
 func TestListObjsByType(t *testing.T) {
 	Convey("ListObjsByType with pagination", t, func() {
-		InitBucketDB(context.TODO(), bktID)
-		dma := &DefaultMetadataAdapter{}
+		// Use unique bktID for this test
 		ig := idgen.NewIDGen(nil, 0)
+		testBktID, _ := ig.New()
+		// Clean up before test
+		CleanTestDB(testBktID)
+		CleanTestBucketData(testBktID)
+		InitDB() // Initialize main database first
+		InitBucketDB(context.TODO(), testBktID)
+		dma := &DefaultMetadataAdapter{}
 		pid, _ := ig.New()
 
 		// Create multiple files
@@ -613,12 +627,12 @@ func TestListObjsByType(t *testing.T) {
 				Size:   int64(i),
 				Extra:  "{}",
 			}
-			_, err := dma.PutObj(c, bktID, []*ObjectInfo{d})
+			_, err := dma.PutObj(c, testBktID, []*ObjectInfo{d})
 			So(err, ShouldBeNil)
 		}
 
 		Convey("list all files without pagination", func() {
-			objs, total, err := dma.ListObjsByType(c, bktID, OBJ_TYPE_FILE, 0, 0)
+			objs, total, err := dma.ListObjsByType(c, testBktID, OBJ_TYPE_FILE, 0, 0)
 			So(err, ShouldBeNil)
 			So(total, ShouldEqual, 15)
 			So(len(objs), ShouldEqual, 0) // limit=0 returns empty
@@ -626,26 +640,26 @@ func TestListObjsByType(t *testing.T) {
 
 		Convey("list files with pagination", func() {
 			// First page
-			objs, total, err := dma.ListObjsByType(c, bktID, OBJ_TYPE_FILE, 0, 5)
+			objs, total, err := dma.ListObjsByType(c, testBktID, OBJ_TYPE_FILE, 0, 5)
 			So(err, ShouldBeNil)
 			So(total, ShouldEqual, 15)
 			So(len(objs), ShouldEqual, 5)
 
 			// Second page
-			objs2, total2, err := dma.ListObjsByType(c, bktID, OBJ_TYPE_FILE, 5, 5)
+			objs2, total2, err := dma.ListObjsByType(c, testBktID, OBJ_TYPE_FILE, 5, 5)
 			So(err, ShouldBeNil)
 			So(total2, ShouldEqual, 15)
 			So(len(objs2), ShouldEqual, 5)
 			So(objs2[0].ID, ShouldNotEqual, objs[0].ID) // Different pages
 
 			// Third page
-			objs3, total3, err := dma.ListObjsByType(c, bktID, OBJ_TYPE_FILE, 10, 5)
+			objs3, total3, err := dma.ListObjsByType(c, testBktID, OBJ_TYPE_FILE, 10, 5)
 			So(err, ShouldBeNil)
 			So(total3, ShouldEqual, 15)
 			So(len(objs3), ShouldEqual, 5)
 
 			// Last page (partial)
-			objs4, total4, err := dma.ListObjsByType(c, bktID, OBJ_TYPE_FILE, 15, 5)
+			objs4, total4, err := dma.ListObjsByType(c, testBktID, OBJ_TYPE_FILE, 15, 5)
 			So(err, ShouldBeNil)
 			So(total4, ShouldEqual, 15)
 			So(len(objs4), ShouldEqual, 0) // No more items
@@ -675,10 +689,10 @@ func TestListObjsByType(t *testing.T) {
 				Size:   0,
 				Extra:  "{}",
 			}
-			_, err := dma.PutObj(c, bktID, []*ObjectInfo{d1, d2})
+			_, err := dma.PutObj(c, testBktID, []*ObjectInfo{d1, d2})
 			So(err, ShouldBeNil)
 
-			objs, total, err := dma.ListObjsByType(c, bktID, OBJ_TYPE_DIR, 0, 10)
+			objs, total, err := dma.ListObjsByType(c, testBktID, OBJ_TYPE_DIR, 0, 10)
 			So(err, ShouldBeNil)
 			So(total, ShouldEqual, 2)
 			So(len(objs), ShouldEqual, 2)
@@ -689,9 +703,15 @@ func TestListObjsByType(t *testing.T) {
 // TestListChildren tests ListChildren with pagination
 func TestListChildren(t *testing.T) {
 	Convey("ListChildren with pagination", t, func() {
-		InitBucketDB(context.TODO(), bktID)
-		dma := &DefaultMetadataAdapter{}
+		// Use unique bktID for this test
 		ig := idgen.NewIDGen(nil, 0)
+		testBktID, _ := ig.New()
+		// Clean up before test
+		CleanTestDB(testBktID)
+		CleanTestBucketData(testBktID)
+		InitDB() // Initialize main database first
+		InitBucketDB(context.TODO(), testBktID)
+		dma := &DefaultMetadataAdapter{}
 		parentID, _ := ig.New()
 
 		// Create parent directory
@@ -705,7 +725,7 @@ func TestListChildren(t *testing.T) {
 			Size:   0,
 			Extra:  "{}",
 		}
-		_, err := dma.PutObj(c, bktID, []*ObjectInfo{parent})
+		_, err := dma.PutObj(c, testBktID, []*ObjectInfo{parent})
 		So(err, ShouldBeNil)
 
 		// Create multiple children
@@ -724,12 +744,12 @@ func TestListChildren(t *testing.T) {
 				Size:   int64(i * 100),
 				Extra:  "{}",
 			}
-			_, err := dma.PutObj(c, bktID, []*ObjectInfo{child})
+			_, err := dma.PutObj(c, testBktID, []*ObjectInfo{child})
 			So(err, ShouldBeNil)
 		}
 
 		Convey("list all children without pagination", func() {
-			children, total, err := dma.ListChildren(c, bktID, parentID, 0, 0)
+			children, total, err := dma.ListChildren(c, testBktID, parentID, 0, 0)
 			So(err, ShouldBeNil)
 			So(total, ShouldEqual, 12)
 			So(len(children), ShouldEqual, 0) // limit=0 returns empty
@@ -737,26 +757,26 @@ func TestListChildren(t *testing.T) {
 
 		Convey("list children with pagination", func() {
 			// First page
-			children1, total1, err := dma.ListChildren(c, bktID, parentID, 0, 5)
+			children1, total1, err := dma.ListChildren(c, testBktID, parentID, 0, 5)
 			So(err, ShouldBeNil)
 			So(total1, ShouldEqual, 12)
 			So(len(children1), ShouldEqual, 5)
 
 			// Second page
-			children2, total2, err := dma.ListChildren(c, bktID, parentID, 5, 5)
+			children2, total2, err := dma.ListChildren(c, testBktID, parentID, 5, 5)
 			So(err, ShouldBeNil)
 			So(total2, ShouldEqual, 12)
 			So(len(children2), ShouldEqual, 5)
 			So(children2[0].ID, ShouldNotEqual, children1[0].ID) // Different pages
 
 			// Third page (partial)
-			children3, total3, err := dma.ListChildren(c, bktID, parentID, 10, 5)
+			children3, total3, err := dma.ListChildren(c, testBktID, parentID, 10, 5)
 			So(err, ShouldBeNil)
 			So(total3, ShouldEqual, 12)
 			So(len(children3), ShouldEqual, 2) // Only 2 remaining
 
 			// Beyond end
-			children4, total4, err := dma.ListChildren(c, bktID, parentID, 15, 5)
+			children4, total4, err := dma.ListChildren(c, testBktID, parentID, 15, 5)
 			So(err, ShouldBeNil)
 			So(total4, ShouldEqual, 12)
 			So(len(children4), ShouldEqual, 0) // No more items
@@ -764,7 +784,7 @@ func TestListChildren(t *testing.T) {
 
 		Convey("list children of non-existent parent", func() {
 			nonExistentID, _ := ig.New()
-			children, total, err := dma.ListChildren(c, bktID, nonExistentID, 0, 10)
+			children, total, err := dma.ListChildren(c, testBktID, nonExistentID, 0, 10)
 			So(err, ShouldBeNil)
 			So(total, ShouldEqual, 0)
 			So(len(children), ShouldEqual, 0)

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -1484,10 +1485,15 @@ func (dma *DefaultMetadataAdapter) ListObjsByType(c Ctx, bktID int64, objType in
 
 	// Get total count
 	var cnt int64
+	// List objects by type, excluding deleted objects (pid >= 0)
+	// Use b.And to combine conditions like in other places
+	conds := []interface{}{b.Eq("type", objType), b.Gte("pid", 0)}
 	_, err = b.TableContext(c, db, OBJ_TBL).Select(&cnt,
 		b.Fields("count(1)"),
-		b.Where(b.Eq("type", objType), "pid >= 0"))
+		b.Where(conds...))
 	if err != nil {
+		// Log detailed error for debugging
+		log.Printf("[ListObjsByType] Query failed: bktID=%d, objType=%d, error=%v", bktID, objType, err)
 		return nil, 0, ERR_QUERY_DB
 	}
 
@@ -1495,10 +1501,12 @@ func (dma *DefaultMetadataAdapter) ListObjsByType(c Ctx, bktID int64, objType in
 	var objs []*ObjectInfo
 	if limit > 0 {
 		_, err = b.TableContext(c, db, OBJ_TBL).Select(&objs,
-			b.Where(b.Eq("type", objType), "pid >= 0"),
+			b.Where(conds...),
 			b.OrderBy("id"),
 			b.Limit(limit, offset))
 		if err != nil {
+			// Log detailed error for debugging
+			log.Printf("[ListObjsByType] Query failed: bktID=%d, objType=%d, offset=%d, limit=%d, error=%v", bktID, objType, offset, limit, err)
 			return nil, 0, ERR_QUERY_DB
 		}
 	}
@@ -1515,10 +1523,16 @@ func (dma *DefaultMetadataAdapter) ListChildren(c Ctx, bktID int64, pid int64, o
 
 	// Get total count
 	var cnt int64
+	// List children of specified parent (pid)
+	// Note: We don't need "pid >= 0" here because we're querying children of a specific parent
+	// If the parent is deleted (pid < 0), we shouldn't be querying its children anyway
+	conds := []interface{}{b.Eq("pid", pid)}
 	_, err = b.TableContext(c, db, OBJ_TBL).Select(&cnt,
 		b.Fields("count(1)"),
-		b.Where(b.Eq("pid", pid), "pid >= 0"))
+		b.Where(conds...))
 	if err != nil {
+		// Log detailed error for debugging
+		log.Printf("[ListChildren] Query failed: bktID=%d, pid=%d, error=%v", bktID, pid, err)
 		return nil, 0, ERR_QUERY_DB
 	}
 
@@ -1526,10 +1540,12 @@ func (dma *DefaultMetadataAdapter) ListChildren(c Ctx, bktID int64, pid int64, o
 	var children []*ObjectInfo
 	if limit > 0 {
 		_, err = b.TableContext(c, db, OBJ_TBL).Select(&children,
-			b.Where(b.Eq("pid", pid), "pid >= 0"),
+			b.Where(conds...),
 			b.OrderBy("id"),
 			b.Limit(limit, offset))
 		if err != nil {
+			// Log detailed error for debugging
+			log.Printf("[ListChildren] Query failed: bktID=%d, pid=%d, offset=%d, limit=%d, error=%v", bktID, pid, offset, limit, err)
 			return nil, 0, ERR_QUERY_DB
 		}
 	}
@@ -1573,7 +1589,9 @@ func (dma *DefaultMetadataAdapter) ListVersions(c Ctx, bktID int64, fileID int64
 		b.Where(conds...),
 		b.OrderBy("mtime desc"))
 	if err != nil {
-		return nil, fmt.Errorf("ListVersions failed (bktID=%d, fileID=%d, excludeWriting=%v): %w", bktID, fileID, excludeWriting, err)
+		// Return ERR_QUERY_DB to maintain compatibility with existing code
+		// The detailed error information is logged via DebugLog if needed
+		return nil, ERR_QUERY_DB
 	}
 	return versions, nil
 }

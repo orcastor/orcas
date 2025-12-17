@@ -10,8 +10,10 @@ import (
 
 func TestGetOrCreateWritingVersion(t *testing.T) {
 	Convey("GetOrCreateWritingVersion", t, func() {
+		InitDB() // Initialize main database first
 		ig := idgen.NewIDGen(nil, 0)
 		testBktID, _ := ig.New()
+		testUID, _ := ig.New()
 		InitBucketDB(c, testBktID)
 
 		dma := &DefaultMetadataAdapter{}
@@ -22,6 +24,22 @@ func TestGetOrCreateWritingVersion(t *testing.T) {
 			da:  dda,
 			acm: &DefaultAccessCtrlMgr{ma: dma},
 		}
+
+		// Create bucket
+		bucket := &BucketInfo{
+			ID:   testBktID,
+			Name: "test",
+			UID:  testUID,
+			Type: 1,
+		}
+		So(dma.PutBkt(c, []*BucketInfo{bucket}), ShouldBeNil)
+
+		// Create user context for permission checks
+		userInfo := &UserInfo{
+			ID:   testUID,
+			Role: USER,
+		}
+		testCtx := UserInfo2Ctx(c, userInfo)
 
 		Convey("create new writing version", func() {
 			// Create a file first
@@ -35,11 +53,11 @@ func TestGetOrCreateWritingVersion(t *testing.T) {
 				Size:   0,
 				MTime:  Now(),
 			}
-			_, err := lh.Put(c, testBktID, []*ObjectInfo{fileObj})
+			_, err := lh.Put(testCtx, testBktID, []*ObjectInfo{fileObj})
 			So(err, ShouldBeNil)
 
 			// Get or create writing version
-			writingVersion, err := lh.GetOrCreateWritingVersion(c, testBktID, fileID)
+			writingVersion, err := lh.GetOrCreateWritingVersion(testCtx, testBktID, fileID)
 			So(err, ShouldBeNil)
 			So(writingVersion, ShouldNotBeNil)
 			So(writingVersion.Name, ShouldEqual, WritingVersionName)
@@ -60,16 +78,16 @@ func TestGetOrCreateWritingVersion(t *testing.T) {
 				Size:   0,
 				MTime:  Now(),
 			}
-			_, err := lh.Put(c, testBktID, []*ObjectInfo{fileObj})
+			_, err := lh.Put(testCtx, testBktID, []*ObjectInfo{fileObj})
 			So(err, ShouldBeNil)
 
 			// Create writing version
-			writingVersion1, err := lh.GetOrCreateWritingVersion(c, testBktID, fileID)
+			writingVersion1, err := lh.GetOrCreateWritingVersion(testCtx, testBktID, fileID)
 			So(err, ShouldBeNil)
 			So(writingVersion1, ShouldNotBeNil)
 
 			// Get again - should return same version
-			writingVersion2, err := lh.GetOrCreateWritingVersion(c, testBktID, fileID)
+			writingVersion2, err := lh.GetOrCreateWritingVersion(testCtx, testBktID, fileID)
 			So(err, ShouldBeNil)
 			So(writingVersion2, ShouldNotBeNil)
 			So(writingVersion2.ID, ShouldEqual, writingVersion1.ID)
@@ -80,8 +98,10 @@ func TestGetOrCreateWritingVersion(t *testing.T) {
 
 func TestListVersionsExcludeWriting(t *testing.T) {
 	Convey("ListVersions excludeWriting", t, func() {
+		InitDB() // Initialize main database first
 		ig := idgen.NewIDGen(nil, 0)
 		testBktID, _ := ig.New()
+		testUID, _ := ig.New()
 		InitBucketDB(c, testBktID)
 
 		dma := &DefaultMetadataAdapter{}
@@ -92,6 +112,22 @@ func TestListVersionsExcludeWriting(t *testing.T) {
 			da:  dda,
 			acm: &DefaultAccessCtrlMgr{ma: dma},
 		}
+
+		// Create bucket
+		bucket := &BucketInfo{
+			ID:   testBktID,
+			Name: "test",
+			UID:  testUID,
+			Type: 1,
+		}
+		So(dma.PutBkt(c, []*BucketInfo{bucket}), ShouldBeNil)
+
+		// Create user context for permission checks
+		userInfo := &UserInfo{
+			ID:   testUID,
+			Role: USER,
+		}
+		testCtx := UserInfo2Ctx(c, userInfo)
 
 		Convey("list versions excluding writing version", func() {
 			// Create a file first
@@ -105,11 +141,11 @@ func TestListVersionsExcludeWriting(t *testing.T) {
 				Size:   0,
 				MTime:  Now(),
 			}
-			_, err := lh.Put(c, testBktID, []*ObjectInfo{fileObj})
+			_, err := lh.Put(testCtx, testBktID, []*ObjectInfo{fileObj})
 			So(err, ShouldBeNil)
 
 			// Create writing version
-			_, err = lh.GetOrCreateWritingVersion(c, testBktID, fileID)
+			_, err = lh.GetOrCreateWritingVersion(testCtx, testBktID, fileID)
 			So(err, ShouldBeNil)
 
 			// Create normal version
@@ -122,16 +158,16 @@ func TestListVersionsExcludeWriting(t *testing.T) {
 				Size:   0,
 				MTime:  Now(),
 			}
-			_, err = lh.Put(c, testBktID, []*ObjectInfo{normalVersion})
+			_, err = lh.Put(testCtx, testBktID, []*ObjectInfo{normalVersion})
 			So(err, ShouldBeNil)
 
 			// List all versions (include writing)
-			allVersions, err := lh.ma.ListVersions(c, testBktID, fileID, false)
+			allVersions, err := lh.ma.ListVersions(testCtx, testBktID, fileID, false)
 			So(err, ShouldBeNil)
 			So(len(allVersions), ShouldEqual, 2)
 
 			// List versions excluding writing
-			versions, err := lh.ma.ListVersions(c, testBktID, fileID, true)
+			versions, err := lh.ma.ListVersions(testCtx, testBktID, fileID, true)
 			So(err, ShouldBeNil)
 			So(len(versions), ShouldEqual, 1)
 			So(versions[0].Name, ShouldNotEqual, WritingVersionName)
@@ -142,8 +178,10 @@ func TestListVersionsExcludeWriting(t *testing.T) {
 
 func TestUpdateData(t *testing.T) {
 	Convey("UpdateData", t, func() {
+		InitDB() // Initialize main database first
 		ig := idgen.NewIDGen(nil, 0)
 		testBktID, _ := ig.New()
+		testUID, _ := ig.New()
 		InitBucketDB(c, testBktID)
 
 		dma := &DefaultMetadataAdapter{}
@@ -155,85 +193,72 @@ func TestUpdateData(t *testing.T) {
 			acm: &DefaultAccessCtrlMgr{ma: dma},
 		}
 
-		Convey("update data with partial write", func() {
-			// Create bucket with quota
-			bucket := &BucketInfo{
-				ID:    testBktID,
-				Name:  "test",
-				UID:   testBktID,
-				Type:  1,
-				Quota: 1000000, // 1MB quota
-			}
-			So(dma.PutBkt(c, []*BucketInfo{bucket}), ShouldBeNil)
+		// Create bucket
+		bucket := &BucketInfo{
+			ID:   testBktID,
+			Name: "test",
+			UID:  testUID,
+			Type: 1,
+			Quota: 1000000, // 1MB quota
+		}
+		So(dma.PutBkt(c, []*BucketInfo{bucket}), ShouldBeNil)
 
+		// Create user context for permission checks
+		userInfo := &UserInfo{
+			ID:   testUID,
+			Role: USER,
+		}
+		testCtx := UserInfo2Ctx(c, userInfo)
+
+		Convey("update data with partial write", func() {
 			// Create initial data
 			dataID, _ := ig.New()
 			initialData := []byte("hello world")
-			_, err := lh.PutData(c, testBktID, dataID, 0, initialData)
+			_, err := lh.PutData(testCtx, testBktID, dataID, 0, initialData)
 			So(err, ShouldBeNil)
 
 			// Update part of data
 			updateData := []byte("HELLO")
-			err = lh.UpdateData(c, testBktID, dataID, 0, 0, updateData)
+			err = lh.UpdateData(testCtx, testBktID, dataID, 0, 0, updateData)
 			So(err, ShouldBeNil)
 
 			// Read back
-			readData, err := lh.GetData(c, testBktID, dataID, 0)
+			readData, err := lh.GetData(testCtx, testBktID, dataID, 0)
 			So(err, ShouldBeNil)
 			So(string(readData), ShouldEqual, "HELLO world")
 		})
 
 		Convey("update data extends chunk", func() {
-			// Create bucket with quota
-			bucket := &BucketInfo{
-				ID:    testBktID,
-				Name:  "test",
-				UID:   testBktID,
-				Type:  1,
-				Quota: 1000000,
-			}
-			So(dma.PutBkt(c, []*BucketInfo{bucket}), ShouldBeNil)
-
 			// Create initial data
 			dataID, _ := ig.New()
 			initialData := []byte("hello")
-			_, err := lh.PutData(c, testBktID, dataID, 0, initialData)
+			_, err := lh.PutData(testCtx, testBktID, dataID, 0, initialData)
 			So(err, ShouldBeNil)
 
 			// Update beyond current size
 			updateData := []byte(" world")
-			err = lh.UpdateData(c, testBktID, dataID, 0, 5, updateData)
+			err = lh.UpdateData(testCtx, testBktID, dataID, 0, 5, updateData)
 			So(err, ShouldBeNil)
 
 			// Read back
-			readData, err := lh.GetData(c, testBktID, dataID, 0)
+			readData, err := lh.GetData(testCtx, testBktID, dataID, 0)
 			So(err, ShouldBeNil)
 			So(string(readData), ShouldEqual, "hello world")
 		})
 
 		Convey("update empty buffer", func() {
-			// Create bucket
-			bucket := &BucketInfo{
-				ID:    testBktID,
-				Name:  "test",
-				UID:   testBktID,
-				Type:  1,
-				Quota: 1000000,
-			}
-			So(dma.PutBkt(c, []*BucketInfo{bucket}), ShouldBeNil)
-
 			// Create initial data
 			dataID, _ := ig.New()
 			initialData := []byte("hello")
-			_, err := lh.PutData(c, testBktID, dataID, 0, initialData)
+			_, err := lh.PutData(testCtx, testBktID, dataID, 0, initialData)
 			So(err, ShouldBeNil)
 
 			// Update with empty buffer
-			err = lh.UpdateData(c, testBktID, dataID, 0, 0, []byte{})
+			err = lh.UpdateData(testCtx, testBktID, dataID, 0, 0, []byte{})
 			So(err, ShouldBeNil)
 
 			// Data should remain unchanged
-			readData, err := lh.GetData(c, testBktID, dataID, 0)
+			readData, err := lh.GetData(testCtx, testBktID, dataID, 0)
 			So(err, ShouldBeNil)
 			So(string(readData), ShouldEqual, "hello")
 		})
