@@ -615,8 +615,6 @@ type SequentialWriteBuffer struct {
 	hasData   bool           // Whether data has been written
 	closed    bool           // Whether closed (becomes random write)
 	dataInfo  *core.DataInfo // Data information
-	// writing version support (for resumable sequential writes)
-	writingVersionID int64 // Writing version object ID
 }
 
 // TempFileWriter handles efficient fragmented writes for .tmp files
@@ -2585,20 +2583,7 @@ func (ra *RandomAccessor) initSequentialBuffer(force bool) error {
 		return err
 	}
 
-	// Try writing version-backed sequential buffer when forced or when file already has data
-	if force || (fileObj.DataID > 0 && fileObj.DataID != core.EmptyDataID && fileObj.Size >= 0) {
-		if err := ra.initSequentialBufferWithWritingVersion(fileObj); err == nil {
-			return nil
-		} else if force {
-			// Forced mode should not silently fall back unless file has no data
-			return err
-		} else if fileObj.DataID > 0 && fileObj.DataID != core.EmptyDataID {
-			// Cannot fall back to legacy path when file already has data
-			return err
-		}
-	}
-
-	// Legacy path: create new data object for sequential buffer (only when file has no data)
+	// Create new data object for sequential buffer (only when file has no data)
 	if fileObj.DataID > 0 && fileObj.DataID != core.EmptyDataID {
 		return fmt.Errorf("file already has data")
 	}
@@ -2651,85 +2636,6 @@ func (ra *RandomAccessor) initSequentialBufferWithNewData() error {
 	}
 
 	return nil
-}
-
-func (ra *RandomAccessor) initSequentialBufferWithWritingVersion(fileObj *core.ObjectInfo) error {
-	lh, ok := ra.fs.h.(*core.LocalHandler)
-	if !ok {
-		return fmt.Errorf("writing version sequential mode requires LocalHandler")
-	}
-
-	// Determine chunk size based on bucket configuration (fixed)
-	chunkSize := ra.fs.chunkSize
-	if chunkSize <= 0 {
-		chunkSize = 10 << 20 // Default 10MB
-	}
-
-	// Ensure writing version exists
-	writingVersion, err := lh.GetOrCreateWritingVersion(ra.fs.c, ra.fs.bktID, ra.fileID)
-	if err != nil {
-		return err
-	}
-
-	dataID := writingVersion.DataID
-	if dataID == 0 || dataID == core.EmptyDataID {
-		return fmt.Errorf("writing version has invalid DataID")
-	}
-
-	// Load DataInfo for writing version
-	dataInfo, err := ra.fs.h.GetDataInfo(ra.fs.c, ra.fs.bktID, dataID)
-	if err != nil || dataInfo == nil {
-		dataInfo = &core.DataInfo{
-			ID:       dataID,
-			OrigSize: writingVersion.Size,
-			Size:     writingVersion.Size,
-			Kind:     core.DATA_NORMAL,
-		}
-	}
-
-	currentSize := writingVersion.Size
-	buffer := make([]byte, 0, chunkSize)
-	sn := int(currentSize / chunkSize)
-	remainder := currentSize % chunkSize
-
-	if remainder > 0 {
-		chunkData, readErr := ra.fs.h.GetData(ra.fs.c, ra.fs.bktID, dataID, sn)
-		if readErr == nil && len(chunkData) >= int(remainder) {
-			buffer = append(buffer, chunkData[:remainder]...)
-		} else {
-			// If reading existing chunk fails, reset buffer to empty to avoid corruption
-			buffer = make([]byte, 0, chunkSize)
-			remainder = 0
-		}
-	} else if currentSize > 0 {
-		// Start next chunk
-		buffer = make([]byte, 0, chunkSize)
-	} else {
-		sn = 0
-	}
-
-	ra.seqBuffer = &SequentialWriteBuffer{
-		fileID:           ra.fileID,
-		dataID:           dataID,
-		sn:               sn,
-		chunkSize:        chunkSize,
-		buffer:           buffer,
-		offset:           currentSize,
-		hasData:          currentSize > 0,
-		closed:           false,
-		dataInfo:         dataInfo,
-		writingVersionID: writingVersion.ID,
-	}
-
-	return nil
-}
-
-// abs returns absolute value of int64
-func abs(x int64) int64 {
-	if x < 0 {
-		return -x
-	}
-	return x
 }
 
 // writeSequential writes data sequentially (optimized path)
@@ -3125,22 +3031,73 @@ func (ra *RandomAccessor) Read(offset int64, size int) ([]byte, error) {
 		}
 	}
 
+	// Check for sparse file: sparse files may have sparseSize > fileObj.Size
+	sparseSize := atomic.LoadInt64(&ra.sparseSize)
+	if sparseSize > 0 && sparseSize > actualFileSize {
+		// Sparse file: use sparseSize as the actual file size for reading
+		actualFileSize = sparseSize
+		DebugLog("[VFS Read] Sparse file detected, using sparseSize: fileID=%d, sparseSize=%d, fileObj.Size=%d", ra.fileID, sparseSize, fileObj.Size)
+	}
+
 	// If file has no DataID and is not in batch writer, check buffer first
 	// Buffer may have data even if fileObj.Size is 0
+	// IMPORTANT: This check must happen BEFORE checking actualFileSize == 0,
+	// because buffer-only writes may have fileObj.Size = 0 but buffer has data
+	// Also check sequential buffer if it exists and has data
 	if (fileObj.DataID == 0 || fileObj.DataID == core.EmptyDataID) && !isInBatchWriter {
-		// Check if buffer has data
+		// First check sequential buffer if it exists and has data
+		if ra.seqBuffer != nil && ra.seqBuffer.hasData && !ra.seqBuffer.closed {
+			// Sequential buffer has data, read from it
+			// Sequential buffer contains data from offset 0, so we can read directly
+			// The buffer contains data up to ra.seqBuffer.offset
+			seqDataLen := ra.seqBuffer.offset
+			if offset < seqDataLen {
+				readEnd := offset + int64(size)
+				if readEnd > seqDataLen {
+					readEnd = seqDataLen
+				}
+				if offset < readEnd {
+					// Read from sequential buffer's buffer field
+					// The buffer contains data from offset 0 to seqDataLen
+					// But we need to read from the actual data, which may be in chunks
+					// For now, if offset is within the current chunk buffer, read from it
+					bufferStart := (ra.seqBuffer.offset / ra.seqBuffer.chunkSize) * ra.seqBuffer.chunkSize
+					bufferEnd := bufferStart + int64(len(ra.seqBuffer.buffer))
+					if offset >= bufferStart && offset < bufferEnd {
+						bufferOffset := offset - bufferStart
+						readEndInBuffer := readEnd - bufferStart
+						if readEndInBuffer > int64(len(ra.seqBuffer.buffer)) {
+							readEndInBuffer = int64(len(ra.seqBuffer.buffer))
+						}
+						if bufferOffset < readEndInBuffer {
+							result := make([]byte, readEndInBuffer-bufferOffset)
+							copy(result, ra.seqBuffer.buffer[bufferOffset:readEndInBuffer])
+							DebugLog("[VFS Read] Reading from sequential buffer: fileID=%d, offset=%d, size=%d, resultLen=%d", ra.fileID, offset, size, len(result))
+							return result, nil
+						}
+					}
+					// If offset is not in current buffer, data may have been flushed
+					// Fall through to check random buffer
+				}
+			}
+		}
+		
+		// Check if random buffer has data
 		writeIndex := atomic.LoadInt64(&ra.buffer.writeIndex)
 		if writeIndex > 0 {
 			// Buffer has data, allow reading from buffer even if fileObj.Size is 0
 			// Size will be calculated from buffer operations
-			// DebugLog("[VFS Read] File has no DataID and buffer has data, reading from buffer: fileID=%d, writeIndex=%d", ra.fileID, writeIndex)
-			return ra.readFromBuffer(offset, size), nil
+			DebugLog("[VFS Read] File has no DataID and buffer has data, reading from buffer: fileID=%d, writeIndex=%d, offset=%d, size=%d", ra.fileID, writeIndex, offset, size)
+			result := ra.readFromBuffer(offset, size)
+			DebugLog("[VFS Read] readFromBuffer returned: fileID=%d, resultLen=%d", ra.fileID, len(result))
+			return result, nil
 		}
 	}
 
 	// Limit reading size to file size (only if we have a valid size)
 	DebugLog("[VFS Read] Before size limit: fileID=%d, offset=%d, requestedSize=%d, actualFileSize=%d", ra.fileID, offset, size, actualFileSize)
-	// IMPORTANT: If actualFileSize is 0, file is empty (truncated to 0 or newly created), return empty data
+	// IMPORTANT: If actualFileSize is 0 and not a sparse file, file is empty (truncated to 0 or newly created), return empty data
+	// For sparse files, actualFileSize should be > 0 (from sparseSize)
 	if actualFileSize == 0 {
 		DebugLog("[VFS Read] File is empty (actualFileSize=0), returning empty: fileID=%d", ra.fileID)
 		return []byte{}, nil
@@ -5273,7 +5230,7 @@ func (ra *RandomAccessor) readWithWrites(reader dataReader, offset int64, size i
 			}
 		}
 	}
-	
+
 	// IMPORTANT: Limit readEnd to reader's origSize to prevent reading beyond truncated size
 	// This is critical for truncated files where DataInfo.OrigSize may not match fileObj.Size
 	if chunkReader, ok := reader.(*chunkReader); ok {
@@ -5873,9 +5830,9 @@ func (ra *RandomAccessor) Truncate(newSize int64) (int64, error) {
 	if err != nil {
 		return 0, fmt.Errorf("failed to get file object: %v", err)
 	}
-	
+
 	oldSize := fileObj.Size
-	
+
 	// IMPORTANT: If fileObj.Size is 0 but file has data in BatchWriter, get correct size from BatchWriter
 	// This is critical because BatchWriter updates fileObj.Size in cache but database update is async
 	if oldSize == 0 {
@@ -5911,7 +5868,7 @@ func (ra *RandomAccessor) Truncate(newSize int64) (int64, error) {
 			}
 		}
 	}
-	
+
 	DebugLog("[VFS Truncate] Starting truncate: fileID=%d, oldSize=%d, newSize=%d, fileObj.Size=%d", ra.fileID, oldSize, newSize, fileObj.Size)
 	if newSize == oldSize {
 		// No change needed

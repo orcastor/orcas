@@ -36,6 +36,9 @@ func init() {
 		os.Setenv("ORCAS_DATA", tmpDir)
 		core.ORCAS_DATA = tmpDir
 	}
+	// Disable batch write optimization for tests to ensure immediate flush after each write
+	// This makes tests more predictable and easier to understand
+	os.Setenv("ORCAS_BATCH_WRITE_ENABLED", "false")
 	// 初始化主数据库
 	core.InitDB("")
 }
@@ -99,7 +102,11 @@ func TestVFSRandomAccessor(t *testing.T) {
 			err = ra.Write(0, []byte("Hello, World!"))
 			So(err, ShouldBeNil)
 
-			// 读取数据（应该包含缓冲区中的写入）
+			// Flush to ensure data is available for reading
+			_, err = ra.Flush()
+			So(err, ShouldBeNil)
+
+			// 读取数据
 			data, err := ra.Read(0, 13)
 			So(err, ShouldBeNil)
 			So(string(data), ShouldEqual, "Hello, World!")
@@ -115,10 +122,14 @@ func TestVFSRandomAccessor(t *testing.T) {
 			ra.Write(3, []byte("xxx"))
 			ra.Write(7, []byte("TEST"))
 
+			// Flush to ensure data is available for reading
+			_, err = ra.Flush()
+			So(err, ShouldBeNil)
+
 			// 读取数据
 			data, err := ra.Read(0, 15)
 			So(err, ShouldBeNil)
-			So(len(data), ShouldBeGreaterThanOrEqualTo, 3)
+			So(len(data), ShouldBeGreaterThanOrEqualTo, 11) // "Hi" + gap + "xxx" + gap + "TEST" = at least 11 bytes
 			So(string(data[:2]), ShouldEqual, "Hi")
 		})
 

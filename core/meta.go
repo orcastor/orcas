@@ -1562,17 +1562,18 @@ func (dma *DefaultMetadataAdapter) ListVersions(c Ctx, bktID int64, fileID int64
 	// Note: Don't close the connection, it's from the pool
 
 	var versions []*ObjectInfo
-	// Query all version objects (type=3, pid=fileID, not deleted pid>=0)
+	// Query all version objects (type=3, pid=fileID)
 	// If excludeWriting is true, exclude writing versions (name="0")
-	conds := []interface{}{b.Eq("pid", fileID), b.Eq("type", OBJ_TYPE_VERSION), "pid >= 0"}
+	conds := []interface{}{b.Eq("pid", fileID), b.Eq("type", OBJ_TYPE_VERSION)}
 	if excludeWriting {
 		conds = append(conds, b.Neq("name", WritingVersionName))
 	}
+	// Use "mtime desc" format (lowercase) as borm expects
 	_, err = b.TableContext(c, db, OBJ_TBL).Select(&versions,
 		b.Where(conds...),
-		b.OrderBy("mtime DESC"))
+		b.OrderBy("mtime desc"))
 	if err != nil {
-		return nil, ERR_QUERY_DB
+		return nil, fmt.Errorf("ListVersions failed (bktID=%d, fileID=%d, excludeWriting=%v): %w", bktID, fileID, excludeWriting, err)
 	}
 	return versions, nil
 }
