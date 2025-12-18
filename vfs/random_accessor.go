@@ -1552,7 +1552,6 @@ func (tw *TempFileWriter) Flush() error {
 				if newName != originalObjName {
 					DebugLog("[VFS TempFileWriter Flush] Auto-removing .tmp suffix after flush: fileID=%d, oldName=%s, newName=%s", tw.fileID, originalObjName, newName)
 
-
 					// Check if a .tmp file with the same name already exists (different fileID)
 					// This can happen when uploading a new file with the same .tmp name
 					// We need to delete the old .tmp file before renaming
@@ -2541,7 +2540,7 @@ func (ra *RandomAccessor) Read(offset int64, size int) ([]byte, error) {
 		return ra.readFromBuffer(offset, size), nil
 	}
 
-	// File has DataID and is not in batch writer, read from database
+	// File has DataID, read from database
 	// Get DataInfo
 	dataInfoCacheKey := fileObj.DataID
 	var dataInfo *core.DataInfo
@@ -2873,12 +2872,7 @@ func (ra *RandomAccessor) flushInternal(force bool) (int64, error) {
 
 	DebugLog("[VFS RandomAccessor Flush] Starting flush: fileID=%d, force=%v", ra.fileID, force)
 
-	// Note: We do NOT flush batch writer here even if force=true
-	// FlushAll is only called when buffer is full (AddFile returns false) or by periodic timer
-	// If file is in batch writer, it will be flushed automatically when buffer is full or timer expires
-
 	// For .tmp files, check final file size before flushing TempFileWriter
-	// If file is small, we can use batch write instead of TempFileWriter
 	fileObj, err := ra.getFileObj()
 	isTmpFile := err == nil && fileObj != nil && isTempFile(fileObj)
 	if isTmpFile {
@@ -2938,8 +2932,6 @@ func (ra *RandomAccessor) flushInternal(force bool) (int64, error) {
 			}
 		} else {
 			// Small .tmp file without DataID, skip TempFileWriter and use batch write
-			// The batch write will be handled in the code below
-			// DebugLog("[VFS RandomAccessor Flush] Small .tmp file detected, will use batch write instead of TempFileWriter: fileID=%d, size=%d", ra.fileID, totalSize)
 		}
 	} else {
 		// Not a .tmp file, flush TempFileWriter if exists
@@ -2992,8 +2984,7 @@ func (ra *RandomAccessor) flushInternal(force bool) (int64, error) {
 		}
 	}
 
-	// For .tmp files, check if we should use batch write or TempFileWriter
-	// Small .tmp files (< batch write threshold) should use batch write
+	// For .tmp files, use TempFileWriter
 	// Large .tmp files should use TempFileWriter
 	if isTmpFile {
 		// Check if TempFileWriter exists (lock-free check using atomic.Value)
@@ -5216,10 +5207,6 @@ func (ra *RandomAccessor) Truncate(newSize int64) (int64, error) {
 		return 0, err
 	}
 
-	// Note: We do NOT flush batch writer here
-	// FlushAll is only called when buffer is full (AddFile returns false) or by periodic timer
-	// Truncate will work with data that's already in batch writer, it will be flushed automatically
-
 	// Get file object (may be from cache or database)
 	fileObj, err := ra.getFileObj()
 	if err != nil {
@@ -5875,7 +5862,6 @@ func (ra *RandomAccessor) Truncate(newSize int64) (int64, error) {
 	if ra.seqBuffer != nil {
 		ra.seqBuffer = nil
 	}
-
 
 	// Keep updated fileObj in cache (don't clear it) to ensure subsequent reads use correct size
 	// FileObj has been updated with newSize, so we should keep it in cache

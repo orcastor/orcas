@@ -743,31 +743,6 @@ func (n *OrcasNode) getPendingObjectsForDir(dirID int64) []*core.ObjectInfo {
 	// Key: fileID, Value: *core.ObjectInfo
 	pendingMap := make(map[int64]*core.ObjectInfo)
 
-	// Get pending objects from batch writer
-	batchMgr := sdk.GetBatchWriterForBucket(n.fs.h, n.fs.bktID)
-	if batchMgr != nil {
-		pendingObjs := batchMgr.GetPendingObjects()
-		for fileID, pkgInfo := range pendingObjs {
-			if pkgInfo != nil && pkgInfo.PID == dirID {
-				// Check if file has been marked for deletion (PID < 0 indicates deleted)
-				// Skip deleted files from pending objects
-				if pkgInfo.PID < 0 {
-					DebugLog("[VFS getPendingObjectsForDir] Skipping deleted file in batch writer: fileID=%d, name=%s, pid=%d", fileID, pkgInfo.Name, pkgInfo.PID)
-					continue
-				}
-				// Convert PackagedFileInfo to ObjectInfo
-				pendingMap[fileID] = &core.ObjectInfo{
-					ID:     fileID,
-					PID:    pkgInfo.PID,
-					Type:   core.OBJ_TYPE_FILE,
-					Name:   pkgInfo.Name,
-					Size:   pkgInfo.OrigSize, // Use OrigSize (uncompressed/unencrypted size)
-					DataID: 0,                // DataID is 0 until flushed
-					MTime:  core.Now(),
-				}
-			}
-		}
-	}
 
 	// Get pending objects from RandomAccessor registry
 	// These are files that are open for writing but may not be in batch writer
@@ -1522,14 +1497,8 @@ func (n *OrcasNode) Unlink(ctx context.Context, name string) syscall.Errno {
 		return syscall.ENOENT
 	}
 
-	// Step 0: Remove from pendingObjects if present (batch writer and RandomAccessor registry)
+	// Step 0: Remove from RandomAccessor registry if present
 	// This ensures the file is removed from pending objects before deletion
-	batchMgr := sdk.GetBatchWriterForBucket(n.fs.h, n.fs.bktID)
-	if batchMgr != nil {
-		if removed := batchMgr.RemovePendingObject(targetID); removed {
-			DebugLog("[VFS Unlink] Removed file from batch writer pending objects: fileID=%d", targetID)
-		}
-	}
 
 	// Remove from RandomAccessor registry if present
 	if n.fs != nil {
@@ -1997,13 +1966,6 @@ func (n *OrcasNode) Rename(ctx context.Context, name string, newParent fs.InodeE
 				targetTmpFileID = existingTargetID
 				DebugLog("[VFS Rename] Target file is .tmp file (or old .tmp without suffix), will delete after rename: fileID=%d, name=%s, targetName=%s", existingTargetID, existingObj.Name, newName)
 
-				batchMgr := sdk.GetBatchWriterForBucket(n.fs.h, n.fs.bktID)
-				if batchMgr != nil {
-					// Note: We do NOT flush batch writer here
-					// FlushAll is only called when buffer is full (AddFile returns false) or by periodic timer
-					// Just remove from batch writer cache - the file will be flushed automatically when buffer is full or timer expires
-					batchMgr.RemovePendingObject(existingTargetID)
-				}
 
 				if n.fs != nil {
 					if targetRA := n.fs.getRandomAccessorByFileID(existingTargetID); targetRA != nil {
@@ -2275,11 +2237,6 @@ func (n *OrcasNode) Rename(ctx context.Context, name string, newParent fs.InodeE
 						}
 					}
 
-					// Remove from batch writer if present
-					batchMgr := sdk.GetBatchWriterForBucket(n.fs.h, n.fs.bktID)
-					if batchMgr != nil {
-						batchMgr.RemovePendingObject(conflictFileID)
-					}
 
 					// Remove from cache
 					conflictCacheKey := conflictFileID
@@ -2388,13 +2345,6 @@ func (n *OrcasNode) Rename(ctx context.Context, name string, newParent fs.InodeE
 	if isRemovingTmp && (existingTargetID == 0 || existingTargetID == sourceID) {
 		DebugLog("[VFS Rename] Source .tmp file renamed to new name (target didn't exist): fileID=%d, oldName=%s, newName=%s", sourceID, sourceObj.Name, newName)
 
-		// Remove from batch writer cache if present
-		batchMgr := sdk.GetBatchWriterForBucket(n.fs.h, n.fs.bktID)
-		if batchMgr != nil {
-			if removed := batchMgr.RemovePendingObject(sourceID); removed {
-				// DebugLog("[VFS Rename] Removed source .tmp file from batch writer cache: fileID=%d", sourceID)
-			}
-		}
 
 		// Note: We don't delete the source file here because it has been renamed to the target name
 		// The source file ID now represents the renamed file, so we should not delete it
@@ -3087,24 +3037,13 @@ func (n *OrcasNode) updateFileObjCacheFromAccessor(ra *RandomAccessor, newName s
 
 // forceFlushTempFileBeforeRename ensures .tmp files flush pending data before renaming away from .tmp
 // - If TempFileWriter: directly sync flush, no waiting
-// - If batchMgr: async flush (add to flush queue)
 // - Cache: strong consistency (always read from database and update cache)
 func (n *OrcasNode) forceFlushTempFileBeforeRename(fileID int64, oldName, newName string) {
 	DebugLog("[VFS Rename] .tmp file being renamed, forcing flush: fileID=%d, oldName=%s, newName=%s", fileID, oldName, newName)
 
-	// First, check if file is in batch writer buffer and update cache before flushing
-	// Note: If file is in batch writer, don't pre-allocate DataID - let batch writer handle it
-	batchMgr := sdk.GetBatchWriterForBucket(n.fs.h, n.fs.bktID)
-	isInBatchWriter := false
-	if batchMgr != nil {
-		if _, ok := batchMgr.GetPendingObject(fileID); ok {
-			isInBatchWriter = true
-		}
-	}
-
-	// Only pre-allocate DataID if file is NOT in batch writer
-	// Batch writer will allocate its own DataID during flush
-	if !isInBatchWriter {
+	// Ensure file has a DataID - if not, pre-allocate one
+	// This ensures the file always has a DataID even before flush completes
+	{
 		// Ensure file has a DataID - if not, pre-allocate one
 		// This ensures the file always has a DataID even before flush completes
 		cacheKey := fileID
@@ -3149,17 +3088,6 @@ func (n *OrcasNode) forceFlushTempFileBeforeRename(fileID int64, oldName, newNam
 		// DebugLog("[VFS Rename] File is in batch writer, skipping pre-allocation (batch writer will allocate DataID): fileID=%d", fileID)
 	}
 
-	// Update batch writer cache with new name before flushing
-	if batchMgr != nil {
-		updated := batchMgr.UpdatePendingObject(fileID, func(pkgInfo *sdk.PackagedFileInfo) {
-			// File is in batch writer buffer, update the cached name before flushing
-			// DebugLog("[VFS Rename] File found in batch writer buffer, updating cached name: fileID=%d, oldName=%s, newName=%s", fileID, pkgInfo.Name, newName)
-			pkgInfo.Name = newName
-		})
-		if updated {
-			// DebugLog("[VFS Rename] Updated batch writer cache with new name: fileID=%d, newName=%s", fileID, newName)
-		}
-	}
 
 	var raToFlush *RandomAccessor
 	if val := n.ra.Load(); val != nil && val != releasedMarker {
@@ -3319,44 +3247,24 @@ func (n *OrcasNode) forceFlushTempFileBeforeRename(fileID int64, oldName, newNam
 		}
 	}
 
-	// Check if file is in batch writer - if so, sync flush and wait for completion
-	if batchMgr != nil {
-		if _, ok := batchMgr.GetPendingObject(fileID); ok {
-			// 			// DebugLog("[VFS Rename] File found in batch writer, syncing flush and waiting: fileID=%d", fileID)
-			// Sync flush: wait for completion to ensure file is written to database before rename
-			// Note: FlushAll is synchronous, database operations complete before it returns
-			batchMgr.FlushAll(n.fs.c)
-			// DebugLog("[VFS Rename] Batch flush completed: fileID=%d", fileID)
+	// If RandomAccessor exists, flush it
+	if raToFlush != nil {
+		DebugLog("[VFS Rename] Flushing RandomAccessor: fileID=%d", fileID)
+		if _, err := raToFlush.ForceFlush(); err != nil {
+			DebugLog("[VFS Rename] WARNING: Failed to flush RandomAccessor: fileID=%d, error=%v", fileID, err)
+		}
 
-			// If RandomAccessor exists, also flush it (in case it has more data)
-			if raToFlush != nil {
-				DebugLog("[VFS Rename] Also flushing RandomAccessor after batch flush: fileID=%d", fileID)
-				if _, err := raToFlush.ForceFlush(); err != nil {
-					DebugLog("[VFS Rename] WARNING: Failed to flush RandomAccessor after batch flush: fileID=%d, error=%v", fileID, err)
-				}
-			}
+		// Strong consistency: re-fetch from database
+		cacheKey := fileID
+		fileObjCache.Del(cacheKey)
 
-			// Strong consistency: re-fetch from database
-			// Note: FlushAll is synchronous, so data should be available immediately
-			cacheKey := fileID
-			fileObjCache.Del(cacheKey)
-
-			// Fetch from database (should have DataID immediately after sync flush)
-			objs, err := n.fs.h.Get(n.fs.c, n.fs.bktID, []int64{fileID})
-			var fileObj *core.ObjectInfo
-			if err == nil && len(objs) > 0 {
-				fileObj = objs[0]
-				// For empty files (Size = 0), EmptyDataID is valid
-				if fileObj.Size == 0 {
-					// Empty file, EmptyDataID is valid, update cache
-					fileObjCache.Put(cacheKey, fileObj)
-					DebugLog("[VFS Rename] Empty file after batch flush: fileID=%d, dataID=%d, size=%d", fileID, fileObj.DataID, fileObj.Size)
-				} else if fileObj.DataID > 0 && fileObj.DataID != core.EmptyDataID {
-					fileObjCache.Put(cacheKey, fileObj)
-					DebugLog("[VFS Rename] Successfully got DataID after batch flush: fileID=%d, dataID=%d, size=%d", fileID, fileObj.DataID, fileObj.Size)
-				} else {
-					// For empty files (Size = 0), EmptyDataID is valid, no need to retry
-					if fileObj.Size == 0 {
+		// Fetch from database (should have DataID immediately after flush)
+		objs, err := n.fs.h.Get(n.fs.c, n.fs.bktID, []int64{fileID})
+		var fileObj *core.ObjectInfo
+		if err == nil && len(objs) > 0 {
+			fileObj = objs[0]
+			// For empty files (Size = 0), EmptyDataID is valid
+			if fileObj.Size == 0 {
 						fileObjCache.Put(cacheKey, fileObj)
 						DebugLog("[VFS Rename] Empty file after batch flush (EmptyDataID is valid): fileID=%d, dataID=%d, size=%d", fileID, fileObj.DataID, fileObj.Size)
 					} else {
@@ -3482,15 +3390,6 @@ func (n *OrcasNode) forceFlushTempFileBeforeRename(fileID int64, oldName, newNam
 	// Note: We already flushed above if there were pending writes, but we still need to ensure
 	// any data that might have been added to batch writer during flush is also flushed
 	// Note: raToFlush is guaranteed to be non-nil here because if it was nil, we would have returned above
-	// Check if file is now in batch writer (after flush above)
-	if batchMgr != nil {
-		if _, ok := batchMgr.GetPendingObject(fileID); ok {
-			// File is now in batch writer, flush it
-			// DebugLog("[VFS Rename] File moved to batch writer after RandomAccessor flush, flushing batch writer: fileID=%d", fileID)
-			batchMgr.FlushAll(n.fs.c)
-			// DebugLog("[VFS Rename] Batch flush completed: fileID=%d", fileID)
-		}
-	}
 	// Also ensure RandomAccessor is fully flushed (in case there's any remaining data)
 	writeIndex := atomic.LoadInt64(&raToFlush.buffer.writeIndex)
 	totalSize := atomic.LoadInt64(&raToFlush.buffer.totalSize)
