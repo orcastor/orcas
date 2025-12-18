@@ -781,20 +781,35 @@ func TestVFSPartialDownload(t *testing.T) {
 			{5 * 1024 * 1024, 1024 * 1024, "1MB starting at 5MB"},
 			{9 * 1024 * 1024, 1024 * 1024, "Last 1MB"},
 			{1024, 9*1024*1024 - 1024, "Almost entire file skipping first 1KB"},
+			// Boundary cases
+			{int64(fileSize) - 1024, 1024, "Last 1KB of file"},
+			{int64(fileSize) - 1, 1, "Last byte"},
+			{0, fileSize, "Entire file"},
+			{int64(fileSize) - 512, 2048, "Reading beyond file end (should truncate)"},
 		}
 
 		for _, tc := range testCases {
 			var readData []byte
 			readData, err = ra.Read(tc.offset, tc.size)
-			So(err, ShouldBeNil)
+			So(err, ShouldBeNil, fmt.Sprintf("Failed to read %s: offset=%d, size=%d", tc.name, tc.offset, tc.size))
 
+			// Calculate expected size (handle boundary cases)
 			expectedSize := tc.size
-			if tc.offset+int64(tc.size) > int64(fileSize) {
+			if tc.offset >= int64(fileSize) {
+				// Reading beyond file end, should return empty
+				expectedSize = 0
+			} else if tc.offset+int64(tc.size) > int64(fileSize) {
+				// Reading partially beyond file end, should return only available data
 				expectedSize = fileSize - int(tc.offset)
 			}
-			So(len(readData), ShouldEqual, expectedSize)
-			expectedData := testData[tc.offset : tc.offset+int64(len(readData))]
-			So(bytes.Equal(readData, expectedData), ShouldBeTrue)
+
+			So(len(readData), ShouldEqual, expectedSize, fmt.Sprintf("Size mismatch for %s: offset=%d, size=%d, expected=%d, actual=%d", tc.name, tc.offset, tc.size, expectedSize, len(readData)))
+
+			if expectedSize > 0 {
+				// Verify data correctness
+				expectedData := testData[tc.offset : tc.offset+int64(len(readData))]
+				So(bytes.Equal(readData, expectedData), ShouldBeTrue, fmt.Sprintf("Data mismatch for %s: offset=%d, size=%d", tc.name, tc.offset, tc.size))
+			}
 		}
 
 		// Cleanup
