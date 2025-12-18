@@ -791,7 +791,10 @@ func TestVFSPartialDownload(t *testing.T) {
 		for _, tc := range testCases {
 			var readData []byte
 			readData, err = ra.Read(tc.offset, tc.size)
-			So(err, ShouldBeNil, fmt.Sprintf("Failed to read %s: offset=%d, size=%d", tc.name, tc.offset, tc.size))
+			if err != nil {
+				t.Errorf("Failed to read %s: offset=%d, size=%d, error=%v", tc.name, tc.offset, tc.size, err)
+			}
+			So(err, ShouldBeNil)
 
 			// Calculate expected size (handle boundary cases)
 			expectedSize := tc.size
@@ -803,12 +806,18 @@ func TestVFSPartialDownload(t *testing.T) {
 				expectedSize = fileSize - int(tc.offset)
 			}
 
-			So(len(readData), ShouldEqual, expectedSize, fmt.Sprintf("Size mismatch for %s: offset=%d, size=%d, expected=%d, actual=%d", tc.name, tc.offset, tc.size, expectedSize, len(readData)))
+			if len(readData) != expectedSize {
+				t.Errorf("Size mismatch for %s: offset=%d, size=%d, expected=%d, actual=%d", tc.name, tc.offset, tc.size, expectedSize, len(readData))
+			}
+			So(len(readData), ShouldEqual, expectedSize)
 
 			if expectedSize > 0 {
 				// Verify data correctness
 				expectedData := testData[tc.offset : tc.offset+int64(len(readData))]
-				So(bytes.Equal(readData, expectedData), ShouldBeTrue, fmt.Sprintf("Data mismatch for %s: offset=%d, size=%d", tc.name, tc.offset, tc.size))
+				if !bytes.Equal(readData, expectedData) {
+					t.Errorf("Data mismatch for %s: offset=%d, size=%d", tc.name, tc.offset, tc.size)
+				}
+				So(bytes.Equal(readData, expectedData), ShouldBeTrue)
 			}
 		}
 
