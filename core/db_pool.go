@@ -219,6 +219,34 @@ func (dp *DBPool) Close() {
 	})
 }
 
+// CloseDBForPath closes all database connections for a specific database path
+// This is useful when renaming database files (e.g., on Windows where files
+// cannot be renamed while open). It closes all pools that match the given path,
+// regardless of the encryption key.
+func (dp *DBPool) CloseDBForPath(dbPath string) {
+	var keysToDelete []interface{}
+	
+	dp.pools.Range(func(key, value interface{}) bool {
+		if dbPool, ok := value.(*DatabasePool); ok {
+			// Check if this pool matches the database path
+			if dbPool.path == dbPath {
+				dbPool.mu.Lock()
+				// Force close all connections regardless of refCount
+				dbPool.readPool.Close()
+				dbPool.writePool.Close()
+				dbPool.mu.Unlock()
+				keysToDelete = append(keysToDelete, key)
+			}
+		}
+		return true
+	})
+	
+	// Delete all matching pools
+	for _, key := range keysToDelete {
+		dp.pools.Delete(key)
+	}
+}
+
 // GetDBStats returns statistics about the connection pool
 func (dp *DBPool) GetDBStats() map[string]interface{} {
 	stats := make(map[string]interface{})

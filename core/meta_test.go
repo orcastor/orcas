@@ -11,6 +11,7 @@ import (
 )
 
 var bktID = int64(0)
+var c = context.TODO()
 
 func init() {
 	// Initialize test environment with in-memory filesystem
@@ -58,16 +59,19 @@ func TestRefData(t *testing.T) {
 		So(dma.PutData(c, bktID, []*DataInfo{{
 			ID:       id,
 			OrigSize: 1,
-			HdrCRC32: 222,
-			CRC32:    333,
-			MD5:      -1081059644736014743,
+			HdrXXH3:  222,
+			XXH3:     333,
+			SHA256_0: -2039914840885289964,
+			SHA256_1: -7278955230309402332,
+			SHA256_2: 2859295262623109964,
+			SHA256_3: -6587190536697628587,
 			Kind:     DATA_NORMAL,
 		}}), ShouldBeNil)
 
 		Convey("single try ref", func() {
 			ids, err := dma.RefData(c, bktID, []*DataInfo{{
 				OrigSize: 1,
-				HdrCRC32: 222,
+				HdrXXH3:  222,
 			}})
 			So(err, ShouldBeNil)
 			So(len(ids), ShouldEqual, 1)
@@ -75,7 +79,7 @@ func TestRefData(t *testing.T) {
 
 			ids, err = dma.RefData(c, bktID, []*DataInfo{{
 				OrigSize: 0,
-				HdrCRC32: 222,
+				HdrXXH3:  222,
 			}})
 			So(err, ShouldBeNil)
 			So(len(ids), ShouldEqual, 1)
@@ -83,7 +87,7 @@ func TestRefData(t *testing.T) {
 
 			ids, err = dma.RefData(c, bktID, []*DataInfo{{
 				OrigSize: 1,
-				HdrCRC32: 0,
+				HdrXXH3:  0,
 			}})
 			So(err, ShouldBeNil)
 			So(len(ids), ShouldEqual, 1)
@@ -91,9 +95,12 @@ func TestRefData(t *testing.T) {
 
 			ids, err = dma.RefData(c, bktID, []*DataInfo{{
 				OrigSize: 1,
-				HdrCRC32: 0,
-				CRC32:    333,
-				MD5:      -1081059644736014743,
+				HdrXXH3:  0,
+				XXH3:     333,
+				SHA256_0: -2039914840885289964,
+				SHA256_1: -7278955230309402332,
+				SHA256_2: 2859295262623109964,
+				SHA256_3: -6587190536697628587,
 			}})
 			So(err, ShouldBeNil)
 			So(len(ids), ShouldEqual, 1)
@@ -102,10 +109,10 @@ func TestRefData(t *testing.T) {
 		Convey("multiple try ref", func() {
 			ids, err := dma.RefData(c, bktID, []*DataInfo{{
 				OrigSize: 1,
-				HdrCRC32: 222,
+				HdrXXH3:  222,
 			}, {
 				OrigSize: 1,
-				HdrCRC32: 222,
+				HdrXXH3:  222,
 			}})
 			So(err, ShouldBeNil)
 			So(len(ids), ShouldEqual, 2)
@@ -115,10 +122,10 @@ func TestRefData(t *testing.T) {
 		Convey("multiple try ref diff", func() {
 			ids, err := dma.RefData(c, bktID, []*DataInfo{{
 				OrigSize: 1,
-				HdrCRC32: 222,
+				HdrXXH3:  222,
 			}, {
 				OrigSize: 1,
-				HdrCRC32: 111,
+				HdrXXH3:  111,
 			}})
 			So(err, ShouldBeNil)
 			So(len(ids), ShouldEqual, 2)
@@ -129,9 +136,12 @@ func TestRefData(t *testing.T) {
 		Convey("single ref", func() {
 			ids, err := dma.RefData(c, bktID, []*DataInfo{{
 				OrigSize: 1,
-				HdrCRC32: 222,
-				CRC32:    333,
-				MD5:      -1081059644736014743,
+				HdrXXH3:  222,
+				XXH3:     333,
+				SHA256_0: -2039914840885289964,
+				SHA256_1: -7278955230309402332,
+				SHA256_2: 2859295262623109964,
+				SHA256_3: -6587190536697628587,
 			}})
 			So(err, ShouldBeNil)
 			So(len(ids), ShouldEqual, 1)
@@ -139,9 +149,12 @@ func TestRefData(t *testing.T) {
 
 			ids, err = dma.RefData(c, bktID, []*DataInfo{{
 				OrigSize: 1,
-				HdrCRC32: 222,
-				CRC32:    0,
-				MD5:      -1081059644736014743,
+				HdrXXH3:  222,
+				XXH3:     0,
+				SHA256_0: -2039914840885289964,
+				SHA256_1: -7278955230309402332,
+				SHA256_2: 2859295262623109964,
+				SHA256_3: -6587190536697628587,
 			}})
 			So(err, ShouldBeNil)
 			So(len(ids), ShouldEqual, 1)
@@ -151,8 +164,8 @@ func TestRefData(t *testing.T) {
 
 			ids, err = dma.RefData(c, bktID, []*DataInfo{{
 				OrigSize: 1,
-				HdrCRC32: 222,
-				CRC32:    333,
+				HdrXXH3:  222,
+				XXH3:     333,
 			}})
 			So(err, ShouldBeNil)
 			So(len(ids), ShouldEqual, 1)
@@ -163,14 +176,20 @@ func TestRefData(t *testing.T) {
 		Convey("multiple ref", func() {
 			ids, err := dma.RefData(c, bktID, []*DataInfo{{
 				OrigSize: 1,
-				HdrCRC32: 222,
-				CRC32:    333,
-				MD5:      -1081059644736014743,
+				HdrXXH3:  222,
+				XXH3:     333,
+				SHA256_0: -2039914840885289964,
+				SHA256_1: -7278955230309402332,
+				SHA256_2: 2859295262623109964,
+				SHA256_3: -6587190536697628587,
 			}, {
 				OrigSize: 1,
-				HdrCRC32: 222,
-				CRC32:    333,
-				MD5:      -1081059644736014743,
+				HdrXXH3:  222,
+				XXH3:     333,
+				SHA256_0: -2039914840885289964,
+				SHA256_1: -7278955230309402332,
+				SHA256_2: 2859295262623109964,
+				SHA256_3: -6587190536697628587,
 			}})
 			So(err, ShouldBeNil)
 			So(len(ids), ShouldEqual, 2)
@@ -180,14 +199,20 @@ func TestRefData(t *testing.T) {
 		Convey("multiple ref diff", func() {
 			ids, err := dma.RefData(c, bktID, []*DataInfo{{
 				OrigSize: 1,
-				HdrCRC32: 222,
-				CRC32:    333,
-				MD5:      -1081059644736014743,
+				HdrXXH3:  222,
+				XXH3:     333,
+				SHA256_0: -2039914840885289964,
+				SHA256_1: -7278955230309402332,
+				SHA256_2: 2859295262623109964,
+				SHA256_3: -6587190536697628587,
 			}, {
 				OrigSize: 1,
-				HdrCRC32: 111,
-				CRC32:    333,
-				MD5:      -1081059644736014743,
+				HdrXXH3:  111,
+				XXH3:     333,
+				SHA256_0: -2039914840885289964,
+				SHA256_1: -7278955230309402332,
+				SHA256_2: 2859295262623109964,
+				SHA256_3: -6587190536697628587,
 			}})
 			So(err, ShouldBeNil)
 			So(len(ids), ShouldEqual, 2)
@@ -196,16 +221,23 @@ func TestRefData(t *testing.T) {
 		})
 
 		Convey("multiple ref same but do not exist", func() {
+			// Use different data that doesn't exist in database
 			ids, err := dma.RefData(c, bktID, []*DataInfo{{
-				OrigSize: 1,
-				HdrCRC32: 222,
-				CRC32:    333,
-				MD5:      -1081059644736014744,
+				OrigSize: 999,
+				HdrXXH3: 888,
+				XXH3:     777,
+				SHA256_0: 11111,
+				SHA256_1: 22222,
+				SHA256_2: 33333,
+				SHA256_3: 44444,
 			}, {
-				OrigSize: 1,
-				HdrCRC32: 222,
-				CRC32:    333,
-				MD5:      -1081059644736014744,
+				OrigSize: 999,
+				HdrXXH3: 888,
+				XXH3:     777,
+				SHA256_0: 11111,
+				SHA256_1: 22222,
+				SHA256_2: 33333,
+				SHA256_3: 44444,
 			}})
 			So(err, ShouldBeNil)
 			So(len(ids), ShouldEqual, 2)

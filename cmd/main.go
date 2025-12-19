@@ -58,11 +58,13 @@ var (
 
 	// Mount options
 	requireKey = flag.Bool("requirekey", false, "Require KEY in context, return EPERM error if not provided (for mount action)")
+	noAuth     = flag.Bool("noauth", false, "Bypass authentication and permission checks (no user required, for mount action)")
 )
 
 type Config struct {
 	UserName string `json:"user_name"`
 	Password string `json:"password"`
+	NoAuth   bool   `json:"no_auth"` // If true, bypass authentication (no user required)
 	RefLevel string `json:"ref_level"`
 	CmprWay  string `json:"cmpr_way"`
 	CmprQlty int    `json:"cmpr_qlty"`
@@ -231,14 +233,21 @@ func handleMount() {
 		os.Exit(1)
 	}
 
-	// Validate required parameters
-	if cfg.UserName == "" {
-		fmt.Fprintf(os.Stderr, "Error: Username cannot be empty (use -user parameter or configuration file)\n")
-		os.Exit(1)
+	// Check if NoAuth is enabled (from command line or config)
+	if *noAuth {
+		cfg.NoAuth = true
 	}
-	if cfg.Password == "" {
-		fmt.Fprintf(os.Stderr, "Error: Password cannot be empty (use -pass parameter or configuration file)\n")
-		os.Exit(1)
+
+	// Validate required parameters
+	if !cfg.NoAuth {
+		if cfg.UserName == "" {
+			fmt.Fprintf(os.Stderr, "Error: Username cannot be empty (use -user parameter or configuration file, or use -noauth to bypass authentication)\n")
+			os.Exit(1)
+		}
+		if cfg.Password == "" {
+			fmt.Fprintf(os.Stderr, "Error: Password cannot be empty (use -pass parameter or configuration file, or use -noauth to bypass authentication)\n")
+			os.Exit(1)
+		}
 	}
 	if *mountPoint == "" {
 		fmt.Fprintf(os.Stderr, "Error: Mount point cannot be empty (use -mountpoint parameter)\n")
@@ -257,42 +266,64 @@ func handleMount() {
 		os.Exit(1)
 	}
 
-	// Create handler
-	handler := core.NewLocalHandler()
-	defer handler.Close()
-
-	// Login
-	ctx, userInfo, buckets, err := handler.Login(context.Background(), cfg.UserName, cfg.Password)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Login failed: %v\n", err)
-		os.Exit(1)
-	}
-
-	fmt.Printf("Login successful: User %s (ID: %d)\n", userInfo.Name, userInfo.ID)
-	if len(buckets) == 0 {
-		fmt.Fprintf(os.Stderr, "Error: No available bucket\n")
-		os.Exit(1)
-	}
-
-	// Select bucket
+	// Create handler and context
+	var handler core.Handler
+	var ctx core.Ctx
 	var selectedBktID int64
-	if *bucketID > 0 {
-		selectedBktID = *bucketID
-		// Verify bucket exists
-		found := false
-		for _, b := range buckets {
-			if b.ID == selectedBktID {
-				found = true
-				break
-			}
-		}
-		if !found {
-			fmt.Fprintf(os.Stderr, "Error: Bucket ID %d does not exist\n", *bucketID)
+
+	if cfg.NoAuth {
+		// NoAuth mode: use NoAuthHandler and skip login
+		handler = core.NewNoAuthHandler()
+		defer handler.Close()
+		ctx = context.Background()
+
+		// In NoAuth mode, bucket ID must be specified
+		if *bucketID <= 0 {
+			fmt.Fprintf(os.Stderr, "Error: Bucket ID must be specified when using -noauth (use -bucket parameter)\n")
 			os.Exit(1)
 		}
+		selectedBktID = *bucketID
+		fmt.Printf("NoAuth mode: Bypassing authentication\n")
+		fmt.Printf("Using Bucket ID: %d\n", selectedBktID)
 	} else {
-		selectedBktID = buckets[0].ID
-		fmt.Printf("Using Bucket: %s (ID: %d)\n", buckets[0].Name, buckets[0].ID)
+		// Normal mode: use LocalHandler and login
+		handler = core.NewLocalHandler()
+		defer handler.Close()
+
+		// Login
+		var userInfo *core.UserInfo
+		var buckets []*core.BucketInfo
+		ctx, userInfo, buckets, err = handler.Login(context.Background(), cfg.UserName, cfg.Password)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Login failed: %v\n", err)
+			os.Exit(1)
+		}
+
+		fmt.Printf("Login successful: User %s (ID: %d)\n", userInfo.Name, userInfo.ID)
+		if len(buckets) == 0 {
+			fmt.Fprintf(os.Stderr, "Error: No available bucket\n")
+			os.Exit(1)
+		}
+
+		// Select bucket
+		if *bucketID > 0 {
+			selectedBktID = *bucketID
+			// Verify bucket exists
+			found := false
+			for _, b := range buckets {
+				if b.ID == selectedBktID {
+					found = true
+					break
+				}
+			}
+			if !found {
+				fmt.Fprintf(os.Stderr, "Error: Bucket ID %d does not exist\n", *bucketID)
+				os.Exit(1)
+			}
+		} else {
+			selectedBktID = buckets[0].ID
+			fmt.Printf("Using Bucket: %s (ID: %d)\n", buckets[0].Name, buckets[0].ID)
+		}
 	}
 
 	// Display configuration
@@ -320,16 +351,18 @@ func handleMount() {
 	// Mount filesystem
 	// Note: AllowRoot is not supported by fusermount3, use AllowOther instead if needed
 	// (requires user_allow_other in /etc/fuse.conf for non-root users)
-	server, err := vfs.Mount(handler, ctx, selectedBktID, &vfs.MountOptions{
-		MountPoint:         *mountPoint,
-		Foreground:         true,
-		AllowOther:         true, // Set to true only if you need other users to access (requires user_allow_other in /etc/fuse.conf)
-		DefaultPermissions: true,
-		Config:             &sdkCfg,
-		Debug:              *debug,
-		RequireKey:         *requireKey,
-		EndecKey:           sdkCfg.EndecKey, // Pass encryption key to VFS layer (not from bucket config)
-	})
+	// Create mount options with common fields
+	// Platform-specific fields (AllowOther, DefaultPermissions, EndecKey) are handled differently:
+	// - On Linux/Unix: set via MountOptions fields
+	// - On Windows: these fields don't exist in MountOptions, but EndecKey is passed via Config
+	mountOpts := &vfs.MountOptions{
+		MountPoint: *mountPoint,
+		Foreground: true,
+		Config:     &sdkCfg,
+		Debug:      *debug,
+		RequireKey: *requireKey,
+	}
+	server, err := vfs.Mount(handler, ctx, selectedBktID, mountOpts)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to mount filesystem: %v\n", err)
 		os.Exit(1)
@@ -364,13 +397,17 @@ func loadConfig() (*Config, error) {
 	}
 	if *password != "" {
 		cfg.Password = *password
-	} else if cfg.Password == "" {
+	} else if cfg.Password == "" && !*noAuth {
 		// If password is not provided via command line or config file, try to read from stdin
 		// This supports both interactive input (hidden) and pipe input
+		// Skip if NoAuth is enabled
 		pwd, err := readPassword("Password: ")
 		if err == nil && pwd != "" {
 			cfg.Password = pwd
 		}
+	}
+	if *noAuth {
+		cfg.NoAuth = true
 	}
 	if *refLevel != "" {
 		cfg.RefLevel = *refLevel
@@ -496,6 +533,7 @@ func convertToSDKConfig(cfg *Config) core.Config {
 	sdkCfg := core.Config{
 		UserName: cfg.UserName,
 		Password: cfg.Password,
+		NoAuth:   cfg.NoAuth,
 		DontSync: cfg.DontSync,
 		NameTmpl: cfg.NameTmpl,
 	}

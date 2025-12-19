@@ -1369,15 +1369,15 @@ func PutObject(c *gin.Context) {
 	// Pre-calculate checksums once for both instant upload and normal upload paths
 	// This avoids redundant calculation if instant upload fails
 	// Only calculate checksums if instant upload is enabled or if we need them for DataInfo
-	var hdrCRC32 uint32
-	var crc32Val uint32
-	var md5Val int64
+	var hdrXXH3 uint64
+	var xxh3Val uint64
+	var sha256_0, sha256_1, sha256_2, sha256_3 int64
 	var checksumsCalculated bool
 	instantUploadEnabled := core.IsInstantUploadEnabled()
 
 	if dataSize > 0 {
 		var calcErr error
-		hdrCRC32, crc32Val, md5Val, calcErr = sdk.CalculateChecksums(data)
+		hdrXXH3, xxh3Val, sha256_0, sha256_1, sha256_2, sha256_3, calcErr = sdk.CalculateChecksums(data)
 		if calcErr == nil {
 			checksumsCalculated = true
 
@@ -1387,9 +1387,12 @@ func PutObject(c *gin.Context) {
 				// Create DataInfo for Ref
 				dataInfo := &core.DataInfo{
 					OrigSize: dataSize,
-					HdrCRC32: hdrCRC32,
-					CRC32:    crc32Val,
-					MD5:      md5Val,
+					HdrXXH3:  hdrXXH3,
+					XXH3:     xxh3Val,
+					SHA256_0: sha256_0,
+					SHA256_1: sha256_1,
+					SHA256_2: sha256_2,
+					SHA256_3: sha256_3,
 					Kind:     core.DATA_NORMAL, // Default: no compression/encryption
 				}
 
@@ -1599,22 +1602,28 @@ func PutObject(c *gin.Context) {
 						ID:       dataID,
 						Size:     dataSize,
 						OrigSize: dataSize,
-						HdrCRC32: hdrCRC32,
-						CRC32:    crc32Val,
-						MD5:      md5Val,
+						HdrXXH3:  hdrXXH3,
+						XXH3:     xxh3Val,
+						SHA256_0: sha256_0,
+						SHA256_1: sha256_1,
+						SHA256_2: sha256_2,
+						SHA256_3: sha256_3,
 						Kind:     core.DATA_NORMAL, // Default: no compression/encryption
 					}
 				} else if dataSize > 0 {
 					// Fallback: calculate checksums if not already calculated
-					calcHdrCRC32, calcCRC32Val, calcMD5Val, calcErr := sdk.CalculateChecksums(data)
+					calcHdrXXH3, calcXXH3Val, calcSHA256_0, calcSHA256_1, calcSHA256_2, calcSHA256_3, calcErr := sdk.CalculateChecksums(data)
 					if calcErr == nil {
 						dataInfo = &core.DataInfo{
 							ID:       dataID,
 							Size:     dataSize,
 							OrigSize: dataSize,
-							HdrCRC32: calcHdrCRC32,
-							CRC32:    calcCRC32Val,
-							MD5:      calcMD5Val,
+							HdrXXH3:  calcHdrXXH3,
+							XXH3:     calcXXH3Val,
+							SHA256_0: calcSHA256_0,
+							SHA256_1: calcSHA256_1,
+							SHA256_2: calcSHA256_2,
+							SHA256_3: calcSHA256_3,
 							Kind:     core.DATA_NORMAL, // Default: no compression/encryption
 						}
 					}
@@ -1876,14 +1885,17 @@ func copyObject(c *gin.Context) {
 	// Only if instant upload is enabled via configuration
 	if dataSize > 0 && core.IsInstantUploadEnabled() {
 		// Calculate checksums for instant upload
-		hdrCRC32, crc32Val, md5Val, err := sdk.CalculateChecksums(sourceData)
+		hdrXXH3, xxh3Val, sha256_0, sha256_1, sha256_2, sha256_3, err := sdk.CalculateChecksums(sourceData)
 		if err == nil {
 			// Create DataInfo for Ref
 			dataInfo := &core.DataInfo{
 				OrigSize: dataSize,
-				HdrCRC32: hdrCRC32,
-				CRC32:    crc32Val,
-				MD5:      md5Val,
+				HdrXXH3:  hdrXXH3,
+				XXH3:     xxh3Val,
+				SHA256_0: sha256_0,
+				SHA256_1: sha256_1,
+				SHA256_2: sha256_2,
+				SHA256_3: sha256_3,
 				Kind:     core.DATA_NORMAL, // Default: no compression/encryption
 			}
 
@@ -2109,14 +2121,17 @@ func moveObject(c *gin.Context) {
 		// Only if instant upload is enabled via configuration
 		if dataSize > 0 && core.IsInstantUploadEnabled() {
 			// Calculate checksums for instant upload
-			hdrCRC32, crc32Val, md5Val, err := sdk.CalculateChecksums(sourceData)
+			hdrXXH3, xxh3Val, sha256_0, sha256_1, sha256_2, sha256_3, err := sdk.CalculateChecksums(sourceData)
 			if err == nil {
 				// Create DataInfo for Ref
 				dataInfo := &core.DataInfo{
 					OrigSize: dataSize,
-					HdrCRC32: hdrCRC32,
-					CRC32:    crc32Val,
-					MD5:      md5Val,
+					HdrXXH3:  hdrXXH3,
+					XXH3:     xxh3Val,
+					SHA256_0: sha256_0,
+					SHA256_1: sha256_1,
+					SHA256_2: sha256_2,
+					SHA256_3: sha256_3,
 					Kind:     core.DATA_NORMAL, // Default: no compression/encryption
 				}
 

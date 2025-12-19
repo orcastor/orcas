@@ -109,8 +109,8 @@ type Handler interface {
 	// 登录用户
 	Login(c Ctx, usr, pwd string) (Ctx, *UserInfo, []*BucketInfo, error)
 
-	// 只有文件长度、HdrCRC32是预Ref，如果成功返回新DataID，失败返回0
-	// 有文件长度、CRC32、MD5，成功返回引用的DataID，失败返回0，客户端发现DataID有变化，说明不需要上传数据
+	// 只有文件长度、HdrXXH3是预Ref，如果成功返回新DataID，失败返回0
+	// 有文件长度、XXH3、SHA-256，成功返回引用的DataID，失败返回0，客户端发现DataID有变化，说明不需要上传数据
 	// 如果非预Ref DataID传0，说明跳过了预Ref
 	Ref(c Ctx, bktID int64, d []*DataInfo) ([]int64, error)
 	// PutData uploads data chunk, sn starts from 0, if dataID is 0 a new one will be created
@@ -377,8 +377,8 @@ func HashPassword(password string) (string, error) {
 	return fmt.Sprintf("%d:%s:%s", iter, saltStr, hashStr), nil
 }
 
-// Ref performs pre-ref: only file length and HdrCRC32 are pre-ref, returns new DataID on success, 0 on failure
-// With file length, CRC32, MD5, returns referenced DataID on success, 0 on failure
+// Ref performs pre-ref: only file length and HdrXXH3 are pre-ref, returns new DataID on success, 0 on failure
+// With file length, XXH3, SHA-256, returns referenced DataID on success, 0 on failure
 // Client detects DataID change means no need to upload data
 // If non-pre-ref DataID is 0, pre-ref is skipped
 func (lh *LocalHandler) Ref(c Ctx, bktID int64, d []*DataInfo) ([]int64, error) {

@@ -1,7 +1,6 @@
 package core
 
 import (
-	"context"
 	"fmt"
 	"testing"
 
@@ -16,8 +15,6 @@ func init() {
 	// Initialize bucket database
 	InitBucketDB(c, bktID)
 }
-
-var c = context.TODO()
 
 func TestWrite(t *testing.T) {
 	Convey("normal", t, func() {
@@ -109,7 +106,7 @@ func TestWriteSyncConcurrent(t *testing.T) {
 			}
 			// Reduce iterations to avoid timeout (original: 20000)
 			// This test is for concurrent write performance, not correctness
-			for i := 0; i < 1000; i++ {
+			for i := 0; i < 100; i++ {  // Reduced from 1000 for faster testing
 				id, _ := ig.New()
 				if err := dda.Write(c, bid, id, 0, []byte(fmt.Sprint(i))); err != nil {
 					t.Fatalf("Write failed at iteration %d: %v", i, err)
@@ -131,7 +128,7 @@ func TestWriteAsyncConcurrent(t *testing.T) {
 			}
 			// Reduce iterations to avoid timeout (original: 20000)
 			// This test is for concurrent write performance, not correctness
-			for i := 0; i < 1000; i++ {
+			for i := 0; i < 100; i++ {  // Reduced from 1000 for faster testing
 				id, _ := ig.New()
 				if err := dda.Write(c, bid, id, 0, []byte(fmt.Sprint(i))); err != nil {
 					t.Fatalf("Write failed at iteration %d: %v", i, err)

@@ -2,10 +2,10 @@ package vfs
 
 import (
 	"context"
-	"crypto/md5"
+	"crypto/sha256"
 	"encoding/binary"
 	"fmt"
-	"hash/crc32"
+	"github.com/zeebo/xxh3"
 	"os"
 	"path/filepath"
 	"sync/atomic"
@@ -174,9 +174,12 @@ func TestVFSRandomAccessor(t *testing.T) {
 			// 先写入初始数据
 			dataID, _ := ig.New()
 			initialData := []byte("Hello, World!")
-			crc32Value := crc32.ChecksumIEEE(initialData)
-			md5Hash := md5.Sum(initialData)
-			md5Int64 := int64(binary.BigEndian.Uint64(md5Hash[4:12]))
+			xxh3Value := xxh3.Hash(initialData)
+			sha256Hash := sha256.Sum256(initialData)
+			sha256_0 := int64(binary.BigEndian.Uint64(sha256Hash[0:8]))
+			sha256_1 := int64(binary.BigEndian.Uint64(sha256Hash[8:16]))
+			sha256_2 := int64(binary.BigEndian.Uint64(sha256Hash[16:24]))
+			sha256_3 := int64(binary.BigEndian.Uint64(sha256Hash[24:32]))
 
 			// 使用PutData写入chunk数据（按chunk存储）
 			_, err := lh.PutData(testCtx, testBktID, dataID, 0, initialData)
@@ -186,9 +189,12 @@ func TestVFSRandomAccessor(t *testing.T) {
 				ID:       dataID,
 				Size:     int64(len(initialData)),
 				OrigSize: int64(len(initialData)),
-				CRC32:    crc32Value,
-				Cksum:    crc32Value,
-				MD5:      md5Int64,
+				XXH3:     xxh3Value,
+				Cksum:    xxh3Value,
+				SHA256_0: sha256_0,
+				SHA256_1: sha256_1,
+				SHA256_2: sha256_2,
+				SHA256_3: sha256_3,
 				Kind:     core.DATA_NORMAL,
 			}
 			So(dma.PutData(testCtx, testBktID, []*core.DataInfo{dataInfo}), ShouldBeNil)
@@ -770,9 +776,12 @@ func TestRandomAccessorReadWithEncryption(t *testing.T) {
 		// 创建加密的数据
 		dataID, _ := ig.New()
 		testData := []byte("This is encrypted test data")
-		crc32Value := crc32.ChecksumIEEE(testData)
-		md5Hash := md5.Sum(testData)
-		md5Int64 := int64(binary.BigEndian.Uint64(md5Hash[4:12]))
+		xxh3Value := xxh3.Hash(testData)
+		sha256Hash := sha256.Sum256(testData)
+		sha256_0 := int64(binary.BigEndian.Uint64(sha256Hash[0:8]))
+		sha256_1 := int64(binary.BigEndian.Uint64(sha256Hash[8:16]))
+		sha256_2 := int64(binary.BigEndian.Uint64(sha256Hash[16:24]))
+		sha256_3 := int64(binary.BigEndian.Uint64(sha256Hash[24:32]))
 
 		// 这里我们需要手动创建加密的数据（简化测试）
 		// 在实际测试中，应该通过RandomAccessor写入
@@ -780,9 +789,12 @@ func TestRandomAccessorReadWithEncryption(t *testing.T) {
 			ID:       dataID,
 			Size:     int64(len(testData)),
 			OrigSize: int64(len(testData)),
-			CRC32:    crc32Value,
-			Cksum:    crc32Value,
-			MD5:      md5Int64,
+			XXH3:     xxh3Value,
+			Cksum:    xxh3Value,
+			SHA256_0: sha256_0,
+			SHA256_1: sha256_1,
+			SHA256_2: sha256_2,
+			SHA256_3: sha256_3,
 			Kind:     core.DATA_NORMAL, // 未加密，用于测试读取
 		}
 		So(dma.PutData(testCtx, testBktID, []*core.DataInfo{dataInfo}), ShouldBeNil)

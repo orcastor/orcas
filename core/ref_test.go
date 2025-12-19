@@ -21,9 +21,12 @@ func TestRefNegativeID(t *testing.T) {
 		data1 := &DataInfo{
 			ID:       data1ID,
 			OrigSize: 100,
-			HdrCRC32: 12345,
-			CRC32:    67890,
-			MD5:      11111,
+			HdrXXH3:  12345,
+			XXH3:     67890,
+			SHA256_0: 11111,
+			SHA256_1: 22222,
+			SHA256_2: 33333,
+			SHA256_3: 44444,
 			Kind:     DATA_NORMAL,
 		}
 		So(dma.PutData(c, testBktID, []*DataInfo{data1}), ShouldBeNil)
@@ -34,15 +37,21 @@ func TestRefNegativeID(t *testing.T) {
 		refData := []*DataInfo{
 			{
 				OrigSize: 100,
-				HdrCRC32: 12345,
-				CRC32:    67890,
-				MD5:      11111,
+				HdrXXH3: 12345,
+				XXH3:    67890,
+				SHA256_0: 11111,
+			SHA256_1: 22222,
+			SHA256_2: 33333,
+			SHA256_3: 44444,
 			},
 			{
 				OrigSize: 100,
-				HdrCRC32: 12345,
-				CRC32:    67890,
-				MD5:      11111,
+				HdrXXH3: 12345,
+				XXH3:    67890,
+				SHA256_0: 11111,
+			SHA256_1: 22222,
+			SHA256_2: 33333,
+			SHA256_3: 44444,
 			},
 		}
 
@@ -58,15 +67,21 @@ func TestRefNegativeID(t *testing.T) {
 		newRefData := []*DataInfo{
 			{
 				OrigSize: 200,
-				HdrCRC32: 99999,
-				CRC32:    88888,
-				MD5:      77777,
+				HdrXXH3: 99999,
+				XXH3:    88888,
+				SHA256_0: 77777,
+				SHA256_1: 88888,
+				SHA256_2: 99999,
+				SHA256_3: 10000,
 			},
 			{
 				OrigSize: 200,
-				HdrCRC32: 99999,
-				CRC32:    88888,
-				MD5:      77777,
+				HdrXXH3: 99999,
+				XXH3:    88888,
+				SHA256_0: 77777,
+				SHA256_1: 88888,
+				SHA256_2: 99999,
+				SHA256_3: 10000,
 			},
 		}
 
@@ -93,9 +108,12 @@ func TestPutDataInfoNegativeID(t *testing.T) {
 		data1 := &DataInfo{
 			ID:       data1ID,
 			OrigSize: 100,
-			HdrCRC32: 12345,
-			CRC32:    67890,
-			MD5:      11111,
+			HdrXXH3:  12345,
+			XXH3:     67890,
+			SHA256_0: 11111,
+			SHA256_1: 22222,
+			SHA256_2: 33333,
+			SHA256_3: 44444,
 			Kind:     DATA_NORMAL,
 		}
 		So(dma.PutData(c, testBktID, []*DataInfo{data1}), ShouldBeNil)

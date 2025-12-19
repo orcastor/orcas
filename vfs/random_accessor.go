@@ -2,9 +2,11 @@ package vfs
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/binary"
 	"errors"
 	"fmt"
-	"hash/crc32"
+	"hash"
 	"io"
 	"sort"
 	"strings"
@@ -20,6 +22,7 @@ import (
 	"github.com/orcastor/orcas/core"
 	"github.com/orcastor/orcas/sdk"
 	"github.com/tjfoc/gmsm/sm4"
+	"github.com/zeebo/xxh3"
 	"golang.org/x/sync/singleflight"
 )
 
@@ -322,15 +325,18 @@ type WriteBuffer struct {
 
 // SequentialWriteBuffer sequential write buffer (optimized: sequential writes starting from 0)
 type SequentialWriteBuffer struct {
-	fileID    int64          // File object ID
-	dataID    int64          // Data object ID (created when creating new object)
-	sn        int            // Current data block sequence number
-	chunkSize int64          // Chunk size
-	buffer    []byte         // Current chunk buffer (at most one chunk size)
-	offset    int64          // Current write position (sequential write)
-	hasData   bool           // Whether data has been written
-	closed    bool           // Whether closed (becomes random write)
-	dataInfo  *core.DataInfo // Data information
+	fileID     int64  // File object ID
+	dataID     int64  // Data object ID (created when creating new object)
+	sn         int    // Current data block sequence number
+	chunkSize  int64  // Chunk size
+	buffer     []byte // Current chunk buffer (at most one chunk size)
+	offset     int64  // Current write position (sequential write)
+	hasData    bool   // Whether data has been written
+	closed     bool   // Whether closed (becomes random write)
+	dataInfo   *core.DataInfo
+	xxh3Hash   *xxh3.Hasher // XXH3 hasher for original data
+	sha256Hash hash.Hash    // SHA-256 hasher for original data
+	cksumHash  *xxh3.Hasher // XXH3 hasher for final data (Cksum)
 }
 
 // TempFileWriter handles efficient fragmented writes for .tmp files
@@ -511,7 +517,11 @@ func (ra *RandomAccessor) getOrCreateTempWriter() (*TempFileWriter, error) {
 		OrigSize: 0,
 		Size:     0,
 		Kind:     core.DATA_NORMAL,
-		CRC32:    0,
+		XXH3:     0,
+		SHA256_0: 0,
+		SHA256_1: 0,
+		SHA256_2: 0,
+		SHA256_3: 0,
 	}
 
 	// Cache LocalHandler if available
@@ -2259,7 +2269,11 @@ func (ra *RandomAccessor) initSequentialBufferWithNewData() error {
 		ID:       newDataID,
 		OrigSize: 0,
 		Size:     0,
-		CRC32:    0,
+		XXH3:     0,
+		SHA256_0: 0,
+		SHA256_1: 0,
+		SHA256_2: 0,
+		SHA256_3: 0,
 		Cksum:    0,
 		Kind:     0,
 	}
@@ -2359,8 +2373,19 @@ func (ra *RandomAccessor) flushSequentialChunk() error {
 		}
 	}
 
-	// Update CRC32 and size of original data
-	ra.seqBuffer.dataInfo.CRC32 = crc32.Update(ra.seqBuffer.dataInfo.CRC32, crc32.IEEETable, chunkData)
+	// Update XXH3 and SHA-256 of original data
+	if ra.seqBuffer.xxh3Hash == nil {
+		ra.seqBuffer.xxh3Hash = xxh3.New()
+		ra.seqBuffer.sha256Hash = sha256.New()
+	}
+	ra.seqBuffer.xxh3Hash.Write(chunkData)
+	ra.seqBuffer.sha256Hash.Write(chunkData)
+	ra.seqBuffer.dataInfo.XXH3 = ra.seqBuffer.xxh3Hash.Sum64()
+	sha256Sum := ra.seqBuffer.sha256Hash.Sum(nil)
+	ra.seqBuffer.dataInfo.SHA256_0 = int64(binary.BigEndian.Uint64(sha256Sum[0:8]))
+	ra.seqBuffer.dataInfo.SHA256_1 = int64(binary.BigEndian.Uint64(sha256Sum[8:16]))
+	ra.seqBuffer.dataInfo.SHA256_2 = int64(binary.BigEndian.Uint64(sha256Sum[16:24]))
+	ra.seqBuffer.dataInfo.SHA256_3 = int64(binary.BigEndian.Uint64(sha256Sum[24:32]))
 	ra.seqBuffer.dataInfo.OrigSize += int64(len(chunkData))
 	DebugLog("[VFS flushSequentialChunk] Original chunk: fileID=%d, chunkSize=%d, OrigSize=%d, Kind=0x%x (CMPR=%v, ENDEC=%v)",
 		ra.fileID, len(chunkData), ra.seqBuffer.dataInfo.OrigSize, ra.seqBuffer.dataInfo.Kind,
@@ -2429,8 +2454,12 @@ func (ra *RandomAccessor) flushSequentialChunk() error {
 		encodedChunk = processedChunk
 	}
 
-	// Update CRC32 of final data
-	ra.seqBuffer.dataInfo.Cksum = crc32.Update(ra.seqBuffer.dataInfo.Cksum, crc32.IEEETable, encodedChunk)
+	// Update Cksum (XXH3) of final data
+	if ra.seqBuffer.cksumHash == nil {
+		ra.seqBuffer.cksumHash = xxh3.New()
+	}
+	ra.seqBuffer.cksumHash.Write(encodedChunk)
+	ra.seqBuffer.dataInfo.Cksum = ra.seqBuffer.cksumHash.Sum64()
 
 	// Update size (if compressed or encrypted)
 	originalChunkSize := len(chunkData)
@@ -2556,7 +2585,7 @@ func (ra *RandomAccessor) flushSequentialBuffer() error {
 
 	if ra.seqBuffer.dataInfo.Kind&core.DATA_CMPR_MASK == 0 && ra.seqBuffer.dataInfo.Kind&core.DATA_ENDEC_MASK == 0 {
 		ra.seqBuffer.dataInfo.Size = ra.seqBuffer.dataInfo.OrigSize
-		ra.seqBuffer.dataInfo.Cksum = ra.seqBuffer.dataInfo.CRC32
+		ra.seqBuffer.dataInfo.Cksum = ra.seqBuffer.dataInfo.XXH3
 		DebugLog("[VFS flushSequentialBuffer] No compression/encryption, set Size=OrigSize: fileID=%d, Size=%d",
 			ra.fileID, ra.seqBuffer.dataInfo.Size)
 	} else {
@@ -4032,182 +4061,7 @@ func (ra *RandomAccessor) applyWritesStreamingUncompressed(fileObj *core.ObjectI
 	// Optimization: pre-calculate write operations for each chunk to reduce repeated checks in loops
 
 	chunkSize := ra.fs.chunkSize
-	// If no bucket configuration, directly stream write
-	bucket := getBucketConfigWithCache(ra.fs)
-	if bucket == nil {
-		dataInfo.Size = newSize
-		dataInfo.OrigSize = newSize
-
-		oldDataID := fileObj.DataID
-		sn := 0
-
-		// Pre-calculate write operation indices for each chunk (optimization: reduce repeated checks)
-		// Optimization: estimate capacity to reduce slice expansion
-		chunkCount := int((newSize + chunkSize - 1) / chunkSize)
-		if chunkCount == 0 {
-			// Empty file, no chunks needed
-			chunkCount = 1
-		}
-		writesByChunk := make([][]int, chunkCount)
-		// Estimate average number of write operations per chunk (optimization: reduce slice expansion)
-		avgWritesPerChunk := 1
-		if chunkCount > 0 {
-			avgWritesPerChunk = len(writes) / chunkCount
-			if avgWritesPerChunk < 1 {
-				avgWritesPerChunk = 1
-			}
-		}
-		if avgWritesPerChunk < 1 {
-			avgWritesPerChunk = 1
-		}
-		for i := range writesByChunk {
-			writesByChunk[i] = make([]int, 0, avgWritesPerChunk)
-		}
-
-		for i, write := range writes {
-			writeEnd := write.Offset + int64(len(write.Data))
-			startChunk := int(write.Offset / chunkSize)
-			endChunk := int((writeEnd + chunkSize - 1) / chunkSize)
-			if endChunk >= chunkCount {
-				endChunk = chunkCount - 1
-			}
-			if startChunk < 0 {
-				startChunk = 0
-			}
-			for chunkIdx := startChunk; chunkIdx <= endChunk; chunkIdx++ {
-				writesByChunk[chunkIdx] = append(writesByChunk[chunkIdx], i)
-			}
-		}
-
-		// Process by chunk
-		DebugLog("[VFS applyWritesStreamingUncompressed] Starting chunk processing: fileID=%d, dataID=%d, chunkCount=%d, newSize=%d, chunkSize=%d", ra.fileID, dataInfo.ID, chunkCount, newSize, chunkSize)
-		for chunkIdx := 0; chunkIdx < chunkCount; chunkIdx++ {
-			pos := int64(chunkIdx * int(chunkSize))
-			chunkEnd := pos + chunkSize
-			if chunkEnd > newSize {
-				chunkEnd = newSize
-			}
-			chunkSize := int(chunkEnd - pos)
-
-			// Read original chunk data (optimization: use object pool to reuse buffers)
-			chunkData := chunkDataPool.Get().([]byte)
-			// Ensure capacity is sufficient
-			if cap(chunkData) < chunkSize {
-				chunkData = make([]byte, chunkSize)
-			} else {
-				chunkData = chunkData[:chunkSize]
-			}
-
-			if oldDataID > 0 && oldDataID != core.EmptyDataID && pos < fileObj.Size {
-				// Calculate sn for this chunk position
-				// 修复: 使用 chunkIdx 作为 sn，因为 chunkSize 变量在循环中被覆盖了
-				// chunkIdx 从 0 开始，正好对应 sn
-				chunkSn := chunkIdx
-				// Read this chunk of original data (read entire chunk by sn)
-				data, err := ra.fs.h.GetData(ra.fs.c, ra.fs.bktID, oldDataID, chunkSn)
-				if err == nil && len(data) > 0 {
-					// Copy data to chunkData, but limit to actual chunk size
-					copyLen := len(data)
-					if copyLen > chunkSize {
-						copyLen = chunkSize
-					}
-					copy(chunkData[:copyLen], data[:copyLen])
-				}
-			}
-
-			// Apply write operations (only process writes related to current chunk, using pre-calculated indices)
-			for _, writeIdx := range writesByChunk[chunkIdx] {
-				write := writes[writeIdx]
-				writeEnd := write.Offset + int64(len(write.Data))
-
-				// Calculate overlap range (optimization: reduce repeated calculations)
-				overlapStart := int64(0)
-				if write.Offset > pos {
-					overlapStart = write.Offset - pos
-				}
-				overlapEnd := int64(chunkSize)
-				if writeEnd-pos < overlapEnd {
-					overlapEnd = writeEnd - pos
-				}
-				if overlapStart < overlapEnd {
-					writeDataStart := int64(0)
-					if write.Offset < pos {
-						writeDataStart = pos - write.Offset
-					}
-					copyLen := overlapEnd - overlapStart
-					// Optimization: directly use slice to avoid repeated length calculations
-					copy(chunkData[overlapStart:overlapEnd], write.Data[writeDataStart:writeDataStart+copyLen])
-				}
-			}
-
-			// Write chunk
-			// Note: need to copy data because PutData may process asynchronously, and chunkData needs to be returned to object pool
-			// Optimization: use object pool for chunkDataCopy to reduce allocations
-			chunkDataCopy := chunkDataPool.Get().([]byte)
-			if cap(chunkDataCopy) < len(chunkData) {
-				chunkDataCopy = make([]byte, len(chunkData))
-			} else {
-				chunkDataCopy = chunkDataCopy[:len(chunkData)]
-			}
-			copy(chunkDataCopy, chunkData)
-			// Return original buffer to object pool before writing (async clear)
-			putChunkDataToPool(chunkData)
-
-			DebugLog("[VFS applyWritesStreamingUncompressed] Writing data chunk to disk: fileID=%d, dataID=%d, chunkIdx=%d, sn=%d, pos=%d, size=%d, writesCount=%d", ra.fileID, dataInfo.ID, chunkIdx, sn, pos, len(chunkDataCopy), len(writesByChunk[chunkIdx]))
-			if _, err := ra.fs.h.PutData(ra.fs.c, ra.fs.bktID, dataInfo.ID, sn, chunkDataCopy); err != nil {
-				// Return copy buffer to pool on error (async clear)
-				putChunkDataToPool(chunkDataCopy)
-				DebugLog("[VFS applyWritesStreamingUncompressed] ERROR: Failed to write data chunk to disk: fileID=%d, dataID=%d, sn=%d, error=%v", ra.fileID, dataInfo.ID, sn, err)
-				return 0, err
-			}
-			// Note: chunkDataCopy is consumed by PutData, don't return to pool here
-			DebugLog("[VFS applyWritesStreamingUncompressed] Successfully wrote data chunk to disk: fileID=%d, dataID=%d, sn=%d, size=%d", ra.fileID, dataInfo.ID, sn, len(chunkDataCopy))
-			sn++
-		}
-
-		// Save data metadata
-		DebugLog("[VFS applyWritesStreamingUncompressed] Writing DataInfo to disk: fileID=%d, dataID=%d, OrigSize=%d, Size=%d", ra.fileID, dataInfo.ID, dataInfo.OrigSize, dataInfo.Size)
-		_, err := ra.fs.h.PutDataInfo(ra.fs.c, ra.fs.bktID, []*core.DataInfo{dataInfo})
-		if err != nil {
-			DebugLog("[VFS applyWritesStreamingUncompressed] ERROR: Failed to write DataInfo to disk: fileID=%d, dataID=%d, error=%v", ra.fileID, dataInfo.ID, err)
-			return 0, err
-		}
-		DebugLog("[VFS applyWritesStreamingUncompressed] Successfully wrote DataInfo to disk: fileID=%d, dataID=%d, OrigSize=%d, Size=%d", ra.fileID, dataInfo.ID, dataInfo.OrigSize, dataInfo.Size)
-
-		// Optimization: use more efficient key generation (function internally uses object pool)
-		dataInfoCache.Put(dataInfo.ID, dataInfo)
-
-		// Update fileObj with new DataID and size
-		// This ensures subsequent operations use the correct DataID
-		oldDataIDForUpdate := fileObj.DataID
-		oldSizeForUpdate := fileObj.Size
-		updateFileObj := &core.ObjectInfo{
-			ID:     fileObj.ID,
-			PID:    fileObj.PID,
-			Type:   fileObj.Type,
-			Name:   fileObj.Name,
-			DataID: dataInfo.ID,
-			Size:   dataInfo.OrigSize,
-			MTime:  core.Now(),
-		}
-		DebugLog("[VFS applyWritesStreamingUncompressed] Updating fileObj (bucket == nil): fileID=%d, oldDataID=%d, newDataID=%d, oldSize=%d, newSize=%d", ra.fileID, oldDataIDForUpdate, dataInfo.ID, oldSizeForUpdate, dataInfo.OrigSize)
-		_, err = ra.fs.h.Put(ra.fs.c, ra.fs.bktID, []*core.ObjectInfo{updateFileObj})
-		if err != nil {
-			DebugLog("[VFS applyWritesStreamingUncompressed] ERROR: Failed to update fileObj: fileID=%d, dataID=%d, error=%v", ra.fileID, dataInfo.ID, err)
-			return 0, err
-		}
-		// Update cache
-		fileObjCache.Put(ra.fileObjKey, updateFileObj)
-		ra.fileObj.Store(updateFileObj)
-		DebugLog("[VFS applyWritesStreamingUncompressed] Successfully updated fileObj (bucket == nil): fileID=%d, dataID=%d, size=%d", ra.fileID, dataInfo.ID, dataInfo.OrigSize)
-
-		newVersionID := core.NewID()
-		return newVersionID, nil
-	}
-
-	// Has SDK configuration, needs compression and encryption
 	// Stream processing: read original data by chunk, apply write operations, process and write to new object immediately
-
 	// Pre-calculate write operation indices for each chunk
 	chunkCount := int((newSize + chunkSize - 1) / chunkSize)
 	if chunkCount == 0 {
@@ -4290,7 +4144,7 @@ func (ra *RandomAccessor) applyWritesStreamingUncompressed(fileObj *core.ObjectI
 		return 0, err
 	}
 
-	// Update fileObj with new DataID and size (for bucket != nil case)
+	// Update fileObj with new DataID and size
 	// This ensures subsequent operations use the correct DataID
 	updateFileObj, err := ra.getFileObj()
 	if err == nil && updateFileObj != nil {
@@ -4299,7 +4153,7 @@ func (ra *RandomAccessor) applyWritesStreamingUncompressed(fileObj *core.ObjectI
 		updateFileObj.DataID = dataInfo.ID
 		updateFileObj.Size = dataInfo.OrigSize
 		updateFileObj.MTime = core.Now()
-		DebugLog("[VFS applyWritesStreamingUncompressed] Updating fileObj (bucket != nil): fileID=%d, oldDataID=%d, newDataID=%d, oldSize=%d, newSize=%d", ra.fileID, oldDataID, dataInfo.ID, oldSize, dataInfo.OrigSize)
+		DebugLog("[VFS applyWritesStreamingUncompressed] Updating fileObj: fileID=%d, oldDataID=%d, newDataID=%d, oldSize=%d, newSize=%d", ra.fileID, oldDataID, dataInfo.ID, oldSize, dataInfo.OrigSize)
 		_, err = ra.fs.h.Put(ra.fs.c, ra.fs.bktID, []*core.ObjectInfo{updateFileObj})
 		if err != nil {
 			DebugLog("[VFS applyWritesStreamingUncompressed] ERROR: Failed to update fileObj: fileID=%d, dataID=%d, error=%v", ra.fileID, dataInfo.ID, err)
@@ -4308,7 +4162,7 @@ func (ra *RandomAccessor) applyWritesStreamingUncompressed(fileObj *core.ObjectI
 		// Update cache
 		fileObjCache.Put(ra.fileObjKey, updateFileObj)
 		ra.fileObj.Store(updateFileObj)
-		DebugLog("[VFS applyWritesStreamingUncompressed] Successfully updated fileObj (bucket != nil): fileID=%d, dataID=%d, size=%d", ra.fileID, dataInfo.ID, dataInfo.OrigSize)
+		DebugLog("[VFS applyWritesStreamingUncompressed] Successfully updated fileObj: fileID=%d, dataID=%d, size=%d", ra.fileID, dataInfo.ID, dataInfo.OrigSize)
 	} else {
 		DebugLog("[VFS applyWritesStreamingUncompressed] WARNING: Failed to get fileObj for update: fileID=%d, error=%v", ra.fileID, err)
 	}
@@ -4357,9 +4211,11 @@ func (ra *RandomAccessor) processWritesStreaming(
 		DebugLog("[VFS processWritesStreaming] Set encryption flag: fileID=%d, dataID=%d, EndecWay=0x%x, Kind=0x%x", ra.fileID, dataInfo.ID, endecWay, dataInfo.Kind)
 	}
 
-	// Calculate CRC32 (original data)
-	var crc32Val uint32
-	var dataCRC32 uint32
+	// Calculate XXH3 and SHA-256 (original data)
+	var xxh3Hash *xxh3.Hasher
+	var sha256Hash hash.Hash
+	var dataXXH3 uint64
+	var cksumHash *xxh3.Hasher // For final data checksum
 
 	sn := 0
 	firstChunk := true
@@ -4456,8 +4312,14 @@ func (ra *RandomAccessor) processWritesStreaming(
 			firstChunk = false
 		}
 
-		// 4. Calculate CRC32 of original data
-		dataCRC32 = crc32.Update(dataCRC32, crc32.IEEETable, chunkData)
+		// 4. Calculate XXH3 and SHA-256 of original data
+		if xxh3Hash == nil {
+			xxh3Hash = xxh3.New()
+			sha256Hash = sha256.New()
+		}
+		xxh3Hash.Write(chunkData)
+		sha256Hash.Write(chunkData)
+		dataXXH3 = xxh3Hash.Sum64()
 
 		// 5. Compress (if enabled)
 		var processedChunk []byte
@@ -4512,8 +4374,12 @@ func (ra *RandomAccessor) processWritesStreaming(
 			encodedChunk = processedChunk
 		}
 
-		// 7. Update checksum of final data
-		crc32Val = crc32.Update(crc32Val, crc32.IEEETable, encodedChunk)
+		// 7. Update checksum of final data (using XXH3)
+		// Accumulate checksum across all chunks
+		if cksumHash == nil {
+			cksumHash = xxh3.New()
+		}
+		cksumHash.Write(encodedChunk)
 
 		// 8. Update size (if compressed or encrypted)
 		if dataInfo.Kind&core.DATA_CMPR_MASK != 0 || dataInfo.Kind&core.DATA_ENDEC_MASK != 0 {
@@ -4536,13 +4402,18 @@ func (ra *RandomAccessor) processWritesStreaming(
 		putChunkDataToPool(chunkData)
 	}
 
-	// Set CRC32 and checksum
-	dataInfo.CRC32 = dataCRC32
+	// Set XXH3, SHA-256 and checksum
+	dataInfo.XXH3 = dataXXH3
+	sha256Sum := sha256Hash.Sum(nil)
+	dataInfo.SHA256_0 = int64(binary.BigEndian.Uint64(sha256Sum[0:8]))
+	dataInfo.SHA256_1 = int64(binary.BigEndian.Uint64(sha256Sum[8:16]))
+	dataInfo.SHA256_2 = int64(binary.BigEndian.Uint64(sha256Sum[16:24]))
+	dataInfo.SHA256_3 = int64(binary.BigEndian.Uint64(sha256Sum[24:32]))
 	if dataInfo.Kind&core.DATA_CMPR_MASK == 0 && dataInfo.Kind&core.DATA_ENDEC_MASK == 0 {
 		dataInfo.Size = dataInfo.OrigSize
-		dataInfo.Cksum = dataCRC32
+		dataInfo.Cksum = dataXXH3
 	} else {
-		dataInfo.Cksum = crc32Val
+		dataInfo.Cksum = cksumHash.Sum64()
 	}
 
 	// Save data metadata
@@ -6384,7 +6255,7 @@ func applyWritesToData(data []byte, writes []WriteOperation) []byte {
 // Returns DataID if instant upload succeeds (> 0), 0 if it fails
 func tryInstantUpload(fs *OrcasFS, data []byte, origSize int64, kind uint32) (int64, error) {
 	// Calculate checksums using SDK
-	hdrCRC32, crc32Val, md5Val, err := sdk.CalculateChecksums(data)
+	hdrXXH3, xxh3Val, sha256_0, sha256_1, sha256_2, sha256_3, err := sdk.CalculateChecksums(data)
 	if err != nil {
 		return 0, err
 	}
@@ -6392,9 +6263,12 @@ func tryInstantUpload(fs *OrcasFS, data []byte, origSize int64, kind uint32) (in
 	// Create DataInfo for Ref
 	dataInfo := &core.DataInfo{
 		OrigSize: origSize,
-		HdrCRC32: hdrCRC32,
-		CRC32:    crc32Val,
-		MD5:      md5Val,
+		HdrXXH3:  hdrXXH3,
+		XXH3:     xxh3Val,
+		SHA256_0: sha256_0,
+		SHA256_1: sha256_1,
+		SHA256_2: sha256_2,
+		SHA256_3: sha256_3,
 		Kind:     kind,
 	}
 

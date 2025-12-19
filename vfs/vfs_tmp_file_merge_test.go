@@ -1,3 +1,6 @@
+//go:build !windows
+// +build !windows
+
 package vfs
 
 import (
@@ -77,7 +80,7 @@ func TestTmpFileMergeAndDirectoryListing(t *testing.T) {
 		So(err, ShouldBeNil)
 
 		// Step 2: Create a .tmp file with new data
-		tmpFileName := "test-file.tmp"
+		tmpFileName := "test-file.txt.tmp"
 		tmpFileData := []byte("New content from tmp file")
 		tmpFileObj := &core.ObjectInfo{
 			ID:    core.NewID(),
@@ -122,18 +125,25 @@ func TestTmpFileMergeAndDirectoryListing(t *testing.T) {
 		So(foundTmpBefore, ShouldBeTrue)
 
 		// Step 4: Rename .tmp file to target file name (this should trigger merge and delete .tmp file)
-		// Get root node (parent of source .tmp file)
-		rootNode := &OrcasNode{
-			fs:     ofs,
-			objID:  core.ROOT_OID,
-			isRoot: true,
+		// Use the filesystem's root node (properly initialized)
+		rootNode := ofs.root
+		if rootNode == nil {
+			// If root node is not initialized, create it
+			rootNode = &OrcasNode{
+				fs:     ofs,
+				objID:  core.ROOT_OID,
+				isRoot: true,
+			}
 		}
 
 		// Get target file node (as newParent, which is the same as root in this case)
-		targetNode := &OrcasNode{
-			fs:     ofs,
-			objID:  core.ROOT_OID,
-			isRoot: true,
+		targetNode := ofs.root
+		if targetNode == nil {
+			targetNode = &OrcasNode{
+				fs:     ofs,
+				objID:  core.ROOT_OID,
+				isRoot: true,
+			}
 		}
 
 		// Rename .tmp file to target file name
@@ -144,7 +154,7 @@ func TestTmpFileMergeAndDirectoryListing(t *testing.T) {
 		// Wait a bit for async operations and delayed double delete to complete
 		// Delayed double delete waits 200ms, so wait a bit longer to ensure it completes
 		time.Sleep(300 * time.Millisecond)
-		
+
 		// List directory contents
 		childrenAfter, _, _, err := handler.List(ctx, testBktID, core.ROOT_OID, core.ListOptions{
 			Count: core.DefaultListPageSize,
@@ -194,4 +204,3 @@ func TestTmpFileMergeAndDirectoryListing(t *testing.T) {
 		t.Logf("Successfully tested .tmp file merge and directory listing: .tmp file deleted, target file updated")
 	})
 }
-

@@ -1,57 +1,56 @@
 package sdk
 
 import (
-	"crypto/md5"
+	"crypto/sha256"
 	"encoding/binary"
-	"hash/crc32"
 	"io"
+
+	"github.com/zeebo/xxh3"
 )
 
 const (
-	// HdrSize is the size of header data used for HdrCRC32 calculation (first 100KB)
+	// HdrSize is the size of header data used for HdrXXH3 calculation (first 100KB)
 	HdrSize = 102400
 )
 
-// CalculateChecksums calculates HdrCRC32, CRC32, and MD5 checksums from data
-// Returns HdrCRC32, CRC32, MD5 (as int64), and error
+// CalculateChecksums calculates HdrXXH3, XXH3, and SHA-256 checksums from data
+// Returns HdrXXH3, XXH3, SHA256_0, SHA256_1, SHA256_2, SHA256_3, and error
 // This function is used for instant upload (deduplication) feature
-func CalculateChecksums(data []byte) (uint32, uint32, int64, error) {
+func CalculateChecksums(data []byte) (uint64, uint64, int64, int64, int64, int64, error) {
 	if len(data) == 0 {
-		return 0, 0, 0, nil
+		return 0, 0, 0, 0, 0, 0, nil
 	}
 
-	// Calculate HdrCRC32 (first 100KB or entire file if smaller)
-	var hdrCRC32 uint32
+	// Calculate HdrXXH3 (first 100KB or entire file if smaller)
+	var hdrXXH3 uint64
 	if len(data) > HdrSize {
-		hdrCRC32 = crc32.ChecksumIEEE(data[0:HdrSize])
+		hdrXXH3 = xxh3.Hash(data[0:HdrSize])
 	} else {
-		hdrCRC32 = crc32.ChecksumIEEE(data)
+		hdrXXH3 = xxh3.Hash(data)
 	}
 
-	// Calculate CRC32 for entire file
-	crc32Hash := crc32.NewIEEE()
-	if _, err := crc32Hash.Write(data); err != nil {
-		return 0, 0, 0, err
-	}
-	fullCRC32 := crc32Hash.Sum32()
+	// Calculate XXH3 for entire file
+	fullXXH3 := xxh3.Hash(data)
 
-	// Calculate MD5 for entire file
-	md5Hash := md5.Sum(data)
-	// Extract middle 8 bytes and convert to int64 (same as SDK)
-	md5Int64 := int64(binary.BigEndian.Uint64(md5Hash[4:12]))
+	// Calculate SHA-256 for entire file
+	sha256Hash := sha256.Sum256(data)
+	sha256_0 := int64(binary.BigEndian.Uint64(sha256Hash[0:8]))
+	sha256_1 := int64(binary.BigEndian.Uint64(sha256Hash[8:16]))
+	sha256_2 := int64(binary.BigEndian.Uint64(sha256Hash[16:24]))
+	sha256_3 := int64(binary.BigEndian.Uint64(sha256Hash[24:32]))
 
-	return hdrCRC32, fullCRC32, md5Int64, nil
+	return hdrXXH3, fullXXH3, sha256_0, sha256_1, sha256_2, sha256_3, nil
 }
 
 // CalculateChecksumsFromReader calculates checksums by reading from an io.Reader
 // This is more memory-efficient for large files
-// Returns HdrCRC32, CRC32, MD5 (as int64), and error
-func CalculateChecksumsFromReader(reader io.Reader, size int64) (uint32, uint32, int64, error) {
+// Returns HdrXXH3, XXH3, SHA256_0, SHA256_1, SHA256_2, SHA256_3, and error
+func CalculateChecksumsFromReader(reader io.Reader, size int64) (uint64, uint64, int64, int64, int64, int64, error) {
 	if size == 0 {
-		return 0, 0, 0, nil
+		return 0, 0, 0, 0, 0, 0, nil
 	}
 
-	// Read header for HdrCRC32
+	// Read header for HdrXXH3
 	headerBuf := make([]byte, HdrSize)
 	headerRead := 0
 	if size < HdrSize {
@@ -59,24 +58,24 @@ func CalculateChecksumsFromReader(reader io.Reader, size int64) (uint32, uint32,
 	}
 	n, err := io.ReadFull(reader, headerBuf)
 	if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
-		return 0, 0, 0, err
+		return 0, 0, 0, 0, 0, 0, err
 	}
 	headerRead = n
 
-	// Calculate HdrCRC32
-	var hdrCRC32 uint32
+	// Calculate HdrXXH3
+	var hdrXXH3 uint64
 	if headerRead > 0 {
-		hdrCRC32 = crc32.ChecksumIEEE(headerBuf[:headerRead])
+		hdrXXH3 = xxh3.Hash(headerBuf[:headerRead])
 	}
 
-	// Create CRC32 and MD5 hashers
-	crc32Hash := crc32.NewIEEE()
-	md5Hash := md5.New()
+	// Create XXH3 and SHA-256 hashers
+	xxh3Hash := xxh3.New()
+	sha256Hash := sha256.New()
 
 	// Write header to hashers
 	if headerRead > 0 {
-		crc32Hash.Write(headerBuf[:headerRead])
-		md5Hash.Write(headerBuf[:headerRead])
+		xxh3Hash.Write(headerBuf[:headerRead])
+		sha256Hash.Write(headerBuf[:headerRead])
 	}
 
 	// Read remaining data and update hashers
@@ -90,23 +89,26 @@ func CalculateChecksumsFromReader(reader io.Reader, size int64) (uint32, uint32,
 			}
 			n, err := reader.Read(buf[:toRead])
 			if n > 0 {
-				crc32Hash.Write(buf[:n])
-				md5Hash.Write(buf[:n])
+				xxh3Hash.Write(buf[:n])
+				sha256Hash.Write(buf[:n])
 				remaining -= int64(n)
 			}
 			if err != nil {
 				if err == io.EOF {
 					break
 				}
-				return 0, 0, 0, err
+				return 0, 0, 0, 0, 0, 0, err
 			}
 		}
 	}
 
 	// Get final checksums
-	fullCRC32 := crc32Hash.Sum32()
-	md5Sum := md5Hash.Sum(nil)
-	md5Int64 := int64(binary.BigEndian.Uint64(md5Sum[4:12]))
+	fullXXH3 := xxh3Hash.Sum64()
+	sha256Sum := sha256Hash.Sum(nil)
+	sha256_0 := int64(binary.BigEndian.Uint64(sha256Sum[0:8]))
+	sha256_1 := int64(binary.BigEndian.Uint64(sha256Sum[8:16]))
+	sha256_2 := int64(binary.BigEndian.Uint64(sha256Sum[16:24]))
+	sha256_3 := int64(binary.BigEndian.Uint64(sha256Sum[24:32]))
 
-	return hdrCRC32, fullCRC32, md5Int64, nil
+	return hdrXXH3, fullXXH3, sha256_0, sha256_1, sha256_2, sha256_3, nil
 }

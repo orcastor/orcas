@@ -3,11 +3,10 @@ package sdk
 import (
 	"bufio"
 	"bytes"
-	"crypto/md5"
+	"crypto/sha256"
 	"encoding/binary"
 	"fmt"
 	"hash"
-	"hash/crc32"
 	"io"
 	"os"
 	"path/filepath"
@@ -20,12 +19,13 @@ import (
 	"github.com/mkmueller/aes256"
 	"github.com/orcastor/orcas/core"
 	"github.com/tjfoc/gmsm/sm4"
+	"github.com/zeebo/xxh3"
 )
 
 const (
 	UPLOAD_DATA = 1 << iota
-	CRC32_MD5
-	HDR_CRC32
+	XXH3_SHA256
+	HDR_XXH3
 )
 
 const (
@@ -39,7 +39,8 @@ type listener struct {
 	d         *core.DataInfo
 	cfg       Config
 	action    uint32
-	md5Hash   hash.Hash
+	sha256Hash hash.Hash
+	xxh3Hash   *xxh3.Hasher
 	once      bool
 	sn, cnt   int
 	cmprBuf   bytes.Buffer
@@ -57,8 +58,9 @@ func (l *listener) getChunkSize() int64 {
 
 func newListener(bktID int64, d *core.DataInfo, cfg Config, action uint32, chunkSize int64) *listener {
 	l := &listener{bktID: bktID, d: d, cfg: cfg, action: action, chunkSize: chunkSize}
-	if action&CRC32_MD5 != 0 {
-		l.md5Hash = md5.New()
+	if action&XXH3_SHA256 != 0 {
+		l.sha256Hash = sha256.New()
+		l.xxh3Hash = xxh3.New()
 	}
 	return l
 }
@@ -87,11 +89,11 @@ func (l *listener) encode(src []byte) (dst []byte, err error) {
 
 func (l *listener) OnData(c core.Ctx, h core.Handler, dp *dataPkger, buf []byte) (once bool, err error) {
 	if l.cnt == 0 {
-		if l.action&HDR_CRC32 != 0 {
+		if l.action&HDR_XXH3 != 0 {
 			if len(buf) > HdrSize {
-				l.d.HdrCRC32 = crc32.ChecksumIEEE(buf[0:HdrSize])
+				l.d.HdrXXH3 = xxh3.Hash(buf[0:HdrSize])
 			} else {
-				l.d.HdrCRC32 = crc32.ChecksumIEEE(buf)
+				l.d.HdrXXH3 = xxh3.Hash(buf)
 			}
 		}
 		// If smart compression is enabled, check file type to determine whether to compress
@@ -119,9 +121,9 @@ func (l *listener) OnData(c core.Ctx, h core.Handler, dp *dataPkger, buf []byte)
 	isFirstChunk := l.cnt == 0
 	l.cnt++
 
-	if l.action&CRC32_MD5 != 0 {
-		l.d.CRC32 = crc32.Update(l.d.CRC32, crc32.IEEETable, buf)
-		l.md5Hash.Write(buf)
+	if l.action&XXH3_SHA256 != 0 {
+		l.xxh3Hash.Write(buf)
+		l.sha256Hash.Write(buf)
 	}
 
 	// Upload data
@@ -163,7 +165,10 @@ func (l *listener) OnData(c core.Ctx, h core.Handler, dp *dataPkger, buf []byte)
 
 		// 3. Update checksum and size
 		if l.d.Kind&core.DATA_CMPR_MASK != 0 || l.d.Kind&core.DATA_ENDEC_MASK != 0 {
-			l.d.Cksum = crc32.Update(l.d.Cksum, crc32.IEEETable, encodedBuf)
+			// Update Cksum using XXH3
+			xxh3Hash := xxh3.New()
+			xxh3Hash.Write(encodedBuf)
+			l.d.Cksum = xxh3Hash.Sum64()
 			l.d.Size += int64(len(encodedBuf))
 		}
 
@@ -192,8 +197,14 @@ func (l *listener) OnData(c core.Ctx, h core.Handler, dp *dataPkger, buf []byte)
 }
 
 func (l *listener) OnFinish(c core.Ctx, h core.Handler) error {
-	if l.action&CRC32_MD5 != 0 {
-		l.d.MD5 = int64(binary.BigEndian.Uint64(l.md5Hash.Sum(nil)[4:12]))
+	if l.action&XXH3_SHA256 != 0 {
+		// Calculate XXH3 and SHA-256
+		l.d.XXH3 = l.xxh3Hash.Sum64()
+		sha256Sum := l.sha256Hash.Sum(nil)
+		l.d.SHA256_0 = int64(binary.BigEndian.Uint64(sha256Sum[0:8]))
+		l.d.SHA256_1 = int64(binary.BigEndian.Uint64(sha256Sum[8:16]))
+		l.d.SHA256_2 = int64(binary.BigEndian.Uint64(sha256Sum[16:24]))
+		l.d.SHA256_3 = int64(binary.BigEndian.Uint64(sha256Sum[24:32]))
 	}
 	// Note: Now each chunk is immediately processed and uploaded in OnData, no need to handle residual data here
 	// If compression produced residual data (theoretically shouldn't, because each chunk is independently compressed), handle here
@@ -208,12 +219,15 @@ func (l *listener) OnFinish(c core.Ctx, h core.Handler) error {
 			fmt.Println(err)
 			return err
 		}
-		l.d.Cksum = crc32.Update(l.d.Cksum, crc32.IEEETable, encodedBuf)
+		// Update Cksum using XXH3
+		xxh3Hash := xxh3.New()
+		xxh3Hash.Write(encodedBuf)
+		l.d.Cksum = xxh3Hash.Sum64()
 		l.d.Size += int64(len(encodedBuf))
 	}
-	// If neither compressed nor encrypted, use original data's CRC32 and size
+	// If neither compressed nor encrypted, use original data's XXH3 and size
 	if l.d.Kind&core.DATA_CMPR_MASK == 0 && l.d.Kind&core.DATA_ENDEC_MASK == 0 {
-		l.d.Cksum = l.d.CRC32
+		l.d.Cksum = l.d.XXH3
 		l.d.Size = l.d.OrigSize
 	}
 	return nil
@@ -411,7 +425,7 @@ func (osi *OrcasSDKImpl) uploadFiles(c core.Ctx, bktID int64, u []uploadInfo,
 	// If it's a file, first check if instant upload is needed
 	switch level {
 	case FAST:
-		// If pre-instant upload is needed, read hdrCRC32 first, queue for check
+		// If pre-instant upload is needed, read hdrXXH3 first, queue for check
 		// Use chunkSize obtained from bucket configuration
 		for i, fi := range u {
 			if fi.o.Size > chunkSize {
@@ -426,7 +440,7 @@ func (osi *OrcasSDKImpl) uploadFiles(c core.Ctx, bktID int64, u []uploadInfo,
 			u, d, u1, d1 = u1, d1, nil, nil
 			for i, fi := range u {
 				if err := osi.readFile(c, filepath.Join(fi.path, fi.o.Name), dp,
-					newListener(bktID, d[i], osi.cfg, HDR_CRC32&^doneAction, chunkSize).Once()); err != nil {
+					newListener(bktID, d[i], osi.cfg, HDR_XXH3&^doneAction, chunkSize).Once()); err != nil {
 					fmt.Println(runtime.Caller(0))
 					fmt.Println(err)
 				}
@@ -445,7 +459,7 @@ func (osi *OrcasSDKImpl) uploadFiles(c core.Ctx, bktID int64, u []uploadInfo,
 					d1 = append(d1, d[i])
 				}
 			}
-			if err := osi.uploadFiles(c, bktID, u1, d1, dp, OFF, doneAction|HDR_CRC32); err != nil {
+			if err := osi.uploadFiles(c, bktID, u1, d1, dp, OFF, doneAction|HDR_XXH3); err != nil {
 				fmt.Println(runtime.Caller(0))
 				fmt.Println(err)
 				return err
@@ -457,10 +471,10 @@ func (osi *OrcasSDKImpl) uploadFiles(c core.Ctx, bktID int64, u []uploadInfo,
 			return err
 		}
 	case FULL:
-		// If pre-instant upload is not needed or pre-instant upload failed, read entire crc32 and md5 then try instant upload
+		// If pre-instant upload is not needed or pre-instant upload failed, read entire xxh3 and sha256 then try instant upload
 		for i, fi := range u {
 			if err := osi.readFile(c, filepath.Join(fi.path, fi.o.Name), dp,
-				newListener(bktID, d[i], osi.cfg, (HDR_CRC32|CRC32_MD5)&^doneAction, chunkSize)); err != nil {
+				newListener(bktID, d[i], osi.cfg, (HDR_XXH3|XXH3_SHA256)&^doneAction, chunkSize)); err != nil {
 				fmt.Println(runtime.Caller(0))
 				fmt.Println(err)
 			}
@@ -493,7 +507,7 @@ func (osi *OrcasSDKImpl) uploadFiles(c core.Ctx, bktID int64, u []uploadInfo,
 		}
 		// Instant upload failed (including exceeding size or pre-instant upload failed), normal upload
 		// Note: Here recursively calls uploadFiles, chunkSize has been obtained at upper level and passed to dp
-		if err := osi.uploadFiles(c, bktID, u1, d1, dp, OFF, doneAction|HDR_CRC32|CRC32_MD5); err != nil {
+		if err := osi.uploadFiles(c, bktID, u1, d1, dp, OFF, doneAction|HDR_XXH3|XXH3_SHA256); err != nil {
 			fmt.Println(runtime.Caller(0))
 			fmt.Println(err)
 			return err
@@ -504,7 +518,7 @@ func (osi *OrcasSDKImpl) uploadFiles(c core.Ctx, bktID int64, u []uploadInfo,
 			// If referencing others, i.e., <0, no longer need to upload
 			if d[i].ID >= 0 {
 				if err := osi.readFile(c, filepath.Join(fi.path, fi.o.Name), dp,
-					newListener(bktID, d[i], osi.cfg, (UPLOAD_DATA|HDR_CRC32|CRC32_MD5)&^doneAction, chunkSize)); err != nil {
+					newListener(bktID, d[i], osi.cfg, (UPLOAD_DATA|HDR_XXH3|XXH3_SHA256)&^doneAction, chunkSize)); err != nil {
 					fmt.Println(runtime.Caller(0))
 					fmt.Println(err)
 				}

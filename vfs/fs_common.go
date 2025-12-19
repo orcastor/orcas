@@ -59,17 +59,16 @@ func DebugLog(format string, args ...interface{}) {
 // OrcasFS implements ORCAS filesystem, mapping ORCAS object storage to filesystem
 // This struct is available on all platforms
 type OrcasFS struct {
-	h          core.Handler
-	c          core.Ctx
-	bktID      int64
-	root       *OrcasNode
-	bucket     *core.BucketInfo // Bucket configuration (chunkSize, quota, etc.)
-	chunkSize  int64
-	requireKey bool // If true, return EPERM error when KEY is not provided
+	h           core.Handler
+	c           core.Ctx
+	bktID       int64
+	root        *OrcasNode
+	core.Config                  // Embedded Config: compression, encryption, instant upload settings
+	bucket      *core.BucketInfo // Bucket configuration (chunkSize, quota, etc.)
+	chunkSize   int64
+	requireKey  bool // If true, return EPERM error when KEY is not provided
 	// Business layer configuration (from MountOptions.Config, not from bucket config)
 	// These fields are NOT stored in database, handled at business layer
-	core.Config // Embedded Config: compression, encryption, instant upload settings
-	// Batch writer is now managed globally by SDK, accessed via GetBatchWriterForBucket
 	raRegistry sync.Map // map[fileID]*RandomAccessor
 	// Mutex to protect RandomAccessor creation for .tmp files during concurrent writes
 	raCreateMu sync.Mutex // Protects creation of RandomAccessor for same fileID
@@ -174,7 +173,20 @@ func (fs *OrcasFS) GetDataPath() string {
 // GetEndecKey returns the encryption key for data encryption/decryption
 // If empty, encryption key is not used
 func (fs *OrcasFS) GetEndecKey() string {
+	if fs == nil {
+		return ""
+	}
 	return fs.Config.EndecKey
+}
+
+// SetEndecKey dynamically sets the encryption key for data encryption/decryption
+// This allows changing the encryption key at runtime without recreating the filesystem
+// Note: This method is not thread-safe. If concurrent access is needed, external synchronization is required.
+func (fs *OrcasFS) SetEndecKey(key string) {
+	if fs == nil {
+		return
+	}
+	fs.Config.EndecKey = key
 }
 
 // getEndecKeyForFS returns the encryption key for a given OrcasFS

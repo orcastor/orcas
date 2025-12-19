@@ -430,6 +430,7 @@ const (
 type Config struct {
 	UserName string // Username
 	Password string // Password
+	NoAuth   bool   // If true, bypass authentication and permission checks (no user required)
 	BasePath string // Base path for metadata (database storage location), if empty uses global ORCAS_BASE
 	DataPath string // Data path for file data storage location, if empty uses global ORCAS_DATA
 	RefLevel uint32 // Instant upload level setting: REF_LEVEL_OFF (default) / REF_LEVEL_FULL: Ref / REF_LEVEL_FAST: TryRef+Ref

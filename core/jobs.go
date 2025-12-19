@@ -3,10 +3,10 @@ package core
 import (
 	"bytes"
 	"crypto/md5"
+	"crypto/sha256"
 	"encoding/binary"
 	"fmt"
 	"hash"
-	"hash/crc32"
 	"io"
 	"os"
 	"path/filepath"
@@ -20,6 +20,7 @@ import (
 	"github.com/mholt/archiver/v3"
 	"github.com/mkmueller/aes256"
 	"github.com/tjfoc/gmsm/sm4"
+	"github.com/zeebo/xxh3"
 )
 
 // workLocks is used to ensure only one work is executing for the same key at a time
@@ -1272,7 +1273,7 @@ func ScrubData(c Ctx, bktID int64, ma MetadataAdapter, da DataAdapter) (*ScrubRe
 				}
 
 				// If data size > 0 and has checksum, verify checksum
-				if dataInfo.Size > 0 && (dataInfo.Cksum > 0 || dataInfo.CRC32 > 0) {
+				if dataInfo.Size > 0 && (dataInfo.Cksum > 0 || dataInfo.XXH3 > 0 || dataInfo.SHA256_0 != 0) {
 					if !verifyChecksum(c, bktID, dataInfo, da, maxSN) {
 						result.MismatchedChecksum = append(result.MismatchedChecksum, dataInfo.ID)
 					}
@@ -1653,8 +1654,8 @@ func scanChunks(basePath string, bktID, dataID int64, dataSize int64, chunkSize 
 		sn := 0
 		for {
 			fileName := fmt.Sprintf("%d_%d", dataID, sn)
-			hash := fmt.Sprintf("%X", md5.Sum([]byte(fileName)))
-			path := filepath.Join(basePath, fmt.Sprint(bktID), hash[21:24], hash[8:24], fileName)
+			hash := fmt.Sprintf("%X", sha256.Sum256([]byte(fileName)))
+			path := filepath.Join(basePath, fmt.Sprint(bktID), hash[58:61], hash[16:48], fileName)
 
 			info, err := os.Stat(path)
 			if err != nil {
@@ -1676,8 +1677,8 @@ func scanChunks(basePath string, bktID, dataID int64, dataSize int64, chunkSize 
 		sn := 0
 		for {
 			fileName := fmt.Sprintf("%d_%d", dataID, sn)
-			hash := fmt.Sprintf("%X", md5.Sum([]byte(fileName)))
-			path := filepath.Join(basePath, fmt.Sprint(bktID), hash[21:24], hash[8:24], fileName)
+			hash := fmt.Sprintf("%X", sha256.Sum256([]byte(fileName)))
+			path := filepath.Join(basePath, fmt.Sprint(bktID), hash[58:61], hash[16:48], fileName)
 
 			info, err := os.Stat(path)
 			if err != nil {
@@ -1895,17 +1896,17 @@ func verifyChecksum(c Ctx, bktID int64, dataInfo *DataInfo, da DataAdapter, maxS
 	}
 
 	// Initialize hash calculators
-	var crc32Hash hash.Hash32
-	var md5Hash hash.Hash
+	var xxh3Hash *xxh3.Hasher
+	var sha256Hash hash.Hash
 	needCksum := dataInfo.Cksum > 0
-	needCRC32 := (dataInfo.Kind&DATA_ENDEC_MASK == 0 && dataInfo.Kind&DATA_CMPR_MASK == 0) && dataInfo.CRC32 > 0
-	needMD5 := (dataInfo.Kind&DATA_ENDEC_MASK == 0 && dataInfo.Kind&DATA_CMPR_MASK == 0) && dataInfo.MD5 != 0
+	needXXH3 := (dataInfo.Kind&DATA_ENDEC_MASK == 0 && dataInfo.Kind&DATA_CMPR_MASK == 0) && dataInfo.XXH3 > 0
+	needSHA256 := (dataInfo.Kind&DATA_ENDEC_MASK == 0 && dataInfo.Kind&DATA_CMPR_MASK == 0) && dataInfo.SHA256_0 != 0
 
-	if needCksum || needCRC32 {
-		crc32Hash = crc32.NewIEEE()
+	if needCksum || needXXH3 {
+		xxh3Hash = xxh3.New()
 	}
-	if needMD5 {
-		md5Hash = md5.New()
+	if needSHA256 {
+		sha256Hash = sha256.New()
 	}
 
 	// Stream read and update hash, calculate total size
@@ -1916,11 +1917,11 @@ func verifyChecksum(c Ctx, bktID int64, dataInfo *DataInfo, da DataAdapter, maxS
 		n, err := reader.Read(buf)
 		if n > 0 {
 			actualSize += int64(n)
-			if crc32Hash != nil {
-				crc32Hash.Write(buf[:n])
+			if xxh3Hash != nil {
+				xxh3Hash.Write(buf[:n])
 			}
-			if md5Hash != nil {
-				md5Hash.Write(buf[:n])
+			if sha256Hash != nil {
+				sha256Hash.Write(buf[:n])
 			}
 		}
 		if err == io.EOF {
@@ -1936,27 +1937,29 @@ func verifyChecksum(c Ctx, bktID int64, dataInfo *DataInfo, da DataAdapter, maxS
 		return false
 	}
 
-	// Verify Cksum (CRC32 of final data)
+	// Verify Cksum (XXHash3-64bit of final data)
 	if needCksum {
-		calculated := crc32Hash.Sum32()
+		calculated := xxh3Hash.Sum64()
 		if calculated != dataInfo.Cksum {
 			return false
 		}
 	}
 
-	// If data is unencrypted and uncompressed, can verify CRC32 and MD5
-	if needCRC32 {
-		calculated := crc32Hash.Sum32()
-		if calculated != dataInfo.CRC32 {
+	// If data is unencrypted and uncompressed, can verify XXH3 and SHA-256
+	if needXXH3 {
+		calculated := xxh3Hash.Sum64()
+		if calculated != dataInfo.XXH3 {
 			return false
 		}
 	}
-	if needMD5 {
-		hashSum := md5Hash.Sum(nil)
-		// MD5 stored as int64, take bytes 4-12 (index 4 to 11), use big-endian conversion
-		// Consistent with calculation method in sdk/data.go
-		md5Int64 := int64(binary.BigEndian.Uint64(hashSum[4:12]))
-		if md5Int64 != dataInfo.MD5 {
+	if needSHA256 {
+		hashSum := sha256Hash.Sum(nil)
+		// SHA-256 stored as 4 int64 values (32 bytes = 4 * 8 bytes)
+		sha256_0 := int64(binary.BigEndian.Uint64(hashSum[0:8]))
+		sha256_1 := int64(binary.BigEndian.Uint64(hashSum[8:16]))
+		sha256_2 := int64(binary.BigEndian.Uint64(hashSum[16:24]))
+		sha256_3 := int64(binary.BigEndian.Uint64(hashSum[24:32]))
+		if sha256_0 != dataInfo.SHA256_0 || sha256_1 != dataInfo.SHA256_1 || sha256_2 != dataInfo.SHA256_2 || sha256_3 != dataInfo.SHA256_3 {
 			return false
 		}
 	}
@@ -1967,8 +1970,8 @@ func verifyChecksum(c Ctx, bktID int64, dataInfo *DataInfo, da DataAdapter, maxS
 // createPkgDataReader creates streaming reader for packaged data
 func createPkgDataReader(basePath string, bktID, pkgID int64, offset, size int) (*pkgReader, int64, error) {
 	fileName := fmt.Sprintf("%d_%d", pkgID, 0)
-	hash := fmt.Sprintf("%X", md5.Sum([]byte(fileName)))
-	path := filepath.Join(basePath, fmt.Sprint(bktID), hash[21:24], hash[8:24], fileName)
+	hash := fmt.Sprintf("%X", sha256.Sum256([]byte(fileName)))
+	path := filepath.Join(basePath, fmt.Sprint(bktID), hash[58:61], hash[16:48], fileName)
 
 	f, err := os.Open(path)
 	if err != nil {
@@ -2304,8 +2307,8 @@ func Defragment(c Ctx, bktID int64, a Admin, ma MetadataAdapter, da DataAdapter)
 	for pkgID, dataList := range pkgDataMap {
 		// Read package file to find holes
 		fileName := fmt.Sprintf("%d_%d", pkgID, 0)
-		hash := fmt.Sprintf("%X", md5.Sum([]byte(fileName)))
-		pkgPath := filepath.Join(ORCAS_DATA, fmt.Sprint(bktID), hash[21:24], hash[8:24], fileName)
+		hash := fmt.Sprintf("%X", sha256.Sum256([]byte(fileName)))
+		pkgPath := filepath.Join(ORCAS_DATA, fmt.Sprint(bktID), hash[58:61], hash[16:48], fileName)
 		pkgFile, err := os.Open(pkgPath)
 		if err != nil {
 			continue
@@ -2655,8 +2658,8 @@ func Defragment(c Ctx, bktID int64, a Admin, ma MetadataAdapter, da DataAdapter)
 		// Read entire package file
 		// Use same path calculation as in core/data.go
 		fileName := fmt.Sprintf("%d_%d", pkgID, 0)
-		hash := fmt.Sprintf("%X", md5.Sum([]byte(fileName)))
-		pkgPath := filepath.Join(ORCAS_DATA, fmt.Sprint(bktID), hash[21:24], hash[8:24], fileName)
+		hash := fmt.Sprintf("%X", sha256.Sum256([]byte(fileName)))
+		pkgPath := filepath.Join(ORCAS_DATA, fmt.Sprint(bktID), hash[58:61], hash[16:48], fileName)
 		pkgFile, err := os.Open(pkgPath)
 		if err != nil {
 			continue

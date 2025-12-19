@@ -1,20 +1,21 @@
 package core
 
 import (
-	"crypto/md5"
+	"crypto/sha256"
 	"encoding/binary"
 	"fmt"
-	"hash/crc32"
 	"io"
 	"testing"
 	"time"
 
 	"github.com/orca-zhang/idgen"
 	. "github.com/smartystreets/goconvey/convey"
+	"github.com/zeebo/xxh3"
 )
 
 func TestScrub(t *testing.T) {
 	Convey("Scrub data integrity", t, func() {
+		InitDB()
 		ig := idgen.NewIDGen(nil, 0)
 		testBktID, _ := ig.New()
 		InitBucketDB(c, testBktID)
@@ -34,18 +35,24 @@ func TestScrub(t *testing.T) {
 			So(err, ShouldBeNil)
 
 			// 计算校验和（基于实际读取的数据）
-			crc32Value := crc32.ChecksumIEEE(readData)
-			md5Hash := md5.Sum(readData)
-			md5Int64 := int64(binary.BigEndian.Uint64(md5Hash[4:12]))
+			xxh3Value := xxh3.Hash(readData)
+			sha256Hash := sha256.Sum256(readData)
+			sha256_0 := int64(binary.BigEndian.Uint64(sha256Hash[0:8]))
+			sha256_1 := int64(binary.BigEndian.Uint64(sha256Hash[8:16]))
+			sha256_2 := int64(binary.BigEndian.Uint64(sha256Hash[16:24]))
+			sha256_3 := int64(binary.BigEndian.Uint64(sha256Hash[24:32]))
 
 			// 创建数据元信息
 			dataInfo := &DataInfo{
 				ID:       dataID,
 				Size:     int64(len(readData)),
 				OrigSize: int64(len(readData)),
-				CRC32:    crc32Value,
-				Cksum:    crc32Value,
-				MD5:      md5Int64,
+				XXH3:     xxh3Value,
+				Cksum:    xxh3Value,
+				SHA256_0: sha256_0,
+				SHA256_1: sha256_1,
+				SHA256_2: sha256_2,
+				SHA256_3: sha256_3,
 				Kind:     DATA_NORMAL,
 			}
 			So(dma.PutData(c, testBktID, []*DataInfo{dataInfo}), ShouldBeNil)
@@ -57,7 +64,7 @@ func TestScrub(t *testing.T) {
 			So(result.TotalData, ShouldBeGreaterThan, 0)
 			So(len(result.CorruptedData), ShouldEqual, 0)
 			So(len(result.OrphanedData), ShouldEqual, 0)
-			// 注意：如果数据没有 CRC32/Cksum，可能不会验证校验和
+			// 注意：如果数据没有 XXH3/Cksum，可能不会验证校验和
 			// 所以这里只检查没有损坏数据即可
 		})
 
@@ -68,7 +75,7 @@ func TestScrub(t *testing.T) {
 				ID:       dataID,
 				Size:     100,
 				OrigSize: 100,
-				CRC32:    12345,
+				XXH3:     12345,
 				Cksum:    12345,
 				Kind:     DATA_NORMAL,
 			}
@@ -113,18 +120,24 @@ func TestScrub(t *testing.T) {
 			So(err, ShouldBeNil)
 
 			// 计算正确的校验和
-			crc32Value := crc32.ChecksumIEEE(readData)
-			md5Hash := md5.Sum(readData)
-			md5Int64 := int64(binary.BigEndian.Uint64(md5Hash[4:12]))
+			xxh3Value := xxh3.Hash(readData)
+			sha256Hash := sha256.Sum256(readData)
+			sha256_0 := int64(binary.BigEndian.Uint64(sha256Hash[0:8]))
+			sha256_1 := int64(binary.BigEndian.Uint64(sha256Hash[8:16]))
+			sha256_2 := int64(binary.BigEndian.Uint64(sha256Hash[16:24]))
+			sha256_3 := int64(binary.BigEndian.Uint64(sha256Hash[24:32]))
 
 			// 创建数据元信息，但使用错误的校验和
 			dataInfo := &DataInfo{
 				ID:       dataID,
 				Size:     int64(len(readData)),
 				OrigSize: int64(len(readData)),
-				CRC32:    crc32Value + 1, // 错误的CRC32
-				Cksum:    crc32Value + 1,
-				MD5:      md5Int64,
+				XXH3:     xxh3Value + 1, // 错误的XXHash3
+				Cksum:    xxh3Value + 1,
+				SHA256_0: sha256_0,
+				SHA256_1: sha256_1,
+				SHA256_2: sha256_2,
+				SHA256_3: sha256_3,
 				Kind:     DATA_NORMAL,
 			}
 			So(dma.PutData(c, testBktID, []*DataInfo{dataInfo}), ShouldBeNil)
@@ -158,18 +171,24 @@ func TestScrub(t *testing.T) {
 
 			// 组合所有分片数据并计算校验和
 			allData := append(append(chunk1, chunk2...), chunk3...)
-			crc32Value := crc32.ChecksumIEEE(allData)
-			md5Hash := md5.Sum(allData)
-			md5Int64 := int64(binary.BigEndian.Uint64(md5Hash[4:12]))
+			xxh3Value := xxh3.Hash(allData)
+			sha256Hash := sha256.Sum256(allData)
+			sha256_0 := int64(binary.BigEndian.Uint64(sha256Hash[0:8]))
+			sha256_1 := int64(binary.BigEndian.Uint64(sha256Hash[8:16]))
+			sha256_2 := int64(binary.BigEndian.Uint64(sha256Hash[16:24]))
+			sha256_3 := int64(binary.BigEndian.Uint64(sha256Hash[24:32]))
 
 			// 创建数据元信息
 			dataInfo := &DataInfo{
 				ID:       dataID,
 				Size:     int64(len(allData)),
 				OrigSize: int64(len(allData)),
-				CRC32:    crc32Value,
-				Cksum:    crc32Value,
-				MD5:      md5Int64,
+				XXH3:     xxh3Value,
+				Cksum:    xxh3Value,
+				SHA256_0: sha256_0,
+				SHA256_1: sha256_1,
+				SHA256_2: sha256_2,
+				SHA256_3: sha256_3,
 				Kind:     DATA_NORMAL,
 			}
 			So(dma.PutData(c, testBktID, []*DataInfo{dataInfo}), ShouldBeNil)
@@ -198,17 +217,23 @@ func TestScrub(t *testing.T) {
 				readData, err := dda.Read(c, testBktID, dataID, 0)
 				So(err, ShouldBeNil)
 
-				crc32Value := crc32.ChecksumIEEE(readData)
-				md5Hash := md5.Sum(readData)
-				md5Int64 := int64(binary.BigEndian.Uint64(md5Hash[4:12]))
+				xxh3Value := xxh3.Hash(readData)
+				sha256Hash := sha256.Sum256(readData)
+				sha256_0 := int64(binary.BigEndian.Uint64(sha256Hash[0:8]))
+				sha256_1 := int64(binary.BigEndian.Uint64(sha256Hash[8:16]))
+				sha256_2 := int64(binary.BigEndian.Uint64(sha256Hash[16:24]))
+				sha256_3 := int64(binary.BigEndian.Uint64(sha256Hash[24:32]))
 
 				dataInfo := &DataInfo{
 					ID:       dataID,
 					Size:     int64(len(readData)),
 					OrigSize: int64(len(readData)),
-					CRC32:    crc32Value,
-					Cksum:    crc32Value,
-					MD5:      md5Int64,
+					XXH3:     xxh3Value,
+					Cksum:    xxh3Value,
+					SHA256_0: sha256_0,
+					SHA256_1: sha256_1,
+					SHA256_2: sha256_2,
+					SHA256_3: sha256_3,
 					Kind:     DATA_NORMAL,
 				}
 				So(dma.PutData(c, testBktID, []*DataInfo{dataInfo}), ShouldBeNil)
@@ -737,6 +762,7 @@ func TestDeleteAndRecycle(t *testing.T) {
 
 func TestScanDirtyData(t *testing.T) {
 	Convey("Scan dirty data (power failure, upload failure)", t, func() {
+		InitDB()
 		ig := idgen.NewIDGen(nil, 0)
 		testBktID, _ := ig.New()
 		InitBucketDB(c, testBktID)
@@ -758,17 +784,23 @@ func TestScanDirtyData(t *testing.T) {
 
 			// 创建元数据（假设完整数据的大小）
 			allData := append(append(chunk1, chunk2...), chunk3...)
-			crc32Value := crc32.ChecksumIEEE(allData)
-			md5Hash := md5.Sum(allData)
-			md5Int64 := int64(binary.BigEndian.Uint64(md5Hash[4:12]))
+			xxh3Value := xxh3.Hash(allData)
+			sha256Hash := sha256.Sum256(allData)
+			sha256_0 := int64(binary.BigEndian.Uint64(sha256Hash[0:8]))
+			sha256_1 := int64(binary.BigEndian.Uint64(sha256Hash[8:16]))
+			sha256_2 := int64(binary.BigEndian.Uint64(sha256Hash[16:24]))
+			sha256_3 := int64(binary.BigEndian.Uint64(sha256Hash[24:32]))
 
 			dataInfo := &DataInfo{
 				ID:       dataID,
 				Size:     int64(len(allData)),
 				OrigSize: int64(len(allData)),
-				CRC32:    crc32Value,
-				Cksum:    crc32Value,
-				MD5:      md5Int64,
+				XXH3:     xxh3Value,
+				Cksum:    xxh3Value,
+				SHA256_0: sha256_0,
+				SHA256_1: sha256_1,
+				SHA256_2: sha256_2,
+				SHA256_3: sha256_3,
 				Kind:     DATA_NORMAL,
 			}
 			So(dma.PutData(c, testBktID, []*DataInfo{dataInfo}), ShouldBeNil)
@@ -800,12 +832,13 @@ func TestScanDirtyData(t *testing.T) {
 
 			// 创建元数据，但Size设置为更大的值（模拟元数据记录错误）
 			allData := append(chunk1, chunk2...)
+			xxh3Value := xxh3.Hash(allData)
 			dataInfo := &DataInfo{
 				ID:       dataID,
 				Size:     int64(len(allData)) + 100, // 故意设置错误的size
 				OrigSize: int64(len(allData)) + 100,
-				CRC32:    crc32.ChecksumIEEE(allData),
-				Cksum:    crc32.ChecksumIEEE(allData),
+				XXH3:     xxh3Value,
+				Cksum:    xxh3Value,
 				Kind:     DATA_NORMAL,
 			}
 			So(dma.PutData(c, testBktID, []*DataInfo{dataInfo}), ShouldBeNil)
@@ -836,17 +869,23 @@ func TestScanDirtyData(t *testing.T) {
 
 			// 创建元数据
 			allData := append(chunk1, chunk2...)
-			crc32Value := crc32.ChecksumIEEE(allData)
-			md5Hash := md5.Sum(allData)
-			md5Int64 := int64(binary.BigEndian.Uint64(md5Hash[4:12]))
+			xxh3Value := xxh3.Hash(allData)
+			sha256Hash := sha256.Sum256(allData)
+			sha256_0 := int64(binary.BigEndian.Uint64(sha256Hash[0:8]))
+			sha256_1 := int64(binary.BigEndian.Uint64(sha256Hash[8:16]))
+			sha256_2 := int64(binary.BigEndian.Uint64(sha256Hash[16:24]))
+			sha256_3 := int64(binary.BigEndian.Uint64(sha256Hash[24:32]))
 
 			dataInfo := &DataInfo{
 				ID:       dataID,
 				Size:     int64(len(allData)),
 				OrigSize: int64(len(allData)),
-				CRC32:    crc32Value,
-				Cksum:    crc32Value,
-				MD5:      md5Int64,
+				XXH3:     xxh3Value,
+				Cksum:    xxh3Value,
+				SHA256_0: sha256_0,
+				SHA256_1: sha256_1,
+				SHA256_2: sha256_2,
+				SHA256_3: sha256_3,
 				Kind:     DATA_NORMAL,
 			}
 			So(dma.PutData(c, testBktID, []*DataInfo{dataInfo}), ShouldBeNil)
@@ -1035,6 +1074,7 @@ func TestPermanentlyDelete(t *testing.T) {
 
 func TestQuotaAndUsed(t *testing.T) {
 	Convey("Quota and Used management", t, func() {
+		InitDB()
 		ig := idgen.NewIDGen(nil, 0)
 		testBktID, _ := ig.New()
 		InitBucketDB(c, testBktID)
@@ -1371,6 +1411,7 @@ func TestQuotaAndUsed(t *testing.T) {
 
 func TestDefragment(t *testing.T) {
 	Convey("Defragment small files and fill holes", t, func() {
+		InitDB()
 		ig := idgen.NewIDGen(nil, 0)
 		testBktID, _ := ig.New()
 		InitBucketDB(c, testBktID)
