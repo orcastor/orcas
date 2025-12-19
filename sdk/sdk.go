@@ -14,36 +14,23 @@ import (
 	"github.com/orcastor/orcas/core"
 )
 
-// Instant upload level setting, corresponds to Config.RefLevel
+// Re-export constants and types from core package for backward compatibility
+// These are now defined in core package, use aliases here
 const (
-	OFF  = iota // OFF
-	FULL        // Read entire file
-	FAST        // Read entire file after header check succeeds
+	OFF  = core.REF_LEVEL_OFF  // OFF
+	FULL = core.REF_LEVEL_FULL // Read entire file
+	FAST = core.REF_LEVEL_FAST // Read entire file after header check succeeds
 )
 
-// Conflict resolution for same name
 const (
-	COVER  = iota // Merge or overwrite
-	RENAME        // Rename
-	THROW         // Throw error
-	SKIP          // Skip
+	COVER  = core.CONFLICT_COVER  // Merge or overwrite
+	RENAME = core.CONFLICT_RENAME // Rename
+	THROW  = core.CONFLICT_THROW  // Throw error
+	SKIP   = core.CONFLICT_SKIP   // Skip
 )
 
-type Config struct {
-	UserName string // Username
-	Password string // Password
-	RefLevel uint32 // Instant upload level setting: OFF (default) / FULL: Ref / FAST: TryRef+Ref
-	PkgThres uint32 // Package count limit, default 1000 if not set
-	CmprWay uint32 // Compression method (smart compression by default, decides whether to compress based on file type), see core.DATA_CMPR_MASK
-	CmprQlty uint32 // Compression level, br:[0,11], gzip:[-3,9], zstd:[0,10]
-	EndecWay uint32 // Encryption method, see core.DATA_ENDEC_MASK
-	EndecKey string // Encryption KEY, SM4 requires exactly 16 characters, AES256 requires more than 16 characters
-	DontSync string // Filename wildcards to exclude from sync (https://pkg.go.dev/path/filepath#Match), separated by semicolons
-	Conflict uint32 // Conflict resolution for same name, COVER: merge or overwrite / RENAME: rename / THROW: throw error / SKIP: skip
-	NameTmpl string // Rename suffix, "%s的副本", should contain "%s"
-	WorkersN uint32 // Concurrent pool size, not less than 16
-	// ChkPtDir string // Checkpoint directory for resume, not enabled if path not set
-}
+// Config is now defined in core package, use type alias for backward compatibility
+type Config = core.Config
 
 type OrcasSDK interface {
 	H() core.Handler
@@ -96,7 +83,7 @@ func (osi *OrcasSDKImpl) Login(cfg Config) (core.Ctx, *core.UserInfo, []*core.Bu
 	if cfg.WorkersN > 0 {
 		osi.f.TuneWorker(int(cfg.WorkersN))
 	}
-	if cfg.Conflict == RENAME {
+	if cfg.Conflict == core.CONFLICT_RENAME {
 		if !strings.Contains(cfg.NameTmpl, "%s") {
 			return nil, nil, nil, errors.New(`cfg.NameTmp should contains "%s".`)
 		}

@@ -410,6 +410,41 @@ var (
 	ORCAS_DATA = os.Getenv("ORCAS_DATA")
 )
 
+// Instant upload level setting
+const (
+	REF_LEVEL_OFF  = iota // OFF
+	REF_LEVEL_FULL        // Read entire file
+	REF_LEVEL_FAST        // Read entire file after header check succeeds
+)
+
+// Conflict resolution for same name
+const (
+	CONFLICT_COVER  = iota // Merge or overwrite
+	CONFLICT_RENAME        // Rename
+	CONFLICT_THROW         // Throw error
+	CONFLICT_SKIP          // Skip
+)
+
+// Config represents business layer configuration (not stored in database)
+// These fields are handled at business layer (cmd/vfs), not in bucket config
+type Config struct {
+	UserName string // Username
+	Password string // Password
+	BasePath string // Base path for metadata (database storage location), if empty uses global ORCAS_BASE
+	DataPath string // Data path for file data storage location, if empty uses global ORCAS_DATA
+	RefLevel uint32 // Instant upload level setting: REF_LEVEL_OFF (default) / REF_LEVEL_FULL: Ref / REF_LEVEL_FAST: TryRef+Ref
+	PkgThres uint32 // Package count limit, default 1000 if not set
+	CmprWay  uint32 // Compression method (smart compression by default, decides whether to compress based on file type), see DATA_CMPR_MASK
+	CmprQlty uint32 // Compression level, br:[0,11], gzip:[-3,9], zstd:[0,10]
+	EndecWay uint32 // Encryption method, see DATA_ENDEC_MASK
+	EndecKey string // Encryption KEY, SM4 requires exactly 16 characters, AES256 requires more than 16 characters
+	DontSync string // Filename wildcards to exclude from sync (https://pkg.go.dev/path/filepath#Match), separated by semicolons
+	Conflict uint32 // Conflict resolution for same name, CONFLICT_COVER: merge or overwrite / CONFLICT_RENAME: rename / CONFLICT_THROW: throw error / CONFLICT_SKIP: skip
+	NameTmpl string // Rename suffix, "%s的副本", should contain "%s"
+	WorkersN uint32 // Concurrent pool size, not less than 16
+	// ChkPtDir string // Checkpoint directory for resume, not enabled if path not set
+}
+
 type Ctx context.Context
 
 type Error string
@@ -471,17 +506,13 @@ type InstantUploadConfig struct {
 
 // GetBucketInstantUploadConfig extracts instant upload config from bucket info
 // Returns nil if bucket is nil or config is not set
+// Note: RefLevel is no longer stored in bucket config, should be provided via core.Config in business layer
 func GetBucketInstantUploadConfig(bucket *BucketInfo) *InstantUploadConfig {
 	if bucket == nil {
 		return nil
 	}
-	// First check if bucket has RefLevel configured
-	if bucket.RefLevel > 0 {
-		return &InstantUploadConfig{
-			RefLevel: bucket.RefLevel,
-		}
-	}
-	// Fallback to environment variable if bucket doesn't have RefLevel configured
+	// Note: RefLevel is no longer stored in bucket config
+	// Always fallback to environment variable
 	return &InstantUploadConfig{
 		RefLevel: getInstantUploadRefLevel(),
 	}

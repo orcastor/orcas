@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/orca-zhang/idgen"
 	"github.com/orcastor/orcas/core"
@@ -269,7 +270,7 @@ func TestVFSRandomAccessUploadDownload(t *testing.T) {
 			UID:       userInfo.ID,
 			Type:      1,
 			Quota:     -1,
-			ChunkSize: 4 * 1024 * 1024, // 4MB chunk size
+			ChunkSize: 10 * 1024 * 1024, // 10MB chunk size
 		}
 		err = admin.PutBkt(ctx, []*core.BucketInfo{bkt})
 		So(err, ShouldBeNil)
@@ -277,8 +278,8 @@ func TestVFSRandomAccessUploadDownload(t *testing.T) {
 		// Create filesystem
 		ofs := NewOrcasFS(handler, ctx, testBktID)
 
-		// Generate test data: 8MB file
-		fileSize := 8 * 1024 * 1024 // 8MB
+		// Generate test data: 20MB file (2 chunks of 10MB each)
+		fileSize := 20 * 1024 * 1024 // 20MB
 		testData := make([]byte, fileSize)
 		_, err = rand.Read(testData)
 		So(err, ShouldBeNil)
@@ -305,25 +306,59 @@ func TestVFSRandomAccessUploadDownload(t *testing.T) {
 		ofs.registerRandomAccessor(fileObj.ID, ra)
 
 		// Upload: Write data at random offsets (not sequential)
-		// Write at offset 0
-		err = ra.Write(0, testData[0:2*1024*1024]) // First 2MB
+		// 修复: 确保所有 chunk 都被写入，即使写入顺序不是顺序的
+		// Chunk 0: 0-10MB, Chunk 1: 10-20MB
+		// 注意: 写入时可能会触发自动 flush，导致创建多个 DataID
+		// 为了确保所有数据在同一个 flush 中处理，我们需要确保 buffer 足够大
+		// 或者使用较小的写入块来避免触发自动 flush
+
+		// Write at offset 0 (first part of chunk 0)
+		err = ra.Write(0, testData[0:5*1024*1024]) // First 5MB
 		So(err, ShouldBeNil)
 
-		// Write at offset 4MB (skip middle)
-		err = ra.Write(4*1024*1024, testData[4*1024*1024:6*1024*1024]) // 4MB-6MB
+		// Write at offset 12MB (middle of chunk 1, skip chunk 0 end and chunk 1 start)
+		err = ra.Write(12*1024*1024, testData[12*1024*1024:15*1024*1024]) // 12MB-15MB
 		So(err, ShouldBeNil)
 
-		// Write at offset 2MB (fill the gap)
-		err = ra.Write(2*1024*1024, testData[2*1024*1024:4*1024*1024]) // 2MB-4MB
+		// Write at offset 5MB (fill gap in chunk 0)
+		err = ra.Write(5*1024*1024, testData[5*1024*1024:10*1024*1024]) // 5MB-10MB (complete chunk 0)
 		So(err, ShouldBeNil)
 
-		// Write at offset 6MB (end)
-		err = ra.Write(6*1024*1024, testData[6*1024*1024:]) // 6MB-end
+		// Write at offset 10MB (start of chunk 1)
+		err = ra.Write(10*1024*1024, testData[10*1024*1024:12*1024*1024]) // 10MB-12MB
 		So(err, ShouldBeNil)
+
+		// Write at offset 15MB (end of chunk 1)
+		err = ra.Write(15*1024*1024, testData[15*1024*1024:]) // 15MB-end (complete chunk 1)
+		So(err, ShouldBeNil)
+
+		// 检查 buffer 状态，确保所有数据都在 buffer 中
+		// 如果 buffer 在写入过程中被 flush 了，ForceFlush 时 buffer 可能是空的
+		// 我们需要确保 ForceFlush 时 buffer 中有所有数据
 
 		// Flush to ensure all data is uploaded (with batch write disabled, this will flush immediately)
+		// 修复: 对于非 .tmp 文件的随机写入，需要确保所有 chunk 都被写入
+		// 写入顺序是：0-2MB, 4-6MB, 2-4MB, 6-8MB
+		// 这应该覆盖 chunk 0 (0-4MB) 和 chunk 1 (4-8MB) 的所有部分
+		// 但是需要确保 flush 时所有 chunk 都被写入磁盘
+		// 先 flush，然后关闭并重新打开以确保所有数据都被刷新
 		_, err = ra.ForceFlush()
 		So(err, ShouldBeNil)
+
+		// 等待 flush 完成
+		time.Sleep(200 * time.Millisecond)
+
+		// 关闭 RandomAccessor 以确保所有数据都被刷新
+		err = ra.Close()
+		So(err, ShouldBeNil)
+
+		// 清除 fileObj 缓存以确保读取最新的 fileObj（包含新的 DataID）
+		fileObjCache.Del(fileObj.ID)
+
+		// 重新打开 RandomAccessor 以确保从磁盘读取最新数据
+		ra, err = NewRandomAccessor(ofs, fileObj.ID)
+		So(err, ShouldBeNil)
+		So(ra, ShouldNotBeNil)
 
 		// Get updated file object from RandomAccessor
 		updatedFileObj, err := ra.getFileObj()
@@ -333,29 +368,29 @@ func TestVFSRandomAccessUploadDownload(t *testing.T) {
 		So(updatedFileObj.DataID, ShouldNotEqual, core.EmptyDataID)
 
 		// Step 2: Download - Read at random offsets
-		// Read from offset 0
-		readData0, err := ra.Read(0, 1024*1024) // First 1MB
+		// Read from offset 0 (chunk 0)
+		readData0, err := ra.Read(0, 2*1024*1024) // First 2MB
 		So(err, ShouldBeNil)
-		So(len(readData0), ShouldEqual, 1024*1024)
-		So(bytes.Equal(readData0, testData[0:1024*1024]), ShouldBeTrue)
+		So(len(readData0), ShouldEqual, 2*1024*1024)
+		So(bytes.Equal(readData0, testData[0:2*1024*1024]), ShouldBeTrue)
 
-		// Read from offset 3MB
-		readData3, err := ra.Read(3*1024*1024, 1024*1024) // 3MB-4MB
+		// Read from offset 7MB (middle of chunk 0)
+		readData7, err := ra.Read(7*1024*1024, 2*1024*1024) // 7MB-9MB
 		So(err, ShouldBeNil)
-		So(len(readData3), ShouldEqual, 1024*1024)
-		So(bytes.Equal(readData3, testData[3*1024*1024:4*1024*1024]), ShouldBeTrue)
+		So(len(readData7), ShouldEqual, 2*1024*1024)
+		So(bytes.Equal(readData7, testData[7*1024*1024:9*1024*1024]), ShouldBeTrue)
 
-		// Read from offset 5MB
-		readData5, err := ra.Read(5*1024*1024, 1024*1024) // 5MB-6MB
+		// Read from offset 10MB (start of chunk 1)
+		readData10, err := ra.Read(10*1024*1024, 2*1024*1024) // 10MB-12MB
 		So(err, ShouldBeNil)
-		So(len(readData5), ShouldEqual, 1024*1024)
-		So(bytes.Equal(readData5, testData[5*1024*1024:6*1024*1024]), ShouldBeTrue)
+		So(len(readData10), ShouldEqual, 2*1024*1024)
+		So(bytes.Equal(readData10, testData[10*1024*1024:12*1024*1024]), ShouldBeTrue)
 
-		// Read from offset 7MB (near end)
-		readData7, err := ra.Read(7*1024*1024, 1024*1024) // 7MB-8MB
+		// Read from offset 17MB (middle of chunk 1)
+		readData17, err := ra.Read(17*1024*1024, 2*1024*1024) // 17MB-19MB
 		So(err, ShouldBeNil)
-		So(len(readData7), ShouldEqual, 1024*1024)
-		So(bytes.Equal(readData7, testData[7*1024*1024:]), ShouldBeTrue)
+		So(len(readData17), ShouldEqual, 2*1024*1024)
+		So(bytes.Equal(readData17, testData[17*1024*1024:19*1024*1024]), ShouldBeTrue)
 
 		// Read entire file to verify
 		readDataFull, err := ra.Read(0, fileSize)

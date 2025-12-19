@@ -165,9 +165,7 @@ func BucketInfo2Ctx(c Ctx, bkt *BucketInfo) Ctx {
 		}
 	}
 	// Set bucket key (bucket key takes precedence over user key for bucket database)
-	if bkt.Key != "" {
-		o["key"] = bkt.Key
-	}
+	// Key is no longer stored in bucket config, should be provided via context or other means
 	// Set bucket ID for reference
 	o["bktID"] = bkt.ID
 	return context.WithValue(c, "o", o)

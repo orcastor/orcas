@@ -310,9 +310,9 @@ func (lh *LocalHandler) GetSDKConfig(bktID int64) *SDKConfigInfo {
 func (lh *LocalHandler) SetBucketConfig(bktID int64, bucket *BucketInfo) {
 	if bucket != nil {
 		lh.bucketConfigs.Store(bktID, bucket)
-		// Also sync to SDKConfig
-		// CmprWay is now smart compression by default
-		lh.SetSDKConfig(bktID, bucket.CmprWay, bucket.CmprQlty, bucket.EndecWay, bucket.EndecKey)
+		// Note: CmprWay, CmprQlty, EndecWay, EndecKey are no longer stored in bucket config
+		// They should be provided via core.Config in business layer (cmd/vfs)
+		// This function is kept for backward compatibility but does not sync to SDKConfig anymore
 	}
 }
 
@@ -345,13 +345,9 @@ func (lh *LocalHandler) Login(c Ctx, usr, pwd string) (Ctx, *UserInfo, []*Bucket
 	// list buckets
 	b, _ := lh.ma.ListBkt(c, u.ID)
 
-	// 同步每个bucket的配置到SDKConfig
-	for _, bucket := range b {
-		if bucket != nil {
-			// CmprWay is now smart compression by default
-			lh.SetSDKConfig(bucket.ID, bucket.CmprWay, bucket.CmprQlty, bucket.EndecWay, bucket.EndecKey)
-		}
-	}
+	// Note: CmprWay, CmprQlty, EndecWay, EndecKey are no longer stored in bucket config
+	// They should be provided via core.Config in business layer (cmd/vfs)
+	// No longer sync bucket config to SDKConfig here
 
 	// set uid to ctx
 	c, u.Pwd = UserInfo2Ctx(c, u), ""
@@ -1089,7 +1085,8 @@ func (lh *LocalHandler) GetBktInfo(c Ctx, bktID int64) (*BucketInfo, error) {
 	// 同步bucket配置到SDKConfig
 	if bucket != nil {
 		// CmprWay is now smart compression by default
-		lh.SetSDKConfig(bktID, bucket.CmprWay, bucket.CmprQlty, bucket.EndecWay, bucket.EndecKey)
+		// Compression and encryption config are no longer stored in bucket, should be provided via SDK config
+		// lh.SetSDKConfig(bktID, 0, 0, 0, "")
 	}
 	return bucket, nil
 }

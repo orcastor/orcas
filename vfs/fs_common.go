@@ -63,9 +63,12 @@ type OrcasFS struct {
 	c          core.Ctx
 	bktID      int64
 	root       *OrcasNode
-	bucket     *core.BucketInfo // Bucket configuration (includes compression/encryption settings)
+	bucket     *core.BucketInfo // Bucket configuration (chunkSize, quota, etc.)
 	chunkSize  int64
 	requireKey bool // If true, return EPERM error when KEY is not provided
+	// Business layer configuration (from MountOptions.Config, not from bucket config)
+	// These fields are NOT stored in database, handled at business layer
+	core.Config // Embedded Config: compression, encryption, instant upload settings
 	// Batch writer is now managed globally by SDK, accessed via GetBatchWriterForBucket
 	raRegistry sync.Map // map[fileID]*RandomAccessor
 	// Mutex to protect RandomAccessor creation for .tmp files during concurrent writes
@@ -76,6 +79,17 @@ type OrcasFS struct {
 // This function is available on all platforms
 // requireKey: if true, return EPERM error when KEY is not provided in context
 func NewOrcasFS(h core.Handler, c core.Ctx, bktID int64, requireKey ...bool) *OrcasFS {
+	return NewOrcasFSWithConfig(h, c, bktID, nil, requireKey...)
+}
+
+// NewOrcasFSWithConfig creates a new ORCAS filesystem with full configuration
+// This function is available on all platforms
+// cfg: Configuration from core.Config (paths, compression, encryption, instant upload settings)
+//
+//	If nil, uses default configuration (no compression, no encryption, instant upload OFF)
+//
+// requireKey: if true, return EPERM error when KEY is not provided in context
+func NewOrcasFSWithConfig(h core.Handler, c core.Ctx, bktID int64, cfg *core.Config, requireKey ...bool) *OrcasFS {
 	// Get bucket configuration (includes chunkSize, compression, encryption settings)
 	var chunkSize int64
 	bucket, err := h.GetBktInfo(c, bktID)
@@ -109,6 +123,12 @@ func NewOrcasFS(h core.Handler, c core.Ctx, bktID int64, requireKey ...bool) *Or
 		reqKey = requireKey[0]
 	}
 
+	// Initialize Config (embed in OrcasFS)
+	var config core.Config
+	if cfg != nil {
+		config = *cfg
+	}
+
 	ofs := &OrcasFS{
 		h:          h,
 		c:          c,
@@ -116,6 +136,7 @@ func NewOrcasFS(h core.Handler, c core.Ctx, bktID int64, requireKey ...bool) *Or
 		bucket:     bucket,
 		chunkSize:  chunkSize,
 		requireKey: reqKey,
+		Config:     config,
 	}
 
 	// Root node initialization
@@ -124,19 +145,100 @@ func NewOrcasFS(h core.Handler, c core.Ctx, bktID int64, requireKey ...bool) *Or
 	// initRootNode method is implemented in platform-specific files (fs_win.go or fs.go)
 	ofs.initRootNode()
 
+	// TODO: If custom paths are specified, create custom adapters that use these paths
+	// and replace the adapters in LocalHandler using SetAdapter method
+	// This requires creating custom DataAdapter and MetadataAdapter implementations
+	// that use ofs.Config.BasePath and ofs.Config.DataPath instead of global ORCAS_BASE and ORCAS_DATA
+
 	return ofs
+}
+
+// GetBasePath returns the base path for metadata (database storage location)
+// If empty, the global ORCAS_BASE environment variable should be used
+func (fs *OrcasFS) GetBasePath() string {
+	if fs == nil {
+		return ""
+	}
+	return fs.Config.BasePath
+}
+
+// GetDataPath returns the data path for file data storage location
+// If empty, the global ORCAS_DATA environment variable should be used
+func (fs *OrcasFS) GetDataPath() string {
+	if fs == nil {
+		return ""
+	}
+	return fs.Config.DataPath
+}
+
+// GetEndecKey returns the encryption key for data encryption/decryption
+// If empty, encryption key is not used
+func (fs *OrcasFS) GetEndecKey() string {
+	return fs.Config.EndecKey
+}
+
+// getEndecKeyForFS returns the encryption key for a given OrcasFS
+// Returns OrcasFS.Config.EndecKey if set, otherwise empty string
+// Key should be provided via MountOptions.Config, not from bucket config
+func getEndecKeyForFS(fs *OrcasFS) string {
+	if fs == nil {
+		return ""
+	}
+	return fs.Config.EndecKey
+}
+
+// getCmprWayForFS returns the compression method for a given OrcasFS
+// Returns OrcasFS.Config.CmprWay if set, otherwise 0
+// Should be provided via MountOptions.Config, not from bucket config
+func getCmprWayForFS(fs *OrcasFS) uint32 {
+	if fs == nil {
+		return 0
+	}
+	return fs.Config.CmprWay
+}
+
+// getCmprQltyForFS returns the compression quality for a given OrcasFS
+// Returns OrcasFS.Config.CmprQlty if set, otherwise 0
+// Should be provided via MountOptions.Config, not from bucket config
+func getCmprQltyForFS(fs *OrcasFS) uint32 {
+	if fs == nil {
+		return 0
+	}
+	return fs.Config.CmprQlty
+}
+
+// getEndecWayForFS returns the encryption method for a given OrcasFS
+// Returns OrcasFS.Config.EndecWay if set, otherwise 0
+// Should be provided via MountOptions.Config, not from bucket config
+func getEndecWayForFS(fs *OrcasFS) uint32 {
+	if fs == nil {
+		return 0
+	}
+	return fs.Config.EndecWay
+}
+
+// getRefLevelForFS returns the instant upload level for a given OrcasFS
+// Returns OrcasFS.Config.RefLevel if set, otherwise 0
+// Should be provided via MountOptions.Config, not from bucket config
+func getRefLevelForFS(fs *OrcasFS) uint32 {
+	if fs == nil {
+		return 0
+	}
+	return fs.Config.RefLevel
 }
 
 // getBucketConfig gets bucket configuration, refreshing from database if needed
 func (fs *OrcasFS) getBucketConfig() *core.BucketInfo {
-	if fs.bucket != nil {
-		return fs.bucket
-	}
-	// Refresh bucket config from database
+	// Always refresh from database to ensure we have the latest config
+	// This is important for tests where bucket config may be updated after OrcasFS creation
 	bucket, err := fs.h.GetBktInfo(fs.c, fs.bktID)
 	if err == nil && bucket != nil {
 		fs.bucket = bucket
 		return bucket
+	}
+	// If GetBktInfo fails, return cached config if available
+	if fs.bucket != nil {
+		return fs.bucket
 	}
 	// Return default config if bucket not found
 	return &core.BucketInfo{

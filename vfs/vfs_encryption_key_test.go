@@ -35,7 +35,7 @@ func TestVFSEncryptionKeyMismatch(t *testing.T) {
 		_, userInfo, _, err := handler.Login(ctx, "orcas", "orcas")
 		So(err, ShouldBeNil)
 
-		// Create bucket with encryption enabled
+		// Create bucket
 		admin := core.NewLocalAdmin()
 		encryptionKey := "test-encryption-key-12345678901234567890123456789012" // 32 bytes for AES256
 		bkt := &core.BucketInfo{
@@ -45,14 +45,19 @@ func TestVFSEncryptionKeyMismatch(t *testing.T) {
 			Type:      1,
 			Quota:     -1,
 			ChunkSize: 4 * 1024 * 1024, // 4MB chunk size
-			EndecWay:  core.DATA_ENDEC_AES256,
-			EndecKey:  encryptionKey,
 		}
 		err = admin.PutBkt(ctx, []*core.BucketInfo{bkt})
 		So(err, ShouldBeNil)
 
-		// Create filesystem
-		ofs := NewOrcasFS(handler, ctx, testBktID)
+		// Clear bucket config cache
+		bucketConfigCache.Del(testBktID)
+
+		// Create filesystem with encryption configuration (not from bucket config)
+		cfg := &core.Config{
+			EndecWay: core.DATA_ENDEC_AES256,
+			EndecKey: encryptionKey,
+		}
+		ofs := NewOrcasFSWithConfig(handler, ctx, testBktID, cfg)
 
 		// Generate test data with non-zero values
 		fileSize := 2 * 1024 * 1024 // 2MB
@@ -164,7 +169,7 @@ func TestVFSEncryptionKeyMismatchAfterReopen(t *testing.T) {
 		_, userInfo, _, err := handler.Login(ctx, "orcas", "orcas")
 		So(err, ShouldBeNil)
 
-		// Create bucket with encryption enabled
+		// Create bucket
 		admin := core.NewLocalAdmin()
 		encryptionKey := "test-encryption-key-12345678901234567890123456789012" // 32 bytes for AES256
 		bkt := &core.BucketInfo{
@@ -174,14 +179,19 @@ func TestVFSEncryptionKeyMismatchAfterReopen(t *testing.T) {
 			Type:      1,
 			Quota:     -1,
 			ChunkSize: 4 * 1024 * 1024, // 4MB chunk size
-			EndecWay:  core.DATA_ENDEC_AES256,
-			EndecKey:  encryptionKey,
 		}
 		err = admin.PutBkt(ctx, []*core.BucketInfo{bkt})
 		So(err, ShouldBeNil)
 
-		// Create filesystem
-		ofs := NewOrcasFS(handler, ctx, testBktID)
+		// Clear bucket config cache
+		bucketConfigCache.Del(testBktID)
+
+		// Create filesystem with encryption configuration (not from bucket config)
+		cfg := &core.Config{
+			EndecWay: core.DATA_ENDEC_AES256,
+			EndecKey: encryptionKey,
+		}
+		ofs := NewOrcasFSWithConfig(handler, ctx, testBktID, cfg)
 
 		// Generate test data
 		fileSize := 1024 * 1024 // 1MB

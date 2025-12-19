@@ -1169,8 +1169,6 @@ func (tw *TempFileWriter) flushChunkWithBuffer(sn int, buf *chunkBuffer) error {
 	DebugLog("[VFS TempFileWriter flushChunk] Buffer state: fileID=%d, dataID=%d, sn=%d, offsetInChunk=%d, bufDataLen=%d, chunkDataLen=%d, numRanges=%d",
 		tw.fileID, tw.dataID, sn, buf.offsetInChunk, len(buf.data), len(chunkData), len(buf.ranges))
 
-	bucket := getBucketConfigWithCache(tw.fs)
-
 	DebugLog("[VFS TempFileWriter flushChunk] Processing chunk: fileID=%d, dataID=%d, sn=%d, originalSize=%d, enableRealtime=%v",
 		tw.fileID, tw.dataID, sn, len(chunkData), tw.enableRealtime)
 
@@ -1186,7 +1184,8 @@ func (tw *TempFileWriter) flushChunkWithBuffer(sn int, buf *chunkBuffer) error {
 		// Real-time compression/encryption enabled
 		// Process first chunk: check file extension first, then file type
 		isFirstChunk := sn == 0
-		if isFirstChunk && bucket != nil && bucket.CmprWay > 0 && len(chunkData) > 0 {
+		cmprWay := getCmprWayForFS(tw.fs)
+		if isFirstChunk && cmprWay > 0 && len(chunkData) > 0 {
 			shouldCompress := true
 
 			// Step 1: Check file extension first (faster than file header check)
@@ -1230,37 +1229,42 @@ func (tw *TempFileWriter) flushChunkWithBuffer(sn int, buf *chunkBuffer) error {
 		// Compression (if enabled)
 		var processedChunk []byte
 		hasCmpr := tw.dataInfo.Kind&core.DATA_CMPR_MASK != 0
-		if hasCmpr && bucket != nil && bucket.CmprWay > 0 {
-			var cmpr archiver.Compressor
-			if bucket.CmprWay&core.DATA_CMPR_SNAPPY != 0 {
-				cmpr = &archiver.Snappy{}
-			} else if bucket.CmprWay&core.DATA_CMPR_ZSTD != 0 {
-				cmpr = &archiver.Zstd{EncoderOptions: []zstd.EOption{zstd.WithEncoderLevel(zstd.EncoderLevelFromZstd(int(bucket.CmprQlty)))}}
-			} else if bucket.CmprWay&core.DATA_CMPR_GZIP != 0 {
-				cmpr = &archiver.Gz{CompressionLevel: int(bucket.CmprQlty)}
-			} else if bucket.CmprWay&core.DATA_CMPR_BR != 0 {
-				cmpr = &archiver.Brotli{Quality: int(bucket.CmprQlty)}
-			}
+		if hasCmpr {
+			cmprQlty := getCmprQltyForFS(tw.fs)
+			if cmprWay > 0 {
+				var cmpr archiver.Compressor
+				if cmprWay&core.DATA_CMPR_SNAPPY != 0 {
+					cmpr = &archiver.Snappy{}
+				} else if cmprWay&core.DATA_CMPR_ZSTD != 0 {
+					cmpr = &archiver.Zstd{EncoderOptions: []zstd.EOption{zstd.WithEncoderLevel(zstd.EncoderLevelFromZstd(int(cmprQlty)))}}
+				} else if cmprWay&core.DATA_CMPR_GZIP != 0 {
+					cmpr = &archiver.Gz{CompressionLevel: int(cmprQlty)}
+				} else if cmprWay&core.DATA_CMPR_BR != 0 {
+					cmpr = &archiver.Brotli{Quality: int(cmprQlty)}
+				}
 
-			if cmpr != nil {
-				var cmprBuf bytes.Buffer
-				err := cmpr.Compress(bytes.NewBuffer(chunkData), &cmprBuf)
-				if err != nil {
-					if isFirstChunk {
-						tw.dataInfo.Kind &= ^core.DATA_CMPR_MASK
-					}
-					processedChunk = chunkData
-				} else {
-					if isFirstChunk && cmprBuf.Len() >= len(chunkData) {
+				if cmpr != nil {
+					var cmprBuf bytes.Buffer
+					err := cmpr.Compress(bytes.NewBuffer(chunkData), &cmprBuf)
+					if err != nil {
+						if isFirstChunk {
+							tw.dataInfo.Kind &= ^core.DATA_CMPR_MASK
+						}
 						processedChunk = chunkData
-						tw.dataInfo.Kind &= ^core.DATA_CMPR_MASK
 					} else {
-						// CRITICAL: bytes.Buffer.Bytes() returns a reference to the underlying buffer
-						// We must create a copy to ensure data integrity
-						compressedData := cmprBuf.Bytes()
-						processedChunk = make([]byte, len(compressedData))
-						copy(processedChunk, compressedData)
+						if isFirstChunk && cmprBuf.Len() >= len(chunkData) {
+							processedChunk = chunkData
+							tw.dataInfo.Kind &= ^core.DATA_CMPR_MASK
+						} else {
+							// CRITICAL: bytes.Buffer.Bytes() returns a reference to the underlying buffer
+							// We must create a copy to ensure data integrity
+							compressedData := cmprBuf.Bytes()
+							processedChunk = make([]byte, len(compressedData))
+							copy(processedChunk, compressedData)
+						}
 					}
+				} else {
+					processedChunk = chunkData
 				}
 			} else {
 				processedChunk = chunkData
@@ -1270,8 +1274,9 @@ func (tw *TempFileWriter) flushChunkWithBuffer(sn int, buf *chunkBuffer) error {
 		}
 
 		// Encryption (if enabled)
-		if bucket != nil && tw.dataInfo.Kind&core.DATA_ENDEC_AES256 != 0 {
-			finalData, err = aes256.Encrypt(bucket.EndecKey, processedChunk)
+		endecKey := getEndecKeyForFS(tw.fs)
+		if endecKey != "" && tw.dataInfo.Kind&core.DATA_ENDEC_AES256 != 0 {
+			finalData, err = aes256.Encrypt(endecKey, processedChunk)
 			if err != nil {
 				// Encryption failed, write unencrypted data and clear encryption flag
 				finalData = processedChunk
@@ -1280,8 +1285,8 @@ func (tw *TempFileWriter) flushChunkWithBuffer(sn int, buf *chunkBuffer) error {
 					DebugLog("[VFS TempFileWriter flushChunk] Encryption failed, cleared encryption flag: fileID=%d, dataID=%d, sn=%d, Kind=0x%x", tw.fileID, tw.dataID, sn, tw.dataInfo.Kind)
 				}
 			}
-		} else if bucket != nil && tw.dataInfo.Kind&core.DATA_ENDEC_SM4 != 0 {
-			finalData, err = sm4.Sm4Cbc([]byte(bucket.EndecKey), processedChunk, true)
+		} else if endecKey != "" && tw.dataInfo.Kind&core.DATA_ENDEC_SM4 != 0 {
+			finalData, err = sm4.Sm4Cbc([]byte(endecKey), processedChunk, true)
 			if err != nil {
 				// Encryption failed, write unencrypted data and clear encryption flag
 				finalData = processedChunk
@@ -1467,18 +1472,18 @@ func (tw *TempFileWriter) decodeChunkDataWithKind(chunkData []byte, kind uint32)
 
 	// 1. Decrypt first (if enabled)
 	if kind&core.DATA_ENDEC_MASK != 0 {
-		bucket := getBucketConfigWithCache(tw.fs)
-		if bucket != nil {
+		endecKey := getEndecKeyForFS(tw.fs)
+		if endecKey != "" {
 			var err error
 			if kind&core.DATA_ENDEC_AES256 != 0 {
-				processedChunk, err = aes256.Decrypt(bucket.EndecKey, processedChunk)
+				processedChunk, err = aes256.Decrypt(endecKey, processedChunk)
 				if err != nil {
 					// Decryption failed, return original data
 					DebugLog("[VFS TempFileWriter decodeChunkDataWithKind] Decryption failed, using raw data: fileID=%d, dataID=%d, error=%v", tw.fileID, tw.dataID, err)
 					return chunkData
 				}
 			} else if kind&core.DATA_ENDEC_SM4 != 0 {
-				processedChunk, err = sm4.Sm4Cbc([]byte(bucket.EndecKey), processedChunk, false)
+				processedChunk, err = sm4.Sm4Cbc([]byte(endecKey), processedChunk, false)
 				if err != nil {
 					// Decryption failed, return original data
 					DebugLog("[VFS TempFileWriter decodeChunkDataWithKind] Decryption failed, using raw data: fileID=%d, dataID=%d, error=%v", tw.fileID, tw.dataID, err)
@@ -1521,24 +1526,22 @@ func (tw *TempFileWriter) decodeChunkDataWithKind(chunkData []byte, kind uint32)
 
 func (tw *TempFileWriter) decideRealtimeProcessing(firstChunk []byte) {
 	tw.realtimeDecided = true
-	bucket := getBucketConfigWithCache(tw.fs)
-	if bucket == nil {
-		tw.enableRealtime = false
-		tw.dataInfo.Kind = core.DATA_NORMAL
-		return
-	}
 
-	enable := bucket.CmprWay > 0 || bucket.EndecWay > 0
+	// Get compression and encryption settings from OrcasFS, not from bucket config
+	cmprWay := getCmprWayForFS(tw.fs)
+	endecWay := getEndecWayForFS(tw.fs)
+
+	enable := cmprWay > 0 || endecWay > 0
 	tw.enableRealtime = enable
 
 	kind := core.DATA_NORMAL
 	if enable {
-		if bucket.CmprWay > 0 {
-			kind |= bucket.CmprWay
+		if cmprWay > 0 {
+			kind |= cmprWay
 		}
-		if bucket.EndecWay&core.DATA_ENDEC_AES256 != 0 {
+		if endecWay&core.DATA_ENDEC_AES256 != 0 {
 			kind |= core.DATA_ENDEC_AES256
-		} else if bucket.EndecWay&core.DATA_ENDEC_SM4 != 0 {
+		} else if endecWay&core.DATA_ENDEC_SM4 != 0 {
 			kind |= core.DATA_ENDEC_SM4
 		}
 	}
@@ -2006,6 +2009,10 @@ func (ra *RandomAccessor) Write(offset int64, data []byte) error {
 			ra.seqBuffer.closed = true
 		} else {
 			// Skipped some positions, switch to random write mode
+			// IMPORTANT: Before flushing sequential buffer, we need to ensure all data is written
+			// But since we're switching to random write mode, we should flush the sequential buffer
+			// to ensure the data written so far is persisted, then continue with random writes
+			// The subsequent random writes will be merged with the sequential data during flush
 			if flushErr := ra.flushSequentialBuffer(); flushErr != nil {
 				return flushErr
 			}
@@ -2131,13 +2138,22 @@ func (ra *RandomAccessor) Write(offset int64, data []byte) error {
 		// Balanced aggressive: For small files even in random write mode, use larger buffer (3x)
 		// This allows more operations to accumulate before flush
 		maxBufferSize = config.MaxBufferSize * 3
+	} else {
+		// For random writes on large files, also use larger buffer (3x) to reduce flush frequency
+		// This ensures all writes can be accumulated before flush, preventing partial data writes
+		maxBufferSize = config.MaxBufferSize * 3
 	}
 
-	if atomic.LoadInt64(&ra.buffer.writeIndex)+1 >= int64(len(ra.buffer.operations)) || atomic.LoadInt64(&ra.buffer.totalSize) >= maxBufferSize {
-		// Exceeds capacity, need to force flush
-		// Don't rollback writeIndex (already incremented, space is allocated)
-		// Force flush current buffer (synchronous execution, ensure data is persisted)
-		DebugLog("[VFS RandomAccessor Write] Buffer full, forcing flush for fileID=%d, writeIndex=%d, totalSize=%d, maxBufferSize=%d", ra.fileID, atomic.LoadInt64(&ra.buffer.writeIndex), atomic.LoadInt64(&ra.buffer.totalSize), maxBufferSize)
+	// Reserve space for this write operation first
+	writeIndex := atomic.AddInt64(&ra.buffer.writeIndex, 1) - 1
+
+	// Check if we exceeded capacity AFTER reserving space
+	// This ensures we don't flush prematurely before adding the current write
+	if writeIndex >= int64(len(ra.buffer.operations)) {
+		// Operations array is full, need to flush before we can write
+		// Rollback writeIndex since we can't write to this position
+		atomic.AddInt64(&ra.buffer.writeIndex, -1)
+		DebugLog("[VFS RandomAccessor Write] Operations array full, forcing flush for fileID=%d, writeIndex=%d, operationsLen=%d", ra.fileID, writeIndex, len(ra.buffer.operations))
 		_, err := ra.Flush()
 		if err != nil {
 			DebugLog("[VFS RandomAccessor Write] ERROR: Failed to flush buffer for fileID=%d: %v", ra.fileID, err)
@@ -2146,10 +2162,33 @@ func (ra *RandomAccessor) Write(offset int64, data []byte) error {
 			}
 			return err
 		}
+		// After flush, reacquire write position (writeIndex should have been reset to 0 by Flush)
+		writeIndex = atomic.AddInt64(&ra.buffer.writeIndex, 1) - 1
 	}
 
-	// After flush, reacquire write position (writeIndex should have been reset to 0 by Flush)
-	writeIndex := atomic.AddInt64(&ra.buffer.writeIndex, 1) - 1
+	// Check if totalSize would exceed limit AFTER adding this write
+	// This ensures we flush all accumulated writes together, not just partial data
+	// IMPORTANT: Only flush if adding this write would exceed the limit, not if it's already at the limit
+	// This prevents premature flushing when buffer is exactly at the limit
+	currentTotalSize := atomic.LoadInt64(&ra.buffer.totalSize)
+	newTotalSize := currentTotalSize + int64(len(data))
+	if newTotalSize > maxBufferSize {
+		// Total size would exceed limit, flush current buffer first
+		// But we've already reserved writeIndex, so we need to flush what we have
+		// Rollback writeIndex since we'll flush first
+		atomic.AddInt64(&ra.buffer.writeIndex, -1)
+		DebugLog("[VFS RandomAccessor Write] Total size would exceed limit, forcing flush for fileID=%d, currentTotalSize=%d, newDataSize=%d, newTotalSize=%d, maxBufferSize=%d", ra.fileID, currentTotalSize, len(data), newTotalSize, maxBufferSize)
+		_, err := ra.Flush()
+		if err != nil {
+			DebugLog("[VFS RandomAccessor Write] ERROR: Failed to flush buffer for fileID=%d: %v", ra.fileID, err)
+			if err == core.ERR_QUOTA_EXCEED {
+				DebugLog("[VFS RandomAccessor Write] ERROR: Quota exceeded during flush for fileID=%d", ra.fileID)
+			}
+			return err
+		}
+		// After flush, reacquire write position (writeIndex should have been reset to 0 by Flush)
+		writeIndex = atomic.AddInt64(&ra.buffer.writeIndex, 1) - 1
+	}
 
 	// Optimization: use atomic operation to update totalSize, reduce lock contention
 	atomic.AddInt64(&ra.buffer.totalSize, int64(len(data)))
@@ -2226,15 +2265,18 @@ func (ra *RandomAccessor) initSequentialBufferWithNewData() error {
 	}
 
 	// Set compression and encryption flags (if enabled)
-	bucket := getBucketConfigWithCache(ra.fs)
-	if bucket != nil {
-		if bucket.CmprWay > 0 {
-			dataInfo.Kind |= bucket.CmprWay
-		}
-		if bucket.EndecWay > 0 {
-			dataInfo.Kind |= bucket.EndecWay
-		}
+	// Get from OrcasFS configuration, not from bucket config
+	cmprWay := getCmprWayForFS(ra.fs)
+	endecWay := getEndecWayForFS(ra.fs)
+	DebugLog("[VFS initSequentialBufferWithNewData] FS config: fileID=%d, bktID=%d, CmprWay=0x%x, EndecWay=0x%x", ra.fileID, ra.fs.bktID, cmprWay, endecWay)
+	if cmprWay > 0 {
+		dataInfo.Kind |= cmprWay
 	}
+	if endecWay > 0 {
+		dataInfo.Kind |= endecWay
+		DebugLog("[VFS initSequentialBufferWithNewData] Set encryption flag: fileID=%d, EndecWay=0x%x, Kind=0x%x", ra.fileID, endecWay, dataInfo.Kind)
+	}
+	DebugLog("[VFS initSequentialBufferWithNewData] Final DataInfo Kind: fileID=%d, Kind=0x%x", ra.fileID, dataInfo.Kind)
 
 	ra.seqBuffer = &SequentialWriteBuffer{
 		fileID:    ra.fileID,
@@ -2303,12 +2345,12 @@ func (ra *RandomAccessor) flushSequentialChunk() error {
 		return nil
 	}
 
-	bucket := getBucketConfigWithCache(ra.fs)
 	chunkData := ra.seqBuffer.buffer
 
 	// Process first chunk: check file type and compression effect
 	isFirstChunk := ra.seqBuffer.sn == 0
-	if isFirstChunk && bucket != nil && bucket.CmprWay > 0 && len(chunkData) > 0 {
+	cmprWay := getCmprWayForFS(ra.fs)
+	if isFirstChunk && cmprWay > 0 && len(chunkData) > 0 {
 		kind, _ := filetype.Match(chunkData)
 		if kind != filetype.Unknown {
 			// Not unknown type, don't compress
@@ -2328,16 +2370,17 @@ func (ra *RandomAccessor) flushSequentialChunk() error {
 	// Compression (if enabled)
 	var processedChunk []byte
 	hasCmpr := ra.seqBuffer.dataInfo.Kind&core.DATA_CMPR_MASK != 0
-	if hasCmpr && bucket != nil && bucket.CmprWay > 0 {
+	cmprQlty := getCmprQltyForFS(ra.fs)
+	if hasCmpr && cmprWay > 0 {
 		var cmpr archiver.Compressor
-		if bucket.CmprWay&core.DATA_CMPR_SNAPPY != 0 {
+		if cmprWay&core.DATA_CMPR_SNAPPY != 0 {
 			cmpr = &archiver.Snappy{}
-		} else if bucket.CmprWay&core.DATA_CMPR_ZSTD != 0 {
-			cmpr = &archiver.Zstd{EncoderOptions: []zstd.EOption{zstd.WithEncoderLevel(zstd.EncoderLevelFromZstd(int(bucket.CmprQlty)))}}
-		} else if bucket.CmprWay&core.DATA_CMPR_GZIP != 0 {
-			cmpr = &archiver.Gz{CompressionLevel: int(bucket.CmprQlty)}
-		} else if bucket.CmprWay&core.DATA_CMPR_BR != 0 {
-			cmpr = &archiver.Brotli{Quality: int(bucket.CmprQlty)}
+		} else if cmprWay&core.DATA_CMPR_ZSTD != 0 {
+			cmpr = &archiver.Zstd{EncoderOptions: []zstd.EOption{zstd.WithEncoderLevel(zstd.EncoderLevelFromZstd(int(cmprQlty)))}}
+		} else if cmprWay&core.DATA_CMPR_GZIP != 0 {
+			cmpr = &archiver.Gz{CompressionLevel: int(cmprQlty)}
+		} else if cmprWay&core.DATA_CMPR_BR != 0 {
+			cmpr = &archiver.Brotli{Quality: int(cmprQlty)}
 		}
 
 		if cmpr != nil {
@@ -2372,12 +2415,13 @@ func (ra *RandomAccessor) flushSequentialChunk() error {
 	}
 
 	// Encryption (if enabled)
+	endecKey := getEndecKeyForFS(ra.fs)
 	var encodedChunk []byte
 	var err error
-	if bucket != nil && ra.seqBuffer.dataInfo.Kind&core.DATA_ENDEC_AES256 != 0 {
-		encodedChunk, err = aes256.Encrypt(bucket.EndecKey, processedChunk)
-	} else if bucket != nil && ra.seqBuffer.dataInfo.Kind&core.DATA_ENDEC_SM4 != 0 {
-		encodedChunk, err = sm4.Sm4Cbc([]byte(bucket.EndecKey), processedChunk, true)
+	if endecKey != "" && ra.seqBuffer.dataInfo.Kind&core.DATA_ENDEC_AES256 != 0 {
+		encodedChunk, err = aes256.Encrypt(endecKey, processedChunk)
+	} else if endecKey != "" && ra.seqBuffer.dataInfo.Kind&core.DATA_ENDEC_SM4 != 0 {
+		encodedChunk, err = sm4.Sm4Cbc([]byte(endecKey), processedChunk, true)
 	} else {
 		encodedChunk = processedChunk
 	}
@@ -2527,6 +2571,9 @@ func (ra *RandomAccessor) flushSequentialBuffer() error {
 	}
 
 	fileObj.DataID = ra.seqBuffer.dataID
+	// IMPORTANT: Use OrigSize as file size, which is the total size of data written so far
+	// This includes all chunks that have been written (sn=0, sn=1, etc.)
+	// The offset might not reflect the actual file size if sequential write was interrupted
 	fileObj.Size = ra.seqBuffer.dataInfo.OrigSize
 
 	// Optimization: Use PutDataInfoAndObj to write DataInfo and ObjectInfo together in a single transaction
@@ -2790,25 +2837,17 @@ func (ra *RandomAccessor) Read(offset int64, size int) ([]byte, error) {
 	}
 
 	// Use unified chunkReader for both plain and compressed/encrypted data
-	var endecKey string
-	bucket := getBucketConfigWithCache(ra.fs)
-	if bucket != nil {
-		endecKey = bucket.EndecKey
-		// IMPORTANT: Log encryption key info to help debug key mismatch issues
-		if dataInfo.Kind&core.DATA_ENDEC_MASK != 0 {
-			if endecKey == "" {
-				DebugLog("[VFS Read] WARNING: Data is encrypted but bucket EndecKey is empty: fileID=%d, DataID=%d, Kind=0x%x",
-					ra.fileID, dataInfo.ID, dataInfo.Kind)
-			} else {
-				DebugLog("[VFS Read] Encryption key info: fileID=%d, DataID=%d, Kind=0x%x, endecKey length=%d",
-					ra.fileID, dataInfo.ID, dataInfo.Kind, len(endecKey))
-			}
+	// Get encryption key from OrcasFS (not from bucket config)
+	endecKey := getEndecKeyForFS(ra.fs)
+	// IMPORTANT: Log encryption key info to help debug key mismatch issues
+	if dataInfo.Kind&core.DATA_ENDEC_MASK != 0 {
+		if endecKey == "" {
+			DebugLog("[VFS Read] WARNING: Data is encrypted but encryption key is empty: fileID=%d, DataID=%d, Kind=0x%x",
+				ra.fileID, dataInfo.ID, dataInfo.Kind)
+		} else {
+			DebugLog("[VFS Read] Encryption key info: fileID=%d, DataID=%d, Kind=0x%x, endecKey length=%d",
+				ra.fileID, dataInfo.ID, dataInfo.Kind, len(endecKey))
 		}
-	} else if dataInfo.Kind&core.DATA_ENDEC_MASK != 0 {
-		// Data is encrypted but bucket config is nil - this is a problem
-		DebugLog("[VFS Read] ERROR: Data is encrypted but bucket config is nil: fileID=%d, DataID=%d, Kind=0x%x",
-			ra.fileID, dataInfo.ID, dataInfo.Kind)
-		return nil, fmt.Errorf("data is encrypted but bucket configuration is not available")
 	}
 
 	// Create data reader (abstract read interface, unified handling of uncompressed and compressed/encrypted data)
@@ -2937,12 +2976,8 @@ func (ra *RandomAccessor) decodeProcessedData(processedData []byte, kind uint32,
 		return processedData, nil
 	}
 
-	// Get encryption key from bucket configuration
-	bucket := getBucketConfigWithCache(ra.fs)
-	endecKey := ""
-	if bucket != nil {
-		endecKey = bucket.EndecKey
-	}
+	// Get encryption key from OrcasFS (not from bucket config)
+	endecKey := getEndecKeyForFS(ra.fs)
 
 	// 1. Decrypt first (if enabled)
 	// Important: decrypt first, then decompress (same order as encoding)
@@ -3503,16 +3538,15 @@ func (ra *RandomAccessor) applyRandomWritesWithSDK(fileObj *core.ObjectInfo, wri
 	}
 
 	// Create DataInfo
-	// Set Kind based on bucket configuration (for new files without old data)
-	bucket := getBucketConfigWithCache(ra.fs)
+	// Set Kind based on OrcasFS configuration (for new files without old data)
+	cmprWay := getCmprWayForFS(ra.fs)
+	endecWay := getEndecWayForFS(ra.fs)
 	kind := core.DATA_NORMAL
-	if bucket != nil {
-		if bucket.CmprWay > 0 {
-			kind |= bucket.CmprWay
-		}
-		if bucket.EndecWay > 0 {
-			kind |= bucket.EndecWay
-		}
+	if cmprWay > 0 {
+		kind |= cmprWay
+	}
+	if endecWay > 0 {
+		kind |= endecWay
 	}
 	dataInfo := &core.DataInfo{
 		ID:       newDataID,
@@ -3525,10 +3559,10 @@ func (ra *RandomAccessor) applyRandomWritesWithSDK(fileObj *core.ObjectInfo, wri
 	// Lock-free check using atomic.Value
 	hasTempWriter := ra.tempWriter.Load() != nil
 
-	// Check if bucket has compression or encryption configuration
-	// For new files (no old data), if bucket has config, should use compression/encryption path
+	// Check if OrcasFS has compression or encryption configuration
+	// For new files (no old data), if OrcasFS has config, should use compression/encryption path
 	// BUT: If TempFileWriter exists, it already handles compression/encryption, so skip this path
-	hasBucketConfig := bucket != nil && (bucket.CmprWay > 0 || bucket.EndecWay > 0)
+	hasBucketConfig := cmprWay > 0 || endecWay > 0
 
 	// If original data is compressed or encrypted, must read completely (unavoidable)
 	// But can stream write, avoid processing all data at once
@@ -3920,11 +3954,8 @@ func (ra *RandomAccessor) applyWritesStreamingCompressed(oldDataInfo *core.DataI
 	// Now each chunk is independently compressed and encrypted, can process by chunk in streaming
 	// Directly read by chunk, decrypt, decompress, don't use DataReader
 
-	var endecKey string
-	bucket := getBucketConfigWithCache(ra.fs)
-	if bucket != nil {
-		endecKey = bucket.EndecKey
-	}
+	// Get encryption key from OrcasFS (not from bucket config)
+	endecKey := getEndecKeyForFS(ra.fs)
 
 	chunkSize := ra.fs.chunkSize
 
@@ -4069,7 +4100,9 @@ func (ra *RandomAccessor) applyWritesStreamingUncompressed(fileObj *core.ObjectI
 
 			if oldDataID > 0 && oldDataID != core.EmptyDataID && pos < fileObj.Size {
 				// Calculate sn for this chunk position
-				chunkSn := int(pos / int64(chunkSize))
+				// 修复: 使用 chunkIdx 作为 sn，因为 chunkSize 变量在循环中被覆盖了
+				// chunkIdx 从 0 开始，正好对应 sn
+				chunkSn := chunkIdx
 				// Read this chunk of original data (read entire chunk by sn)
 				data, err := ra.fs.h.GetData(ra.fs.c, ra.fs.bktID, oldDataID, chunkSn)
 				if err == nil && len(data) > 0 {
@@ -4293,32 +4326,35 @@ func (ra *RandomAccessor) processWritesStreaming(
 	newSize int64,
 	chunkCount int,
 ) (int64, error) {
-	bucket := getBucketConfigWithCache(ra.fs)
+	// Get compression and encryption settings from OrcasFS
+	cmprWay := getCmprWayForFS(ra.fs)
+	cmprQlty := getCmprQltyForFS(ra.fs)
+	endecWay := getEndecWayForFS(ra.fs)
 
 	// Initialize compressor (if smart compression is enabled)
 	var cmpr archiver.Compressor
 	var hasCmpr bool
-	if bucket != nil && bucket.CmprWay > 0 {
+	if cmprWay > 0 {
 		// Compressor will be determined when processing the first chunk (needs to check file type)
 		hasCmpr = true
-		if bucket.CmprWay&core.DATA_CMPR_SNAPPY != 0 {
+		if cmprWay&core.DATA_CMPR_SNAPPY != 0 {
 			cmpr = &archiver.Snappy{}
-		} else if bucket.CmprWay&core.DATA_CMPR_ZSTD != 0 {
-			cmpr = &archiver.Zstd{EncoderOptions: []zstd.EOption{zstd.WithEncoderLevel(zstd.EncoderLevelFromZstd(int(bucket.CmprQlty)))}}
-		} else if bucket.CmprWay&core.DATA_CMPR_GZIP != 0 {
-			cmpr = &archiver.Gz{CompressionLevel: int(bucket.CmprQlty)}
-		} else if bucket.CmprWay&core.DATA_CMPR_BR != 0 {
-			cmpr = &archiver.Brotli{Quality: int(bucket.CmprQlty)}
+		} else if cmprWay&core.DATA_CMPR_ZSTD != 0 {
+			cmpr = &archiver.Zstd{EncoderOptions: []zstd.EOption{zstd.WithEncoderLevel(zstd.EncoderLevelFromZstd(int(cmprQlty)))}}
+		} else if cmprWay&core.DATA_CMPR_GZIP != 0 {
+			cmpr = &archiver.Gz{CompressionLevel: int(cmprQlty)}
+		} else if cmprWay&core.DATA_CMPR_BR != 0 {
+			cmpr = &archiver.Brotli{Quality: int(cmprQlty)}
 		}
 		if cmpr != nil {
-			dataInfo.Kind |= bucket.CmprWay
+			dataInfo.Kind |= cmprWay
 		}
 	}
 
 	// If encryption is set, set encryption flag
-	if bucket != nil && bucket.EndecWay > 0 {
-		dataInfo.Kind |= bucket.EndecWay
-		DebugLog("[VFS processWritesStreaming] Set encryption flag: fileID=%d, dataID=%d, EndecWay=0x%x, Kind=0x%x", ra.fileID, dataInfo.ID, bucket.EndecWay, dataInfo.Kind)
+	if endecWay > 0 {
+		dataInfo.Kind |= endecWay
+		DebugLog("[VFS processWritesStreaming] Set encryption flag: fileID=%d, dataID=%d, EndecWay=0x%x, Kind=0x%x", ra.fileID, dataInfo.ID, endecWay, dataInfo.Kind)
 	}
 
 	// Calculate CRC32 (original data)
@@ -4355,7 +4391,9 @@ func (ra *RandomAccessor) processWritesStreaming(
 			if err != nil && err != io.EOF {
 				// If chunk doesn't exist (e.g., file was extended), treat as zero-filled
 				// This is normal when writing to a new part of the file
-				if strings.Contains(err.Error(), "not found") || strings.Contains(err.Error(), "cannot find") {
+				errStr := err.Error()
+				if strings.Contains(errStr, "not found") || strings.Contains(errStr, "cannot find") ||
+					strings.Contains(errStr, "no such file") || strings.Contains(errStr, "does not exist") {
 					DebugLog("[VFS processWritesStreaming] Chunk not found (expected for new data), zero-filling: fileID=%d, dataID=%d, chunkIdx=%d, sn=%d, pos=%d, error=%v", ra.fileID, dataInfo.ID, chunkIdx, sn, pos, err)
 					// Zero-fill the entire chunk (it's new data)
 					for i := range chunkData {
@@ -4407,7 +4445,7 @@ func (ra *RandomAccessor) processWritesStreaming(
 		}
 
 		// 3. If it's the first chunk, check file type to determine if compression is needed
-		if firstChunk && bucket != nil && bucket.CmprWay > 0 && len(chunkData) > 0 {
+		if firstChunk && cmprWay > 0 && len(chunkData) > 0 {
 			kind, _ := filetype.Match(chunkData)
 			if kind != filetype.Unknown {
 				// Not unknown type, don't compress
@@ -4460,12 +4498,13 @@ func (ra *RandomAccessor) processWritesStreaming(
 		}
 
 		// 6. Encrypt (if enabled)
+		endecKey := getEndecKeyForFS(ra.fs)
 		var encodedChunk []byte
 		var err error
-		if bucket != nil && dataInfo.Kind&core.DATA_ENDEC_AES256 != 0 {
-			encodedChunk, err = aes256.Encrypt(bucket.EndecKey, processedChunk)
-		} else if bucket != nil && dataInfo.Kind&core.DATA_ENDEC_SM4 != 0 {
-			encodedChunk, err = sm4.Sm4Cbc([]byte(bucket.EndecKey), processedChunk, true)
+		if endecKey != "" && dataInfo.Kind&core.DATA_ENDEC_AES256 != 0 {
+			encodedChunk, err = aes256.Encrypt(endecKey, processedChunk)
+		} else if endecKey != "" && dataInfo.Kind&core.DATA_ENDEC_SM4 != 0 {
+			encodedChunk, err = sm4.Sm4Cbc([]byte(endecKey), processedChunk, true)
 		} else {
 			encodedChunk = processedChunk
 		}

@@ -960,42 +960,95 @@ func (n *OrcasNode) Create(ctx context.Context, name string, flags uint32, mode 
 			}
 		}
 
-		// If O_TRUNC is set, truncate the file
+		// If O_TRUNC is set, handle file overwrite
 		if flags&syscall.O_TRUNC != 0 {
-			// Truncate file to size 0
-			existingFileObj.Size = 0
-			existingFileObj.DataID = 0
-			existingFileObj.MTime = core.Now()
-			_, err := n.fs.h.Put(n.fs.c, n.fs.bktID, []*core.ObjectInfo{existingFileObj})
-			if err != nil {
-				DebugLog("[VFS Create] ERROR: Failed to truncate existing file: fileID=%d, error=%v", existingFileID, err)
-				return nil, nil, 0, syscall.EIO
+			// Check if existing file is a .tmp file
+			isExistingTmpFile := isTempFile(existingFileObj)
+
+			if isExistingTmpFile {
+				// Existing file is a .tmp file, delete it
+				DebugLog("[VFS Create] Existing file is .tmp file, deleting it before overwrite: fileID=%d, name=%s", existingFileID, existingFileObj.Name)
+
+				// Force flush before deletion (if RandomAccessor exists)
+				if n.fs != nil {
+					if targetRA := n.fs.getRandomAccessorByFileID(existingFileID); targetRA != nil {
+						// Force flush before deletion
+						if _, err := targetRA.ForceFlush(); err != nil {
+							DebugLog("[VFS Create] WARNING: Failed to flush .tmp file before deletion: fileID=%d, error=%v", existingFileID, err)
+						}
+						// Unregister RandomAccessor
+						n.fs.unregisterRandomAccessor(existingFileID, targetRA)
+					}
+				}
+
+				// Delete the .tmp file
+				err := n.fs.h.Delete(n.fs.c, n.fs.bktID, existingFileID)
+				if err != nil {
+					DebugLog("[VFS Create] ERROR: Failed to delete .tmp file: fileID=%d, error=%v", existingFileID, err)
+					return nil, nil, 0, syscall.EIO
+				}
+
+				// Remove from caches
+				fileObjCache.Del(existingFileID)
+				n.removeChildFromDirCache(obj.ID, existingFileID)
+
+				// File was deleted, continue to create new file below
+				existingFileID = 0
+				existingFileObj = nil
+			} else {
+				// Existing file is not a .tmp file, create version before truncating
+				// This preserves file history for non-.tmp files
+				if lh, ok := n.fs.h.(*core.LocalHandler); ok {
+					err := lh.CreateVersionFromFile(n.fs.c, n.fs.bktID, existingFileID)
+					if err != nil {
+						// Log error but continue with truncate (don't fail the operation)
+						DebugLog("[VFS Create] WARNING: Failed to create version from existing file: fileID=%d, error=%v", existingFileID, err)
+					} else {
+						DebugLog("[VFS Create] Created version from existing file before truncate: fileID=%d", existingFileID)
+					}
+				}
+
+				// Truncate file to size 0
+				existingFileObj.Size = 0
+				existingFileObj.DataID = 0
+				existingFileObj.MTime = core.Now()
+				_, err := n.fs.h.Put(n.fs.c, n.fs.bktID, []*core.ObjectInfo{existingFileObj})
+				if err != nil {
+					DebugLog("[VFS Create] ERROR: Failed to truncate existing file: fileID=%d, error=%v", existingFileID, err)
+					return nil, nil, 0, syscall.EIO
+				}
 			}
 		}
 
-		// Create file node for existing file
-		fileNode := &OrcasNode{
-			fs:    n.fs,
-			objID: existingFileObj.ID,
+		// If existingFileID is still > 0, create file node for existing file
+		if existingFileID == 0 {
+			// File was deleted (was a .tmp file), continue to create new file below
+			existingFileObj = nil
+		} else {
+			// Create file node for existing file
+			fileNode := &OrcasNode{
+				fs:    n.fs,
+				objID: existingFileObj.ID,
+			}
+			fileNode.obj.Store(existingFileObj)
+
+			stableAttr := fs.StableAttr{
+				Mode: syscall.S_IFREG,
+				Ino:  uint64(existingFileObj.ID),
+			}
+
+			fileInode := n.NewInode(ctx, fileNode, stableAttr)
+
+			// Fill EntryOut
+			out.Mode = syscall.S_IFREG | 0o644
+			out.Size = uint64(existingFileObj.Size)
+			out.Mtime = uint64(existingFileObj.MTime)
+			out.Ctime = out.Mtime
+			out.Atime = out.Mtime
+			out.Ino = uint64(existingFileObj.ID)
+
+			return fileInode, fileNode, 0, 0
 		}
-		fileNode.obj.Store(existingFileObj)
-
-		stableAttr := fs.StableAttr{
-			Mode: syscall.S_IFREG,
-			Ino:  uint64(existingFileObj.ID),
-		}
-
-		fileInode := n.NewInode(ctx, fileNode, stableAttr)
-
-		// Fill EntryOut
-		out.Mode = syscall.S_IFREG | 0o644
-		out.Size = uint64(existingFileObj.Size)
-		out.Mtime = uint64(existingFileObj.MTime)
-		out.Ctime = out.Mtime
-		out.Atime = out.Mtime
-		out.Ino = uint64(existingFileObj.ID)
-
-		return fileInode, fileNode, 0, 0
 	}
 
 	// File doesn't exist, check if O_CREAT is set
@@ -1213,41 +1266,95 @@ func (n *OrcasNode) Create(ctx context.Context, name string, flags uint32, mode 
 			return nil, nil, 0, syscall.EEXIST
 		}
 
-		// If O_TRUNC is set, truncate the file
+		// If O_TRUNC is set, handle file overwrite
 		if flags&syscall.O_TRUNC != 0 {
-			existingFileObj.Size = 0
-			existingFileObj.DataID = 0
-			existingFileObj.MTime = core.Now()
-			_, err := n.fs.h.Put(n.fs.c, n.fs.bktID, []*core.ObjectInfo{existingFileObj})
-			if err != nil {
-				DebugLog("[VFS Create] ERROR: Failed to truncate existing file: fileID=%d, error=%v", existingFileID, err)
-				return nil, nil, 0, syscall.EIO
+			// Check if existing file is a .tmp file
+			isExistingTmpFile := isTempFile(existingFileObj)
+
+			if isExistingTmpFile {
+				// Existing file is a .tmp file, delete it
+				DebugLog("[VFS Create] Existing file is .tmp file, deleting it before overwrite: fileID=%d, name=%s", existingFileID, existingFileObj.Name)
+
+				// Force flush before deletion (if RandomAccessor exists)
+				if n.fs != nil {
+					if targetRA := n.fs.getRandomAccessorByFileID(existingFileID); targetRA != nil {
+						// Force flush before deletion
+						if _, err := targetRA.ForceFlush(); err != nil {
+							DebugLog("[VFS Create] WARNING: Failed to flush .tmp file before deletion: fileID=%d, error=%v", existingFileID, err)
+						}
+						// Unregister RandomAccessor
+						n.fs.unregisterRandomAccessor(existingFileID, targetRA)
+					}
+				}
+
+				// Delete the .tmp file
+				err := n.fs.h.Delete(n.fs.c, n.fs.bktID, existingFileID)
+				if err != nil {
+					DebugLog("[VFS Create] ERROR: Failed to delete .tmp file: fileID=%d, error=%v", existingFileID, err)
+					return nil, nil, 0, syscall.EIO
+				}
+
+				// Remove from caches
+				fileObjCache.Del(existingFileID)
+				n.removeChildFromDirCache(obj.ID, existingFileID)
+
+				// File was deleted, continue to create new file below
+				existingFileID = 0
+				existingFileObj = nil
+			} else {
+				// Existing file is not a .tmp file, create version before truncating
+				// This preserves file history for non-.tmp files
+				if lh, ok := n.fs.h.(*core.LocalHandler); ok {
+					err := lh.CreateVersionFromFile(n.fs.c, n.fs.bktID, existingFileID)
+					if err != nil {
+						// Log error but continue with truncate (don't fail the operation)
+						DebugLog("[VFS Create] WARNING: Failed to create version from existing file: fileID=%d, error=%v", existingFileID, err)
+					} else {
+						DebugLog("[VFS Create] Created version from existing file before truncate: fileID=%d", existingFileID)
+					}
+				}
+
+				// Truncate file to size 0
+				existingFileObj.Size = 0
+				existingFileObj.DataID = 0
+				existingFileObj.MTime = core.Now()
+				_, err := n.fs.h.Put(n.fs.c, n.fs.bktID, []*core.ObjectInfo{existingFileObj})
+				if err != nil {
+					DebugLog("[VFS Create] ERROR: Failed to truncate existing file: fileID=%d, error=%v", existingFileID, err)
+					return nil, nil, 0, syscall.EIO
+				}
 			}
 		}
 
-		// Create file node for existing file
-		fileNode := &OrcasNode{
-			fs:    n.fs,
-			objID: existingFileObj.ID,
+		// If existingFileID is still > 0, create file node for existing file
+		if existingFileID == 0 {
+			// File was deleted (was a .tmp file), continue to create new file below
+			existingFileObj = nil
+		} else {
+			// Create file node for existing file
+			fileNode := &OrcasNode{
+				fs:    n.fs,
+				objID: existingFileObj.ID,
+			}
+			fileNode.obj.Store(existingFileObj)
+
+			stableAttr := fs.StableAttr{
+				Mode: syscall.S_IFREG,
+				Ino:  uint64(existingFileObj.ID),
+			}
+
+			fileInode := n.NewInode(ctx, fileNode, stableAttr)
+
+			// Fill EntryOut
+			out.Mode = syscall.S_IFREG | 0o644
+			out.Size = uint64(existingFileObj.Size)
+			out.Mtime = uint64(existingFileObj.MTime)
+			out.Ctime = out.Mtime
+			out.Atime = out.Mtime
+			out.Ino = uint64(existingFileObj.ID)
+
+			return fileInode, fileNode, 0, 0
 		}
-		fileNode.obj.Store(existingFileObj)
-
-		stableAttr := fs.StableAttr{
-			Mode: syscall.S_IFREG,
-			Ino:  uint64(existingFileObj.ID),
-		}
-
-		fileInode := n.NewInode(ctx, fileNode, stableAttr)
-
-		// Fill EntryOut
-		out.Mode = syscall.S_IFREG | 0o644
-		out.Size = uint64(existingFileObj.Size)
-		out.Mtime = uint64(existingFileObj.MTime)
-		out.Ctime = out.Mtime
-		out.Atime = out.Mtime
-		out.Ino = uint64(existingFileObj.ID)
-
-		return fileInode, fileNode, 0, 0
 	}
 
 	// New file was created successfully, continue with file node creation
@@ -1476,22 +1583,50 @@ func (n *OrcasNode) Unlink(ctx context.Context, name string) syscall.Errno {
 	}
 
 	// Find child object
-	children, _, _, err := n.fs.h.List(n.fs.c, n.fs.bktID, obj.ID, core.ListOptions{
-		Count: core.DefaultListPageSize,
-	})
-	if err != nil {
-		return syscall.EIO
+	// IMPORTANT: Also check RandomAccessor registry for files that are being written
+	// (especially .tmp files) that may not be in List results yet
+	var targetID int64
+	var targetObj *core.ObjectInfo
+
+	// First, try to find from RandomAccessor registry (for files being written, especially .tmp files)
+	if n.fs != nil {
+		n.fs.raRegistry.Range(func(key, value interface{}) bool {
+			if fileID, ok := key.(int64); ok {
+				if ra, ok := value.(*RandomAccessor); ok && ra != nil {
+					fileObj, err := ra.getFileObj()
+					if err == nil && fileObj != nil && fileObj.PID == obj.ID && fileObj.Name == name && fileObj.Type == core.OBJ_TYPE_FILE {
+						targetID = fileID
+						targetObj = fileObj
+						DebugLog("[VFS Unlink] Found target file from RandomAccessor registry: fileID=%d, name=%s", targetID, name)
+						return false // Stop iteration
+					}
+				}
+			}
+			return true // Continue iteration
+		})
 	}
 
-	var targetID int64
-	for _, child := range children {
-		if child.Name == name && child.Type == core.OBJ_TYPE_FILE {
-			targetID = child.ID
-			break
+	// If not found in RandomAccessor registry, try to find from List
+	if targetID == 0 {
+		children, _, _, err := n.fs.h.List(n.fs.c, n.fs.bktID, obj.ID, core.ListOptions{
+			Count: core.DefaultListPageSize,
+		})
+		if err != nil {
+			return syscall.EIO
+		}
+
+		for _, child := range children {
+			if child.Name == name && child.Type == core.OBJ_TYPE_FILE {
+				targetID = child.ID
+				targetObj = child
+				DebugLog("[VFS Unlink] Found target file from List: fileID=%d, name=%s", targetID, name)
+				break
+			}
 		}
 	}
 
 	if targetID == 0 {
+		DebugLog("[VFS Unlink] ERROR: Target file not found: name=%s, parentID=%d", name, obj.ID)
 		return syscall.ENOENT
 	}
 
@@ -1525,10 +1660,16 @@ func (n *OrcasNode) Unlink(ctx context.Context, name string) syscall.Errno {
 	n.removeChildFromDirCache(obj.ID, targetID)
 
 	// Get file object to get DataID before clearing cache
-	targetObj, err := n.fs.h.Get(n.fs.c, n.fs.bktID, []int64{targetID})
-	if err == nil && len(targetObj) > 0 && targetObj[0].DataID > 0 && targetObj[0].DataID != core.EmptyDataID {
+	// Use targetObj from above if available, otherwise fetch from database
+	if targetObj == nil {
+		targetObjs, err := n.fs.h.Get(n.fs.c, n.fs.bktID, []int64{targetID})
+		if err == nil && len(targetObjs) > 0 {
+			targetObj = targetObjs[0]
+		}
+	}
+	if targetObj != nil && targetObj.DataID > 0 && targetObj.DataID != core.EmptyDataID {
 		// Clear DataInfo cache for the deleted file's DataID
-		dataInfoCacheKey := targetObj[0].DataID
+		dataInfoCacheKey := targetObj.DataID
 		dataInfoCache.Del(dataInfoCacheKey)
 		decodingReaderCache.Del(dataInfoCacheKey)
 		DebugLog("[VFS Unlink] Cleared DataInfo cache for deleted file: fileID=%d, dataID=%d", targetID, dataInfoCacheKey)
@@ -1684,12 +1825,15 @@ func (n *OrcasNode) Rename(ctx context.Context, name string, newParent fs.InodeE
 
 	// Try to find source file from RandomAccessor cache
 	// Check if this node has a RandomAccessor that matches the source file name
+	// IMPORTANT: Only match exact name here (not name without .tmp suffix)
+	// This ensures we find the correct file, especially for .tmp files
 	val := n.ra.Load()
 	if val != nil && val != releasedMarker {
 		if ra, ok := val.(*RandomAccessor); ok && ra != nil {
 			fileObj, err := ra.getFileObj()
 			if err == nil && fileObj != nil && fileObj.Name == name && fileObj.PID == obj.ID {
 				sourceID = fileObj.ID
+				DebugLog("[VFS Rename] Found source file from node RandomAccessor: sourceID=%d, name=%s", sourceID, name)
 			}
 		}
 	}
@@ -1715,16 +1859,20 @@ func (n *OrcasNode) Rename(ctx context.Context, name string, newParent fs.InodeE
 			nameWithoutTmp = name[:len(name)-4] // Remove ".tmp" suffix
 		}
 
+		// IMPORTANT: When searching for source file, prioritize exact match over name without .tmp suffix
+		// This ensures we find the .tmp file itself, not the target file with the same name (without .tmp)
+		// First pass: look for exact match (especially important for .tmp files)
 		for _, child := range children {
-			// Match exact name or name without .tmp suffix (for files that may have been auto-renamed)
-			if child.Name == name || (hasTmpSuffix && child.Name == nameWithoutTmp) {
-				// Found potential match, try to get from cache first
+			// Prioritize exact name match first
+			if child.Name == name {
+				// Found exact match, try to get from cache first
 				cacheKey := child.ID
 				if cached, ok := fileObjCache.Get(cacheKey); ok {
 					if cachedObj, ok := cached.(*core.ObjectInfo); ok && cachedObj != nil {
 						// Use cached object (may have more up-to-date information)
 						sourceID = cachedObj.ID
 						sourceObj = cachedObj
+						DebugLog("[VFS Rename] Found source file from List (exact match, cached): sourceID=%d, name=%s", sourceID, name)
 						break
 					}
 				}
@@ -1732,28 +1880,77 @@ func (n *OrcasNode) Rename(ctx context.Context, name string, newParent fs.InodeE
 				if sourceID == 0 {
 					sourceID = child.ID
 					sourceObj = child
+					DebugLog("[VFS Rename] Found source file from List (exact match, from DB): sourceID=%d, name=%s", sourceID, name)
 					break
+				}
+			}
+		}
+
+		// Second pass: if exact match not found and source name has .tmp suffix,
+		// also check for name without .tmp suffix (for files that may have been auto-renamed)
+		// But only if we haven't found an exact match
+		if sourceID == 0 && hasTmpSuffix {
+			for _, child := range children {
+				if child.Name == nameWithoutTmp {
+					// Found match without .tmp suffix, try to get from cache first
+					cacheKey := child.ID
+					if cached, ok := fileObjCache.Get(cacheKey); ok {
+						if cachedObj, ok := cached.(*core.ObjectInfo); ok && cachedObj != nil {
+							// Use cached object (may have more up-to-date information)
+							sourceID = cachedObj.ID
+							sourceObj = cachedObj
+							break
+						}
+					}
+					// If cache miss, use child from List
+					if sourceID == 0 {
+						sourceID = child.ID
+						sourceObj = child
+						break
+					}
 				}
 			}
 		}
 
 		// If still not found, try to find from RandomAccessor registry
 		// This handles cases where file is being written and may not be in List yet
+		// IMPORTANT: Prioritize exact match over name without .tmp suffix
 		if sourceID == 0 {
+			// First pass: look for exact match in RandomAccessor registry
 			n.fs.raRegistry.Range(func(key, value interface{}) bool {
 				if ra, ok := value.(*RandomAccessor); ok && ra != nil {
 					fileObj, err := ra.getFileObj()
 					if err == nil && fileObj != nil && fileObj.PID == obj.ID {
-						// Match exact name or name without .tmp suffix
-						if fileObj.Name == name || (hasTmpSuffix && fileObj.Name == nameWithoutTmp) {
+						// Prioritize exact name match first
+						if fileObj.Name == name {
 							sourceID = fileObj.ID
 							sourceObj = fileObj
+							DebugLog("[VFS Rename] Found source file from RandomAccessor registry (exact match): sourceID=%d, name=%s", sourceID, name)
 							return false // Stop iteration
 						}
 					}
 				}
 				return true // Continue iteration
 			})
+
+			// Second pass: if exact match not found and source name has .tmp suffix,
+			// also check for name without .tmp suffix (for files that may have been auto-renamed)
+			if sourceID == 0 && hasTmpSuffix {
+				n.fs.raRegistry.Range(func(key, value interface{}) bool {
+					if ra, ok := value.(*RandomAccessor); ok && ra != nil {
+						fileObj, err := ra.getFileObj()
+						if err == nil && fileObj != nil && fileObj.PID == obj.ID {
+							// Match name without .tmp suffix
+							if fileObj.Name == nameWithoutTmp {
+								sourceID = fileObj.ID
+								sourceObj = fileObj
+								return false // Stop iteration
+							}
+						}
+					}
+					return true // Continue iteration
+				})
+			}
 		}
 	} else {
 		// If found from RandomAccessor, get source object info
@@ -1774,8 +1971,11 @@ func (n *OrcasNode) Rename(ctx context.Context, name string, newParent fs.InodeE
 	}
 
 	if sourceID == 0 || sourceObj == nil {
+		DebugLog("[VFS Rename] ERROR: Source file not found: name=%s, parentID=%d", name, obj.ID)
 		return syscall.ENOENT
 	}
+
+	DebugLog("[VFS Rename] Found source file: sourceID=%d, name=%s, type=%d, PID=%d", sourceID, sourceObj.Name, sourceObj.Type, sourceObj.PID)
 
 	// Determine if source is .tmp file that will lose its .tmp suffix
 	isTmpFile := false
@@ -1898,7 +2098,13 @@ func (n *OrcasNode) Rename(ctx context.Context, name string, newParent fs.InodeE
 		}
 
 		// First, try to find from cache for each child
+		// IMPORTANT: Exclude source file itself (sourceID) when searching for existing target
+		// This ensures we find the actual target file, not the source file being renamed
 		for _, child := range targetChildren {
+			// Skip source file itself - we're looking for a different file with the same name
+			if child.ID == sourceID {
+				continue
+			}
 			// Match exact name or name without .tmp suffix (for files that may have been auto-renamed)
 			if child.Name == newName || (hasTmpSuffix && child.Name == nameWithoutTmp) {
 				// Found potential match, try to get from cache first
@@ -1906,13 +2112,17 @@ func (n *OrcasNode) Rename(ctx context.Context, name string, newParent fs.InodeE
 				if cached, ok := fileObjCache.Get(cacheKey); ok {
 					if cachedObj, ok := cached.(*core.ObjectInfo); ok && cachedObj != nil {
 						// Use cached object (may have more up-to-date information)
-						existingTargetID = cachedObj.ID
-						existingTargetObj = cachedObj
-						break
+						// Double-check it's not the source file
+						if cachedObj.ID != sourceID {
+							existingTargetID = cachedObj.ID
+							existingTargetObj = cachedObj
+							break
+						}
 					}
 				}
 				// If cache miss, use child from List
-				if existingTargetID == 0 {
+				// Double-check it's not the source file
+				if existingTargetID == 0 && child.ID != sourceID {
 					existingTargetID = child.ID
 					existingTargetObj = child
 					break
@@ -2016,6 +2226,8 @@ func (n *OrcasNode) Rename(ctx context.Context, name string, newParent fs.InodeE
 
 	// Special handling: if source is .tmp file and target exists, merge version and delete .tmp file
 	// BUT: if sourceID == existingTargetID, it's the same file (just renaming), don't merge/delete
+	DebugLog("[VFS Rename] Checking merge condition: isRemovingTmp=%v, existingTargetID=%d, sourceID=%d, sourceName=%s, targetName=%s",
+		isRemovingTmp, existingTargetID, sourceID, sourceObj.Name, newName)
 	if isRemovingTmp && existingTargetID > 0 && sourceID != existingTargetID {
 		// Source is .tmp file, target file exists (non-.tmp) and is different file
 		// Instead of renaming, we should:
@@ -2037,7 +2249,35 @@ func (n *OrcasNode) Rename(ctx context.Context, name string, newParent fs.InodeE
 			// Invalidate cache
 			cacheKey := sourceID
 			fileObjCache.Del(cacheKey)
-			n.removeChildFromDirCache(obj.ID, sourceID)
+			// Remove from parent directory cache using sourceObj.ID (the actual .tmp file ID)
+			// Use delayed double delete to prevent dirty read
+			if sourceObj.PID > 0 {
+				// First delete: immediate removal
+				n.removeChildFromDirCache(sourceObj.PID, sourceObj.ID)
+				// Delayed second delete: remove again after delay to prevent dirty read
+				go func(dirID int64, fileID int64) {
+					time.Sleep(200 * time.Millisecond)
+					if n.fs != nil {
+						tempNode := &OrcasNode{fs: n.fs, objID: dirID}
+						tempNode.removeChildFromDirCache(dirID, fileID)
+						DebugLog("[VFS Rename] Delayed second delete: Removed empty .tmp file from parent directory cache again: tmpFileID=%d, parentDirID=%d", fileID, dirID)
+					}
+				}(sourceObj.PID, sourceObj.ID)
+			}
+			// Also remove from obj.ID if different
+			if obj.ID != sourceObj.PID && obj.ID > 0 {
+				// First delete: immediate removal
+				n.removeChildFromDirCache(obj.ID, sourceObj.ID)
+				// Delayed second delete: remove again after delay to prevent dirty read
+				go func(dirID int64, fileID int64) {
+					time.Sleep(200 * time.Millisecond)
+					if n.fs != nil {
+						tempNode := &OrcasNode{fs: n.fs, objID: dirID}
+						tempNode.removeChildFromDirCache(dirID, fileID)
+						DebugLog("[VFS Rename] Delayed second delete: Removed empty .tmp file from obj.ID cache again: tmpFileID=%d, objDirID=%d", fileID, dirID)
+					}
+				}(obj.ID, sourceObj.ID)
+			}
 			DebugLog("[VFS Rename] Successfully deleted empty source .tmp file: sourceID=%d", sourceID)
 			return 0
 		}
@@ -2138,6 +2378,22 @@ func (n *OrcasNode) Rename(ctx context.Context, name string, newParent fs.InodeE
 			sourceID, existingTargetID, newVersion.ID, sourceObj.DataID, sourceObj.Size)
 
 		// 3. Delete source .tmp file
+		// First, flush and unregister RandomAccessor if exists (similar to target .tmp file deletion)
+		if n.fs != nil {
+			if sourceRA := n.fs.getRandomAccessorByFileID(sourceID); sourceRA != nil {
+				// Force flush before deletion
+				if _, flushErr := sourceRA.ForceFlush(); flushErr != nil {
+					DebugLog("[VFS Rename] WARNING: Failed to flush source .tmp file before deletion: sourceID=%d, error=%v", sourceID, flushErr)
+				}
+				// Unregister RandomAccessor
+				n.fs.unregisterRandomAccessor(sourceID, sourceRA)
+			}
+		}
+
+		// Remove from file object cache immediately (before database delete)
+		cacheKey := sourceID
+		fileObjCache.Del(cacheKey)
+
 		DebugLog("[VFS Rename] Deleting source .tmp file after merge: sourceID=%d", sourceID)
 		err = n.fs.h.Delete(n.fs.c, n.fs.bktID, sourceID)
 		if err != nil {
@@ -2148,8 +2404,46 @@ func (n *OrcasNode) Rename(ctx context.Context, name string, newParent fs.InodeE
 		}
 
 		// Update directory listing cache for both directories
-		// Remove source from old parent directory listing
-		n.removeChildFromDirCache(obj.ID, sourceID)
+		// Use delayed double delete to prevent dirty read:
+		// 1. First delete: Remove immediately from cache
+		// 2. Delayed delete: Remove again after a delay to catch any cache repopulation from stale database reads
+		// This prevents race condition where another thread reads from database (before delete completes)
+		// and repopulates the cache with the .tmp file
+		if sourceObj.PID > 0 {
+			// First delete: immediate removal
+			n.removeChildFromDirCache(sourceObj.PID, sourceObj.ID)
+			DebugLog("[VFS Rename] First delete: Removed source .tmp file from parent directory cache: tmpFileID=%d, parentDirID=%d", sourceObj.ID, sourceObj.PID)
+
+			// Delayed second delete: remove again after delay to prevent dirty read
+			go func(dirID int64, fileID int64) {
+				time.Sleep(200 * time.Millisecond) // Wait for potential cache repopulation
+				// Get fresh node reference (n may be invalid after delay)
+				if n.fs != nil {
+					// Create a temporary node to access cache removal method
+					tempNode := &OrcasNode{fs: n.fs, objID: dirID}
+					tempNode.removeChildFromDirCache(dirID, fileID)
+					DebugLog("[VFS Rename] Delayed second delete: Removed source .tmp file from parent directory cache again: tmpFileID=%d, parentDirID=%d", fileID, dirID)
+				}
+			}(sourceObj.PID, sourceObj.ID)
+		}
+		// Also remove from obj.ID if different (in case obj is not the direct parent)
+		if obj.ID != sourceObj.PID && obj.ID > 0 {
+			// First delete: immediate removal
+			n.removeChildFromDirCache(obj.ID, sourceObj.ID)
+			DebugLog("[VFS Rename] First delete: Also removed source .tmp file from obj.ID cache: tmpFileID=%d, objDirID=%d", sourceObj.ID, obj.ID)
+
+			// Delayed second delete: remove again after delay to prevent dirty read
+			go func(dirID int64, fileID int64) {
+				time.Sleep(200 * time.Millisecond) // Wait for potential cache repopulation
+				// Get fresh node reference (n may be invalid after delay)
+				if n.fs != nil {
+					// Create a temporary node to access cache removal method
+					tempNode := &OrcasNode{fs: n.fs, objID: dirID}
+					tempNode.removeChildFromDirCache(dirID, fileID)
+					DebugLog("[VFS Rename] Delayed second delete: Removed source .tmp file from obj.ID cache again: tmpFileID=%d, objDirID=%d", fileID, dirID)
+				}
+			}(obj.ID, sourceObj.ID)
+		}
 		// Update target file in new parent directory listing (if target exists)
 		// Note: Target file is updated with new data, so we need to update it in cache
 		targetObjs, err := n.fs.h.Get(n.fs.c, n.fs.bktID, []int64{existingTargetID})
@@ -2564,14 +2858,8 @@ func (n *OrcasNode) getDataReader(offset int64) (dataReader, syscall.Errno) {
 	}
 
 	// Create new reader
-	var endecKey string
-	bucket := n.fs.getBucketConfig()
-	if bucket != nil {
-		endecKey = bucket.EndecKey
-		// DebugLog("[VFS getDataReader] Bucket config: bktID=%d, endecKey length=%d", n.fs.bktID, len(endecKey))
-	} else {
-		// DebugLog("[VFS getDataReader] WARNING: Bucket config is nil: bktID=%d", n.fs.bktID)
-	}
+	// Get encryption key from OrcasFS (not from bucket config)
+	endecKey := getEndecKeyForFS(n.fs)
 
 	// Create chunkReader (dataInfo is always available here)
 	var reader *chunkReader

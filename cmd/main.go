@@ -325,9 +325,10 @@ func handleMount() {
 		Foreground:         true,
 		AllowOther:         true, // Set to true only if you need other users to access (requires user_allow_other in /etc/fuse.conf)
 		DefaultPermissions: true,
-		SDKConfig:          &sdkCfg,
+		Config:             &sdkCfg,
 		Debug:              *debug,
 		RequireKey:         *requireKey,
+		EndecKey:           sdkCfg.EndecKey, // Pass encryption key to VFS layer (not from bucket config)
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to mount filesystem: %v\n", err)
@@ -491,8 +492,8 @@ func readPassword(prompt string) (string, error) {
 	return password, err
 }
 
-func convertToSDKConfig(cfg *Config) sdk.Config {
-	sdkCfg := sdk.Config{
+func convertToSDKConfig(cfg *Config) core.Config {
+	sdkCfg := core.Config{
 		UserName: cfg.UserName,
 		Password: cfg.Password,
 		DontSync: cfg.DontSync,
@@ -502,11 +503,11 @@ func convertToSDKConfig(cfg *Config) sdk.Config {
 	// Convert RefLevel
 	switch cfg.RefLevel {
 	case "FULL":
-		sdkCfg.RefLevel = sdk.FULL
+		sdkCfg.RefLevel = core.REF_LEVEL_FULL
 	case "FAST":
-		sdkCfg.RefLevel = sdk.FAST
+		sdkCfg.RefLevel = core.REF_LEVEL_FAST
 	default:
-		sdkCfg.RefLevel = sdk.OFF
+		sdkCfg.RefLevel = core.REF_LEVEL_OFF
 	}
 
 	// Convert CmprWay
@@ -543,13 +544,13 @@ func convertToSDKConfig(cfg *Config) sdk.Config {
 	// Convert Conflict
 	switch cfg.Conflict {
 	case "RENAME":
-		sdkCfg.Conflict = sdk.RENAME
+		sdkCfg.Conflict = core.CONFLICT_RENAME
 	case "THROW":
-		sdkCfg.Conflict = sdk.THROW
+		sdkCfg.Conflict = core.CONFLICT_THROW
 	case "SKIP":
-		sdkCfg.Conflict = sdk.SKIP
+		sdkCfg.Conflict = core.CONFLICT_SKIP
 	default:
-		sdkCfg.Conflict = sdk.COVER
+		sdkCfg.Conflict = core.CONFLICT_COVER
 	}
 
 	if cfg.WorkersN > 0 {
@@ -818,47 +819,8 @@ func handleBucketManagement() {
 			ChunkSize:    0, // Use default chunk size
 		}
 
-		// Set compression configuration if provided
-		if *cmprWay != "" {
-			switch *cmprWay {
-			case "SNAPPY":
-				bucket.CmprWay = core.DATA_CMPR_SNAPPY
-			case "ZSTD":
-				bucket.CmprWay = core.DATA_CMPR_ZSTD
-			case "GZIP":
-				bucket.CmprWay = core.DATA_CMPR_GZIP
-			case "BR":
-				bucket.CmprWay = core.DATA_CMPR_BR
-			}
-		}
-		if *cmprQlty > 0 {
-			bucket.CmprQlty = uint32(*cmprQlty)
-		}
-
-		// Set encryption configuration if provided
-		if *endecWay != "" {
-			switch *endecWay {
-			case "AES256":
-				bucket.EndecWay = core.DATA_ENDEC_AES256
-			case "SM4":
-				bucket.EndecWay = core.DATA_ENDEC_SM4
-			}
-		}
-		if *endecKey != "" {
-			bucket.EndecKey = *endecKey
-		}
-
-		// Set instant upload (deduplication) configuration if provided
-		if *refLevel != "" {
-			switch *refLevel {
-			case "FULL":
-				bucket.RefLevel = 1
-			case "FAST":
-				bucket.RefLevel = 2
-			case "OFF", "NONE", "":
-				bucket.RefLevel = 0
-			}
-		}
+		// Note: Compression, encryption, and instant upload configuration are no longer stored in bucket
+		// These should be provided via core.Config when mounting filesystem or using SDK
 
 		err := admin.PutBkt(ctx, []*core.BucketInfo{bucket})
 		if err != nil {
@@ -875,20 +837,8 @@ func handleBucketManagement() {
 			fmt.Printf("  Quota: %d bytes (%.2f GB)\n", bucket.Quota, float64(bucket.Quota)/(1024*1024*1024))
 		}
 		fmt.Printf("  Owner: %s (ID: %d)\n", ownerName, ownerID)
-		if bucket.CmprWay > 0 {
-			cmprStr := getCompressionString(bucket.CmprWay)
-			fmt.Printf("  Compression: %s (level: %d)\n", cmprStr, bucket.CmprQlty)
-		}
-		if bucket.EndecWay > 0 {
-			endecStr := getEncryptionString(bucket.EndecWay)
-			fmt.Printf("  Encryption: %s\n", endecStr)
-		}
-		if bucket.RefLevel > 0 {
-			refLevelStr := getRefLevelString(bucket.RefLevel)
-			fmt.Printf("  Instant Upload: %s\n", refLevelStr)
-		} else {
-			fmt.Printf("  Instant Upload: OFF\n")
-		}
+		// Note: Compression, encryption, and instant upload configuration are no longer stored in bucket
+		// These should be provided via core.Config when mounting filesystem or using SDK
 
 	case "delete-bucket":
 		if *bucketID == 0 {
@@ -936,20 +886,8 @@ func handleBucketManagement() {
 			}
 			fmt.Printf("  Used: %d bytes (%.2f GB)\n", bkt.Used, float64(bkt.Used)/(1024*1024*1024))
 			fmt.Printf("  Real Used: %d bytes (%.2f GB)\n", bkt.RealUsed, float64(bkt.RealUsed)/(1024*1024*1024))
-			if bkt.CmprWay > 0 {
-				cmprStr := getCompressionString(bkt.CmprWay)
-				fmt.Printf("  Compression: %s (level: %d)\n", cmprStr, bkt.CmprQlty)
-			}
-			if bkt.EndecWay > 0 {
-				endecStr := getEncryptionString(bkt.EndecWay)
-				fmt.Printf("  Encryption: %s\n", endecStr)
-			}
-			if bkt.RefLevel > 0 {
-				refLevelStr := getRefLevelString(bkt.RefLevel)
-				fmt.Printf("  Instant Upload: %s\n", refLevelStr)
-			} else {
-				fmt.Printf("  Instant Upload: OFF\n")
-			}
+			// Note: Compression, encryption, and instant upload configuration are no longer stored in bucket
+			// These should be provided via core.Config when mounting filesystem or using SDK
 			fmt.Println()
 		}
 
@@ -967,59 +905,22 @@ func handleBucketManagement() {
 		}
 
 		// Update compression configuration if provided
+		// Note: Compression, encryption, and instant upload configuration are no longer stored in bucket
+		// These should be provided via core.Config when mounting filesystem or using SDK
+		// If these flags are provided, warn user that they are ignored
+		if *cmprWay != "" || *cmprQlty > 0 || *endecWay != "" || *endecKey != "" || *refLevel != "" {
+			fmt.Fprintf(os.Stderr, "Warning: Compression, encryption, and instant upload settings are no longer stored in bucket.\n")
+			fmt.Fprintf(os.Stderr, "These should be provided via core.Config when mounting filesystem or using SDK.\n")
+		}
+
+		// For now, we still need to update bucket for other fields (if any)
+		// But compression/encryption/refLevel are no longer supported
 		updated := false
-		if *cmprWay != "" {
-			switch *cmprWay {
-			case "SNAPPY":
-				bucket.CmprWay = core.DATA_CMPR_SNAPPY
-			case "ZSTD":
-				bucket.CmprWay = core.DATA_CMPR_ZSTD
-			case "GZIP":
-				bucket.CmprWay = core.DATA_CMPR_GZIP
-			case "BR":
-				bucket.CmprWay = core.DATA_CMPR_BR
-			case "NONE", "OFF", "":
-				bucket.CmprWay = 0
-			}
-			updated = true
-		}
-		if *cmprQlty > 0 {
-			bucket.CmprQlty = uint32(*cmprQlty)
-			updated = true
-		}
-
-		// Update encryption configuration if provided
-		if *endecWay != "" {
-			switch *endecWay {
-			case "AES256":
-				bucket.EndecWay = core.DATA_ENDEC_AES256
-			case "SM4":
-				bucket.EndecWay = core.DATA_ENDEC_SM4
-			case "NONE", "OFF", "":
-				bucket.EndecWay = 0
-			}
-			updated = true
-		}
-		if *endecKey != "" {
-			bucket.EndecKey = *endecKey
-			updated = true
-		}
-
-		// Update instant upload (deduplication) configuration if provided
-		if *refLevel != "" {
-			switch *refLevel {
-			case "FULL":
-				bucket.RefLevel = 1
-			case "FAST":
-				bucket.RefLevel = 2
-			case "OFF", "NONE", "":
-				bucket.RefLevel = 0
-			}
-			updated = true
-		}
+		// TODO: Add other bucket fields that can be updated here
 
 		if !updated {
-			fmt.Fprintf(os.Stderr, "Error: No configuration changes specified. Use -cmprway, -cmprqlty, -endecway, -endeckey, or -reflevel to update bucket configuration.\n")
+			fmt.Fprintf(os.Stderr, "Error: No configuration changes specified. Bucket-level compression/encryption/instant-upload settings are no longer supported.\n")
+			fmt.Fprintf(os.Stderr, "These should be provided via core.Config when mounting filesystem or using SDK.\n")
 			os.Exit(1)
 		}
 
@@ -1031,24 +932,8 @@ func handleBucketManagement() {
 		}
 
 		fmt.Printf("Bucket %d updated successfully:\n", *bucketID)
-		if bucket.CmprWay > 0 {
-			cmprStr := getCompressionString(bucket.CmprWay)
-			fmt.Printf("  Compression: %s (level: %d)\n", cmprStr, bucket.CmprQlty)
-		} else {
-			fmt.Printf("  Compression: None\n")
-		}
-		if bucket.EndecWay > 0 {
-			endecStr := getEncryptionString(bucket.EndecWay)
-			fmt.Printf("  Encryption: %s\n", endecStr)
-		} else {
-			fmt.Printf("  Encryption: None\n")
-		}
-		if bucket.RefLevel > 0 {
-			refLevelStr := getRefLevelString(bucket.RefLevel)
-			fmt.Printf("  Instant Upload: %s\n", refLevelStr)
-		} else {
-			fmt.Printf("  Instant Upload: OFF\n")
-		}
+		// Note: Compression, encryption, and instant upload configuration are no longer stored in bucket
+		// These should be provided via core.Config when mounting filesystem or using SDK
 
 	default:
 		fmt.Fprintf(os.Stderr, "Error: Unknown bucket management action: %s\n", *action)

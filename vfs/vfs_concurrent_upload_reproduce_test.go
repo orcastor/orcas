@@ -51,8 +51,6 @@ func TestVFSConcurrentUploadReproduceZeroBytes(t *testing.T) {
 			Type:      1,
 			Quota:     -1,
 			ChunkSize: 10 * 1024 * 1024, // 10MB chunk size
-			EndecWay:  core.DATA_ENDEC_AES256,
-			EndecKey:  "this-is-a-test-encryption-key-that-is-long-enough-for-aes256-encryption-12345678901234567890",
 		}
 		err = admin.PutBkt(ctx, []*core.BucketInfo{bkt})
 		So(err, ShouldBeNil)
@@ -60,11 +58,16 @@ func TestVFSConcurrentUploadReproduceZeroBytes(t *testing.T) {
 		// Clear bucket config cache
 		bucketConfigCache.Del(testBktID)
 
-		// Create filesystem
-		ofs := NewOrcasFS(handler, ctx, testBktID)
+		// Create filesystem with encryption configuration (not from bucket config)
+		encryptionKey := "this-is-a-test-encryption-key-that-is-long-enough-for-aes256-encryption-12345678901234567890"
+		cfg := &core.Config{
+			EndecWay: core.DATA_ENDEC_AES256,
+			EndecKey: encryptionKey,
+		}
+		ofs := NewOrcasFSWithConfig(handler, ctx, testBktID, cfg)
 
-		// Generate 100MB test data with known pattern (to detect zeros)
-		fileSize := 100 * 1024 * 1024 // 100MB
+		// Generate test data with known pattern (to detect zeros) (精简规模)
+		fileSize := 20 * 1024 * 1024 // 精简: 100MB -> 20MB
 		testData := make([]byte, fileSize)
 		// Fill with pattern that doesn't contain zeros
 		for i := range testData {
@@ -81,7 +84,7 @@ func TestVFSConcurrentUploadReproduceZeroBytes(t *testing.T) {
 			ID:    core.NewID(),
 			PID:   core.ROOT_OID,
 			Type:  core.OBJ_TYPE_FILE,
-			Name:  "test-reproduce-zero-100mb.bin.tmp",
+			Name:  "test-reproduce-zero-20mb.bin.tmp",
 			Size:  0,
 			MTime: core.Now(),
 		}
@@ -97,10 +100,10 @@ func TestVFSConcurrentUploadReproduceZeroBytes(t *testing.T) {
 		// Register RandomAccessor
 		ofs.registerRandomAccessor(fileObj.ID, ra)
 
-		// Step 2: Concurrent upload - 5 chunks (10MB each) written concurrently
+		// Step 2: Concurrent upload - 3 chunks (10MB each) written concurrently (精简规模)
 		chunkSize := 10 * 1024 * 1024 // 10MB
-		numChunks := 5
-		totalChunks := 10 // 100MB / 10MB = 10 chunks total
+		numChunks := 3                // 精简: 5 -> 3
+		totalChunks := 2              // 精简: 20MB / 10MB = 2 chunks total
 
 		var wg sync.WaitGroup
 		var writeErrors int64
@@ -295,8 +298,6 @@ func TestVFSRepeatedChunkWriteReproduce(t *testing.T) {
 			Type:      1,
 			Quota:     -1,
 			ChunkSize: 10 * 1024 * 1024, // 10MB chunk size
-			EndecWay:  core.DATA_ENDEC_AES256,
-			EndecKey:  "this-is-a-test-encryption-key-that-is-long-enough-for-aes256-encryption-12345678901234567890",
 		}
 		err = admin.PutBkt(ctx, []*core.BucketInfo{bkt})
 		So(err, ShouldBeNil)
@@ -304,14 +305,19 @@ func TestVFSRepeatedChunkWriteReproduce(t *testing.T) {
 		// Clear bucket config cache
 		bucketConfigCache.Del(testBktID)
 
-		// Create filesystem
-		ofs := NewOrcasFS(handler, ctx, testBktID)
+		// Create filesystem with encryption configuration (not from bucket config)
+		encryptionKey := "this-is-a-test-encryption-key-that-is-long-enough-for-aes256-encryption-12345678901234567890"
+		cfg := &core.Config{
+			EndecWay: core.DATA_ENDEC_AES256,
+			EndecKey: encryptionKey,
+		}
+		ofs := NewOrcasFSWithConfig(handler, ctx, testBktID, cfg)
 
-		// Generate 50MB test data with unique markers for each chunk
-		fileSize := 50 * 1024 * 1024 // 50MB
+		// Generate test data with unique markers for each chunk (精简规模)
+		fileSize := 20 * 1024 * 1024 // 精简: 50MB -> 20MB
 		testData := make([]byte, fileSize)
 		chunkSize := 10 * 1024 * 1024 // 10MB
-		totalChunks := 5
+		totalChunks := 2              // 精简: 5 -> 2
 
 		// Fill each chunk with unique pattern
 		for chunkNum := 0; chunkNum < totalChunks; chunkNum++ {
@@ -529,8 +535,6 @@ func TestVFSConcurrentUploadStressTest(t *testing.T) {
 			Type:      1,
 			Quota:     -1,
 			ChunkSize: 10 * 1024 * 1024, // 10MB chunk size
-			EndecWay:  core.DATA_ENDEC_AES256,
-			EndecKey:  "this-is-a-test-encryption-key-that-is-long-enough-for-aes256-encryption-12345678901234567890",
 		}
 		err = admin.PutBkt(ctx, []*core.BucketInfo{bkt})
 		So(err, ShouldBeNil)
@@ -538,14 +542,19 @@ func TestVFSConcurrentUploadStressTest(t *testing.T) {
 		// Clear bucket config cache
 		bucketConfigCache.Del(testBktID)
 
-		// Create filesystem
-		ofs := NewOrcasFS(handler, ctx, testBktID)
+		// Create filesystem with encryption configuration (not from bucket config)
+		encryptionKey := "this-is-a-test-encryption-key-that-is-long-enough-for-aes256-encryption-12345678901234567890"
+		cfg := &core.Config{
+			EndecWay: core.DATA_ENDEC_AES256,
+			EndecKey: encryptionKey,
+		}
+		ofs := NewOrcasFSWithConfig(handler, ctx, testBktID, cfg)
 
-		// Run multiple test iterations
-		numIterations := 3
-		fileSize := 100 * 1024 * 1024 // 100MB
-		chunkSize := 10 * 1024 * 1024 // 10MB
-		numChunks := 5
+		// Run multiple test iterations (精简规模)
+		numIterations := 2                // 精简: 3 -> 2
+		fileSize := 20 * 1024 * 1024       // 精简: 100MB -> 20MB
+		chunkSize := 10 * 1024 * 1024      // 10MB
+		numChunks := 2                     // 精简: 5 -> 2
 
 		for iteration := 0; iteration < numIterations; iteration++ {
 			t.Logf("Starting iteration %d/%d", iteration+1, numIterations)

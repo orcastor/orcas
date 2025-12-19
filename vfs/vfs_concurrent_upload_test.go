@@ -53,8 +53,6 @@ func TestVFSConcurrentChunkUpload(t *testing.T) {
 			Type:      1,
 			Quota:     -1,
 			ChunkSize: 10 * 1024 * 1024, // 10MB chunk size
-			EndecWay:  core.DATA_ENDEC_AES256,
-			EndecKey:  "this-is-a-test-encryption-key-that-is-long-enough-for-aes256-encryption-12345678901234567890",
 		}
 		err = admin.PutBkt(ctx, []*core.BucketInfo{bkt})
 		So(err, ShouldBeNil)
@@ -268,8 +266,6 @@ func TestVFSRepeatedChunkWrite(t *testing.T) {
 			Type:      1,
 			Quota:     -1,
 			ChunkSize: 10 * 1024 * 1024, // 10MB chunk size
-			EndecWay:  core.DATA_ENDEC_AES256,
-			EndecKey:  "this-is-a-test-encryption-key-that-is-long-enough-for-aes256-encryption-12345678901234567890",
 		}
 		err = admin.PutBkt(ctx, []*core.BucketInfo{bkt})
 		So(err, ShouldBeNil)
@@ -313,7 +309,7 @@ func TestVFSRepeatedChunkWrite(t *testing.T) {
 		ofs.registerRandomAccessor(fileObj.ID, ra)
 
 		chunkSize := 10 * 1024 * 1024 // 10MB
-		totalChunks := 5               // 50MB / 10MB = 5 chunks
+		totalChunks := 5              // 50MB / 10MB = 5 chunks
 
 		// Step 2: Write all chunks initially
 		for i := 0; i < totalChunks; i++ {
@@ -435,8 +431,6 @@ func TestVFSConcurrentChunkUploadWithWait(t *testing.T) {
 			Type:      1,
 			Quota:     -1,
 			ChunkSize: 10 * 1024 * 1024, // 10MB chunk size
-			EndecWay:  core.DATA_ENDEC_AES256,
-			EndecKey:  "this-is-a-test-encryption-key-that-is-long-enough-for-aes256-encryption-12345678901234567890",
 		}
 		err = admin.PutBkt(ctx, []*core.BucketInfo{bkt})
 		So(err, ShouldBeNil)
@@ -616,4 +610,3 @@ func TestVFSConcurrentChunkUploadWithWait(t *testing.T) {
 		t.Logf("Successfully tested concurrent chunk upload with wait: %d bytes (%.2f MB)", fileSize, float64(fileSize)/(1024*1024))
 	})
 }
-

@@ -331,15 +331,18 @@ func TestVFSRandomAccessorWithSDK(t *testing.T) {
 		})
 
 		Convey("test with encryption", func() {
-			// 设置bucket加密配置
-			bucket.EndecWay = core.DATA_ENDEC_AES256
-			bucket.EndecKey = "this-is-a-test-encryption-key-that-is-long-enough-for-aes256-encryption-12345678901234567890"
+			// 创建bucket（不再存储加密配置）
 			So(dma.PutBkt(testCtx, []*core.BucketInfo{bucket}), ShouldBeNil)
-			// 清除bucket配置缓存，确保使用新配置
+			// 清除bucket配置缓存
 			bucketConfigCache.Del(testBktID)
 
-			// 创建OrcasFS（bucket配置已包含加密设置）
-			ofs := NewOrcasFS(lh, testCtx, testBktID)
+			// 创建OrcasFS（通过OrcasFS配置加密设置，不再从bucket获取）
+			encryptionKey := "this-is-a-test-encryption-key-that-is-long-enough-for-aes256-encryption-12345678901234567890"
+			cfg := &core.Config{
+				EndecWay: core.DATA_ENDEC_AES256,
+				EndecKey: encryptionKey,
+			}
+			ofs := NewOrcasFSWithConfig(lh, testCtx, testBktID, cfg)
 
 			ra, err := NewRandomAccessor(ofs, fileID)
 			So(err, ShouldBeNil)
@@ -390,17 +393,20 @@ func TestVFSRandomAccessorWithSDK(t *testing.T) {
 		})
 
 		Convey("test with compression and encryption", func() {
-			// 设置bucket压缩和加密配置
-			bucket.CmprWay = core.DATA_CMPR_ZSTD
-			bucket.CmprQlty = 5
-			bucket.EndecWay = core.DATA_ENDEC_AES256
-			bucket.EndecKey = "this-is-a-test-encryption-key-that-is-long-enough-for-aes256-encryption-12345678901234567890"
+			// 创建bucket（不再存储压缩和加密配置）
 			So(dma.PutBkt(testCtx, []*core.BucketInfo{bucket}), ShouldBeNil)
-			// 清除bucket配置缓存，确保使用新配置
+			// 清除bucket配置缓存
 			bucketConfigCache.Del(testBktID)
 
-			// 创建OrcasFS（bucket配置已包含压缩和加密设置）
-			ofs := NewOrcasFS(lh, testCtx, testBktID)
+			// 创建OrcasFS（通过OrcasFS配置压缩和加密设置，不再从bucket获取）
+			encryptionKey := "this-is-a-test-encryption-key-that-is-long-enough-for-aes256-encryption-12345678901234567890"
+			cfg := &core.Config{
+				CmprWay:  core.DATA_CMPR_ZSTD,
+				CmprQlty: 5,
+				EndecWay: core.DATA_ENDEC_AES256,
+				EndecKey: encryptionKey,
+			}
+			ofs := NewOrcasFSWithConfig(lh, testCtx, testBktID, cfg)
 
 			ra, err := NewRandomAccessor(ofs, fileID)
 			So(err, ShouldBeNil)
@@ -445,17 +451,20 @@ func TestVFSRandomAccessorWithSDK(t *testing.T) {
 		})
 
 		Convey("test random read and write with chunk-based compression and encryption", func() {
-			// 设置bucket压缩和加密配置
-			bucket.CmprWay = core.DATA_CMPR_ZSTD
-			bucket.CmprQlty = 5
-			bucket.EndecWay = core.DATA_ENDEC_AES256
-			bucket.EndecKey = "this-is-a-test-encryption-key-that-is-long-enough-for-aes256-encryption-12345678901234567890"
+			// 创建bucket（不再存储压缩和加密配置）
 			So(dma.PutBkt(testCtx, []*core.BucketInfo{bucket}), ShouldBeNil)
-			// 清除bucket配置缓存，确保使用新配置
+			// 清除bucket配置缓存
 			bucketConfigCache.Del(testBktID)
 
-			// 创建OrcasFS（bucket配置已包含压缩和加密设置）
-			ofs := NewOrcasFS(lh, testCtx, testBktID)
+			// 创建OrcasFS（通过OrcasFS配置压缩和加密设置，不再从bucket获取）
+			encryptionKey := "this-is-a-test-encryption-key-that-is-long-enough-for-aes256-encryption-12345678901234567890"
+			cfg := &core.Config{
+				CmprWay:  core.DATA_CMPR_ZSTD,
+				CmprQlty: 5,
+				EndecWay: core.DATA_ENDEC_AES256,
+				EndecKey: encryptionKey,
+			}
+			ofs := NewOrcasFSWithConfig(lh, testCtx, testBktID, cfg)
 
 			// 创建新文件对象
 			fileID2, _ := ig.New()
@@ -556,15 +565,17 @@ func TestVFSRandomAccessorWithSDK(t *testing.T) {
 		})
 
 		Convey("test random write with overlapping chunks", func() {
-			// 设置bucket压缩配置
-			bucket.CmprWay = core.DATA_CMPR_ZSTD
-			bucket.CmprQlty = 5
+			// 创建bucket（不再存储压缩配置）
 			So(dma.PutBkt(testCtx, []*core.BucketInfo{bucket}), ShouldBeNil)
-			// 清除bucket配置缓存，确保使用新配置
+			// 清除bucket配置缓存
 			bucketConfigCache.Del(testBktID)
 
-			// 创建OrcasFS（bucket配置已包含压缩设置）
-			ofs := NewOrcasFS(lh, testCtx, testBktID)
+			// 创建OrcasFS（通过OrcasFS配置压缩设置，不再从bucket获取）
+			cfg := &core.Config{
+				CmprWay:  core.DATA_CMPR_ZSTD,
+				CmprQlty: 5,
+			}
+			ofs := NewOrcasFSWithConfig(lh, testCtx, testBktID, cfg)
 
 			// 创建新文件对象
 			fileID3, _ := ig.New()

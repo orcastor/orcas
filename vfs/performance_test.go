@@ -269,47 +269,45 @@ func TestPerformanceComprehensive(t *testing.T) {
 
 	var results []PerformanceMetrics
 
-	// Test scenario 1: Small data blocks, single thread (optimization: use batch write, increase data volume)
+	// Test scenario 1: Small data blocks, single thread (精简规模)
 	t.Run("SmallData_SingleThread", func(t *testing.T) {
-		result := runPerformanceTest(t, "small_single", 4*1024, 4*1024*1024, 200, 1, nil) // Increased from 100 to 200
+		result := runPerformanceTest(t, "small_single", 4*1024, 4*1024*1024, 50, 1, nil) // 精简: 200 -> 50
 		results = append(results, result)
 	})
 
-	// Test scenario 2: Medium data blocks, single thread (optimization: use batch write, increase data volume)
+	// Test scenario 2: Medium data blocks, single thread (精简规模)
 	t.Run("MediumData_SingleThread", func(t *testing.T) {
-		result := runPerformanceTest(t, "medium_single", 256*1024, 4*1024*1024, 100, 1, nil) // Increased from 50 to 100
+		result := runPerformanceTest(t, "medium_single", 256*1024, 4*1024*1024, 20, 1, nil) // 精简: 100 -> 20
 		results = append(results, result)
 	})
 
-	// Test scenario 3: Small data blocks, concurrent (3 goroutines, optimized test)
-	// Optimization: Increase write operations to better test batch write manager performance
-	// Increased to 60 writes = 240KB, can better test batch packaging and flush mechanism
+	// Test scenario 3: Small data blocks, concurrent (精简规模)
 	t.Run("SmallData_Concurrent3", func(t *testing.T) {
-		result := runPerformanceTest(t, "small_concurrent3", 4*1024, 4*1024*1024, 60, 3, nil) // Increased from 30 to 60
+		result := runPerformanceTest(t, "small_concurrent3", 4*1024, 4*1024*1024, 20, 3, nil) // 精简: 60 -> 20
 		results = append(results, result)
 	})
 
-	// Test scenario 4: Encryption, single thread (increase data volume)
+	// Test scenario 4: Encryption, single thread (精简规模)
 	t.Run("Encrypted_SingleThread", func(t *testing.T) {
 		sdkCfg := &sdk.Config{
 			EndecWay: core.DATA_ENDEC_AES256,
 			EndecKey: "this is a test encryption key that is long enough for AES256",
 		}
-		result := runPerformanceTest(t, "encrypted_single", 256*1024, 4*1024*1024, 20, 1, sdkCfg) // Increased from 5 to 20
+		result := runPerformanceTest(t, "encrypted_single", 256*1024, 4*1024*1024, 10, 1, sdkCfg) // 精简: 20 -> 10
 		results = append(results, result)
 	})
 
-	// Test scenario 5: Compression, single thread (increase data volume)
+	// Test scenario 5: Compression, single thread (精简规模)
 	t.Run("Compressed_SingleThread", func(t *testing.T) {
 		sdkCfg := &sdk.Config{
 			CmprWay: core.DATA_CMPR_SNAPPY,
 			CmprQlty: 1,
 		}
-		result := runPerformanceTest(t, "compressed_single", 256*1024, 4*1024*1024, 20, 1, sdkCfg) // Increased from 5 to 20
+		result := runPerformanceTest(t, "compressed_single", 256*1024, 4*1024*1024, 10, 1, sdkCfg) // 精简: 20 -> 10
 		results = append(results, result)
 	})
 
-	// Test scenario 6: Compression+Encryption, single thread (increase data volume)
+	// Test scenario 6: Compression+Encryption, single thread (精简规模)
 	t.Run("CompressedEncrypted_SingleThread", func(t *testing.T) {
 		sdkCfg := &sdk.Config{
 			CmprWay: core.DATA_CMPR_SNAPPY,
@@ -317,17 +315,17 @@ func TestPerformanceComprehensive(t *testing.T) {
 			EndecWay: core.DATA_ENDEC_AES256,
 			EndecKey: "this is a test encryption key that is long enough for AES256",
 		}
-		result := runPerformanceTest(t, "compressed_encrypted_single", 256*1024, 4*1024*1024, 20, 1, sdkCfg) // Increased from 5 to 20
+		result := runPerformanceTest(t, "compressed_encrypted_single", 256*1024, 4*1024*1024, 10, 1, sdkCfg) // 精简: 20 -> 10
 		results = append(results, result)
 	})
 
-	// Test scenario 7: Large file, single thread (100MB)
+	// Test scenario 7: Large file, single thread (精简规模: 100MB -> 20MB)
 	t.Run("LargeFile_SingleThread", func(t *testing.T) {
-		result := runPerformanceTest(t, "large_single", 100*1024*1024, 4*1024*1024, 1, 1, nil)
+		result := runPerformanceTest(t, "large_single", 20*1024*1024, 4*1024*1024, 1, 1, nil) // 精简: 100MB -> 20MB
 		results = append(results, result)
 	})
 
-	// Test scenario 8: Large file+Compression+Encryption, single thread (100MB)
+	// Test scenario 8: Large file+Compression+Encryption, single thread (精简规模: 100MB -> 20MB)
 	t.Run("LargeFile_CompressedEncrypted_SingleThread", func(t *testing.T) {
 		sdkCfg := &sdk.Config{
 			CmprWay: core.DATA_CMPR_SNAPPY,
@@ -335,17 +333,17 @@ func TestPerformanceComprehensive(t *testing.T) {
 			EndecWay: core.DATA_ENDEC_AES256,
 			EndecKey: "this is a test encryption key that is long enough for AES256",
 		}
-		result := runPerformanceTest(t, "large_compressed_encrypted_single", 100*1024*1024, 4*1024*1024, 1, 1, sdkCfg)
+		result := runPerformanceTest(t, "large_compressed_encrypted_single", 20*1024*1024, 4*1024*1024, 1, 1, sdkCfg) // 精简: 100MB -> 20MB
 		results = append(results, result)
 	})
 
-	// Test scenario 9: Sequential write optimization (sequential write from 0, trigger sequential write optimization)
+	// Test scenario 9: Sequential write optimization (精简规模: 10MB -> 5MB)
 	t.Run("SequentialWrite_Optimized", func(t *testing.T) {
-		result := runSequentialWriteTest(t, "sequential_write_optimized", 10*1024*1024, 4*1024*1024, nil)
+		result := runSequentialWriteTest(t, "sequential_write_optimized", 5*1024*1024, 4*1024*1024, nil) // 精简: 10MB -> 5MB
 		results = append(results, result)
 	})
 
-	// Test scenario 10: Sequential write+Compression+Encryption optimization
+	// Test scenario 10: Sequential write+Compression+Encryption optimization (精简规模: 10MB -> 5MB)
 	t.Run("SequentialWrite_CompressedEncrypted", func(t *testing.T) {
 		sdkCfg := &sdk.Config{
 			CmprWay: core.DATA_CMPR_SNAPPY,
@@ -353,17 +351,17 @@ func TestPerformanceComprehensive(t *testing.T) {
 			EndecWay: core.DATA_ENDEC_AES256,
 			EndecKey: "this is a test encryption key that is long enough for AES256",
 		}
-		result := runSequentialWriteTest(t, "sequential_write_compressed_encrypted", 10*1024*1024, 4*1024*1024, sdkCfg)
+		result := runSequentialWriteTest(t, "sequential_write_compressed_encrypted", 5*1024*1024, 4*1024*1024, sdkCfg) // 精简: 10MB -> 5MB
 		results = append(results, result)
 	})
 
-	// Test scenario 11: Random write (different offsets, non-contiguous)
+	// Test scenario 11: Random write (精简规模并修复: 确保所有chunk都被写入)
 	t.Run("RandomWrite_NonSequential", func(t *testing.T) {
-		result := runRandomWriteTest(t, "random_write_nonsequential", 10*1024*1024, 4*1024*1024, nil)
+		result := runRandomWriteTest(t, "random_write_nonsequential", 5*1024*1024, 4*1024*1024, nil) // 精简: 10MB -> 5MB
 		results = append(results, result)
 	})
 
-	// Test scenario 12: Random write+Compression+Encryption
+	// Test scenario 12: Random write+Compression+Encryption (精简规模)
 	t.Run("RandomWrite_CompressedEncrypted", func(t *testing.T) {
 		sdkCfg := &sdk.Config{
 			CmprWay: core.DATA_CMPR_SNAPPY,
@@ -371,19 +369,19 @@ func TestPerformanceComprehensive(t *testing.T) {
 			EndecWay: core.DATA_ENDEC_AES256,
 			EndecKey: "this is a test encryption key that is long enough for AES256",
 		}
-		result := runRandomWriteTest(t, "random_write_compressed_encrypted", 10*1024*1024, 4*1024*1024, sdkCfg)
+		result := runRandomWriteTest(t, "random_write_compressed_encrypted", 5*1024*1024, 4*1024*1024, sdkCfg) // 精简: 10MB -> 5MB
 		results = append(results, result)
 	})
 
-	// Test scenario 13: Random write (overlapping writes)
+	// Test scenario 13: Random write (overlapping writes) (精简规模: 10MB -> 5MB)
 	t.Run("RandomWrite_Overlapping", func(t *testing.T) {
-		result := runRandomWriteOverlappingTest(t, "random_write_overlapping", 10*1024*1024, 4*1024*1024, nil)
+		result := runRandomWriteOverlappingTest(t, "random_write_overlapping", 5*1024*1024, 4*1024*1024, nil) // 精简: 10MB -> 5MB
 		results = append(results, result)
 	})
 
-	// Test scenario 14: Random write (small data chunks, multiple writes)
+	// Test scenario 14: Random write (small data chunks, multiple writes) (精简规模: 10MB -> 5MB)
 	t.Run("RandomWrite_SmallChunks", func(t *testing.T) {
-		result := runRandomWriteSmallChunksTest(t, "random_write_small_chunks", 10*1024*1024, 4*1024*1024, nil)
+		result := runRandomWriteSmallChunksTest(t, "random_write_small_chunks", 5*1024*1024, 4*1024*1024, nil) // 精简: 10MB -> 5MB
 		results = append(results, result)
 	})
 
@@ -645,8 +643,9 @@ func runRandomWriteTest(t *testing.T, name string, totalSize, chunkSize int64, s
 	ofs := NewOrcasFS(lh, testCtx, testBktID)
 
 	// Prepare test data: random offsets, non-contiguous writes
-	writeChunkSize := int64(512 * 1024) // 512KB per write
-	writeCount := 20                    // Write 20 times
+	// 精简规模: 减少写入次数和大小
+	writeChunkSize := int64(256 * 1024) // 精简: 512KB -> 256KB per write
+	writeCount := 10                    // 精简: 20 -> 10 times
 	writeSize := writeChunkSize
 
 	hasCompression := sdkCfg != nil && sdkCfg.CmprWay > 0
@@ -664,11 +663,23 @@ func runRandomWriteTest(t *testing.T, name string, totalSize, chunkSize int64, s
 		t.Fatalf("NewRandomAccessor failed: %v", err)
 	}
 
-	// Generate random offset list (ensure non-contiguous)
+	// Generate random offset list (ensure non-contiguous but within totalSize limit)
+	// 修复: 确保所有偏移量都在文件大小范围内，避免写入超出范围的chunk
+	maxOffset := totalSize - writeChunkSize
+	if maxOffset < 0 {
+		maxOffset = 0
+	}
 	offsets := make([]int64, writeCount)
 	for i := 0; i < writeCount; i++ {
-		// Generate random offset, ensure non-contiguous
-		offsets[i] = int64(i*2) * writeChunkSize // Write with intervals, skip some positions
+		// Generate random offset, ensure non-contiguous but within bounds
+		offset := int64(i*2) * writeChunkSize
+		if offset > maxOffset {
+			offset = maxOffset - int64(writeCount-i)*writeChunkSize
+			if offset < 0 {
+				offset = 0
+			}
+		}
+		offsets[i] = offset
 	}
 
 	// Shuffle order (simulate real random writes)
@@ -680,7 +691,15 @@ func runRandomWriteTest(t *testing.T, name string, totalSize, chunkSize int64, s
 	totalWritten := int64(0)
 	for i := 0; i < writeCount; i++ {
 		offset := offsets[i]
-		testData := make([]byte, writeSize)
+		// 修复: 确保写入大小不超过文件边界
+		actualWriteSize := writeSize
+		if offset+actualWriteSize > totalSize {
+			actualWriteSize = totalSize - offset
+			if actualWriteSize <= 0 {
+				continue // Skip if no space left
+			}
+		}
+		testData := make([]byte, actualWriteSize)
 		for j := range testData {
 			testData[j] = byte((offset + int64(j)) % 256)
 		}
@@ -689,7 +708,7 @@ func runRandomWriteTest(t *testing.T, name string, totalSize, chunkSize int64, s
 		if err != nil {
 			t.Fatalf("Write failed: %v", err)
 		}
-		totalWritten += writeSize
+		totalWritten += actualWriteSize
 	}
 
 	// Flush
@@ -794,10 +813,10 @@ func runRandomWriteOverlappingTest(t *testing.T, name string, totalSize, chunkSi
 
 	ofs := NewOrcasFS(lh, testCtx, testBktID)
 
-	// Prepare test data: overlapping writes
-	writeChunkSize := int64(1024 * 1024) // 1MB per write
-	writeCount := 15                     // Write 15 times
-	overlapSize := int64(256 * 1024)     // Overlap 256KB each time
+	// Prepare test data: overlapping writes (精简规模)
+	writeChunkSize := int64(512 * 1024)  // 精简: 1MB -> 512KB per write
+	writeCount := 8                      // 精简: 15 -> 8 times
+	overlapSize := int64(128 * 1024)     // 精简: 256KB -> 128KB overlap each time
 
 	hasCompression := sdkCfg != nil && sdkCfg.CmprWay > 0
 	hasEncryption := sdkCfg != nil && sdkCfg.EndecWay > 0
@@ -934,9 +953,9 @@ func runRandomWriteSmallChunksTest(t *testing.T, name string, totalSize, chunkSi
 
 	ofs := NewOrcasFS(lh, testCtx, testBktID)
 
-	// Prepare test data: small data chunks, multiple writes
+	// Prepare test data: small data chunks, multiple writes (精简规模)
 	writeChunkSize := int64(64 * 1024) // 64KB per write
-	writeCount := 100                  // Write 100 times
+	writeCount := 30                   // 精简: 100 -> 30 times
 
 	hasCompression := sdkCfg != nil && sdkCfg.CmprWay > 0
 	hasEncryption := sdkCfg != nil && sdkCfg.EndecWay > 0

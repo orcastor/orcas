@@ -11,7 +11,6 @@ import (
 	"syscall"
 
 	"github.com/orcastor/orcas/core"
-	"github.com/orcastor/orcas/sdk"
 )
 
 // OrcasNode minimal implementation on Windows (currently only for testing and RandomAccessor API)
@@ -215,8 +214,8 @@ type MountOptions struct {
 	Foreground bool
 	// Thread count for Dokany (default: 5)
 	ThreadCount uint16
-	// SDK configuration (for encryption, compression, instant upload, etc.)
-	SDKConfig *sdk.Config
+	// Configuration (for encryption, compression, instant upload, etc.)
+	Config *core.Config
 	// Enable debug mode (verbose output with timestamps)
 	Debug bool
 	// RequireKey: if true, return EPERM error when KEY is not provided in context
@@ -256,7 +255,7 @@ func Mount(h core.Handler, c core.Ctx, bktID int64, opts *MountOptions) (*Dokany
 	}
 
 	// Create filesystem, pass RequireKey option
-	// Note: SDKConfig is handled separately in Windows version if needed
+	// Note: Config is handled separately in Windows version if needed
 	ofs := NewOrcasFS(h, c, bktID, opts.RequireKey)
 
 	// Set default thread count

@@ -16,6 +16,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/orca-zhang/idgen"
 	"github.com/orcastor/orcas/core"
+	"github.com/orcastor/orcas/s3"
 	"github.com/orcastor/orcas/s3/util"
 )
 
@@ -96,51 +97,51 @@ func setupTestEnvironmentForMultipart(t *testing.T) (int64, *gin.Engine) {
 	})
 
 	// 注册路由
-	router.GET("/", listBuckets)
-	router.PUT("/:bucket", createBucket)
-	router.DELETE("/:bucket", deleteBucket)
+	router.GET("/", s3.ListBuckets)
+	router.PUT("/:bucket", s3.CreateBucket)
+	router.DELETE("/:bucket", s3.DeleteBucket)
 	// 分片上传和普通操作的路由（通过查询参数区分）
 	router.GET("/:bucket", func(c *gin.Context) {
 		_, hasUploads := c.GetQuery("uploads")
 		if hasUploads {
-			listMultipartUploads(c)
+			s3.ListMultipartUploads(c)
 		} else {
-			listObjects(c)
+			s3.ListObjects(c)
 		}
 	})
 	router.GET("/:bucket/*key", func(c *gin.Context) {
 		if c.Query("uploadId") != "" && c.Request.Method == "GET" {
-			listParts(c)
+			s3.ListParts(c)
 		} else {
-			getObject(c)
+			s3.GetObject(c)
 		}
 	})
 	router.PUT("/:bucket/*key", func(c *gin.Context) {
 		if c.Query("partNumber") != "" && c.Query("uploadId") != "" {
-			uploadPart(c)
+			s3.UploadPart(c)
 		} else {
-			putObject(c)
+			s3.PutObject(c)
 		}
 	})
 	router.POST("/:bucket/*key", func(c *gin.Context) {
 		_, hasUploads := c.GetQuery("uploads")
 		uploadId := c.Query("uploadId")
 		if hasUploads {
-			initiateMultipartUpload(c)
+			s3.InitiateMultipartUpload(c)
 		} else if uploadId != "" {
-			completeMultipartUpload(c)
+			s3.CompleteMultipartUpload(c)
 		} else {
 			util.S3ErrorResponse(c, http.StatusBadRequest, "InvalidRequest", "Missing required query parameter (uploads or uploadId)")
 		}
 	})
 	router.DELETE("/:bucket/*key", func(c *gin.Context) {
 		if c.Query("uploadId") != "" {
-			abortMultipartUpload(c)
+			s3.AbortMultipartUpload(c)
 		} else {
-			deleteObject(c)
+			s3.DeleteObject(c)
 		}
 	})
-	router.HEAD("/:bucket/*key", headObject)
+	router.HEAD("/:bucket/*key", s3.HeadObject)
 
 	return testBktID, router
 }

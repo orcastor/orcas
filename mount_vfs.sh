@@ -8,7 +8,7 @@ set -e
 # 配置参数
 MOUNT_POINT="/media/ZimaOS-HD/orcas_test"
 ENCRYPTION_METHOD="AES256"  # 可选: AES256 或 SM4
-ENCRYPTION_KEY="orcas-encryption-key-12345678901234567890"  # AES256需要>16字符，SM4需要16字符
+ENCRYPTION_KEY="my-secure-encryption-key-12345678901234567890"  # AES256需要>16字符，SM4需要16字符
 #COMPRESSION_METHOD="ZSTD"   # 可选: SNAPPY, ZSTD, GZIP, BR
 #COMPRESSION_LEVEL=5         # 压缩级别
 

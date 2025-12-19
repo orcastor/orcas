@@ -2284,8 +2284,8 @@ func formatMultipartUploadKey(bktID int64, uploadID string) string {
 	return fmt.Sprintf("%d:%s", bktID, uploadID)
 }
 
-// initiateMultipartUpload handles POST /{bucket}/{key}?uploads - InitiateMultipartUpload
-func initiateMultipartUpload(c *gin.Context) {
+// InitiateMultipartUpload handles POST /{bucket}/{key}?uploads - InitiateMultipartUpload
+func InitiateMultipartUpload(c *gin.Context) {
 	bucketName := c.Param("bucket")
 	key := c.Param("key")
 	key = util.FastTrimPrefix(key, "/")
@@ -2353,8 +2353,8 @@ func initiateMultipartUpload(c *gin.Context) {
 	c.XML(http.StatusOK, result)
 }
 
-// uploadPart handles PUT /{bucket}/{key}?partNumber={partNumber}&uploadId={uploadId} - UploadPart
-func uploadPart(c *gin.Context) {
+// UploadPart handles PUT /{bucket}/{key}?partNumber={partNumber}&uploadId={uploadId} - UploadPart
+func UploadPart(c *gin.Context) {
 	bucketName := c.Param("bucket")
 	key := c.Param("key")
 	key = util.FastTrimPrefix(key, "/")
@@ -2487,8 +2487,8 @@ func uploadPart(c *gin.Context) {
 	c.Status(http.StatusOK)
 }
 
-// completeMultipartUpload handles POST /{bucket}/{key}?uploadId={uploadId} - CompleteMultipartUpload
-func completeMultipartUpload(c *gin.Context) {
+// CompleteMultipartUpload handles POST /{bucket}/{key}?uploadId={uploadId} - CompleteMultipartUpload
+func CompleteMultipartUpload(c *gin.Context) {
 	bucketName := c.Param("bucket")
 	key := c.Param("key")
 	key = util.FastTrimPrefix(key, "/")
@@ -2726,8 +2726,8 @@ func completeMultipartUpload(c *gin.Context) {
 	c.XML(http.StatusOK, result)
 }
 
-// abortMultipartUpload handles DELETE /{bucket}/{key}?uploadId={uploadId} - AbortMultipartUpload
-func abortMultipartUpload(c *gin.Context) {
+// AbortMultipartUpload handles DELETE /{bucket}/{key}?uploadId={uploadId} - AbortMultipartUpload
+func AbortMultipartUpload(c *gin.Context) {
 	bucketName := c.Param("bucket")
 	key := c.Param("key")
 	key = util.FastTrimPrefix(key, "/")
@@ -2783,8 +2783,8 @@ func abortMultipartUpload(c *gin.Context) {
 	c.Status(http.StatusNoContent)
 }
 
-// listMultipartUploads handles GET /{bucket}?uploads - ListMultipartUploads
-func listMultipartUploads(c *gin.Context) {
+// ListMultipartUploads handles GET /{bucket}?uploads - ListMultipartUploads
+func ListMultipartUploads(c *gin.Context) {
 	bucketName := c.Param("bucket")
 	if bucketName == "" {
 		util.S3ErrorResponse(c, http.StatusBadRequest, "InvalidRequest", "Bucket name is required")
@@ -2889,8 +2889,8 @@ func listMultipartUploads(c *gin.Context) {
 	c.XML(http.StatusOK, result)
 }
 
-// listParts handles GET /{bucket}/{key}?uploadId={uploadId} - ListParts
-func listParts(c *gin.Context) {
+// ListParts handles GET /{bucket}/{key}?uploadId={uploadId} - ListParts
+func ListParts(c *gin.Context) {
 	bucketName := c.Param("bucket")
 	key := c.Param("key")
 	key = util.FastTrimPrefix(key, "/")

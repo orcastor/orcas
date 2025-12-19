@@ -26,12 +26,6 @@ type BucketInfo struct {
 	LogicalUsed  int64  `borm:"logical_used" json:"lu,omitempty"`  // Logical occupancy, counts logical size of all valid objects (not deleted, PID >= 0) considering deduplication but excluding deleted objects
 	DedupSavings int64  `borm:"dedup_savings" json:"ds,omitempty"` // Instant upload space savings, counts deduplicated data savings (LogicalUsed - unique data block size)
 	ChunkSize    int64  `borm:"chunk_size" json:"cs,omitempty"`    // Chunk size (bytes), must be >0 (defaults to system chunk size)
-	Key          string `borm:"key" json:"k,omitempty"`            // Database encryption key
-	CmprWay      uint32 `borm:"cmpr_way" json:"cw,omitempty"`      // Compression method (DATA_CMPR_MASK), default is smart compression (checks file type)
-	CmprQlty     uint32 `borm:"cmpr_qlty" json:"cq,omitempty"`     // Compression quality
-	EndecWay     uint32 `borm:"endec_way" json:"ew,omitempty"`     // Encryption method (DATA_ENDEC_MASK)
-	EndecKey     string `borm:"endec_key" json:"ek,omitempty"`     // Encryption key
-	RefLevel     uint32 `borm:"ref_level" json:"rl,omitempty"`     // Instant upload level: 0=OFF, 1=FULL, 2=FAST
 	// SnapshotID int64 // Latest snapshot version ID
 }
 
@@ -232,6 +226,30 @@ type MetadataAdapter interface {
 	UserMetadataAdapter
 	DataMetadataAdapter
 	ObjectMetadataAdapter
+}
+
+// EscapeSQLString 转义SQL字符串，只遍历一次字符串
+// 将单引号 ' 转义为 ”，防止SQL注入
+func EscapeSQLString(s string) string {
+	// 先检查是否包含需要转义的字符，避免不必要的内存分配
+	if !strings.Contains(s, "'") {
+		return s
+	}
+
+	// 预估容量：每个单引号会变成两个，所以最多需要2倍长度
+	var builder strings.Builder
+	builder.Grow(len(s) + strings.Count(s, "'"))
+
+	// 只遍历一次字符串
+	for _, r := range s {
+		if r == '\'' {
+			builder.WriteString("''")
+		} else {
+			builder.WriteRune(r)
+		}
+	}
+
+	return builder.String()
 }
 
 func GetDB(c ...interface{}) (*sql.DB, error) {
@@ -472,11 +490,11 @@ func ChangeDBKey(oldKey, newKey string) error {
 	// while any connection is open
 	dbOld.Close()
 	dbNew.Close()
-	
+
 	// Wait for connections to fully close (especially important on Windows)
 	// SQLite connections may take a moment to fully release file handles
 	time.Sleep(100 * time.Millisecond)
-	
+
 	// Retry renaming with exponential backoff (up to 5 attempts)
 	// This handles cases where connections haven't fully closed yet
 	var renameErr error
@@ -495,7 +513,7 @@ func ChangeDBKey(oldKey, newKey string) error {
 		dbOld.Close()
 		dbNew.Close()
 	}
-	
+
 	// Step 7: Replace old database with new one
 	// Backup old database first
 	if renameErr != nil {
@@ -1143,6 +1161,54 @@ func toDelim(field string, o *ObjectInfo) string {
 	return fmt.Sprintf("%v:%d", d, o.ID)
 }
 
+// escapeLikePattern escapes special characters in a LIKE pattern for SQLite
+// Converts wildcards: * -> %, ? -> _
+// Escapes SQL special characters: ' -> ”
+// This prevents SQL injection and ensures proper pattern matching
+// 只遍历字符串一次，提高性能
+func escapeLikePattern(pattern string) string {
+	var builder strings.Builder
+	changed := false
+
+	// 只遍历一次字符串，同时处理通配符转换和SQL转义
+	for i, r := range pattern {
+		switch r {
+		case '*':
+			if !changed {
+				// 第一次遇到需要处理的字符，初始化builder并写入之前的内容
+				// 使用保守的容量预估：原长度的1.5倍（考虑单引号可能翻倍）
+				builder.Grow(len(pattern) + len(pattern)/2)
+				builder.WriteString(pattern[:i])
+				changed = true
+			}
+			builder.WriteRune('%')
+		case '?':
+			if !changed {
+				builder.Grow(len(pattern) + len(pattern)/2)
+				builder.WriteString(pattern[:i])
+				changed = true
+			}
+			builder.WriteRune('_')
+		case '\'':
+			if !changed {
+				builder.Grow(len(pattern) + len(pattern)/2)
+				builder.WriteString(pattern[:i])
+				changed = true
+			}
+			builder.WriteString("''")
+		default:
+			if changed {
+				builder.WriteRune(r)
+			}
+		}
+	}
+
+	if !changed {
+		return pattern
+	}
+	return builder.String()
+}
+
 func doOrder(delim, order string, conds *[]interface{}) (string, string) {
 	// 处理order
 	if order == "" {
@@ -1184,7 +1250,9 @@ func (dma *DefaultMetadataAdapter) ListObj(c Ctx, bktID, pid int64,
 	if wd != "" {
 		if strings.ContainsAny(wd, "*?") {
 			// sqlite 分支使用 LIKE 模式匹配
-			conds = append(conds, fmt.Sprintf("name LIKE '%s'", strings.ReplaceAll(strings.ReplaceAll(wd, "*", "%"), "?", "_")))
+			// 使用转义方法处理通配符和特殊字符
+			pattern := escapeLikePattern(wd)
+			conds = append(conds, fmt.Sprintf("name LIKE '%s'", pattern))
 		} else {
 			conds = append(conds, b.Eq("name", wd))
 		}
@@ -1718,7 +1786,9 @@ func (dma *DefaultMetadataAdapter) ListRecycleBin(c Ctx, bktID int64, opt ListOp
 	if opt.Word != "" {
 		if strings.ContainsAny(opt.Word, "*?") {
 			// SQLite branch uses LIKE pattern matching
-			conds = append(conds, fmt.Sprintf("name LIKE '%s'", strings.ReplaceAll(strings.ReplaceAll(opt.Word, "*", "%"), "?", "_")))
+			// 使用转义方法处理通配符和特殊字符
+			pattern := escapeLikePattern(opt.Word)
+			conds = append(conds, fmt.Sprintf("name LIKE '%s'", pattern))
 		} else {
 			conds = append(conds, b.Eq("name", opt.Word))
 		}

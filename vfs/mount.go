@@ -12,7 +12,6 @@ import (
 
 	"github.com/hanwen/go-fuse/v2/fuse"
 	"github.com/orcastor/orcas/core"
-	"github.com/orcastor/orcas/sdk"
 )
 
 // MountOptions mount options
@@ -27,12 +26,22 @@ type MountOptions struct {
 	AllowOther bool
 	// Default permissions
 	DefaultPermissions bool
-	// SDK configuration (for encryption, compression, instant upload, etc.)
-	SDKConfig *sdk.Config
+	// Configuration (for encryption, compression, instant upload, etc.)
+	Config *core.Config
 	// Enable debug mode (verbose output with timestamps)
 	Debug bool
 	// RequireKey: if true, return EPERM error when KEY is not provided in context
 	RequireKey bool
+	// BasePath: Base path for metadata (database storage location)
+	// If empty, uses global ORCAS_BASE environment variable
+	BasePath string
+	// DataPath: Data path for file data storage location
+	// If empty, uses global ORCAS_DATA environment variable
+	DataPath string
+	// EndecKey: Encryption key for data encryption/decryption
+	// If empty, encryption key will not be used (data will not be encrypted/decrypted)
+	// This overrides bucket config EndecKey
+	EndecKey string
 }
 
 // Mount mounts ORCAS filesystem
@@ -67,8 +76,41 @@ func Mount(h core.Handler, c core.Ctx, bktID int64, opts *MountOptions) (*fuse.S
 		SetDebugEnabled(true)
 	}
 
-	// Create filesystem
-	ofs := NewOrcasFS(h, c, bktID, opts.RequireKey)
+	// Create filesystem with configuration from Config
+	// Use Config if provided, otherwise create empty config
+	var cfg *core.Config
+	if opts.Config != nil {
+		cfg = opts.Config
+		// Override with explicit paths and EndecKey if provided (for backward compatibility)
+		if opts.BasePath != "" || opts.DataPath != "" || opts.EndecKey != "" {
+			newCfg := *cfg
+			if opts.BasePath != "" {
+				newCfg.BasePath = opts.BasePath
+			}
+			if opts.DataPath != "" {
+				newCfg.DataPath = opts.DataPath
+			}
+			if opts.EndecKey != "" {
+				newCfg.EndecKey = opts.EndecKey
+			}
+			cfg = &newCfg
+		}
+	} else if opts.BasePath != "" || opts.DataPath != "" || opts.EndecKey != "" {
+		// For backward compatibility: if only paths or EndecKey is provided, create config
+		cfg = &core.Config{
+			BasePath: opts.BasePath,
+			DataPath: opts.DataPath,
+			EndecKey: opts.EndecKey,
+		}
+	}
+
+	// Create filesystem with full configuration
+	var ofs *OrcasFS
+	if cfg != nil {
+		ofs = NewOrcasFSWithConfig(h, c, bktID, cfg, opts.RequireKey)
+	} else {
+		ofs = NewOrcasFS(h, c, bktID, opts.RequireKey)
+	}
 
 	// Build FUSE mount options
 	fuseOpts := &fuse.MountOptions{

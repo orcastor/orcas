@@ -722,15 +722,9 @@ func (osi *OrcasSDKImpl) downloadFile(c core.Ctx, bktID int64, o *core.ObjectInf
 	b := bufio.NewWriter(f)
 	defer b.Flush()
 
-	// Get encryption key: use SDK config first, fallback to bucket config if empty
+	// Get encryption key from SDK config
+	// EndecKey is no longer stored in bucket config, should be provided via SDK config
 	endecKey := osi.cfg.EndecKey
-	if endecKey == "" {
-		// Try to get encryption key from bucket configuration
-		bucket, err := osi.h.GetBktInfo(c, bktID)
-		if err == nil && bucket != nil && bucket.EndecKey != "" {
-			endecKey = bucket.EndecKey
-		}
-	}
 
 	// Check if encryption is required but key is missing
 	if d.Kind&core.DATA_ENDEC_MASK != 0 && endecKey == "" {
