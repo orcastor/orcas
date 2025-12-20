@@ -68,7 +68,6 @@ func TestInitDBWithKey(t *testing.T) {
 }
 
 func TestChangeDBKey(t *testing.T) {
-	t.Skip("TestChangeDBKey is temporarily disabled, will be fixed later")
 	Convey("ChangeDBKey", t, func() {
 		// Create temporary directory
 		tmpDir, err := os.MkdirTemp("", "orcas_test_*")
@@ -461,7 +460,6 @@ func TestGetDBWithKey(t *testing.T) {
 }
 
 func TestChangeDBKeyEdgeCases(t *testing.T) {
-	t.Skip("TestChangeDBKeyEdgeCases is temporarily disabled, will be fixed later")
 	Convey("ChangeDBKey edge cases", t, func() {
 		// Create temporary directory
 		tmpDir, err := os.MkdirTemp("", "orcas_test_*")

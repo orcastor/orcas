@@ -414,7 +414,7 @@ func TestListObj(t *testing.T) {
 		CleanTestDB(testBktID)
 		CleanTestBucketData(testBktID)
 		InitDB() // Initialize main database first
-		InitBucketDB(context.TODO(), testBktID)
+		InitBucketDB(c, testBktID)
 
 		dma := &DefaultMetadataAdapter{}
 		pid, _ := ig.New()

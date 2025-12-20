@@ -125,26 +125,19 @@ func TestTmpFileMergeAndDirectoryListing(t *testing.T) {
 		So(foundTmpBefore, ShouldBeTrue)
 
 		// Step 4: Rename .tmp file to target file name (this should trigger merge and delete .tmp file)
-		// Use the filesystem's root node (properly initialized)
-		rootNode := ofs.root
-		if rootNode == nil {
-			// If root node is not initialized, create it
-			rootNode = &OrcasNode{
+		// On non-Windows platforms, root node may not be initialized until Mount is called
+		// So we need to initialize it manually for testing
+		if ofs.root == nil {
+			ofs.root = &OrcasNode{
 				fs:     ofs,
 				objID:  core.ROOT_OID,
 				isRoot: true,
 			}
 		}
+		rootNode := ofs.root
 
 		// Get target file node (as newParent, which is the same as root in this case)
-		targetNode := ofs.root
-		if targetNode == nil {
-			targetNode = &OrcasNode{
-				fs:     ofs,
-				objID:  core.ROOT_OID,
-				isRoot: true,
-			}
-		}
+		targetNode := rootNode
 
 		// Rename .tmp file to target file name
 		errno := rootNode.Rename(context.Background(), tmpFileName, targetNode, targetFileName, 0)

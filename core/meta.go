@@ -794,7 +794,7 @@ func (dma *DefaultMetadataAdapter) RefData(c Ctx, bktID int64, d []*DataInfo) ([
 		b.Join(`on a.os=b.os and a.h=b.h and 
 			(b.x=0 or b.s0=0 or (a.x=b.x and a.s0=b.s0 and a.s1=b.s1 and a.s2=b.s2 and a.s3=b.s3))`),
 		b.GroupBy("b.os", "b.h", "b.x", "b.s0", "b.s1", "b.s2", "b.s3")); err != nil {
-		return nil, ERR_QUERY_DB
+		return nil, fmt.Errorf("%w: RefData join query failed (bktID=%d, tempTable=%s): %v", ERR_QUERY_DB, bktID, tbl, err)
 	}
 	// 删除临时表
 	db.Exec(`DROP TABLE ` + tbl)
@@ -847,8 +847,45 @@ func (dma *DefaultMetadataAdapter) PutData(c Ctx, bktID int64, d []*DataInfo) er
 	}
 	// Note: Don't close the connection, it's from the pool
 
-	if _, err = b.TableContext(c, db, DATA_TBL).ReplaceInto(&d); err != nil {
-		return ERR_EXEC_DB
+	// Convert uint64 fields to int64 for SQLite compatibility
+	// SQLite's go-sqlite3 driver doesn't support uint64 values with high bit set
+	type DataInfoForDB struct {
+		ID        int64  `borm:"id"`
+		Size      int64  `borm:"size"`
+		OrigSize  int64  `borm:"os"`
+		HdrXXH3   int64  `borm:"h"`   // Convert uint64 to int64
+		XXH3      int64  `borm:"x"`   // Convert uint64 to int64
+		SHA256_0  int64  `borm:"s0"`
+		SHA256_1  int64  `borm:"s1"`
+		SHA256_2  int64  `borm:"s2"`
+		SHA256_3  int64  `borm:"s3"`
+		Cksum     int64  `borm:"c"`   // Convert uint64 to int64
+		Kind      uint32 `borm:"kind"`
+		PkgID     int64  `borm:"pi"`
+		PkgOffset uint32 `borm:"po"`
+	}
+	
+	dataForDB := make([]*DataInfoForDB, len(d))
+	for i, di := range d {
+		dataForDB[i] = &DataInfoForDB{
+			ID:        di.ID,
+			Size:      di.Size,
+			OrigSize:  di.OrigSize,
+			HdrXXH3:   int64(di.HdrXXH3),
+			XXH3:      int64(di.XXH3),
+			SHA256_0:  di.SHA256_0,
+			SHA256_1:  di.SHA256_1,
+			SHA256_2:  di.SHA256_2,
+			SHA256_3:  di.SHA256_3,
+			Cksum:     int64(di.Cksum),
+			Kind:      di.Kind,
+			PkgID:     di.PkgID,
+			PkgOffset: di.PkgOffset,
+		}
+	}
+
+	if _, err = b.TableContext(c, db, DATA_TBL).ReplaceInto(&dataForDB); err != nil {
+		return fmt.Errorf("%w: PutData failed (bktID=%d, count=%d): %v", ERR_EXEC_DB, bktID, len(d), err)
 	}
 	return nil
 }
@@ -861,9 +898,43 @@ func (dma *DefaultMetadataAdapter) GetData(c Ctx, bktID, id int64) (d *DataInfo,
 	}
 	// Note: Don't close the connection, it's from the pool
 
-	d = &DataInfo{}
-	if _, err = b.TableContext(c, db, DATA_TBL).Select(d, b.Where(b.Eq("id", id))); err != nil {
-		return nil, ERR_QUERY_DB
+	// Use intermediate struct to handle uint64 conversion
+	type DataInfoFromDB struct {
+		ID        int64  `borm:"id"`
+		Size      int64  `borm:"size"`
+		OrigSize  int64  `borm:"os"`
+		HdrXXH3   int64  `borm:"h"`   // Read as int64, convert to uint64
+		XXH3      int64  `borm:"x"`   // Read as int64, convert to uint64
+		SHA256_0  int64  `borm:"s0"`
+		SHA256_1  int64  `borm:"s1"`
+		SHA256_2  int64  `borm:"s2"`
+		SHA256_3  int64  `borm:"s3"`
+		Cksum     int64  `borm:"c"`   // Read as int64, convert to uint64
+		Kind      uint32 `borm:"kind"`
+		PkgID     int64  `borm:"pi"`
+		PkgOffset uint32 `borm:"po"`
+	}
+	
+	diFromDB := &DataInfoFromDB{}
+	if _, err = b.TableContext(c, db, DATA_TBL).Select(diFromDB, b.Where(b.Eq("id", id))); err != nil {
+		return nil, fmt.Errorf("%w: GetData failed (bktID=%d, dataID=%d): %v", ERR_QUERY_DB, bktID, id, err)
+	}
+	
+	// Convert back to DataInfo
+	d = &DataInfo{
+		ID:        diFromDB.ID,
+		Size:      diFromDB.Size,
+		OrigSize:  diFromDB.OrigSize,
+		HdrXXH3:   uint64(diFromDB.HdrXXH3),
+		XXH3:      uint64(diFromDB.XXH3),
+		SHA256_0:  diFromDB.SHA256_0,
+		SHA256_1:  diFromDB.SHA256_1,
+		SHA256_2:  diFromDB.SHA256_2,
+		SHA256_3:  diFromDB.SHA256_3,
+		Cksum:     uint64(diFromDB.Cksum),
+		Kind:      diFromDB.Kind,
+		PkgID:     diFromDB.PkgID,
+		PkgOffset: diFromDB.PkgOffset,
 	}
 	return
 }
@@ -878,21 +949,60 @@ func (dma *DefaultMetadataAdapter) ListAllData(c Ctx, bktID int64, offset, limit
 
 	// Get total count
 	if _, err = b.TableContext(c, db, DATA_TBL).Select(&total, b.Fields("count(1)")); err != nil {
-		return nil, 0, ERR_QUERY_DB
+		return nil, 0, fmt.Errorf("%w: ListAllData count failed (bktID=%d): %v", ERR_QUERY_DB, bktID, err)
 	}
 
+	// Use intermediate struct to handle uint64 conversion
+	type DataInfoFromDB struct {
+		ID        int64  `borm:"id"`
+		Size      int64  `borm:"size"`
+		OrigSize  int64  `borm:"os"`
+		HdrXXH3   int64  `borm:"h"`
+		XXH3      int64  `borm:"x"`
+		SHA256_0  int64  `borm:"s0"`
+		SHA256_1  int64  `borm:"s1"`
+		SHA256_2  int64  `borm:"s2"`
+		SHA256_3  int64  `borm:"s3"`
+		Cksum     int64  `borm:"c"`
+		Kind      uint32 `borm:"kind"`
+		PkgID     int64  `borm:"pi"`
+		PkgOffset uint32 `borm:"po"`
+	}
+	
+	var dFromDB []*DataInfoFromDB
+	
 	// Paginated query: use borm to implement LIMIT and OFFSET
 	if limit > 0 {
-		_, err = b.TableContext(c, db, DATA_TBL).Select(&d,
+		_, err = b.TableContext(c, db, DATA_TBL).Select(&dFromDB,
 			b.OrderBy("id"),
 			b.Limit(limit, offset))
 		if err != nil {
-			return nil, 0, ERR_QUERY_DB
+			return nil, 0, fmt.Errorf("%w: ListAllData select failed (bktID=%d, offset=%d, limit=%d): %v", ERR_QUERY_DB, bktID, offset, limit, err)
 		}
 	} else {
 		// limit=0 means get all (for backward compatibility, but not recommended)
-		if _, err = b.TableContext(c, db, DATA_TBL).Select(&d); err != nil {
-			return nil, 0, ERR_QUERY_DB
+		if _, err = b.TableContext(c, db, DATA_TBL).Select(&dFromDB); err != nil {
+			return nil, 0, fmt.Errorf("%w: ListAllData select all failed (bktID=%d): %v", ERR_QUERY_DB, bktID, err)
+		}
+	}
+	
+	// Convert back to DataInfo
+	d = make([]*DataInfo, len(dFromDB))
+	for i, di := range dFromDB {
+		d[i] = &DataInfo{
+			ID:        di.ID,
+			Size:      di.Size,
+			OrigSize:  di.OrigSize,
+			HdrXXH3:   uint64(di.HdrXXH3),
+			XXH3:      uint64(di.XXH3),
+			SHA256_0:  di.SHA256_0,
+			SHA256_1:  di.SHA256_1,
+			SHA256_2:  di.SHA256_2,
+			SHA256_3:  di.SHA256_3,
+			Cksum:     uint64(di.Cksum),
+			Kind:      di.Kind,
+			PkgID:     di.PkgID,
+			PkgOffset: di.PkgOffset,
 		}
 	}
 	return
@@ -935,7 +1045,7 @@ func (dma *DefaultMetadataAdapter) FindDuplicateData(c Ctx, bktID int64, offset,
 		b.Where(whereConds...),
 		b.GroupBy("os", "h", "x", "s0", "s1", "s2", "s3"),
 		b.OrderBy("min(id)")); err != nil {
-		return nil, 0, ERR_QUERY_DB
+		return nil, 0, fmt.Errorf("%w: FindDuplicateData query failed (bktID=%d): %v", ERR_QUERY_DB, bktID, err)
 	}
 
 	// 过滤出重复的组（count > 1）
@@ -1011,7 +1121,7 @@ func (dma *DefaultMetadataAdapter) UpdateObjDataID(c Ctx, bktID int64, oldDataID
 	if _, err = b.TableContext(c, db, OBJ_TBL).Update(updateObj,
 		b.Fields("did"),
 		b.Where(b.Eq("did", oldDataID))); err != nil {
-		return ERR_EXEC_DB
+		return fmt.Errorf("%w: UpdateObjDataID failed (bktID=%d, oldDataID=%d, newDataID=%d): %v", ERR_EXEC_DB, bktID, oldDataID, newDataID, err)
 	}
 	return nil
 }
@@ -1030,7 +1140,7 @@ func (dma *DefaultMetadataAdapter) DeleteData(c Ctx, bktID int64, dataIDs []int6
 	// 批量删除数据元信息
 	_, err = b.TableContext(c, db, DATA_TBL).Delete(b.Where(b.In("id", dataIDs)))
 	if err != nil {
-		return ERR_EXEC_DB
+		return fmt.Errorf("%w: DeleteData failed (bktID=%d, dataIDsCount=%d): %v", ERR_EXEC_DB, bktID, len(dataIDs), err)
 	}
 	return nil
 }
@@ -1053,25 +1163,64 @@ func (dma *DefaultMetadataAdapter) FindSmallPackageData(c Ctx, bktID int64, maxS
 	if _, err = b.TableContext(c, db, DATA_TBL).Select(&total,
 		b.Fields("count(1)"),
 		b.Where(conds...)); err != nil {
-		return nil, 0, ERR_QUERY_DB
+		return nil, 0, fmt.Errorf("%w: FindSmallPackageData count failed (bktID=%d, maxSize=%d): %v", ERR_QUERY_DB, bktID, maxSize, err)
 	}
 
+	// Use intermediate struct to handle uint64 conversion
+	type DataInfoFromDB struct {
+		ID        int64  `borm:"id"`
+		Size      int64  `borm:"size"`
+		OrigSize  int64  `borm:"os"`
+		HdrXXH3   int64  `borm:"h"`
+		XXH3      int64  `borm:"x"`
+		SHA256_0  int64  `borm:"s0"`
+		SHA256_1  int64  `borm:"s1"`
+		SHA256_2  int64  `borm:"s2"`
+		SHA256_3  int64  `borm:"s3"`
+		Cksum     int64  `borm:"c"`
+		Kind      uint32 `borm:"kind"`
+		PkgID     int64  `borm:"pi"`
+		PkgOffset uint32 `borm:"po"`
+	}
+	
+	var dFromDB []*DataInfoFromDB
+	
 	// Paginated query: use borm to implement LIMIT and OFFSET
 	if limit > 0 {
-		_, err = b.TableContext(c, db, DATA_TBL).Select(&d,
+		_, err = b.TableContext(c, db, DATA_TBL).Select(&dFromDB,
 			b.Where(conds...),
 			b.OrderBy("id"),
 			b.Limit(limit, offset))
 		if err != nil {
-			return nil, 0, ERR_QUERY_DB
+			return nil, 0, fmt.Errorf("%w: FindSmallPackageData select failed (bktID=%d, maxSize=%d, offset=%d, limit=%d): %v", ERR_QUERY_DB, bktID, maxSize, offset, limit, err)
 		}
 	} else {
 		// limit=0 means get all (for backward compatibility, but not recommended)
-		_, err = b.TableContext(c, db, DATA_TBL).Select(&d,
+		_, err = b.TableContext(c, db, DATA_TBL).Select(&dFromDB,
 			b.Where(conds...),
 			b.OrderBy("id"))
 		if err != nil {
-			return nil, 0, ERR_QUERY_DB
+			return nil, 0, fmt.Errorf("%w: FindSmallPackageData select all failed (bktID=%d, maxSize=%d): %v", ERR_QUERY_DB, bktID, maxSize, err)
+		}
+	}
+	
+	// Convert back to DataInfo
+	d = make([]*DataInfo, len(dFromDB))
+	for i, di := range dFromDB {
+		d[i] = &DataInfo{
+			ID:        di.ID,
+			Size:      di.Size,
+			OrigSize:  di.OrigSize,
+			HdrXXH3:   uint64(di.HdrXXH3),
+			XXH3:      uint64(di.XXH3),
+			SHA256_0:  di.SHA256_0,
+			SHA256_1:  di.SHA256_1,
+			SHA256_2:  di.SHA256_2,
+			SHA256_3:  di.SHA256_3,
+			Cksum:     uint64(di.Cksum),
+			Kind:      di.Kind,
+			PkgID:     di.PkgID,
+			PkgOffset: di.PkgOffset,
 		}
 	}
 	return
@@ -1091,12 +1240,12 @@ func (dma *DefaultMetadataAdapter) PutObj(c Ctx, bktID int64, o []*ObjectInfo) (
 
 	var n int
 	if n, err = b.TableContext(c, db, OBJ_TBL).InsertIgnore(&o); err != nil {
-		return nil, ERR_EXEC_DB
+		return nil, fmt.Errorf("%w: PutObj InsertIgnore failed (bktID=%d, count=%d): %v", ERR_EXEC_DB, bktID, len(o), err)
 	}
 	if n != len(o) {
 		var inserted []int64
 		if _, err = b.TableContext(c, db, OBJ_TBL).Select(&inserted, b.Fields("id"), b.Where(b.In("id", ids))); err != nil {
-			return nil, ERR_QUERY_DB
+			return nil, fmt.Errorf("%w: PutObj select inserted failed (bktID=%d): %v", ERR_QUERY_DB, bktID, err)
 		}
 		// 处理有冲突的情况
 		m := make(map[int64]struct{}, 0)
@@ -1126,27 +1275,63 @@ func (dma *DefaultMetadataAdapter) PutDataAndObj(c Ctx, bktID int64, d []*DataIn
 	// Use transaction to ensure atomicity
 	tx, err := db.Begin()
 	if err != nil {
-		return ERR_EXEC_DB
+		return fmt.Errorf("%w: PutObjAndData Begin transaction failed (bktID=%d): %v", ERR_EXEC_DB, bktID, err)
 	}
 	defer tx.Rollback()
 
 	// Write DataInfo first
 	if len(d) > 0 {
-		if _, err = b.TableContext(c, tx, DATA_TBL).ReplaceInto(&d); err != nil {
-			return ERR_EXEC_DB
+		// Convert uint64 fields to int64 for SQLite compatibility
+		type DataInfoForDB struct {
+			ID        int64  `borm:"id"`
+			Size      int64  `borm:"size"`
+			OrigSize  int64  `borm:"os"`
+			HdrXXH3   int64  `borm:"h"`   // Convert uint64 to int64
+			XXH3      int64  `borm:"x"`   // Convert uint64 to int64
+			SHA256_0  int64  `borm:"s0"`
+			SHA256_1  int64  `borm:"s1"`
+			SHA256_2  int64  `borm:"s2"`
+			SHA256_3  int64  `borm:"s3"`
+			Cksum     int64  `borm:"c"`   // Convert uint64 to int64
+			Kind      uint32 `borm:"kind"`
+			PkgID     int64  `borm:"pi"`
+			PkgOffset uint32 `borm:"po"`
+		}
+		
+		dataForDB := make([]*DataInfoForDB, len(d))
+		for i, di := range d {
+			dataForDB[i] = &DataInfoForDB{
+				ID:        di.ID,
+				Size:      di.Size,
+				OrigSize:  di.OrigSize,
+				HdrXXH3:   int64(di.HdrXXH3),
+				XXH3:      int64(di.XXH3),
+				SHA256_0:  di.SHA256_0,
+				SHA256_1:  di.SHA256_1,
+				SHA256_2:  di.SHA256_2,
+				SHA256_3:  di.SHA256_3,
+				Cksum:     int64(di.Cksum),
+				Kind:      di.Kind,
+				PkgID:     di.PkgID,
+				PkgOffset: di.PkgOffset,
+			}
+		}
+		
+		if _, err = b.TableContext(c, tx, DATA_TBL).ReplaceInto(&dataForDB); err != nil {
+			return fmt.Errorf("%w: PutObjAndData ReplaceInto DATA failed (bktID=%d, dataCount=%d): %v", ERR_EXEC_DB, bktID, len(d), err)
 		}
 	}
 
 	// Write ObjectInfo
 	if len(o) > 0 {
 		if _, err = b.TableContext(c, tx, OBJ_TBL).ReplaceInto(&o); err != nil {
-			return ERR_EXEC_DB
+			return fmt.Errorf("%w: PutObjAndData ReplaceInto OBJ failed (bktID=%d, objCount=%d): %v", ERR_EXEC_DB, bktID, len(o), err)
 		}
 	}
 
 	// Commit transaction
 	if err = tx.Commit(); err != nil {
-		return ERR_EXEC_DB
+		return fmt.Errorf("%w: PutObjAndData Commit transaction failed (bktID=%d): %v", ERR_EXEC_DB, bktID, err)
 	}
 
 	return nil
@@ -1161,7 +1346,7 @@ func (dma *DefaultMetadataAdapter) GetObj(c Ctx, bktID int64, ids []int64) (o []
 	// Note: Don't close the connection, it's from the pool
 
 	if _, err = b.TableContext(c, db, OBJ_TBL).Select(&o, b.Where(b.In("id", ids))); err != nil {
-		return nil, ERR_QUERY_DB
+		return nil, fmt.Errorf("%w: GetObj failed (bktID=%d, idsCount=%d): %v", ERR_QUERY_DB, bktID, len(ids), err)
 	}
 	return
 }
@@ -1179,7 +1364,7 @@ func (dma *DefaultMetadataAdapter) SetObj(c Ctx, bktID int64, fields []string, o
 		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
 			return ERR_DUP_KEY
 		}
-		return ERR_EXEC_DB
+		return fmt.Errorf("%w: SetObj failed (bktID=%d, objID=%d, fields=%v): %v", ERR_EXEC_DB, bktID, o.ID, fields, err)
 	}
 	return nil
 }
@@ -1292,7 +1477,11 @@ func (dma *DefaultMetadataAdapter) ListObj(c Ctx, bktID, pid int64,
 			// sqlite 分支使用 LIKE 模式匹配
 			// 使用转义方法处理通配符和特殊字符
 			pattern := escapeLikePattern(wd)
-			conds = append(conds, fmt.Sprintf("name LIKE '%s'", pattern))
+			// Escape single quotes in pattern for safe SQL string literal
+			escapedPattern := strings.ReplaceAll(pattern, "'", "''")
+			// Use LIKE with proper escaping - ensure the pattern is properly quoted
+			// SQLite requires the pattern to be a valid string literal
+			conds = append(conds, fmt.Sprintf("name LIKE %s", fmt.Sprintf("'%s'", escapedPattern)))
 		} else {
 			conds = append(conds, b.Eq("name", wd))
 		}
@@ -1301,14 +1490,14 @@ func (dma *DefaultMetadataAdapter) ListObj(c Ctx, bktID, pid int64,
 	// Use read connection for listing objects
 	db, err := GetReadDB(c, bktID)
 	if err != nil {
-		return nil, 0, "", ERR_OPEN_DB
+		return nil, 0, "", fmt.Errorf("%w: ListObj GetReadDB failed (bktID=%d): %v", ERR_OPEN_DB, bktID, err)
 	}
 	// Note: Don't close the connection, it's from the pool
 
 	if _, err = b.TableContext(c, db, OBJ_TBL).Select(&cnt,
 		b.Fields("count(1)"),
 		b.Where(conds...)); err != nil {
-		return nil, 0, "", ERR_QUERY_DB
+		return nil, 0, "", fmt.Errorf("%w: ListObj count failed (bktID=%d, pid=%d, wd=%s): %v", ERR_QUERY_DB, bktID, pid, wd, err)
 	}
 
 	if count > 0 {
@@ -1318,7 +1507,7 @@ func (dma *DefaultMetadataAdapter) ListObj(c Ctx, bktID, pid int64,
 			b.Where(conds...),
 			b.OrderBy(orderBy),
 			b.Limit(count)); err != nil {
-			return nil, 0, "", ERR_QUERY_DB
+			return nil, 0, "", fmt.Errorf("%w: ListObj select failed (bktID=%d, pid=%d, wd=%s, count=%d): %v", ERR_QUERY_DB, bktID, pid, wd, count, err)
 		}
 
 		if len(o) > 0 {
@@ -1337,7 +1526,7 @@ func (dma *DefaultMetadataAdapter) PutUsr(c Ctx, u *UserInfo) error {
 	// Note: Don't close the connection, it's from the pool
 
 	if _, err = b.TableContext(c, db, USR_TBL).ReplaceInto(&u); err != nil {
-		return ERR_EXEC_DB
+		return fmt.Errorf("%w: PutUsr failed (userID=%d, usr=%s): %v", ERR_EXEC_DB, u.ID, u.Usr, err)
 	}
 	return nil
 }
@@ -1351,7 +1540,7 @@ func (dma *DefaultMetadataAdapter) GetUsr(c Ctx, ids []int64) (o []*UserInfo, er
 	// Note: Don't close the connection, it's from the pool
 
 	if _, err = b.TableContext(c, db, USR_TBL).Select(&o, b.Where(b.In("id", ids))); err != nil {
-		return nil, ERR_QUERY_DB
+		return nil, fmt.Errorf("%w: GetUsr failed (idsCount=%d): %v", ERR_QUERY_DB, len(ids), err)
 	}
 	return
 }
@@ -1366,7 +1555,7 @@ func (dma *DefaultMetadataAdapter) GetUsr2(c Ctx, usr string) (o *UserInfo, err 
 
 	o = &UserInfo{}
 	if _, err = b.TableContext(c, db, USR_TBL).Select(o, b.Where(b.Eq("usr", usr))); err != nil {
-		return nil, ERR_QUERY_DB
+		return nil, fmt.Errorf("%w: GetUsr2 failed (usr=%s): %v", ERR_QUERY_DB, usr, err)
 	}
 	return
 }
@@ -1381,7 +1570,7 @@ func (dma *DefaultMetadataAdapter) SetUsr(c Ctx, fields []string, u *UserInfo) e
 
 	if _, err = b.TableContext(c, db, USR_TBL).Update(&u,
 		b.Fields(fields...), b.Where(b.Eq("id", u.ID))); err != nil {
-		return ERR_EXEC_DB
+		return fmt.Errorf("%w: SetUsr failed (userID=%d, fields=%v): %v", ERR_EXEC_DB, u.ID, fields, err)
 	}
 	return nil
 }
@@ -1396,7 +1585,7 @@ func (dma *DefaultMetadataAdapter) ListUsers(c Ctx) (o []*UserInfo, err error) {
 
 	// Use borm to query all users
 	if _, err = b.TableContext(c, db, USR_TBL).Select(&o); err != nil {
-		return nil, ERR_QUERY_DB
+		return nil, fmt.Errorf("%w: ListUsers failed: %v", ERR_QUERY_DB, err)
 	}
 
 	// 清除敏感信息
@@ -1415,7 +1604,7 @@ func (dma *DefaultMetadataAdapter) DeleteUser(c Ctx, userID int64) error {
 	// Note: Don't close the connection, it's from the pool
 
 	if _, err = b.TableContext(c, db, USR_TBL).Delete(b.Where(b.Eq("id", userID))); err != nil {
-		return ERR_EXEC_DB
+		return fmt.Errorf("%w: DeleteUser failed (userID=%d): %v", ERR_EXEC_DB, userID, err)
 	}
 	return nil
 }
@@ -1438,7 +1627,7 @@ func (dma *DefaultMetadataAdapter) PutBkt(c Ctx, o []*BucketInfo) error {
 	}
 
 	if _, err = b.TableContext(c, db, BKT_TBL).ReplaceInto(&o); err != nil {
-		return ERR_EXEC_DB
+		return fmt.Errorf("%w: PutBkt failed (count=%d): %v", ERR_EXEC_DB, len(o), err)
 	}
 	for _, x := range o {
 		InitBucketDB(c, x.ID)
@@ -1456,7 +1645,7 @@ func (dma *DefaultMetadataAdapter) GetBkt(c Ctx, ids []int64) (o []*BucketInfo, 
 	// Note: Don't close the connection, it's from the pool
 
 	if _, err = b.TableContext(c, db, BKT_TBL).Select(&o, b.Where(b.In("id", ids))); err != nil {
-		return nil, ERR_QUERY_DB
+		return nil, fmt.Errorf("%w: GetBkt failed (idsCount=%d): %v", ERR_QUERY_DB, len(ids), err)
 	}
 	return
 }
@@ -1470,7 +1659,7 @@ func (dma *DefaultMetadataAdapter) ListBkt(c Ctx, uid int64) (o []*BucketInfo, e
 	// Note: Don't close the connection, it's from the pool
 
 	if _, err = b.TableContext(c, db, BKT_TBL).Select(&o, b.Where(b.Eq("uid", uid))); err != nil {
-		return nil, ERR_QUERY_DB
+		return nil, fmt.Errorf("%w: ListBkt failed (uid=%d): %v", ERR_QUERY_DB, uid, err)
 	}
 	return
 }
@@ -1484,7 +1673,7 @@ func (dma *DefaultMetadataAdapter) ListAllBuckets(c Ctx) (o []*BucketInfo, err e
 	// Note: Don't close the connection, it's from the pool
 
 	if _, err = b.TableContext(c, db, BKT_TBL).Select(&o); err != nil {
-		return nil, ERR_QUERY_DB
+		return nil, fmt.Errorf("%w: ListAllBuckets failed: %v", ERR_QUERY_DB, err)
 	}
 	return
 }
@@ -1498,7 +1687,7 @@ func (dma *DefaultMetadataAdapter) DeleteBkt(c Ctx, bktID int64) error {
 	// Note: Don't close the connection, it's from the pool
 
 	if _, err = b.TableContext(c, db, BKT_TBL).Delete(b.Where(b.Eq("id", bktID))); err != nil {
-		return ERR_EXEC_DB
+		return fmt.Errorf("%w: DeleteBkt failed (bktID=%d): %v", ERR_EXEC_DB, bktID, err)
 	}
 	return nil
 }
@@ -1513,7 +1702,7 @@ func (dma *DefaultMetadataAdapter) UpdateBktQuota(c Ctx, bktID int64, quota int6
 
 	if _, err = b.TableContext(c, db, BKT_TBL).Update(&BucketInfo{Quota: quota},
 		b.Fields("quota"), b.Where(b.Eq("id", bktID))); err != nil {
-		return ERR_EXEC_DB
+		return fmt.Errorf("%w: UpdateBktQuota failed (bktID=%d, quota=%d): %v", ERR_EXEC_DB, bktID, quota, err)
 	}
 	return nil
 }
@@ -1695,7 +1884,7 @@ func (dma *DefaultMetadataAdapter) GetObjByDataID(c Ctx, bktID int64, dataID int
 	_, err = b.TableContext(c, db, OBJ_TBL).Select(&objs,
 		b.Where(b.Eq("did", dataID)))
 	if err != nil {
-		return nil, ERR_QUERY_DB
+		return nil, fmt.Errorf("%w: GetObjByDataID failed (bktID=%d, dataID=%d): %v", ERR_QUERY_DB, bktID, dataID, err)
 	}
 	return objs, nil
 }
@@ -1720,9 +1909,8 @@ func (dma *DefaultMetadataAdapter) ListVersions(c Ctx, bktID int64, fileID int64
 		b.Where(conds...),
 		b.OrderBy("mtime desc"))
 	if err != nil {
-		// Return ERR_QUERY_DB to maintain compatibility with existing code
-		// The detailed error information is logged via DebugLog if needed
-		return nil, ERR_QUERY_DB
+		// Return ERR_QUERY_DB with detailed error information
+		return nil, fmt.Errorf("%w: ListVersions failed (bktID=%d, fileID=%d, excludeWriting=%v): %v", ERR_QUERY_DB, bktID, fileID, excludeWriting, err)
 	}
 	return versions, nil
 }
@@ -1738,7 +1926,7 @@ func (dma *DefaultMetadataAdapter) DeleteObj(c Ctx, bktID int64, id int64) error
 	// Get object information (read operation, but using same connection for consistency)
 	obj := &ObjectInfo{}
 	if _, err = b.TableContext(c, db, OBJ_TBL).Select(obj, b.Where(b.Eq("id", id))); err != nil {
-		return ERR_QUERY_DB
+		return fmt.Errorf("%w: GetObjByDataID select obj failed (bktID=%d, id=%d): %v", ERR_QUERY_DB, bktID, id, err)
 	}
 
 	// Flip object's PID to negative to mark as deleted (so it disappears from original tree structure)
@@ -1800,13 +1988,13 @@ func (dma *DefaultMetadataAdapter) ListDeletedObjs(c Ctx, bktID int64, beforeTim
 			b.Where(conds...),
 			b.OrderBy("mtime"),
 			b.Limit(limit)); err != nil {
-			return nil, ERR_QUERY_DB
+			return nil, fmt.Errorf("%w: ListRecycleBin select failed (bktID=%d, limit=%d): %v", ERR_QUERY_DB, bktID, limit, err)
 		}
 	} else {
 		if _, err = b.TableContext(c, db, OBJ_TBL).Select(&objs,
 			b.Where(conds...),
 			b.OrderBy("mtime")); err != nil {
-			return nil, ERR_QUERY_DB
+			return nil, fmt.Errorf("%w: ListRecycleBin select all failed (bktID=%d): %v", ERR_QUERY_DB, bktID, err)
 		}
 	}
 	return objs, nil
@@ -1838,7 +2026,7 @@ func (dma *DefaultMetadataAdapter) ListRecycleBin(c Ctx, bktID int64, opt ListOp
 	if _, err = b.TableContext(c, db, OBJ_TBL).Select(&cnt,
 		b.Fields("count(1)"),
 		b.Where(conds...)); err != nil {
-		return nil, 0, "", ERR_QUERY_DB
+		return nil, 0, "", fmt.Errorf("%w: ListRecycleBin count failed (bktID=%d, word=%s): %v", ERR_QUERY_DB, bktID, opt.Word, err)
 	}
 
 	if opt.Count > 0 {
@@ -1879,7 +2067,7 @@ func (dma *DefaultMetadataAdapter) ListRecycleBin(c Ctx, bktID int64, opt ListOp
 			b.Where(conds...),
 			b.OrderBy(orderBy),
 			b.Limit(opt.Count)); err != nil {
-			return nil, 0, "", ERR_QUERY_DB
+			return nil, 0, "", fmt.Errorf("%w: ListRecycleBin select failed (bktID=%d, word=%s, count=%d): %v", ERR_QUERY_DB, bktID, opt.Word, opt.Count, err)
 		}
 
 		if len(o) > 0 {

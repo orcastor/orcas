@@ -7,7 +7,6 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
-	"log"
 	"os"
 	"strconv"
 	"strings"
@@ -441,13 +440,10 @@ func (lh *LocalHandler) PutData(c Ctx, bktID, dataID int64, sn int, buf []byte) 
 			dataID = NewID()
 		}
 	}
-	log.Printf("[Core PutData] Writing data to disk: bktID=%d, dataID=%d, sn=%d, size=%d", bktID, dataID, sn, len(buf))
 	err := lh.da.Write(c, bktID, dataID, sn, buf)
 	if err != nil {
-		log.Printf("[Core PutData] ERROR: Failed to write data to disk: bktID=%d, dataID=%d, sn=%d, size=%d, error=%v", bktID, dataID, sn, len(buf), err)
 		return dataID, err
 	}
-	log.Printf("[Core PutData] Successfully wrote data to disk: bktID=%d, dataID=%d, sn=%d, size=%d", bktID, dataID, sn, len(buf))
 	return dataID, nil
 }
 
@@ -508,20 +504,16 @@ func (lh *LocalHandler) PutDataFromReader(c Ctx, bktID, dataID int64, sn int, r 
 	buf := make([]byte, size)
 	n, err := io.ReadFull(r, buf)
 	if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
-		log.Printf("[Core PutDataFromReader] ERROR: Failed to read from reader: bktID=%d, dataID=%d, sn=%d, size=%d, error=%v", bktID, dataID, sn, size, err)
 		return dataID, err
 	}
 	if int64(n) < size {
 		buf = buf[:n]
 	}
 
-	log.Printf("[Core PutDataFromReader] Writing data to disk: bktID=%d, dataID=%d, sn=%d, size=%d", bktID, dataID, sn, len(buf))
 	err = lh.da.Write(c, bktID, dataID, sn, buf)
 	if err != nil {
-		log.Printf("[Core PutDataFromReader] ERROR: Failed to write data to disk: bktID=%d, dataID=%d, sn=%d, size=%d, error=%v", bktID, dataID, sn, len(buf), err)
 		return dataID, err
 	}
-	log.Printf("[Core PutDataFromReader] Successfully wrote data to disk: bktID=%d, dataID=%d, sn=%d, size=%d", bktID, dataID, sn, len(buf))
 	return dataID, nil
 }
 

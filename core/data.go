@@ -68,10 +68,6 @@ func (dda *DefaultDataAdapter) Write(c Ctx, bktID, dataID int64, sn int, buf []b
 	if err != nil {
 		return err
 	}
-
-	if os.Getenv("ORCAS_DEBUG") != "0" {
-		fmt.Printf("[DATA WRITE] PutData bkt=%d data=%d sn=%d size=%d path=%s\n", bktID, dataID, sn, len(buf), path)
-	}
 	return nil
 }
 
@@ -135,10 +131,6 @@ func (dda *DefaultDataAdapter) Update(c Ctx, bktID, dataID int64, sn int, offset
 	}
 
 	f.Sync()
-	if os.Getenv("ORCAS_DEBUG") != "0" {
-		fmt.Printf("[DATA UPDATE] UpdateData bkt=%d data=%d sn=%d offset=%d size=%d path=%s\n",
-			bktID, dataID, sn, offset, len(buf), path)
-	}
 	return nil
 }
 
@@ -221,10 +213,5 @@ func (dda *DefaultDataAdapter) Delete(c Ctx, bktID, dataID int64, sn int) error 
 	if err != nil {
 		return err
 	}
-
-	if os.Getenv("ORCAS_DEBUG") != "0" {
-		fmt.Printf("[DATA DELETE] DeleteData bkt=%d data=%d sn=%d path=%s\n", bktID, dataID, sn, path)
-	}
-
 	return nil
 }

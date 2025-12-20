@@ -1189,17 +1189,17 @@ func runInstantUploadPerformanceTest(t *testing.T) {
 	}
 	dma.PutBkt(testCtx, []*core.BucketInfo{bucket})
 
-	// Test different file sizes
+	// Test different file sizes (精简规模: 减少测试次数以加快执行)
 	testSizes := []struct {
 		size     int64
 		numTests int
 		name     string
 	}{
-		{1 * 1024, 50, "1KB"},
-		{10 * 1024, 50, "10KB"},
-		{100 * 1024, 30, "100KB"},
-		{1024 * 1024, 20, "1MB"},
-		{10 * 1024 * 1024, 10, "10MB"},
+		{1 * 1024, 10, "1KB"},      // 精简: 50 -> 10
+		{10 * 1024, 10, "10KB"},   // 精简: 50 -> 10
+		{100 * 1024, 5, "100KB"},  // 精简: 30 -> 5
+		{1024 * 1024, 5, "1MB"},   // 精简: 20 -> 5
+		{10 * 1024 * 1024, 3, "10MB"}, // 精简: 10 -> 3
 	}
 
 	fmt.Println("\n" + strings.Repeat("=", 120))
