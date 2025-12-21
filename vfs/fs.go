@@ -657,7 +657,7 @@ func (n *OrcasNode) getDirListWithCache(dirID int64) ([]*core.ObjectInfo, syscal
 			return nil, err
 		}
 
-		// Get pending objects from batch writer and RandomAccessor registry
+		// Get pending objects from RandomAccessor registry
 		// These are objects that are being written but not yet flushed to database
 		pendingChildren := n.getPendingObjectsForDir(dirID)
 
@@ -734,7 +734,7 @@ func (n *OrcasNode) getDirListWithCache(dirID int64) ([]*core.ObjectInfo, syscal
 	return children, 0
 }
 
-// getPendingObjectsForDir gets pending objects (from batch writer and RandomAccessor registry) for a directory
+// getPendingObjectsForDir gets pending objects from RandomAccessor registry for a directory
 // These are objects that are being written but not yet flushed to database
 // Optimized: uses map for O(1) deduplication instead of O(n²) linear search
 func (n *OrcasNode) getPendingObjectsForDir(dirID int64) []*core.ObjectInfo {
@@ -743,7 +743,7 @@ func (n *OrcasNode) getPendingObjectsForDir(dirID int64) []*core.ObjectInfo {
 	pendingMap := make(map[int64]*core.ObjectInfo)
 
 	// Get pending objects from RandomAccessor registry
-	// These are files that are open for writing but may not be in batch writer
+	// These are files that are open for writing
 	// IMPORTANT: Even if file has DataID (already flushed), if it's still in registry,
 	// it might not be in database List yet (cache/race condition), so include it
 	if n.fs != nil {
@@ -759,7 +759,7 @@ func (n *OrcasNode) getPendingObjectsForDir(dirID int64) []*core.ObjectInfo {
 							DebugLog("[VFS getPendingObjectsForDir] Skipping deleted file in RandomAccessor registry: fileID=%d, name=%s, pid=%d", fileID, fileObj.Name, fileObj.PID)
 							return true // Continue to next iteration
 						}
-						// Only add if not already in map (batch writer takes precedence)
+						// Only add if not already in map
 						if _, exists := pendingMap[fileID]; !exists {
 							// Create a copy to avoid modifying the original
 							// Note: Even if file has DataID, include it because:
@@ -1135,7 +1135,7 @@ func (n *OrcasNode) Create(ctx context.Context, name string, flags uint32, mode 
 		// Put succeeded but returned zero ID - likely duplicate key conflict
 		DebugLog("[VFS Create] WARNING: Put returned empty or zero ID (likely duplicate key), re-querying database and pending objects: name=%s, parentID=%d, ids=%v", name, obj.ID, ids)
 
-		// First, check pending objects (batch writer and RandomAccessor registry)
+		// First, check pending objects from RandomAccessor registry
 		// File might be created by another goroutine but not yet flushed to database
 		pendingChildren := n.getPendingObjectsForDir(obj.ID)
 		for _, pending := range pendingChildren {
@@ -1989,7 +1989,6 @@ func (n *OrcasNode) Rename(ctx context.Context, name string, newParent fs.InodeE
 		if isRemovingTmp {
 			n.forceFlushTempFileBeforeRename(sourceID, sourceObj.Name, newName)
 			// Re-fetch source object after flush to ensure we have latest DataID
-			// This is critical for files that were in batch writer buffer
 			// Invalidate cache for source file (not current node)
 			cacheKey := sourceID
 			fileObjCache.Del(cacheKey)
@@ -2185,7 +2184,6 @@ func (n *OrcasNode) Rename(ctx context.Context, name string, newParent fs.InodeE
 
 			if isExistingTmpFile || isOldTmpFileWithoutSuffix {
 				// If target file is a .tmp file (or old .tmp file without suffix), we'll delete it after rename
-				// First, check if target file is in batch writer buffer
 				targetTmpFileID = existingTargetID
 				DebugLog("[VFS Rename] Target file is .tmp file (or old .tmp without suffix), will delete after rename: fileID=%d, name=%s, targetName=%s", existingTargetID, existingObj.Name, newName)
 
@@ -3539,7 +3537,6 @@ func (n *OrcasNode) forceFlushTempFileBeforeRename(fileID int64, oldName, newNam
 
 	// If RandomAccessor exists but no TempFileWriter, flush its buffer first
 	// This handles the case where data is in RandomAccessor's buffer but not yet flushed
-	// Note: We flush before checking batch writer, because flush might move data to batch writer
 	if raToFlush != nil && !raToFlush.hasTempFileWriter() {
 		// Check if RandomAccessor has pending writes
 		writeIndex := atomic.LoadInt64(&raToFlush.buffer.writeIndex)
@@ -3690,10 +3687,10 @@ func (n *OrcasNode) forceFlushTempFileBeforeRename(fileID int64, oldName, newNam
 		return
 	}
 
-	// RandomAccessor exists but no TempFileWriter and not in batch writer
+	// RandomAccessor exists but no TempFileWriter
 	// Flush RandomAccessor normally (if not already flushed above)
 	// Note: We already flushed above if there were pending writes, but we still need to ensure
-	// any data that might have been added to batch writer during flush is also flushed
+	// RandomAccessor is fully flushed
 	// Note: raToFlush is guaranteed to be non-nil here because if it was nil, we would have returned above
 	// Also ensure RandomAccessor is fully flushed (in case there's any remaining data)
 	writeIndex := atomic.LoadInt64(&raToFlush.buffer.writeIndex)

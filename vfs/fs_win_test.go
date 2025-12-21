@@ -13,7 +13,6 @@ import (
 
 	"github.com/orca-zhang/idgen"
 	"github.com/orcastor/orcas/core"
-	"github.com/orcastor/orcas/sdk"
 )
 
 // TestDokanyInitialization tests Dokany DLL loading
@@ -570,18 +569,12 @@ func TestDokanyWriteAndRead(t *testing.T) {
 		t.Fatalf("Close failed: %v", err)
 	}
 
-	// Flush batch write manager if it exists
-	batchMgr := sdk.GetBatchWriterForBucket(ofs.h, ofs.bktID)
-	if batchMgr != nil {
-		batchMgr.FlushAll(ctx)
-	}
-
-	// Wait a bit for batch write to complete (if used)
+	// Wait a bit for flush to complete
 	// This ensures all async operations are finished
 	time.Sleep(100 * time.Millisecond)
 
 	// Refresh object info to get updated DataID and size
-	// Try multiple times in case batch write is still processing
+	// Try multiple times in case flush is still processing
 	var updatedObj *core.ObjectInfo
 	originalDataID := fileObj.DataID
 	originalSize := fileObj.Size

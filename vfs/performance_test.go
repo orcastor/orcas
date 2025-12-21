@@ -154,7 +154,7 @@ func runPerformanceTest(t *testing.T, name string, dataSize, chunkSize int64, wr
 		}
 
 		// Optimization: Use delayed flush mechanism, small file writes go to memory first, flush periodically or before close
-		// Batch write optimization: Reduce Flush frequency, let buffer accumulate more operations
+		// Reduce Flush frequency, let buffer accumulate more operations
 		for i := 0; i < writeOps; i++ {
 			offset := int64(i) * dataSize
 			err := ra.Write(offset, testData)
@@ -162,7 +162,7 @@ func runPerformanceTest(t *testing.T, name string, dataSize, chunkSize int64, wr
 				t.Fatalf("Write failed: %v", err)
 			}
 			// For small files, use delayed flush (automatically handled by Write method)
-			// Don't actively Flush, let batch write manager handle it
+			// Don't actively Flush, let buffer accumulate operations
 		}
 		// Automatically flush all pending writes when closing
 		err = ra.Close()
@@ -173,7 +173,7 @@ func runPerformanceTest(t *testing.T, name string, dataSize, chunkSize int64, wr
 		// Concurrency optimization:
 		// 1. Each goroutine uses independent RandomAccessor (avoid internal lock contention)
 		// 2. Optimize write offset calculation to ensure non-overlapping and continuous
-		// 3. Reduce Flush calls, let batch write manager handle uniformly (small file optimization)
+		// 3. Reduce Flush calls, let buffer accumulate operations (small file optimization)
 		// 4. Use Close to automatically flush, avoid explicit Flush contention
 		var wg sync.WaitGroup
 		wg.Add(concurrency)
@@ -220,18 +220,14 @@ func runPerformanceTest(t *testing.T, name string, dataSize, chunkSize int64, wr
 					}
 				}
 
-				// For small files, use batch write manager, no need for explicit Flush
+				// For small files, use delayed flush, no need for explicit Flush
 				// Close will automatically flush all pending writes
 			}(g)
 		}
 		wg.Wait()
 
-		// After all goroutines complete, ensure batch write manager flushes all data
+		// After all goroutines complete, ensure all data is flushed
 		// Note: Each RandomAccessor's Close will already trigger flush, this is a safeguard
-		batchMgr := sdk.GetBatchWriterForBucket(ofs.h, ofs.bktID)
-		if batchMgr != nil {
-			batchMgr.FlushAll(testCtx)
-		}
 	}
 
 	// Record end state
@@ -393,9 +389,9 @@ func TestPerformanceComprehensive(t *testing.T) {
 	// Print performance report
 	printPerformanceReport(results)
 
-	// Print batch write optimization comparison
+	// Print performance comparison
 	fmt.Println("\n" + strings.Repeat("=", 120))
-	fmt.Println("Batch Write Optimization Comparison")
+	fmt.Println("Performance Comparison")
 	fmt.Println(strings.Repeat("=", 120))
 	fmt.Printf("%-50s %12s %12s %10s %15s\n", "Test Name", "Throughput", "Ops/sec", "Memory", "Total Data")
 	fmt.Println(strings.Repeat("-", 120))
@@ -408,10 +404,9 @@ func TestPerformanceComprehensive(t *testing.T) {
 	}
 
 	fmt.Println("\n" + strings.Repeat("-", 120))
-	fmt.Println("Key Benefits of Batch Write Optimization:")
+	fmt.Println("Key Benefits of Write Optimization:")
 	fmt.Println("  - Delayed Flush: Small files are buffered in memory and flushed periodically")
 	fmt.Println("  - Batch Metadata: Multiple metadata objects are written together")
-	fmt.Println("  - Batch Data Blocks: Data blocks can be grouped for efficient writes")
 	fmt.Println("  - Configurable Window: Flush window time can be configured via ORCAS_WRITE_BUFFER_WINDOW_SEC")
 	fmt.Println("  - Reduced I/O: Fewer database and disk operations")
 	fmt.Println("  - Better Throughput: Especially for small file writes")
@@ -433,10 +428,8 @@ func runSequentialWriteTest(t *testing.T, name string, totalSize, chunkSize int6
 		os.Setenv("ORCAS_DATA", tmpDir)
 		core.ORCAS_DATA = tmpDir
 	}
-	// Performance test enables batch write optimization by default
-	if os.Getenv("ORCAS_BATCH_WRITE_ENABLED") == "" {
-		os.Setenv("ORCAS_BATCH_WRITE_ENABLED", "true")
-	}
+	// Performance test configuration
+	// Note: Batch write is disabled for VFS, but delayed flush is still used
 	core.InitDB("")
 
 	// Ensure test user exists
@@ -584,10 +577,8 @@ func runRandomWriteTest(t *testing.T, name string, totalSize, chunkSize int64, s
 		os.Setenv("ORCAS_DATA", tmpDir)
 		core.ORCAS_DATA = tmpDir
 	}
-	// Performance test enables batch write optimization by default
-	if os.Getenv("ORCAS_BATCH_WRITE_ENABLED") == "" {
-		os.Setenv("ORCAS_BATCH_WRITE_ENABLED", "true")
-	}
+	// Performance test configuration
+	// Note: Batch write is disabled for VFS, but delayed flush is still used
 	core.InitDB("")
 
 	// Ensure test user exists

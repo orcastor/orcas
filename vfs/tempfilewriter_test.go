@@ -10,7 +10,6 @@ import (
 
 	"github.com/orca-zhang/idgen"
 	"github.com/orcastor/orcas/core"
-	"github.com/orcastor/orcas/sdk"
 	. "github.com/smartystreets/goconvey/convey"
 )
 
@@ -62,7 +61,6 @@ func TestTempFileWriterLargeFileWithEncryption(t *testing.T) {
 
 		// Cleanup
 		defer func() {
-			sdk.FlushAllBatchWriters(testCtx)
 			os.RemoveAll(core.ORCAS_BASE)
 			os.RemoveAll(core.ORCAS_DATA)
 		}()
@@ -482,7 +480,6 @@ func TestTempFileWriterMemoryEfficiency(t *testing.T) {
 		ofs := NewOrcasFSWithConfig(lh, testCtx, testBktID, cfg)
 
 		defer func() {
-			sdk.FlushAllBatchWriters(testCtx)
 			os.RemoveAll(core.ORCAS_BASE)
 			os.RemoveAll(core.ORCAS_DATA)
 		}()

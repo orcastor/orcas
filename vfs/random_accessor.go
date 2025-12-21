@@ -1916,8 +1916,7 @@ func (ra *RandomAccessor) MarkSparseFile(size int64) {
 // Optimization: sequential write optimization - if sequential write starting from 0, directly write to data block, avoid caching
 // Optimization: for sparse files (pre-allocated), use more aggressive delayed flush to reduce frequent flushes
 // For .tmp files, we don't know the final file size until rename (removing .tmp extension),
-// so we can't decide whether to use batch write during Write(). Use random write mode first,
-// and the decision will be made during Flush() based on final file size.
+// so we use random write mode first, and the decision will be made during Flush() based on final file size.
 func (ra *RandomAccessor) Write(offset int64, data []byte) error {
 	// Optimization: cache fileObj to avoid repeated getFileObj calls
 	// Check local atomic value first (fast path)
@@ -2046,20 +2045,7 @@ func (ra *RandomAccessor) Write(offset int64, data []byte) error {
 				// Fall through to random write mode
 			} else {
 				// No TempFileWriter, can proceed with sequential buffer initialization
-				// Check if this is a small file that should use batch write
-				// Small files (< 1MB) should use batch write for better performance
-				config := core.GetWriteBufferConfig()
-				isSmallFile := int64(len(data)) < 1<<20 // 1MB threshold
-				shouldUseBatchWrite := isSmallFile && config.BatchWriteEnabled &&
-					offset == 0 && (fileObj.DataID == 0 || fileObj.DataID == core.EmptyDataID)
-
-				if shouldUseBatchWrite {
-					// For small files, use batch write instead of sequential write
-					// This allows multiple small files to be packaged together
-					// Don't initialize sequential buffer, let it fall through to random write mode
-					// which will handle batch write in flushInternal
-					// DebugLog("[VFS RandomAccessor Write] Small file detected, will use batch write: fileID=%d, size=%d", ra.fileID, len(data))
-				} else if offset == 0 && (fileObj.DataID == 0 || fileObj.DataID == core.EmptyDataID) {
+				if offset == 0 && (fileObj.DataID == 0 || fileObj.DataID == core.EmptyDataID) {
 					// File has no data, can initialize sequential write buffer
 					var initErr error
 					if initErr = ra.initSequentialBuffer(false); initErr == nil {
@@ -2219,11 +2205,7 @@ func (ra *RandomAccessor) Write(offset int64, data []byte) error {
 	// Update last write offset for sequential write detection
 	atomic.StoreInt64(&ra.lastOffset, offset+int64(len(data)))
 
-	// Aggressive optimization: for small file writes, use batch write manager
-	// If data size is small and hasn't reached force flush condition, add to batch write manager
-	// Note: batch write only applies to small files, and needs to ensure data integrity
-	// Here use delayed flush first, batch write logic is handled in Flush
-	// Aggressive: reduce delayed flush scheduling frequency to allow more batching
+	// Aggressive: reduce delayed flush scheduling frequency
 	// Only schedule if buffer is getting quite full (80%+) or it's a sequential write with significant data (70%+)
 	// This allows more small files to accumulate before flushing, reducing database operations
 	bufferUsage := float64(atomic.LoadInt64(&ra.buffer.totalSize)) / float64(maxBufferSize)
@@ -3161,43 +3143,26 @@ func (ra *RandomAccessor) flushInternal(force bool) (int64, error) {
 			}
 		}
 
-		// If file has no DataID and is small (< batch write threshold), we can use batch write
-		// Otherwise, use TempFileWriter (for large files or files that already have DataID)
-		config := core.GetWriteBufferConfig()
-		batchWriteThreshold := config.MaxBatchWriteFileSize
-		if batchWriteThreshold <= 0 {
-			batchWriteThreshold = 64 << 10 // Default 64KB
-		}
-		isSmallFile := totalSize > 0 && totalSize < batchWriteThreshold
-		shouldUseBatchWrite := isSmallFile && config.BatchWriteEnabled &&
-			(fileObj.DataID == 0 || fileObj.DataID == core.EmptyDataID) &&
-			writeIndex > 0 && // Has pending writes in buffer
-			!hasTempWriterData // TempFileWriter should not have data if using batch write
-
-		if !shouldUseBatchWrite {
-			// Large .tmp file or already has DataID, or TempFileWriter has data, use TempFileWriter
-			if hasTempWriterData || fileObj.DataID == 0 || fileObj.DataID == core.EmptyDataID {
-				// TempFileWriter has data or file has no DataID, flush it
-				if err := ra.flushTempFileWriter(); err != nil {
-					return 0, err
-				}
-				// After flushing TempFileWriter, re-fetch fileObj to get updated DataID and Size
-				// This ensures we have the latest information after flush
-				fileObj, err = ra.getFileObj()
-				if err == nil && fileObj != nil {
-					// Re-fetch from database to get latest DataID and Size
-					objs, err := ra.fs.h.Get(ra.fs.c, ra.fs.bktID, []int64{ra.fileID})
-					if err == nil && len(objs) > 0 {
-						updatedFileObj := objs[0]
-						ra.fileObj.Store(updatedFileObj)
-						fileObjCache.Put(ra.fileObjKey, updatedFileObj)
-						DebugLog("[VFS RandomAccessor Flush] Updated fileObj after TempFileWriter flush: fileID=%d, dataID=%d, size=%d", ra.fileID, updatedFileObj.DataID, updatedFileObj.Size)
-						fileObj = updatedFileObj
-					}
+		// Use TempFileWriter for .tmp files
+		if hasTempWriterData || fileObj.DataID == 0 || fileObj.DataID == core.EmptyDataID {
+			// TempFileWriter has data or file has no DataID, flush it
+			if err := ra.flushTempFileWriter(); err != nil {
+				return 0, err
+			}
+			// After flushing TempFileWriter, re-fetch fileObj to get updated DataID and Size
+			// This ensures we have the latest information after flush
+			fileObj, err = ra.getFileObj()
+			if err == nil && fileObj != nil {
+				// Re-fetch from database to get latest DataID and Size
+				objs, err := ra.fs.h.Get(ra.fs.c, ra.fs.bktID, []int64{ra.fileID})
+				if err == nil && len(objs) > 0 {
+					updatedFileObj := objs[0]
+					ra.fileObj.Store(updatedFileObj)
+					fileObjCache.Put(ra.fileObjKey, updatedFileObj)
+					DebugLog("[VFS RandomAccessor Flush] Updated fileObj after TempFileWriter flush: fileID=%d, dataID=%d, size=%d", ra.fileID, updatedFileObj.DataID, updatedFileObj.Size)
+					fileObj = updatedFileObj
 				}
 			}
-		} else {
-			// Small .tmp file without DataID, skip TempFileWriter and use batch write
 		}
 	} else {
 		// Not a .tmp file, flush TempFileWriter if exists
@@ -3295,7 +3260,7 @@ func (ra *RandomAccessor) flushInternal(force bool) (int64, error) {
 
 		// TempFileWriter doesn't exist - this should not happen for .tmp files
 		// But handle it for safety - continue to process buffer writes below
-		DebugLog("[VFS RandomAccessor Flush] Small .tmp file without TempFileWriter, will use batch write: fileID=%d", ra.fileID)
+		DebugLog("[VFS RandomAccessor Flush] Small .tmp file without TempFileWriter, will use normal write path: fileID=%d", ra.fileID)
 	}
 
 	// Optimization: use atomic operation to get and clear operations (lock-free)
