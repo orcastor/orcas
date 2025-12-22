@@ -194,22 +194,9 @@ Storage Layout:
 - **Storage Efficiency**: 30-70% space savings with compression + deduplication
 - **Concurrent Operations**: Optimized for high concurrency
 
-## 🚀 Quick Start
-
-```bash
-# Build
-go build -o orcas ./cmd
-
-# Run
-./orcas
-
-# Use S3 API
-aws --endpoint-url=http://localhost:9000 s3 mb s3://my-bucket
-aws --endpoint-url=http://localhost:9000 s3 cp file.txt s3://my-bucket/
-
-# Mount as filesystem (Linux/Mac)
-./mount_vfs.sh
-```
+**Performance Test Reports**:
+- [S3 API Performance Test Report](s3/docs/PERFORMANCE_TEST_REPORT.md)
+- [VFS Performance Optimization Report](vfs/PERFORMANCE_OPTIMIZATION_FINAL.md)
 
 ## 📚 Documentation
 

@@ -407,7 +407,14 @@ func GetWriteBufferConfig() WriteBufferConfig {
 
 var (
 	ORCAS_BASE = os.Getenv("ORCAS_BASE")
-	ORCAS_DATA = os.Getenv("ORCAS_DATA")
+	ORCAS_DATA = func() string {
+		data := os.Getenv("ORCAS_DATA")
+		if data == "" {
+			// If ORCAS_DATA is empty, use ORCAS_BASE as fallback
+			return os.Getenv("ORCAS_BASE")
+		}
+		return data
+	}()
 )
 
 // Instant upload level setting

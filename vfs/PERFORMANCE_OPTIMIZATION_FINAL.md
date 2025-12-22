@@ -112,7 +112,7 @@ Based on real performance test data (continuously updated)
 
 **Key Findings:**
 - ✅ **100% Deduplication Success**: All test files successfully used instant upload (DataID reuse)
-- ⚠️ **Performance Overhead**: Instant upload has performance overhead due to checksum calculation (HdrCRC32, CRC32, MD5) and Ref call
+- ⚠️ **Performance Overhead**: Instant upload has performance overhead due to checksum calculation (HdrXXH3, XXH3, SHA256) and Ref call
 - ✅ **Storage Space Savings**: The primary benefit of instant upload is **storage space savings**, not performance
 - ✅ **Small Files**: Overhead is minimal for small files (1KB: 0.84x, 10KB: 0.90x)
 - ⚠️ **Large Files**: Overhead increases for larger files (10MB: 0.70x) due to checksum calculation time
@@ -120,7 +120,7 @@ Based on real performance test data (continuously updated)
 
 **Analysis:**
 - Instant upload in VFS has performance overhead because:
-  1. Checksum calculation (HdrCRC32, CRC32, MD5) takes time
+  1. Checksum calculation (HdrXXH3, XXH3, SHA256) takes time
   2. Ref call to check if data exists adds latency
   3. For small files, these overheads may exceed the time saved by not writing data
 - However, instant upload provides significant **storage space savings** by reusing existing data blocks

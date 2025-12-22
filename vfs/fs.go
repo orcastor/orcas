@@ -1537,7 +1537,17 @@ func (n *OrcasNode) Mkdir(ctx context.Context, name string, mode uint32, out *fu
 	// Cache new directory object for GetAttr optimization
 	cacheKey := dirObj.ID
 	fileObjCache.Put(cacheKey, dirObj)
+	
+	// Update parent directory listing cache with new directory
 	n.appendChildToDirCache(obj.ID, dirObj)
+	
+	// IMPORTANT: Clear readdirCache and mark as stale to ensure Readdir sees the new directory
+	// This is critical because Readdir checks readdirCache first, and if it exists,
+	// it returns cached entries without checking dirListCache
+	parentCacheKey := obj.ID
+	readdirCache.Del(parentCacheKey)
+	readdirCacheStale.Store(parentCacheKey, true)
+	DebugLog("[VFS Mkdir] Cleared readdirCache and marked as stale for parent directory: parentID=%d, newDirID=%d, name=%s", obj.ID, dirObj.ID, name)
 
 	// Create directory node
 	dirNode := &OrcasNode{

@@ -4,7 +4,7 @@
   </a>
 </p>
 
-<p align="center"><strong>OrcaS：开放可信赖内容寻址存储</strong></p>
+<p align="center"><strong>OrcaS：开放开箱即用内容寻址存储</strong></p>
 <p align="center"><em>一款开箱即用的轻量级对象存储系统</em></p>
 
 <p align="center">
@@ -32,12 +32,12 @@
 
 ## 🚀 什么是 OrcaS？
 
-**OrcaS**（开放可信赖内容寻址存储，Open Reliable Content Addressable Storage）是一个**轻量级、高性能的对象存储系统**，以**内容寻址存储（CAS）**为核心构建。它提供了企业级功能，如即时去重、多版本管理、零知识加密和智能压缩——所有这些都集成在一个可立即部署的二进制文件中。
+**OrcaS**（开放开箱即用内容寻址存储，Open Ready-to-Use Content Addressable Storage）是一个**轻量级、高性能的对象存储系统**，以 **内容寻址存储（CAS）** 为核心构建。它提供了企业级功能，如即时去重、多版本管理、零知识加密和智能压缩——所有这些都集成在一个可立即部署的二进制文件中。
 
 ### 为什么选择 OrcaS？
 
 - 🌐 **开放**：开源（MIT 许可证），透明，社区驱动开发
-- 🛡️ **可信赖**：内容寻址存储确保数据完整性和自动去重
+- 🛡️ **开箱即用**：内容寻址存储确保数据完整性和自动去重，生产环境可直接使用
 - 🎯 **内容寻址存储**：数据通过内容哈希存储，实现自动去重和完整性验证
 - ⚡ **秒传（去重）**：文件秒级上传，而非分钟级——相同文件可即时检测，无需上传
 - 🔒 **零知识加密**：您的数据，您的密钥——采用行业标准算法的端到端加密
@@ -194,22 +194,9 @@ OrcaS 基于**内容寻址存储**原则构建，数据通过内容哈希而非�
 - **存储效率**：压缩 + 去重节省 30-70% 空间
 - **并发操作**：针对高并发优化
 
-## 🚀 快速开始
-
-```bash
-# 构建
-go build -o orcas ./cmd
-
-# 运行
-./orcas
-
-# 使用 S3 API
-aws --endpoint-url=http://localhost:9000 s3 mb s3://my-bucket
-aws --endpoint-url=http://localhost:9000 s3 cp file.txt s3://my-bucket/
-
-# 挂载为文件系统 (Linux/Mac)
-./mount_vfs.sh
-```
+**性能测试报告**：
+- [S3 API 性能测试报告](s3/docs/PERFORMANCE_TEST_REPORT.zh.md)
+- [VFS 性能优化报告](vfs/PERFORMANCE_OPTIMIZATION_FINAL.zh.md)
 
 ## 📚 文档
 

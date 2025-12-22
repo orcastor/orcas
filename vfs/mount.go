@@ -6,8 +6,10 @@ package vfs
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 
 	"github.com/hanwen/go-fuse/v2/fuse"
@@ -56,22 +58,7 @@ func Mount(h core.Handler, c core.Ctx, bktID int64, opts *MountOptions) (*fuse.S
 		return nil, fmt.Errorf("invalid mount point: %w", err)
 	}
 
-	// Check if mount point exists
-	info, err := os.Stat(mountPoint)
-	if err != nil {
-		if os.IsNotExist(err) {
-			// Create mount point directory
-			if err := os.MkdirAll(mountPoint, 0o755); err != nil {
-				return nil, fmt.Errorf("failed to create mount point: %w", err)
-			}
-		} else {
-			return nil, fmt.Errorf("failed to stat mount point: %w", err)
-		}
-	} else if !info.IsDir() {
-		return nil, fmt.Errorf("mount point is not a directory: %s", mountPoint)
-	}
-
-	// Set debug mode if specified
+	// Set debug mode if specified (needed early for logging)
 	if opts.Debug {
 		SetDebugEnabled(true)
 	}
@@ -102,6 +89,102 @@ func Mount(h core.Handler, c core.Ctx, bktID int64, opts *MountOptions) (*fuse.S
 			DataPath: opts.DataPath,
 			EndecKey: opts.EndecKey,
 		}
+	}
+
+	// Get ORCAS_BASE and ORCAS_DATA paths
+	basePath := core.ORCAS_BASE
+	dataPath := core.ORCAS_DATA
+	if cfg != nil {
+		if cfg.BasePath != "" {
+			basePath = cfg.BasePath
+		}
+		if cfg.DataPath != "" {
+			dataPath = cfg.DataPath
+		}
+	}
+	if opts.BasePath != "" {
+		basePath = opts.BasePath
+	}
+	if opts.DataPath != "" {
+		dataPath = opts.DataPath
+	}
+	// If dataPath is empty, use basePath as fallback
+	if dataPath == "" {
+		dataPath = basePath
+	}
+
+	// Check if mount point conflicts with ORCAS_BASE or ORCAS_DATA
+	// If mount point is in the same directory as ORCAS_BASE or ORCAS_DATA,
+	// we need to bind mount to a temporary location first to avoid conflicts
+	var actualMountPoint string
+	var tmpBindMount string
+	var needUnbind bool
+
+	// Get absolute paths for comparison
+	if basePath != "" {
+		absBasePath, err := filepath.Abs(basePath)
+		if err == nil {
+			// Check if mount point is within ORCAS_BASE directory
+			if strings.HasPrefix(mountPoint, absBasePath+string(filepath.Separator)) || mountPoint == absBasePath {
+				// Create temporary bind mount point
+				tmpBindMount = filepath.Join(os.TempDir(), fmt.Sprintf("orcas_mount_%d", os.Getpid()))
+				if err := os.MkdirAll(tmpBindMount, 0o755); err != nil {
+					return nil, fmt.Errorf("failed to create temporary bind mount point: %w", err)
+				}
+				needUnbind = true
+				actualMountPoint = tmpBindMount
+				fmt.Printf("Warning: Mount point %s conflicts with ORCAS_BASE %s, using temporary bind mount at %s\n", mountPoint, absBasePath, tmpBindMount)
+			}
+		}
+	}
+
+	if dataPath != "" && actualMountPoint == "" {
+		absDataPath, err := filepath.Abs(dataPath)
+		if err == nil {
+			// Check if mount point is within ORCAS_DATA directory
+			if strings.HasPrefix(mountPoint, absDataPath+string(filepath.Separator)) || mountPoint == absDataPath {
+				// Create temporary bind mount point
+				tmpBindMount = filepath.Join(os.TempDir(), fmt.Sprintf("orcas_mount_%d", os.Getpid()))
+				if err := os.MkdirAll(tmpBindMount, 0o755); err != nil {
+					return nil, fmt.Errorf("failed to create temporary bind mount point: %w", err)
+				}
+				needUnbind = true
+				actualMountPoint = tmpBindMount
+				fmt.Printf("Warning: Mount point %s conflicts with ORCAS_DATA %s, using temporary bind mount at %s\n", mountPoint, absDataPath, tmpBindMount)
+			}
+		}
+	}
+
+	// Use original mount point if no conflict
+	if actualMountPoint == "" {
+		actualMountPoint = mountPoint
+	}
+
+	// Check if mount point exists
+	info, err := os.Stat(actualMountPoint)
+	if err != nil {
+		if os.IsNotExist(err) {
+			// Create mount point directory
+			if err := os.MkdirAll(actualMountPoint, 0o755); err != nil {
+				return nil, fmt.Errorf("failed to create mount point: %w", err)
+			}
+		} else {
+			return nil, fmt.Errorf("failed to stat mount point: %w", err)
+		}
+	} else if !info.IsDir() {
+		return nil, fmt.Errorf("mount point is not a directory: %s", actualMountPoint)
+	}
+
+	// If we need to bind mount, do it now
+	if needUnbind && tmpBindMount != "" {
+		// Bind mount the original mount point to temporary location
+		cmd := exec.Command("mount", "--bind", mountPoint, tmpBindMount)
+		if err := cmd.Run(); err != nil {
+			// Clean up temporary directory
+			os.RemoveAll(tmpBindMount)
+			return nil, fmt.Errorf("failed to bind mount %s to %s: %w", mountPoint, tmpBindMount, err)
+		}
+		fmt.Printf("Bind mounted %s to %s\n", mountPoint, tmpBindMount)
 	}
 
 	// Create filesystem with full configuration
@@ -136,10 +219,34 @@ func Mount(h core.Handler, c core.Ctx, bktID int64, opts *MountOptions) (*fuse.S
 		fuseOpts.Options = append(fuseOpts.Options, opts.FuseOptions...)
 	}
 
-	// Mount filesystem
-	server, err := ofs.Mount(mountPoint, fuseOpts)
+	// Mount filesystem to actual mount point (may be temporary bind mount)
+	server, err := ofs.Mount(actualMountPoint, fuseOpts)
 	if err != nil {
+		// Clean up bind mount if it was created
+		if needUnbind && tmpBindMount != "" {
+			exec.Command("umount", tmpBindMount).Run()
+			os.RemoveAll(tmpBindMount)
+		}
 		return nil, fmt.Errorf("failed to mount: %w", err)
+	}
+
+	// If we used a temporary bind mount, we need to bind mount the FUSE mount back to original location
+	if needUnbind && tmpBindMount != "" {
+		// Unmount the temporary bind mount first
+		if err := exec.Command("umount", tmpBindMount).Run(); err != nil {
+			DebugLog("[VFS Mount] WARNING: Failed to unmount temporary bind mount %s: %v", tmpBindMount, err)
+		}
+		// Bind mount the FUSE mount to the original mount point
+		cmd := exec.Command("mount", "--bind", actualMountPoint, mountPoint)
+		if err := cmd.Run(); err != nil {
+			// Try to unmount the FUSE mount
+			server.Unmount()
+			os.RemoveAll(tmpBindMount)
+			return nil, fmt.Errorf("failed to bind mount FUSE mount to original location %s: %w", mountPoint, err)
+		}
+		fmt.Printf("Bind mounted FUSE filesystem from %s to %s\n", actualMountPoint, mountPoint)
+		// Clean up temporary directory
+		os.RemoveAll(tmpBindMount)
 	}
 
 	// Note: fs.Mount() returns a server that needs to be started with server.Serve()
