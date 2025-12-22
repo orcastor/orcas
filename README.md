@@ -4,8 +4,7 @@
   </a>
 </p>
 
-<p align="center"><strong>OrcaS: Open Reliable Content Addressable Storage</strong></p>
-<p align="center"><em>A Lightweight Object Storage System Ready to Use</em></p>
+<p align="center"><strong>OrcaS: Open Ready-to-Use Content Addressable Storage</strong></p>
 
 <p align="center">
   <a href="/go.mod#L3" alt="go version">
@@ -32,12 +31,12 @@
 
 ## 🚀 What is OrcaS?
 
-**OrcaS** (Open Reliable Content Addressable Storage) is a **lightweight, high-performance object storage system** built with **Content Addressable Storage (CAS)** at its core. It provides enterprise-grade features like instant deduplication, multi-versioning, zero-knowledge encryption, and smart compression - all in a single binary that's ready to deploy.
+**OrcaS** (Open Ready-to-Use Content Addressable Storage) is a **lightweight, high-performance object storage system** built with **Content Addressable Storage (CAS)** at its core. It provides enterprise-grade features like instant deduplication, multi-versioning, zero-knowledge encryption, and smart compression - all in a single binary that's ready to deploy.
 
 ### Why OrcaS?
 
 - 🌐 **Open**: Open source (MIT license), transparent, community-driven development
-- 🛡️ **Reliable**: Content Addressable Storage ensures data integrity and automatic deduplication
+- ✅ **Ready-to-Use**: Content Addressable Storage ensures data integrity and automatic deduplication, production-ready out of the box
 - 🎯 **Content Addressable Storage**: Data is stored by content hash, enabling automatic deduplication and integrity verification
 - ⚡ **Instant Upload (Deduplication)**: Upload files in seconds, not minutes - identical files are detected instantly without uploading
 - 🔒 **Zero-Knowledge Encryption**: Your data, your keys - end-to-end encryption with industry-standard algorithms

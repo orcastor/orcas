@@ -1650,27 +1650,21 @@ func scanChunks(basePath string, bktID, dataID int64, dataSize int64, chunkSize 
 			maxAllowedSN = 100000 // Set an absolute upper limit to prevent abnormal situations
 		}
 
-		// Scan from 0 until file not found or exceed expected max sn
-		sn := 0
-		for {
+		// Scan from 0 to maxAllowedSN to find all existing chunks
+		// This allows detection of non-continuous chunks (e.g., chunk 0 and 2 exist, but chunk 1 is missing)
+		for sn := 0; sn <= maxAllowedSN; sn++ {
 			fileName := fmt.Sprintf("%d_%d", dataID, sn)
 			hash := fmt.Sprintf("%X", sha256.Sum256([]byte(fileName)))
 			path := filepath.Join(basePath, fmt.Sprint(bktID), hash[58:61], hash[16:48], fileName)
 
 			info, err := os.Stat(path)
 			if err != nil {
-				// File doesn't exist, stop scanning
-				break
+				// File doesn't exist, continue to next chunk (don't break, to detect non-continuous chunks)
+				continue
 			}
 
 			// Record chunk size
 			chunks[sn] = info.Size()
-			sn++
-
-			// If data size is known, stop when exceed expected max sn (allow some tolerance)
-			if sn > maxAllowedSN {
-				break
-			}
 		}
 	} else {
 		// If data size is unknown, use original logic (until file not found or exceed safety limit)
@@ -1897,12 +1891,17 @@ func verifyChecksum(c Ctx, bktID int64, dataInfo *DataInfo, da DataAdapter, maxS
 
 	// Initialize hash calculators
 	var xxh3Hash *xxh3.Hasher
+	var xxh3HashForXXH3 *xxh3.Hasher // Separate hasher for XXH3 if both Cksum and XXH3 are needed
 	var sha256Hash hash.Hash
 	needCksum := dataInfo.Cksum > 0
 	needXXH3 := (dataInfo.Kind&DATA_ENDEC_MASK == 0 && dataInfo.Kind&DATA_CMPR_MASK == 0) && dataInfo.XXH3 > 0
 	needSHA256 := (dataInfo.Kind&DATA_ENDEC_MASK == 0 && dataInfo.Kind&DATA_CMPR_MASK == 0) && dataInfo.SHA256_0 != 0
 
-	if needCksum || needXXH3 {
+	// If both Cksum and XXH3 are needed, we need separate hashers because Sum64() consumes the hash state
+	if needCksum && needXXH3 {
+		xxh3Hash = xxh3.New()
+		xxh3HashForXXH3 = xxh3.New()
+	} else if needCksum || needXXH3 {
 		xxh3Hash = xxh3.New()
 	}
 	if needSHA256 {
@@ -1919,6 +1918,9 @@ func verifyChecksum(c Ctx, bktID int64, dataInfo *DataInfo, da DataAdapter, maxS
 			actualSize += int64(n)
 			if xxh3Hash != nil {
 				xxh3Hash.Write(buf[:n])
+			}
+			if xxh3HashForXXH3 != nil {
+				xxh3HashForXXH3.Write(buf[:n])
 			}
 			if sha256Hash != nil {
 				sha256Hash.Write(buf[:n])
@@ -1938,6 +1940,7 @@ func verifyChecksum(c Ctx, bktID int64, dataInfo *DataInfo, da DataAdapter, maxS
 	}
 
 	// Verify Cksum (XXHash3-64bit of final data)
+	// Note: For unencrypted and uncompressed data, Cksum should equal XXH3
 	if needCksum {
 		calculated := xxh3Hash.Sum64()
 		if calculated != dataInfo.Cksum {
@@ -1946,10 +1949,25 @@ func verifyChecksum(c Ctx, bktID int64, dataInfo *DataInfo, da DataAdapter, maxS
 	}
 
 	// If data is unencrypted and uncompressed, can verify XXH3 and SHA-256
+	// Note: For unencrypted and uncompressed data, XXH3 should equal Cksum
+	// If both needCksum and needXXH3 are true, we use separate hashers to avoid Sum64() consuming hash state
 	if needXXH3 {
-		calculated := xxh3Hash.Sum64()
-		if calculated != dataInfo.XXH3 {
-			return false
+		if needCksum {
+			// Both are needed, use separate hasher for XXH3
+			calculated := xxh3HashForXXH3.Sum64()
+			if calculated != dataInfo.XXH3 {
+				return false
+			}
+			// Also verify they match in metadata (should be equal for unencrypted/uncompressed data)
+			if dataInfo.Cksum != dataInfo.XXH3 {
+				return false
+			}
+		} else {
+			// Only XXH3 is needed, verify it
+			calculated := xxh3Hash.Sum64()
+			if calculated != dataInfo.XXH3 {
+				return false
+			}
 		}
 	}
 	if needSHA256 {

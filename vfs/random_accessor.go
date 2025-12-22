@@ -1182,8 +1182,8 @@ func (tw *TempFileWriter) flushChunkWithBuffer(sn int, buf *chunkBuffer) error {
 	DebugLog("[VFS TempFileWriter flushChunk] Processing chunk: fileID=%d, dataID=%d, sn=%d, originalSize=%d, enableRealtime=%v",
 		tw.fileID, tw.dataID, sn, len(chunkData), tw.enableRealtime)
 
-	// Update DataInfo CRC32 and OrigSize
-	// tw.dataInfo.CRC32 = crc32.Update(tw.dataInfo.CRC32, crc32.IEEETable, chunkData)
+	// Update DataInfo XXH3/SHA256 and OrigSize
+	// Note: XXH3 and SHA256 are updated in the actual processing code
 	// Use atomic operation for thread-safe OrigSize update (multiple chunks may flush concurrently)
 	atomic.AddInt64(&tw.dataInfo.OrigSize, int64(len(chunkData)))
 
@@ -1309,8 +1309,8 @@ func (tw *TempFileWriter) flushChunkWithBuffer(sn int, buf *chunkBuffer) error {
 			finalData = processedChunk
 		}
 
-		// Update CRC32 and size of final data
-		// tw.dataInfo.Cksum = crc32.Update(tw.dataInfo.Cksum, crc32.IEEETable, finalData)
+		// Update Cksum (XXH3) and size of final data
+		// Note: Cksum is updated in the actual processing code using XXH3
 		DebugLog("[VFS TempFileWriter flushChunk] Compression/encryption applied: fileID=%d, dataID=%d, sn=%d, originalSize=%d, finalSize=%d, ratio=%.2f%%",
 			tw.fileID, tw.dataID, sn, len(chunkData), len(finalData), float64(len(finalData))*100.0/float64(len(chunkData)))
 	} else {

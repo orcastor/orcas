@@ -853,18 +853,18 @@ func (dma *DefaultMetadataAdapter) PutData(c Ctx, bktID int64, d []*DataInfo) er
 		ID        int64  `borm:"id"`
 		Size      int64  `borm:"size"`
 		OrigSize  int64  `borm:"os"`
-		HdrXXH3   int64  `borm:"h"`   // Convert uint64 to int64
-		XXH3      int64  `borm:"x"`   // Convert uint64 to int64
+		HdrXXH3   int64  `borm:"h"` // Convert uint64 to int64
+		XXH3      int64  `borm:"x"` // Convert uint64 to int64
 		SHA256_0  int64  `borm:"s0"`
 		SHA256_1  int64  `borm:"s1"`
 		SHA256_2  int64  `borm:"s2"`
 		SHA256_3  int64  `borm:"s3"`
-		Cksum     int64  `borm:"c"`   // Convert uint64 to int64
+		Cksum     int64  `borm:"c"` // Convert uint64 to int64
 		Kind      uint32 `borm:"kind"`
 		PkgID     int64  `borm:"pi"`
 		PkgOffset uint32 `borm:"po"`
 	}
-	
+
 	dataForDB := make([]*DataInfoForDB, len(d))
 	for i, di := range d {
 		dataForDB[i] = &DataInfoForDB{
@@ -903,23 +903,23 @@ func (dma *DefaultMetadataAdapter) GetData(c Ctx, bktID, id int64) (d *DataInfo,
 		ID        int64  `borm:"id"`
 		Size      int64  `borm:"size"`
 		OrigSize  int64  `borm:"os"`
-		HdrXXH3   int64  `borm:"h"`   // Read as int64, convert to uint64
-		XXH3      int64  `borm:"x"`   // Read as int64, convert to uint64
+		HdrXXH3   int64  `borm:"h"` // Read as int64, convert to uint64
+		XXH3      int64  `borm:"x"` // Read as int64, convert to uint64
 		SHA256_0  int64  `borm:"s0"`
 		SHA256_1  int64  `borm:"s1"`
 		SHA256_2  int64  `borm:"s2"`
 		SHA256_3  int64  `borm:"s3"`
-		Cksum     int64  `borm:"c"`   // Read as int64, convert to uint64
+		Cksum     int64  `borm:"c"` // Read as int64, convert to uint64
 		Kind      uint32 `borm:"kind"`
 		PkgID     int64  `borm:"pi"`
 		PkgOffset uint32 `borm:"po"`
 	}
-	
+
 	diFromDB := &DataInfoFromDB{}
 	if _, err = b.TableContext(c, db, DATA_TBL).Select(diFromDB, b.Where(b.Eq("id", id))); err != nil {
 		return nil, fmt.Errorf("%w: GetData failed (bktID=%d, dataID=%d): %v", ERR_QUERY_DB, bktID, id, err)
 	}
-	
+
 	// Convert back to DataInfo
 	d = &DataInfo{
 		ID:        diFromDB.ID,
@@ -968,9 +968,9 @@ func (dma *DefaultMetadataAdapter) ListAllData(c Ctx, bktID int64, offset, limit
 		PkgID     int64  `borm:"pi"`
 		PkgOffset uint32 `borm:"po"`
 	}
-	
+
 	var dFromDB []*DataInfoFromDB
-	
+
 	// Paginated query: use borm to implement LIMIT and OFFSET
 	if limit > 0 {
 		_, err = b.TableContext(c, db, DATA_TBL).Select(&dFromDB,
@@ -985,7 +985,7 @@ func (dma *DefaultMetadataAdapter) ListAllData(c Ctx, bktID int64, offset, limit
 			return nil, 0, fmt.Errorf("%w: ListAllData select all failed (bktID=%d): %v", ERR_QUERY_DB, bktID, err)
 		}
 	}
-	
+
 	// Convert back to DataInfo
 	d = make([]*DataInfo, len(dFromDB))
 	for i, di := range dFromDB {
@@ -1182,9 +1182,9 @@ func (dma *DefaultMetadataAdapter) FindSmallPackageData(c Ctx, bktID int64, maxS
 		PkgID     int64  `borm:"pi"`
 		PkgOffset uint32 `borm:"po"`
 	}
-	
+
 	var dFromDB []*DataInfoFromDB
-	
+
 	// Paginated query: use borm to implement LIMIT and OFFSET
 	if limit > 0 {
 		_, err = b.TableContext(c, db, DATA_TBL).Select(&dFromDB,
@@ -1203,7 +1203,7 @@ func (dma *DefaultMetadataAdapter) FindSmallPackageData(c Ctx, bktID int64, maxS
 			return nil, 0, fmt.Errorf("%w: FindSmallPackageData select all failed (bktID=%d, maxSize=%d): %v", ERR_QUERY_DB, bktID, maxSize, err)
 		}
 	}
-	
+
 	// Convert back to DataInfo
 	d = make([]*DataInfo, len(dFromDB))
 	for i, di := range dFromDB {
@@ -1286,18 +1286,18 @@ func (dma *DefaultMetadataAdapter) PutDataAndObj(c Ctx, bktID int64, d []*DataIn
 			ID        int64  `borm:"id"`
 			Size      int64  `borm:"size"`
 			OrigSize  int64  `borm:"os"`
-			HdrXXH3   int64  `borm:"h"`   // Convert uint64 to int64
-			XXH3      int64  `borm:"x"`   // Convert uint64 to int64
+			HdrXXH3   int64  `borm:"h"` // Convert uint64 to int64
+			XXH3      int64  `borm:"x"` // Convert uint64 to int64
 			SHA256_0  int64  `borm:"s0"`
 			SHA256_1  int64  `borm:"s1"`
 			SHA256_2  int64  `borm:"s2"`
 			SHA256_3  int64  `borm:"s3"`
-			Cksum     int64  `borm:"c"`   // Convert uint64 to int64
+			Cksum     int64  `borm:"c"` // Convert uint64 to int64
 			Kind      uint32 `borm:"kind"`
 			PkgID     int64  `borm:"pi"`
 			PkgOffset uint32 `borm:"po"`
 		}
-		
+
 		dataForDB := make([]*DataInfoForDB, len(d))
 		for i, di := range d {
 			dataForDB[i] = &DataInfoForDB{
@@ -1316,7 +1316,7 @@ func (dma *DefaultMetadataAdapter) PutDataAndObj(c Ctx, bktID int64, d []*DataIn
 				PkgOffset: di.PkgOffset,
 			}
 		}
-		
+
 		if _, err = b.TableContext(c, tx, DATA_TBL).ReplaceInto(&dataForDB); err != nil {
 			return fmt.Errorf("%w: PutObjAndData ReplaceInto DATA failed (bktID=%d, dataCount=%d): %v", ERR_EXEC_DB, bktID, len(d), err)
 		}
@@ -1478,10 +1478,15 @@ func (dma *DefaultMetadataAdapter) ListObj(c Ctx, bktID, pid int64,
 			// 使用转义方法处理通配符和特殊字符
 			pattern := escapeLikePattern(wd)
 			// Escape single quotes in pattern for safe SQL string literal
+			// Note: escapeLikePattern already handles single quotes, but we do it again for safety
 			escapedPattern := strings.ReplaceAll(pattern, "'", "''")
+			// Escape backslash for SQL string literal (SQLite uses backslash for escaping in LIKE)
+			escapedPattern = strings.ReplaceAll(escapedPattern, "\\", "\\\\")
 			// Use LIKE with proper escaping - ensure the pattern is properly quoted
 			// SQLite requires the pattern to be a valid string literal
-			conds = append(conds, fmt.Sprintf("name LIKE %s", fmt.Sprintf("'%s'", escapedPattern)))
+			// Use raw SQL string to avoid SQL builder treating ? as parameter placeholder
+			// Note: ? has been converted to _ by escapeLikePattern, so no need to escape ? here
+			conds = append(conds, fmt.Sprintf("name LIKE '%s'", escapedPattern))
 		} else {
 			conds = append(conds, b.Eq("name", wd))
 		}
@@ -2016,7 +2021,11 @@ func (dma *DefaultMetadataAdapter) ListRecycleBin(c Ctx, bktID int64, opt ListOp
 			// SQLite branch uses LIKE pattern matching
 			// 使用转义方法处理通配符和特殊字符
 			pattern := escapeLikePattern(opt.Word)
-			conds = append(conds, fmt.Sprintf("name LIKE '%s'", pattern))
+			// Escape single quotes in pattern for safe SQL string literal
+			escapedPattern := strings.ReplaceAll(pattern, "'", "''")
+			// Escape backslash for SQL string literal (SQLite uses backslash for escaping in LIKE)
+			escapedPattern = strings.ReplaceAll(escapedPattern, "\\", "\\\\")
+			conds = append(conds, fmt.Sprintf("name LIKE '%s'", escapedPattern))
 		} else {
 			conds = append(conds, b.Eq("name", opt.Word))
 		}
