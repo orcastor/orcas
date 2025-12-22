@@ -1645,14 +1645,19 @@ func scanChunks(basePath string, bktID, dataID int64, dataSize int64, chunkSize 
 		//   chunk count = ceil(10/4) = 3, chunk indices are 0, 1, 2
 		//   max sn = 3 - 1 = 2
 		expectedChunkCount := (dataSize + chunkSize - 1) / chunkSize // Round up
-		maxAllowedSN := int(expectedChunkCount) + 1                  // Allow some tolerance to prevent calculation errors
+		// Calculate expected maxSN: if expectedChunkCount is 1, maxSN should be 0; if 2, maxSN should be 1, etc.
+		// So maxSN = expectedChunkCount - 1, but we add 1 for tolerance to detect missing chunks
+		maxAllowedSN := int(expectedChunkCount) // Use exact count, but scan up to maxAllowedSN (exclusive)
 		if maxAllowedSN > 100000 {
 			maxAllowedSN = 100000 // Set an absolute upper limit to prevent abnormal situations
 		}
 
 		// Scan from 0 to maxAllowedSN to find all existing chunks
 		// This allows detection of non-continuous chunks (e.g., chunk 0 and 2 exist, but chunk 1 is missing)
-		for sn := 0; sn <= maxAllowedSN; sn++ {
+		// We scan up to maxAllowedSN (exclusive) to avoid scanning non-existent chunks
+		// But we also need to scan beyond if we find chunks beyond expected range (for detecting orphaned chunks)
+		maxFoundSN := -1
+		for sn := 0; sn <= maxAllowedSN+1; sn++ { // Scan one extra to detect chunks beyond expected range
 			fileName := fmt.Sprintf("%d_%d", dataID, sn)
 			hash := fmt.Sprintf("%X", sha256.Sum256([]byte(fileName)))
 			path := filepath.Join(basePath, fmt.Sprint(bktID), hash[58:61], hash[16:48], fileName)
@@ -1660,11 +1665,18 @@ func scanChunks(basePath string, bktID, dataID int64, dataSize int64, chunkSize 
 			info, err := os.Stat(path)
 			if err != nil {
 				// File doesn't exist, continue to next chunk (don't break, to detect non-continuous chunks)
+				// But if we've found chunks and we're beyond expected range, we can stop
+				if sn > maxAllowedSN && maxFoundSN >= 0 {
+					break
+				}
 				continue
 			}
 
 			// Record chunk size
 			chunks[sn] = info.Size()
+			if sn > maxFoundSN {
+				maxFoundSN = sn
+			}
 		}
 	} else {
 		// If data size is unknown, use original logic (until file not found or exceed safety limit)

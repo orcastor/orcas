@@ -1,6 +1,7 @@
 package core
 
 import (
+	"bytes"
 	"strconv"
 	"testing"
 
@@ -425,20 +426,18 @@ func TestSparseFileSupport(t *testing.T) {
 			// Read missing chunk with only sn - should return chunkSize zeros
 			readData, err := lh.GetData(testCtx, testBktID, dataID, 0)
 			So(err, ShouldBeNil)
-			So(len(readData), ShouldEqual, 4*1024*1024) // Should be chunkSize
-			// All should be zeros
-			for _, b := range readData {
-				So(b, ShouldEqual, 0)
-			}
+			chunkSize := 4 * 1024 * 1024
+			So(len(readData), ShouldEqual, chunkSize) // Should be chunkSize
+			// Compare with all-zero array using bytes.Equal
+			zeroChunk := make([]byte, chunkSize)
+			So(bytes.Equal(readData, zeroChunk), ShouldBeTrue)
 
 			// Read another missing chunk
 			readData2, err := lh.GetData(testCtx, testBktID, dataID, 1)
 			So(err, ShouldBeNil)
-			So(len(readData2), ShouldEqual, 4*1024*1024) // Should be chunkSize
-			// All should be zeros
-			for _, b := range readData2 {
-				So(b, ShouldEqual, 0)
-			}
+			So(len(readData2), ShouldEqual, chunkSize) // Should be chunkSize
+			// Compare with all-zero array using bytes.Equal
+			So(bytes.Equal(readData2, zeroChunk), ShouldBeTrue)
 		})
 
 		Convey("sparse file - read multiple chunks with gaps", func() {

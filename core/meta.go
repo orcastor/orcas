@@ -1477,11 +1477,9 @@ func (dma *DefaultMetadataAdapter) ListObj(c Ctx, bktID, pid int64,
 			// sqlite 分支使用 LIKE 模式匹配
 			// 使用转义方法处理通配符和特殊字符
 			pattern := escapeLikePattern(wd)
-			// Escape single quotes in pattern for safe SQL string literal
-			// Note: escapeLikePattern already handles single quotes, but we do it again for safety
-			escapedPattern := strings.ReplaceAll(pattern, "'", "''")
+			// escapeLikePattern already handles single quotes (' -> ''), but we need to escape backslash
 			// Escape backslash for SQL string literal (SQLite uses backslash for escaping in LIKE)
-			escapedPattern = strings.ReplaceAll(escapedPattern, "\\", "\\\\")
+			escapedPattern := strings.ReplaceAll(pattern, "\\", "\\\\")
 			// Use LIKE with proper escaping - ensure the pattern is properly quoted
 			// SQLite requires the pattern to be a valid string literal
 			// Use raw SQL string to avoid SQL builder treating ? as parameter placeholder
@@ -1499,15 +1497,19 @@ func (dma *DefaultMetadataAdapter) ListObj(c Ctx, bktID, pid int64,
 	}
 	// Note: Don't close the connection, it's from the pool
 
+	// Build order conditions early to avoid modifying conds after count query
+	var orderBy string
+	orderBy, order = doOrder(delim, order, &conds)
+
+	// Use borm for count (it should handle raw SQL strings correctly)
 	if _, err = b.TableContext(c, db, OBJ_TBL).Select(&cnt,
 		b.Fields("count(1)"),
 		b.Where(conds...)); err != nil {
 		return nil, 0, "", fmt.Errorf("%w: ListObj count failed (bktID=%d, pid=%d, wd=%s): %v", ERR_QUERY_DB, bktID, pid, wd, err)
 	}
 
+	// Only query data if count > 0
 	if count > 0 {
-		var orderBy string
-		orderBy, order = doOrder(delim, order, &conds)
 		if _, err = b.TableContext(c, db, OBJ_TBL).Select(&o,
 			b.Where(conds...),
 			b.OrderBy(orderBy),
