@@ -10,17 +10,17 @@ require (
 	github.com/h2non/filetype v1.1.4-0.20231228185113-6469358c2bcb
 	github.com/hanwen/go-fuse/v2 v2.9.0
 	github.com/klauspost/compress v1.11.4
-	github.com/mattn/go-sqlite3 v1.14.6
+	github.com/mattn/go-sqlite3 v1.14.32
 	github.com/mholt/archiver/v3 v3.5.1
 	github.com/mkmueller/aes256 v0.0.0-20171112015946-1ce9e9b3f91a
-	github.com/orca-zhang/borm v0.0.0-20250923160046-6f14fa36e5bb
+	github.com/orca-zhang/borm v0.0.0-20251222162248-ce6be9d18ce8
 	github.com/orca-zhang/ecache2 v0.0.1
 	github.com/orca-zhang/idgen v0.0.0-20220909041521-2662ff4c3c3e
 	github.com/prometheus/client_golang v1.12.1
-	github.com/smartystreets/goconvey v1.7.2
+	github.com/smartystreets/goconvey v1.8.1
 	github.com/tjfoc/gmsm v1.4.1
+	github.com/zeebo/xxh3 v1.0.2
 	golang.org/x/crypto v0.17.0
-	golang.org/x/net v0.19.0
 	golang.org/x/sync v0.10.0
 )
 
@@ -52,7 +52,7 @@ require (
 	github.com/google/cel-go v0.11.3 // indirect
 	github.com/google/go-cmp v0.6.0 // indirect
 	github.com/google/uuid v1.1.2 // indirect
-	github.com/gopherjs/gopherjs v0.0.0-20181017120253-0766667cb4d1 // indirect
+	github.com/gopherjs/gopherjs v1.17.2 // indirect
 	github.com/gorilla/websocket v1.5.0 // indirect
 	github.com/gotomicro/logrotate v0.0.0-20211108034117-46d53eedc960 // indirect
 	github.com/grpc-ecosystem/grpc-gateway/v2 v2.7.0 // indirect
@@ -76,7 +76,7 @@ require (
 	github.com/prometheus/procfs v0.7.3 // indirect
 	github.com/robfig/cron/v3 v3.0.1 // indirect
 	github.com/shirou/gopsutil/v3 v3.21.6 // indirect
-	github.com/smartystreets/assertions v1.2.0 // indirect
+	github.com/smarty/assertions v1.15.0 // indirect
 	github.com/spf13/cast v1.4.1 // indirect
 	github.com/stoewer/go-strcase v1.2.0 // indirect
 	github.com/stretchr/testify v1.9.0 // indirect
@@ -85,7 +85,6 @@ require (
 	github.com/ugorji/go/codec v1.2.7 // indirect
 	github.com/ulikunitz/xz v0.5.9 // indirect
 	github.com/xi2/xz v0.0.0-20171230120015-48954b6210f8 // indirect
-	github.com/zeebo/xxh3 v1.0.2 // indirect
 	go.opentelemetry.io/otel v1.7.0 // indirect
 	go.opentelemetry.io/otel/exporters/jaeger v1.7.0 // indirect
 	go.opentelemetry.io/otel/exporters/otlp/internal/retry v1.7.0 // indirect
@@ -98,6 +97,7 @@ require (
 	go.uber.org/automaxprocs v1.5.1 // indirect
 	go.uber.org/multierr v1.6.0 // indirect
 	go.uber.org/zap v1.21.0 // indirect
+	golang.org/x/net v0.19.0 // indirect
 	golang.org/x/sys v0.28.0 // indirect
 	golang.org/x/text v0.14.0 // indirect
 	google.golang.org/genproto v0.0.0-20220505152158-f39f71e6c8f3 // indirect

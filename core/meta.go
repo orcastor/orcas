@@ -1480,11 +1480,9 @@ func (dma *DefaultMetadataAdapter) ListObj(c Ctx, bktID, pid int64,
 			// escapeLikePattern already handles single quotes (' -> ''), but we need to escape backslash
 			// Escape backslash for SQL string literal (SQLite uses backslash for escaping in LIKE)
 			escapedPattern := strings.ReplaceAll(pattern, "\\", "\\\\")
-			// Use LIKE with proper escaping - ensure the pattern is properly quoted
-			// SQLite requires the pattern to be a valid string literal
-			// Use raw SQL string to avoid SQL builder treating ? as parameter placeholder
+			// Use b.Cond with the escaped pattern as a parameter to avoid borm parsing issues
 			// Note: ? has been converted to _ by escapeLikePattern, so no need to escape ? here
-			conds = append(conds, fmt.Sprintf("name LIKE '%s'", escapedPattern))
+			conds = append(conds, b.Cond("name LIKE ?", escapedPattern))
 		} else {
 			conds = append(conds, b.Eq("name", wd))
 		}
@@ -2023,11 +2021,11 @@ func (dma *DefaultMetadataAdapter) ListRecycleBin(c Ctx, bktID int64, opt ListOp
 			// SQLite branch uses LIKE pattern matching
 			// 使用转义方法处理通配符和特殊字符
 			pattern := escapeLikePattern(opt.Word)
-			// Escape single quotes in pattern for safe SQL string literal
-			escapedPattern := strings.ReplaceAll(pattern, "'", "''")
+			// escapeLikePattern already handles single quotes (' -> ''), but we need to escape backslash
 			// Escape backslash for SQL string literal (SQLite uses backslash for escaping in LIKE)
-			escapedPattern = strings.ReplaceAll(escapedPattern, "\\", "\\\\")
-			conds = append(conds, fmt.Sprintf("name LIKE '%s'", escapedPattern))
+			escapedPattern := strings.ReplaceAll(pattern, "\\", "\\\\")
+			// Use b.Cond with the escaped pattern as a parameter to avoid borm parsing issues
+			conds = append(conds, b.Cond("name LIKE ?", escapedPattern))
 		} else {
 			conds = append(conds, b.Eq("name", opt.Word))
 		}
