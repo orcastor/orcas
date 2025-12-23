@@ -5,12 +5,13 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"fmt"
-	"github.com/zeebo/xxh3"
 	"os"
 	"path/filepath"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/zeebo/xxh3"
 
 	"github.com/orca-zhang/idgen"
 	"github.com/orcastor/orcas/core"
@@ -187,8 +188,8 @@ func TestVFSRandomAccessor(t *testing.T) {
 				ID:       dataID,
 				Size:     int64(len(initialData)),
 				OrigSize: int64(len(initialData)),
-				XXH3:     xxh3Value,
-				Cksum:    xxh3Value,
+				XXH3:     int64(xxh3Value),
+				Cksum:    int64(xxh3Value),
 				SHA256_0: sha256_0,
 				SHA256_1: sha256_1,
 				SHA256_2: sha256_2,
@@ -775,8 +776,8 @@ func TestRandomAccessorReadWithEncryption(t *testing.T) {
 			ID:       dataID,
 			Size:     int64(len(testData)),
 			OrigSize: int64(len(testData)),
-			XXH3:     xxh3Value,
-			Cksum:    xxh3Value,
+			XXH3:     int64(xxh3Value),
+			Cksum:    int64(xxh3Value),
 			SHA256_0: sha256_0,
 			SHA256_1: sha256_1,
 			SHA256_2: sha256_2,
