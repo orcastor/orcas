@@ -1,6 +1,7 @@
 package core
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/sha1"
 	"encoding/base64"
@@ -106,6 +107,9 @@ type Handler interface {
 	SetOptions(opt Options)
 	// 设置自定义的存储适配器
 	SetAdapter(ma MetadataAdapter, da DataAdapter)
+	// SetPath sets base path and data path for this handler
+	// If basePath or dataPath is empty string, it will not override existing values
+	SetPath(basePath, dataPath string)
 
 	// 登录用户
 	Login(c Ctx, usr, pwd string) (Ctx, *UserInfo, []*BucketInfo, error)
@@ -187,6 +191,9 @@ type LocalHandler struct {
 	// This allows access to bucket configuration for compression/encryption
 	// Cache expires after 5 minutes to ensure bucket config changes are reflected
 	bucketConfigs *ecache2.Cache[int64]
+	// Path configuration
+	basePath string // Base path for metadata (database storage location)
+	dataPath string // Data path for file data storage location
 }
 
 func NewLocalHandler() Handler {
@@ -273,6 +280,40 @@ func (lh *LocalHandler) SetAdapter(ma MetadataAdapter, da DataAdapter) {
 	lh.acm.SetAdapter(ma)
 }
 
+// SetPath sets base path and data path for this handler
+// If basePath or dataPath is empty string, it will not override existing values
+func (lh *LocalHandler) SetPath(basePath, dataPath string) {
+	if basePath != "" {
+		lh.basePath = basePath
+	}
+	if dataPath != "" {
+		lh.dataPath = dataPath
+	}
+}
+
+// withPath injects handler's path configuration into context
+// This ensures all operations use the handler's configured paths
+func (lh *LocalHandler) withPath(c Ctx) Ctx {
+	if lh.basePath == "" && lh.dataPath == "" {
+		return c
+	}
+	// Get existing context values
+	o := make(map[string]interface{})
+	if v, ok := c.Value("o").(map[string]interface{}); ok {
+		for k, val := range v {
+			o[k] = val
+		}
+	}
+	// Set paths if configured in handler
+	if lh.basePath != "" {
+		o["basePath"] = lh.basePath
+	}
+	if lh.dataPath != "" {
+		o["dataPath"] = lh.dataPath
+	}
+	return context.WithValue(c, "o", o)
+}
+
 // GetDataAdapter returns the DataAdapter instance
 // This allows external packages to access DataAdapter for operations like Delete
 func (lh *LocalHandler) GetDataAdapter() DataAdapter {
@@ -290,6 +331,7 @@ func (lh *LocalHandler) SetBucketConfig(bktID int64, bucket *BucketInfo) {
 }
 
 func (lh *LocalHandler) Login(c Ctx, usr, pwd string) (Ctx, *UserInfo, []*BucketInfo, error) {
+	c = lh.withPath(c)
 	// pwd from db or cache
 	u, err := lh.ma.GetUsr2(c, usr)
 	if err != nil {
@@ -355,6 +397,7 @@ func HashPassword(password string) (string, error) {
 // Client detects DataID change means no need to upload data
 // If non-pre-ref DataID is 0, pre-ref is skipped
 func (lh *LocalHandler) Ref(c Ctx, bktID int64, d []*DataInfo) ([]int64, error) {
+	c = lh.withPath(c)
 	if err := lh.acm.CheckPermission(c, MDRW, bktID); err != nil {
 		return nil, err
 	}
@@ -365,6 +408,7 @@ func (lh *LocalHandler) Ref(c Ctx, bktID int64, d []*DataInfo) ([]int64, error) 
 // For large files, sn starts from 0. For small files or packaged uploads, use sn=0
 // If dataID is 0, a new dataID will be created automatically
 func (lh *LocalHandler) PutData(c Ctx, bktID, dataID int64, sn int, buf []byte) (int64, error) {
+	c = lh.withPath(c)
 	if err := lh.acm.CheckPermission(c, DW, bktID); err != nil {
 		return 0, err
 	}
@@ -493,6 +537,7 @@ func (lh *LocalHandler) PutDataFromReader(c Ctx, bktID, dataID int64, sn int, r 
 
 // PutDataInfo creates metadata after data is uploaded
 func (lh *LocalHandler) PutDataInfo(c Ctx, bktID int64, d []*DataInfo) (ids []int64, err error) {
+	c = lh.withPath(c)
 	if err := lh.acm.CheckPermission(c, MDW, bktID); err != nil {
 		return nil, err
 	}
@@ -519,6 +564,7 @@ func (lh *LocalHandler) PutDataInfo(c Ctx, bktID int64, d []*DataInfo) (ids []in
 // PutDataInfoAndObj writes both DataInfo and ObjectInfo in a single transaction
 // This optimization reduces database round trips for better performance
 func (lh *LocalHandler) PutDataInfoAndObj(c Ctx, bktID int64, d []*DataInfo, o []*ObjectInfo) error {
+	c = lh.withPath(c)
 	if err := lh.acm.CheckPermission(c, MDW, bktID); err != nil {
 		return err
 	}
@@ -555,6 +601,7 @@ func (lh *LocalHandler) PutDataInfoAndObj(c Ctx, bktID int64, d []*DataInfo, o [
 }
 
 func (lh *LocalHandler) GetDataInfo(c Ctx, bktID, id int64) (*DataInfo, error) {
+	c = lh.withPath(c)
 	if err := lh.acm.CheckPermission(c, MDR, bktID); err != nil {
 		return nil, err
 	}
@@ -565,6 +612,7 @@ func (lh *LocalHandler) GetDataInfo(c Ctx, bktID, id int64) (*DataInfo, error) {
 // One param means sn, two params mean sn+offset, three params mean sn+offset+size
 // For sparse files (DATA_SPARSE flag), missing chunks are filled with zeros
 func (lh *LocalHandler) GetData(c Ctx, bktID, id int64, sn int, offsetOrSize ...int) ([]byte, error) {
+	c = lh.withPath(c)
 	if err := lh.acm.CheckPermission(c, DR, bktID); err != nil {
 		return nil, err
 	}
@@ -633,6 +681,7 @@ func (lh *LocalHandler) GetData(c Ctx, bktID, id int64, sn int, offsetOrSize ...
 // This is optimized for scenarios like qBittorrent random writes
 // The version ID is set to creation time (timestamp), and name will be set to completion time when finished
 func (lh *LocalHandler) GetOrCreateWritingVersion(c Ctx, bktID, fileID int64) (*ObjectInfo, error) {
+	c = lh.withPath(c)
 	if err := lh.acm.CheckPermission(c, MDW, bktID); err != nil {
 		return nil, err
 	}
@@ -801,6 +850,7 @@ func (lh *LocalHandler) UpdateData(c Ctx, bktID, dataID int64, sn int, offset in
 // Metadata without data is corrupted data
 // PID supports using two's complement to directly reference object ID that hasn't been uploaded yet
 func (lh *LocalHandler) Put(c Ctx, bktID int64, o []*ObjectInfo) ([]int64, error) {
+	c = lh.withPath(c)
 	if err := lh.acm.CheckPermission(c, MDW, bktID); err != nil {
 		return nil, err
 	}
@@ -865,14 +915,14 @@ func (lh *LocalHandler) Put(c Ctx, bktID int64, o []*ObjectInfo) ([]int64, error
 							Size:   dataInfo.OrigSize,
 							MTime:  obj.MTime,
 						}
-						lh.ma.SetObj(c, bktID, []string{"did", "size", "mtime"}, updateObj)
+						lh.ma.SetObj(c, bktID, []string{"did", "s", "m"}, updateObj)
 					} else {
 						updateObj := &ObjectInfo{
 							ID:     parent.ID,
 							DataID: obj.DataID,
 							MTime:  obj.MTime,
 						}
-						lh.ma.SetObj(c, bktID, []string{"did", "mtime"}, updateObj)
+						lh.ma.SetObj(c, bktID, []string{"did", "m"}, updateObj)
 					}
 				}
 			}
@@ -925,6 +975,7 @@ func (lh *LocalHandler) Put(c Ctx, bktID int64, o []*ObjectInfo) ([]int64, error
 }
 
 func (lh *LocalHandler) Get(c Ctx, bktID int64, ids []int64) ([]*ObjectInfo, error) {
+	c = lh.withPath(c)
 	if err := lh.acm.CheckPermission(c, MDR, bktID); err != nil {
 		return nil, err
 	}
@@ -932,6 +983,7 @@ func (lh *LocalHandler) Get(c Ctx, bktID int64, ids []int64) ([]*ObjectInfo, err
 }
 
 func (lh *LocalHandler) List(c Ctx, bktID, pid int64, opt ListOptions) ([]*ObjectInfo, int64, string, error) {
+	c = lh.withPath(c)
 	if err := lh.acm.CheckPermission(c, MDR, bktID); err != nil {
 		return nil, 0, "", err
 	}
@@ -939,10 +991,11 @@ func (lh *LocalHandler) List(c Ctx, bktID, pid int64, opt ListOptions) ([]*Objec
 }
 
 func (lh *LocalHandler) Rename(c Ctx, bktID, id int64, name string) error {
+	c = lh.withPath(c)
 	if err := lh.acm.CheckPermission(c, MDW, bktID); err != nil {
 		return err
 	}
-	return lh.ma.SetObj(c, bktID, []string{"name"}, &ObjectInfo{ID: id, Name: name})
+	return lh.ma.SetObj(c, bktID, []string{"n"}, &ObjectInfo{ID: id, Name: name})
 }
 
 // CreateVersionFromFile creates a new version from an existing file
@@ -996,6 +1049,7 @@ func (lh *LocalHandler) CreateVersionFromFile(c Ctx, bktID, existingFileID int64
 }
 
 func (lh *LocalHandler) MoveTo(c Ctx, bktID, id, pid int64) error {
+	c = lh.withPath(c)
 	if err := lh.acm.CheckPermission(c, MDRW, bktID); err != nil {
 		return err
 	}
@@ -1003,6 +1057,7 @@ func (lh *LocalHandler) MoveTo(c Ctx, bktID, id, pid int64) error {
 }
 
 func (lh *LocalHandler) Recycle(c Ctx, bktID, id int64) error {
+	c = lh.withPath(c)
 	if err := lh.acm.CheckPermission(c, MDRW, bktID); err != nil {
 		return err
 	}
@@ -1012,6 +1067,7 @@ func (lh *LocalHandler) Recycle(c Ctx, bktID, id int64) error {
 }
 
 func (lh *LocalHandler) Delete(c Ctx, bktID, id int64) error {
+	c = lh.withPath(c)
 	if err := lh.acm.CheckPermission(c, MDD, bktID); err != nil {
 		return err
 	}
@@ -1020,6 +1076,7 @@ func (lh *LocalHandler) Delete(c Ctx, bktID, id int64) error {
 }
 
 func (lh *LocalHandler) CleanRecycleBin(c Ctx, bktID int64, targetID int64) error {
+	c = lh.withPath(c)
 	if err := lh.acm.CheckPermission(c, ALL, bktID); err != nil {
 		return err
 	}
@@ -1027,6 +1084,7 @@ func (lh *LocalHandler) CleanRecycleBin(c Ctx, bktID int64, targetID int64) erro
 }
 
 func (lh *LocalHandler) ListRecycleBin(c Ctx, bktID int64, opt ListOptions) ([]*ObjectInfo, int64, string, error) {
+	c = lh.withPath(c)
 	if err := lh.acm.CheckPermission(c, MDR, bktID); err != nil {
 		return nil, 0, "", err
 	}
@@ -1037,6 +1095,7 @@ func (lh *LocalHandler) ListRecycleBin(c Ctx, bktID int64, opt ListOptions) ([]*
 }
 
 func (lh *LocalHandler) GetBktInfo(c Ctx, bktID int64) (*BucketInfo, error) {
+	c = lh.withPath(c)
 	if err := lh.acm.CheckOwn(c, bktID); err != nil {
 		return nil, err
 	}
@@ -1058,6 +1117,7 @@ func (lh *LocalHandler) GetBktInfo(c Ctx, bktID int64) (*BucketInfo, error) {
 }
 
 func (lh *LocalHandler) UpdateFileLatestVersion(c Ctx, bktID int64) error {
+	c = lh.withPath(c)
 	if err := lh.acm.CheckPermission(c, ALL, bktID); err != nil {
 		return err
 	}

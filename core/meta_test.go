@@ -393,7 +393,7 @@ func TestSetObj(t *testing.T) {
 		So(o[1], ShouldResemble, d1)
 		Convey("set obj name", func() {
 			d.Name = "test1"
-			dma.SetObj(c, bktID, []string{"name"}, &ObjectInfo{ID: id, Name: d.Name})
+			dma.SetObj(c, bktID, []string{"n"}, &ObjectInfo{ID: id, Name: d.Name})
 			o, err = dma.GetObj(c, bktID, ids)
 			So(err, ShouldBeNil)
 			So(len(o), ShouldEqual, 2)
@@ -403,7 +403,7 @@ func TestSetObj(t *testing.T) {
 
 		Convey("same obj name", func() {
 			d.Name = "test2"
-			err := dma.SetObj(c, bktID, []string{"name"}, &ObjectInfo{ID: id, Name: d.Name})
+			err := dma.SetObj(c, bktID, []string{"n"}, &ObjectInfo{ID: id, Name: d.Name})
 			So(err, ShouldEqual, ERR_DUP_KEY)
 		})
 	})

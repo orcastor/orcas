@@ -110,30 +110,30 @@ func flushBucketStats(bktID int64, delta *BucketStatsDelta) {
 	// Batch execute updates (merge updates for multiple fields)
 	if used != 0 {
 		if used > 0 {
-			_, _ = db.Exec("UPDATE bkt SET used = used + ? WHERE id = ?", used, bktID)
+			_, _ = db.Exec("UPDATE bkt SET u = u + ? WHERE id = ?", used, bktID)
 		} else {
-			_, _ = db.Exec("UPDATE bkt SET used = MAX(0, used - ?) WHERE id = ?", -used, bktID)
+			_, _ = db.Exec("UPDATE bkt SET u = MAX(0, u - ?) WHERE id = ?", -used, bktID)
 		}
 	}
 	if realUsed != 0 {
 		if realUsed > 0 {
-			_, _ = db.Exec("UPDATE bkt SET real_used = real_used + ? WHERE id = ?", realUsed, bktID)
+			_, _ = db.Exec("UPDATE bkt SET ru = ru + ? WHERE id = ?", realUsed, bktID)
 		} else {
-			_, _ = db.Exec("UPDATE bkt SET real_used = MAX(0, real_used - ?) WHERE id = ?", -realUsed, bktID)
+			_, _ = db.Exec("UPDATE bkt SET ru = MAX(0, ru - ?) WHERE id = ?", -realUsed, bktID)
 		}
 	}
 	if logicalUsed != 0 {
 		if logicalUsed > 0 {
-			_, _ = db.Exec("UPDATE bkt SET logical_used = logical_used + ? WHERE id = ?", logicalUsed, bktID)
+			_, _ = db.Exec("UPDATE bkt SET lu = lu + ? WHERE id = ?", logicalUsed, bktID)
 		} else {
-			_, _ = db.Exec("UPDATE bkt SET logical_used = MAX(0, logical_used - ?) WHERE id = ?", -logicalUsed, bktID)
+			_, _ = db.Exec("UPDATE bkt SET lu = MAX(0, lu - ?) WHERE id = ?", -logicalUsed, bktID)
 		}
 	}
 	if dedupSavings != 0 {
 		if dedupSavings > 0 {
-			_, _ = db.Exec("UPDATE bkt SET dedup_savings = dedup_savings + ? WHERE id = ?", dedupSavings, bktID)
+			_, _ = db.Exec("UPDATE bkt SET ds = ds + ? WHERE id = ?", dedupSavings, bktID)
 		} else {
-			_, _ = db.Exec("UPDATE bkt SET dedup_savings = MAX(0, dedup_savings - ?) WHERE id = ?", -dedupSavings, bktID)
+			_, _ = db.Exec("UPDATE bkt SET ds = MAX(0, ds - ?) WHERE id = ?", -dedupSavings, bktID)
 		}
 	}
 }

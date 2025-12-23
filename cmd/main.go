@@ -65,6 +65,8 @@ type Config struct {
 	UserName string `json:"user_name"`
 	Password string `json:"password"`
 	NoAuth   bool   `json:"no_auth"` // If true, bypass authentication (no user required)
+	BasePath string `json:"base_path"` // Base path for metadata (database storage location)
+	DataPath string `json:"data_path"` // Data path for file data storage location
 	RefLevel string `json:"ref_level"`
 	CmprWay  string `json:"cmpr_way"`
 	CmprQlty int    `json:"cmpr_qlty"`
@@ -155,6 +157,10 @@ func main() {
 
 	// Create SDK instance
 	handler := core.NewLocalHandler()
+	// Set paths if configured
+	if cfg.BasePath != "" || cfg.DataPath != "" {
+		handler.SetPath(cfg.BasePath, cfg.DataPath)
+	}
 	sdkInstance := sdk.New(handler)
 	defer sdkInstance.Close()
 
@@ -290,6 +296,10 @@ func handleMount() {
 		// NoAuth mode: use NoAuthHandler and skip login
 		handler = core.NewNoAuthHandler()
 		defer handler.Close()
+		// Set paths if configured
+		if cfg.BasePath != "" || cfg.DataPath != "" {
+			handler.SetPath(cfg.BasePath, cfg.DataPath)
+		}
 		ctx = context.Background()
 
 		// In NoAuth mode, bucket ID must be specified
@@ -304,6 +314,10 @@ func handleMount() {
 		// Normal mode: use LocalHandler and login
 		handler = core.NewLocalHandler()
 		defer handler.Close()
+		// Set paths if configured
+		if cfg.BasePath != "" || cfg.DataPath != "" {
+			handler.SetPath(cfg.BasePath, cfg.DataPath)
+		}
 
 		// Login
 		var userInfo *core.UserInfo
@@ -452,6 +466,19 @@ func loadConfig() (*Config, error) {
 	// workers default value is 0, if command line sets a value greater than 0, use it
 	if *workersN > 0 {
 		cfg.WorkersN = *workersN
+	}
+
+	// BasePath and DataPath can be set via environment variables if not in config
+	// This allows fallback to ORCAS_BASE and ORCAS_DATA environment variables
+	if cfg.BasePath == "" {
+		if envBasePath := os.Getenv("ORCAS_BASE"); envBasePath != "" {
+			cfg.BasePath = envBasePath
+		}
+	}
+	if cfg.DataPath == "" {
+		if envDataPath := os.Getenv("ORCAS_DATA"); envDataPath != "" {
+			cfg.DataPath = envDataPath
+		}
 	}
 
 	return cfg, nil
@@ -633,6 +660,10 @@ func handleUserManagement() {
 
 	// Create handler and login as admin
 	handler := core.NewLocalHandler()
+	// Set paths if configured
+	if cfg.BasePath != "" || cfg.DataPath != "" {
+		handler.SetPath(cfg.BasePath, cfg.DataPath)
+	}
 	ctx, userInfo, _, err := handler.Login(context.Background(), cfg.UserName, cfg.Password)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Login failed: %v\n", err)
@@ -778,6 +809,10 @@ func handleBucketManagement() {
 
 	// Create handler and login as admin
 	handler := core.NewLocalHandler()
+	// Set paths if configured
+	if cfg.BasePath != "" || cfg.DataPath != "" {
+		handler.SetPath(cfg.BasePath, cfg.DataPath)
+	}
 	ctx, userInfo, _, err := handler.Login(context.Background(), cfg.UserName, cfg.Password)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Login failed: %v\n", err)

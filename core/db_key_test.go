@@ -91,7 +91,7 @@ func TestChangeDBKey(t *testing.T) {
 			So(err, ShouldBeNil)
 
 			// Insert a test bucket
-			_, err = db.Exec(`INSERT INTO bkt (id, uid, quota, used, real_used, logical_used, dedup_savings, type, name, chunk_size) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			_, err = db.Exec(`INSERT INTO bkt (id, uid, q, u, ru, lu, ds, t, n, cs) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 				1, 1, 1000, 0, 0, 0, 0, 1, "test-bucket", 0)
 			So(err, ShouldBeNil)
 			
@@ -136,7 +136,7 @@ func TestChangeDBKey(t *testing.T) {
 			So(err, ShouldBeNil)
 
 			// Insert a test bucket
-			_, err = db.Exec(`INSERT INTO bkt (id, uid, quota, used, real_used, logical_used, dedup_savings, type, name, chunk_size) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			_, err = db.Exec(`INSERT INTO bkt (id, uid, q, u, ru, lu, ds, t, n, cs) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 				1, 1, 1000, 0, 0, 0, 0, 1, "test-bucket", 0)
 			So(err, ShouldBeNil)
 			
@@ -179,7 +179,7 @@ func TestChangeDBKey(t *testing.T) {
 			So(err, ShouldBeNil)
 
 			// Insert a test bucket
-			_, err = db.Exec(`INSERT INTO bkt (id, uid, quota, used, real_used, logical_used, dedup_savings, type, name, chunk_size) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			_, err = db.Exec(`INSERT INTO bkt (id, uid, q, u, ru, lu, ds, t, n, cs) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 				1, 1, 1000, 0, 0, 0, 0, 1, "test-bucket", 0)
 			So(err, ShouldBeNil)
 			
@@ -250,10 +250,10 @@ func TestChangeDBKey(t *testing.T) {
 			So(err, ShouldBeNil)
 
 			// Insert buckets
-			_, err = db.Exec(`INSERT INTO bkt (id, uid, quota, used, real_used, logical_used, dedup_savings, type, name, chunk_size) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			_, err = db.Exec(`INSERT INTO bkt (id, uid, q, u, ru, lu, ds, t, n, cs) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 				1, 1, 1000, 0, 0, 0, 0, 1, "bucket1", 0)
 			So(err, ShouldBeNil)
-			_, err = db.Exec(`INSERT INTO bkt (id, uid, quota, used, real_used, logical_used, dedup_savings, type, name, chunk_size) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			_, err = db.Exec(`INSERT INTO bkt (id, uid, q, u, ru, lu, ds, t, n, cs) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 				2, 1, 2000, 0, 0, 0, 0, 1, "bucket2", 0)
 			So(err, ShouldBeNil)
 
@@ -292,7 +292,7 @@ func TestChangeDBKey(t *testing.T) {
 
 			// Verify specific data
 			var name string
-			err = db2.QueryRow("SELECT name FROM bkt WHERE id = ?", 1).Scan(&name)
+			err = db2.QueryRow("SELECT n FROM bkt WHERE id = ?", 1).Scan(&name)
 			So(err, ShouldBeNil)
 			So(name, ShouldEqual, "bucket1")
 
@@ -338,7 +338,7 @@ func TestChangeDBKey(t *testing.T) {
 			So(err, ShouldBeNil)
 
 			// Insert bucket with unique name (uses uk_name index)
-			_, err = db.Exec(`INSERT INTO bkt (id, uid, quota, used, real_used, logical_used, dedup_savings, type, name, chunk_size) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			_, err = db.Exec(`INSERT INTO bkt (id, uid, q, u, ru, lu, ds, t, n, cs) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 				1, 1, 1000, 0, 0, 0, 0, 1, "unique-bucket", 0)
 			So(err, ShouldBeNil)
 			
@@ -355,7 +355,7 @@ func TestChangeDBKey(t *testing.T) {
 			So(err, ShouldBeNil)
 			defer db2.Close()
 
-			_, err = db2.Exec(`INSERT INTO bkt (id, uid, quota, used, real_used, logical_used, dedup_savings, type, name, chunk_size) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			_, err = db2.Exec(`INSERT INTO bkt (id, uid, q, u, ru, lu, ds, t, n, cs) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 				2, 1, 1000, 0, 0, 0, 0, 1, "unique-bucket", 0)
 			So(err, ShouldNotBeNil) // Should fail due to unique constraint
 		})
@@ -369,7 +369,7 @@ func TestChangeDBKey(t *testing.T) {
 			db, err := GetDBWithKey("same-key")
 			So(err, ShouldBeNil)
 
-			_, err = db.Exec(`INSERT INTO bkt (id, uid, quota, used, real_used, logical_used, dedup_savings, type, name, chunk_size) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			_, err = db.Exec(`INSERT INTO bkt (id, uid, q, u, ru, lu, ds, t, n, cs) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 				1, 1, 1000, 0, 0, 0, 0, 1, "test-bucket", 0)
 			So(err, ShouldBeNil)
 			
@@ -501,7 +501,7 @@ func TestChangeDBKeyEdgeCases(t *testing.T) {
 			// Add data
 			db, err := GetDBWithKey("key1")
 			So(err, ShouldBeNil)
-			_, err = db.Exec(`INSERT INTO bkt (id, uid, quota, used, real_used, logical_used, dedup_savings, type, name, chunk_size) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			_, err = db.Exec(`INSERT INTO bkt (id, uid, q, u, ru, lu, ds, t, n, cs) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 				1, 1, 1000, 0, 0, 0, 0, 1, "bucket1", 0)
 			So(err, ShouldBeNil)
 			db.Close()

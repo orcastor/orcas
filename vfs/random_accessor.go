@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"hash"
 	"io"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -155,6 +156,69 @@ var (
 
 	tempFlushMgr     *delayedFlushManager
 	tempFlushMgrOnce sync.Once
+
+	// nonCompressibleExts is a map of file extensions that don't benefit from compression
+	// Common compressed/encoded file extensions that are already compressed or encoded
+	nonCompressibleExts map[string]struct{} = map[string]struct{}{
+		// Archive/Compression formats
+		".zip": {}, ".gz": {}, ".bz2": {}, ".xz": {}, ".7z": {}, ".rar": {}, ".tar": {},
+		".cab": {}, ".deb": {}, ".dmg": {}, ".iso": {}, ".lz": {}, ".lzma": {}, ".lzo": {},
+		".pak": {}, ".rpm": {}, ".sit": {}, ".sitx": {}, ".tgz": {}, ".z": {}, ".zst": {},
+		".apk": {}, ".ipa": {}, ".jar": {}, ".war": {}, ".ear": {}, ".zipx": {}, ".ace": {},
+		".arc": {}, ".arj": {}, ".cpio": {}, ".lha": {}, ".lzh": {}, ".zoo": {},
+
+		// Image formats
+		".jpg": {}, ".jpeg": {}, ".png": {}, ".gif": {}, ".webp": {}, ".bmp": {}, ".ico": {},
+		".svg": {}, ".tiff": {}, ".tif": {}, ".psd": {}, ".ai": {}, ".eps": {}, ".raw": {},
+		".cr2": {}, ".nef": {}, ".orf": {}, ".sr2": {}, ".arw": {}, ".dng": {}, ".heic": {},
+		".heif": {}, ".avif": {}, ".jp2": {}, ".j2k": {}, ".jpx": {}, ".jpf": {}, ".jpm": {},
+		".jpc": {}, ".jxr": {}, ".wdp": {}, ".hdp": {}, ".exr": {}, ".hdr": {}, ".xcf": {},
+		".sketch": {}, ".fig": {}, ".xd": {},
+
+		// Video formats
+		".mp4": {}, ".avi": {}, ".mkv": {}, ".mov": {}, ".wmv": {}, ".flv": {}, ".webm": {},
+		".m4v": {}, ".mpg": {}, ".mpeg": {}, ".mts": {}, ".m2ts": {}, ".ogv": {}, ".qt": {},
+		".rm": {}, ".rmvb": {}, ".swf": {}, ".ts": {}, ".vob": {}, ".f4v": {}, ".f4p": {},
+		".f4a": {}, ".f4b": {}, ".mxf": {}, ".divx": {}, ".xvid": {}, ".h264": {}, ".h265": {},
+		".hevc": {}, ".vp8": {}, ".vp9": {}, ".av1": {}, ".3gp": {}, ".3g2": {}, ".asf": {},
+		".avchd": {}, ".m2v": {}, ".mpv": {}, ".nsv": {}, ".ogm": {},
+
+		// Audio formats
+		".mp3": {}, ".wav": {}, ".flac": {}, ".aac": {}, ".ogg": {}, ".m4a": {}, ".wma": {},
+		".m4p": {}, ".ape": {}, ".opus": {}, ".ra": {}, ".amr": {}, ".aa": {},
+		".aax": {}, ".act": {}, ".aiff": {}, ".au": {}, ".awb": {}, ".dct": {}, ".dss": {},
+		".dvf": {}, ".gsm": {}, ".iklax": {}, ".ivs": {}, ".m4b": {}, ".mmf": {}, ".mpc": {},
+		".msv": {}, ".nmf": {}, ".nsf": {}, ".oga": {}, ".mogg": {}, ".rf64": {},
+		".sln": {}, ".tta": {}, ".voc": {}, ".vox": {}, ".wv": {}, ".wvx": {}, ".3ga": {},
+
+		// CAD formats
+		".dwg": {}, ".dxf": {}, ".dgn": {}, ".dwf": {}, ".ifc": {}, ".step": {}, ".stp": {},
+		".iges": {}, ".igs": {}, ".3dm": {}, ".3ds": {}, ".max": {}, ".obj": {}, ".fbx": {},
+		".dae": {}, ".blend": {}, ".skp": {}, ".c4d": {}, ".ma": {}, ".mb": {},
+		".lwo": {}, ".lws": {}, ".x3d": {}, ".x3dv": {}, ".x3db": {}, ".ply": {}, ".stl": {},
+		".off": {}, ".3mf": {}, ".amf": {}, ".collada": {}, ".x": {}, ".b3d": {},
+		".bvh": {}, ".cob": {}, ".csm": {}, ".enff": {}, ".gltf": {},
+		".glb": {}, ".iqm": {}, ".irrmesh": {}, ".irr": {}, ".lxo": {},
+		".md2": {}, ".md3": {}, ".md5anim": {}, ".md5camera": {}, ".md5mesh": {},
+		".mdc": {}, ".mdl": {}, ".mesh": {}, ".mesh.xml": {}, ".mot": {}, ".ms3d": {},
+		".ndo": {}, ".nff": {}, ".ogex": {}, ".pk3": {},
+		".pmx": {}, ".prj": {}, ".q3o": {}, ".q3s": {}, ".scn": {}, ".sib": {},
+		".smd": {}, ".ter": {}, ".uc": {}, ".vta": {},
+		".xgl": {}, ".zgl": {},
+
+		// Document formats (already compressed)
+		".pdf": {}, ".doc": {}, ".docx": {}, ".xls": {}, ".xlsx": {}, ".ppt": {}, ".pptx": {},
+		".odt": {}, ".ods": {}, ".odp": {}, ".rtf": {}, ".pages": {}, ".numbers": {}, ".key": {},
+		".epub": {}, ".mobi": {}, ".azw": {}, ".azw3": {}, ".fb2": {}, ".ibooks": {},
+
+		// Font formats
+		".woff": {}, ".woff2": {}, ".ttf": {}, ".otf": {}, ".eot": {}, ".fon": {}, ".fnt": {},
+		".ttc": {}, ".afm": {}, ".pfb": {}, ".pfm": {},
+
+		// Other compressed/binary formats
+		".db": {}, ".sqlite": {}, ".sqlite3": {}, ".mdb": {}, ".accdb": {}, ".fdb": {},
+		".gdb": {}, ".pst": {}, ".ost": {}, ".msg": {}, ".eml": {},
+	}
 )
 
 // getBucketConfigWithCache gets bucket configuration with global cache
@@ -180,6 +244,56 @@ func getBucketConfigWithCache(fs *OrcasFS) *core.BucketInfo {
 	}
 
 	return bucket
+}
+
+// createCompressor creates a compressor based on compression way and quality
+// Returns nil if cmprWay is 0 or unsupported
+func createCompressor(cmprWay uint32, cmprQlty uint32) archiver.Compressor {
+	if cmprWay == 0 {
+		return nil
+	}
+	if cmprWay&core.DATA_CMPR_SNAPPY != 0 {
+		return &archiver.Snappy{}
+	} else if cmprWay&core.DATA_CMPR_ZSTD != 0 {
+		return &archiver.Zstd{EncoderOptions: []zstd.EOption{zstd.WithEncoderLevel(zstd.EncoderLevelFromZstd(int(cmprQlty)))}}
+	} else if cmprWay&core.DATA_CMPR_GZIP != 0 {
+		return &archiver.Gz{CompressionLevel: int(cmprQlty)}
+	} else if cmprWay&core.DATA_CMPR_BR != 0 {
+		return &archiver.Brotli{Quality: int(cmprQlty)}
+	}
+	return nil
+}
+
+// shouldCompressFile checks if a file should be compressed based on file extension and file header
+// Returns true if the file should be compressed, false otherwise
+// Step 1: Check file extension first (faster than file header check)
+// Step 2: If extension check passed, check file header using filetype.Match
+func shouldCompressFile(fileName string, firstChunk []byte) bool {
+	if len(firstChunk) == 0 {
+		return true // Empty chunk, allow compression
+	}
+
+	shouldCompress := true
+
+	// Step 1: Check file extension first (faster than file header check)
+	if fileName != "" {
+		ext := strings.ToLower(filepath.Ext(fileName))
+		// Check if file extension is in non-compressible extensions map
+		if _, ok := nonCompressibleExts[ext]; ok {
+			shouldCompress = false
+		}
+	}
+
+	// Step 2: If extension check passed, check file header
+	if shouldCompress {
+		detectedKind, _ := filetype.Match(firstChunk)
+		if detectedKind != filetype.Unknown {
+			// Not unknown type, don't compress
+			shouldCompress = false
+		}
+	}
+
+	return shouldCompress
 }
 
 const (
@@ -1196,43 +1310,10 @@ func (tw *TempFileWriter) flushChunkWithBuffer(sn int, buf *chunkBuffer) error {
 		isFirstChunk := sn == 0
 		cmprWay := getCmprWayForFS(tw.fs)
 		if isFirstChunk && cmprWay > 0 && len(chunkData) > 0 {
-			shouldCompress := true
-
-			// Step 1: Check file extension first (faster than file header check)
-			if tw.fileName != "" {
-				fileNameLower := strings.ToLower(tw.fileName)
-				// Common compressed/encoded file extensions that don't benefit from compression
-				nonCompressibleExts := []string{
-					".zip", ".gz", ".bz2", ".xz", ".7z", ".rar", ".tar",
-					".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".ico",
-					".mp4", ".avi", ".mkv", ".mov", ".wmv", ".flv", ".webm",
-					".mp3", ".wav", ".flac", ".aac", ".ogg", ".m4a",
-					".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx",
-					".woff", ".woff2", ".ttf", ".otf", ".eot",
-				}
-				for _, ext := range nonCompressibleExts {
-					if strings.HasSuffix(fileNameLower, ext) {
-						shouldCompress = false
-						DebugLog("[VFS TempFileWriter flushChunk] File extension indicates non-compressible type, skipping compression: fileID=%d, dataID=%d, sn=%d, fileName=%s, ext=%s",
-							tw.fileID, tw.dataID, sn, tw.fileName, ext)
-						break
-					}
-				}
-			}
-
-			// Step 2: If extension check passed, check file header
-			if shouldCompress {
-				detectedKind, _ := filetype.Match(chunkData)
-				if detectedKind != filetype.Unknown {
-					// Not unknown type, don't compress
-					shouldCompress = false
-					DebugLog("[VFS TempFileWriter flushChunk] File header indicates known type, skipping compression: fileID=%d, dataID=%d, sn=%d, fileName=%s, detectedKind=%s",
-						tw.fileID, tw.dataID, sn, tw.fileName, detectedKind.Extension)
-				}
-			}
-
-			if !shouldCompress {
+			if !shouldCompressFile(tw.fileName, chunkData) {
 				tw.dataInfo.Kind &= ^core.DATA_CMPR_MASK
+				DebugLog("[VFS TempFileWriter flushChunk] File should not be compressed, skipping compression: fileID=%d, dataID=%d, sn=%d, fileName=%s",
+					tw.fileID, tw.dataID, sn, tw.fileName)
 			}
 		}
 
@@ -1241,40 +1322,27 @@ func (tw *TempFileWriter) flushChunkWithBuffer(sn int, buf *chunkBuffer) error {
 		hasCmpr := tw.dataInfo.Kind&core.DATA_CMPR_MASK != 0
 		if hasCmpr {
 			cmprQlty := getCmprQltyForFS(tw.fs)
-			if cmprWay > 0 {
-				var cmpr archiver.Compressor
-				if cmprWay&core.DATA_CMPR_SNAPPY != 0 {
-					cmpr = &archiver.Snappy{}
-				} else if cmprWay&core.DATA_CMPR_ZSTD != 0 {
-					cmpr = &archiver.Zstd{EncoderOptions: []zstd.EOption{zstd.WithEncoderLevel(zstd.EncoderLevelFromZstd(int(cmprQlty)))}}
-				} else if cmprWay&core.DATA_CMPR_GZIP != 0 {
-					cmpr = &archiver.Gz{CompressionLevel: int(cmprQlty)}
-				} else if cmprWay&core.DATA_CMPR_BR != 0 {
-					cmpr = &archiver.Brotli{Quality: int(cmprQlty)}
-				}
+			cmpr := createCompressor(cmprWay, cmprQlty)
 
-				if cmpr != nil {
-					var cmprBuf bytes.Buffer
-					err := cmpr.Compress(bytes.NewBuffer(chunkData), &cmprBuf)
-					if err != nil {
-						if isFirstChunk {
-							tw.dataInfo.Kind &= ^core.DATA_CMPR_MASK
-						}
-						processedChunk = chunkData
-					} else {
-						if isFirstChunk && cmprBuf.Len() >= len(chunkData) {
-							processedChunk = chunkData
-							tw.dataInfo.Kind &= ^core.DATA_CMPR_MASK
-						} else {
-							// CRITICAL: bytes.Buffer.Bytes() returns a reference to the underlying buffer
-							// We must create a copy to ensure data integrity
-							compressedData := cmprBuf.Bytes()
-							processedChunk = make([]byte, len(compressedData))
-							copy(processedChunk, compressedData)
-						}
+			if cmpr != nil {
+				var cmprBuf bytes.Buffer
+				err := cmpr.Compress(bytes.NewBuffer(chunkData), &cmprBuf)
+				if err != nil {
+					if isFirstChunk {
+						tw.dataInfo.Kind &= ^core.DATA_CMPR_MASK
 					}
-				} else {
 					processedChunk = chunkData
+				} else {
+					if isFirstChunk && cmprBuf.Len() >= len(chunkData) {
+						processedChunk = chunkData
+						tw.dataInfo.Kind &= ^core.DATA_CMPR_MASK
+					} else {
+						// CRITICAL: bytes.Buffer.Bytes() returns a reference to the underlying buffer
+						// We must create a copy to ensure data integrity
+						compressedData := cmprBuf.Bytes()
+						processedChunk = make([]byte, len(compressedData))
+						copy(processedChunk, compressedData)
+					}
 				}
 			} else {
 				processedChunk = chunkData
@@ -1560,41 +1628,10 @@ func (tw *TempFileWriter) decideRealtimeProcessing(firstChunk []byte) {
 	// 1. First check file extension to quickly filter out non-compressible files
 	// 2. If extension doesn't indicate compression, then check file header
 	if kind&core.DATA_CMPR_MASK != 0 && len(firstChunk) > 0 {
-		shouldCompress := true
-
-		// Step 1: Check file extension first (faster than file header check)
-		if tw.fileName != "" {
-			fileNameLower := strings.ToLower(tw.fileName)
-			// Common compressed/encoded file extensions that don't benefit from compression
-			nonCompressibleExts := []string{
-				".zip", ".gz", ".bz2", ".xz", ".7z", ".rar", ".tar",
-				".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".ico",
-				".mp4", ".avi", ".mkv", ".mov", ".wmv", ".flv", ".webm",
-				".mp3", ".wav", ".flac", ".aac", ".ogg", ".m4a",
-				".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx",
-				".woff", ".woff2", ".ttf", ".otf", ".eot",
-			}
-			for _, ext := range nonCompressibleExts {
-				if strings.HasSuffix(fileNameLower, ext) {
-					shouldCompress = false
-					DebugLog("[VFS TempFileWriter decideRealtimeProcessing] File extension indicates non-compressible type, skipping compression: fileID=%d, fileName=%s, ext=%s",
-						tw.fileID, tw.fileName, ext)
-					break
-				}
-			}
-		}
-
-		// Step 2: If extension check passed, check file header
-		if shouldCompress {
-			if detectedKind, _ := filetype.Match(firstChunk); detectedKind != filetype.Unknown {
-				shouldCompress = false
-				DebugLog("[VFS TempFileWriter decideRealtimeProcessing] File header indicates known type, skipping compression: fileID=%d, fileName=%s, detectedKind=%s",
-					tw.fileID, tw.fileName, detectedKind.Extension)
-			}
-		}
-
-		if !shouldCompress {
+		if !shouldCompressFile(tw.fileName, firstChunk) {
 			kind &= ^core.DATA_CMPR_MASK
+			DebugLog("[VFS TempFileWriter decideRealtimeProcessing] File should not be compressed, skipping compression: fileID=%d, fileName=%s",
+				tw.fileID, tw.fileName)
 		}
 	}
 
@@ -2379,16 +2416,7 @@ func (ra *RandomAccessor) flushSequentialChunk() error {
 	hasCmpr := ra.seqBuffer.dataInfo.Kind&core.DATA_CMPR_MASK != 0
 	cmprQlty := getCmprQltyForFS(ra.fs)
 	if hasCmpr && cmprWay > 0 {
-		var cmpr archiver.Compressor
-		if cmprWay&core.DATA_CMPR_SNAPPY != 0 {
-			cmpr = &archiver.Snappy{}
-		} else if cmprWay&core.DATA_CMPR_ZSTD != 0 {
-			cmpr = &archiver.Zstd{EncoderOptions: []zstd.EOption{zstd.WithEncoderLevel(zstd.EncoderLevelFromZstd(int(cmprQlty)))}}
-		} else if cmprWay&core.DATA_CMPR_GZIP != 0 {
-			cmpr = &archiver.Gz{CompressionLevel: int(cmprQlty)}
-		} else if cmprWay&core.DATA_CMPR_BR != 0 {
-			cmpr = &archiver.Brotli{Quality: int(cmprQlty)}
-		}
+		cmpr := createCompressor(cmprWay, cmprQlty)
 
 		if cmpr != nil {
 			var cmprBuf bytes.Buffer
@@ -4156,15 +4184,7 @@ func (ra *RandomAccessor) processWritesStreaming(
 	if cmprWay > 0 {
 		// Compressor will be determined when processing the first chunk (needs to check file type)
 		hasCmpr = true
-		if cmprWay&core.DATA_CMPR_SNAPPY != 0 {
-			cmpr = &archiver.Snappy{}
-		} else if cmprWay&core.DATA_CMPR_ZSTD != 0 {
-			cmpr = &archiver.Zstd{EncoderOptions: []zstd.EOption{zstd.WithEncoderLevel(zstd.EncoderLevelFromZstd(int(cmprQlty)))}}
-		} else if cmprWay&core.DATA_CMPR_GZIP != 0 {
-			cmpr = &archiver.Gz{CompressionLevel: int(cmprQlty)}
-		} else if cmprWay&core.DATA_CMPR_BR != 0 {
-			cmpr = &archiver.Brotli{Quality: int(cmprQlty)}
-		}
+		cmpr = createCompressor(cmprWay, cmprQlty)
 		if cmpr != nil {
 			dataInfo.Kind |= cmprWay
 		}

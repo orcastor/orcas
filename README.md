@@ -208,39 +208,32 @@ export ORCAS_BASE=/var/orcas/base  # Base path for metadata (main database)
 export ORCAS_DATA=/var/orcas/data  # Data path for file data storage
 ```
 
-### Context-Based Path Configuration
+### Path Configuration
 
-You can override global paths per context, enabling multiple storage locations in the same process:
+Paths can be configured via environment variables or through the `Config` struct when initializing handlers:
 
 ```go
 import (
-    "context"
     "github.com/orcastor/orcas/core"
 )
 
-// Method 1: Direct path setting
-ctx := context.Background()
-ctx = core.Path2Ctx(ctx, "/path/to/base", "/path/to/data")
-
-// Method 2: Using Config struct
+// Paths are set via Config struct or environment variables
 cfg := &core.Config{
-    BasePath: "/custom/base/path",
-    DataPath: "/custom/data/path",
+    BasePath: "/custom/base/path",  // Override ORCAS_BASE
+    DataPath: "/custom/data/path",  // Override ORCAS_DATA
     // ... other config options
 }
-ctx = core.Config2Ctx(ctx, cfg)
 
-// All operations using this context will use the specified paths
+// Config is used when creating handlers or mounting filesystems
 handler := core.NewLocalHandler()
-dataID, err := handler.PutData(ctx, bktID, 0, -1, data)
+// Paths from Config or environment variables will be used
 ```
 
 ### Benefits
 
-- 🔄 **Multi-tenant Support**: Different contexts can use different storage paths
-- 🎯 **Flexible Configuration**: Override paths per operation without changing global settings
-- ⚙️ **Backward Compatible**: Falls back to global `ORCAS_BASE` and `ORCAS_DATA` if not set in context
-- 🚀 **Process Isolation**: Multiple storage locations in the same process
+- 🔄 **Flexible Configuration**: Set paths via environment variables or Config struct
+- ⚙️ **Backward Compatible**: Falls back to global `ORCAS_BASE` and `ORCAS_DATA` if not set
+- 🚀 **Process Isolation**: Support for multiple storage locations via different Config instances
 
 ## 📚 Documentation
 

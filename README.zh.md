@@ -208,39 +208,32 @@ export ORCAS_BASE=/var/orcas/base  # 元数据基础路径（主数据库）
 export ORCAS_DATA=/var/orcas/data  # 文件数据存储路径
 ```
 
-### 基于 Context 的路径配置
+### 路径配置
 
-您可以为每个 context 覆盖全局路径，从而在同一进程中启用多个存储位置：
+路径可以通过环境变量或在初始化处理器时通过 `Config` 结构体进行配置：
 
 ```go
 import (
-    "context"
     "github.com/orcastor/orcas/core"
 )
 
-// 方式1: 直接设置路径
-ctx := context.Background()
-ctx = core.Path2Ctx(ctx, "/path/to/base", "/path/to/data")
-
-// 方式2: 使用 Config 结构体
+// 通过 Config 结构体或环境变量设置路径
 cfg := &core.Config{
-    BasePath: "/custom/base/path",
-    DataPath: "/custom/data/path",
+    BasePath: "/custom/base/path",  // 覆盖 ORCAS_BASE
+    DataPath: "/custom/data/path",  // 覆盖 ORCAS_DATA
     // ... 其他配置选项
 }
-ctx = core.Config2Ctx(ctx, cfg)
 
-// 使用此 context 的所有操作都将使用指定的路径
+// Config 在创建处理器或挂载文件系统时使用
 handler := core.NewLocalHandler()
-dataID, err := handler.PutData(ctx, bktID, 0, -1, data)
+// 将使用 Config 或环境变量中的路径
 ```
 
 ### 优势
 
-- 🔄 **多租户支持**：不同的 context 可以使用不同的存储路径
-- 🎯 **灵活配置**：可以为每个操作覆盖路径，而无需更改全局设置
-- ⚙️ **向后兼容**：如果 context 中未设置，则回退到全局 `ORCAS_BASE` 和 `ORCAS_DATA`
-- 🚀 **进程隔离**：在同一进程中支持多个存储位置
+- 🔄 **灵活配置**：通过环境变量或 Config 结构体设置路径
+- ⚙️ **向后兼容**：如果未设置，则回退到全局 `ORCAS_BASE` 和 `ORCAS_DATA`
+- 🚀 **进程隔离**：通过不同的 Config 实例支持多个存储位置
 
 ## 📚 文档
 

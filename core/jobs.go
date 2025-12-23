@@ -474,7 +474,7 @@ func convertVersionData(c Ctx, bktID int64, version *ObjectInfo, originalDataID 
 		DataID: newDataID,
 		Size:   version.Size,
 	}
-	err = lh.ma.SetObj(c, bktID, []string{"did", "size"}, updateVersion)
+	err = lh.ma.SetObj(c, bktID, []string{"did", "s"}, updateVersion)
 	if err != nil {
 		return false, 0, fmt.Errorf("failed to update version: %v", err)
 	}
@@ -490,7 +490,7 @@ func convertVersionData(c Ctx, bktID int64, version *ObjectInfo, originalDataID 
 				DataID: newDataID,
 				Size:   version.Size,
 			}
-			lh.ma.SetObj(c, bktID, []string{"did", "size"}, updateFileObj)
+			lh.ma.SetObj(c, bktID, []string{"did", "s"}, updateFileObj)
 		}
 	}
 
@@ -690,7 +690,7 @@ func UpdateFileLatestVersion(c Ctx, bktID int64, ma MetadataAdapter) error {
 					Size:   totalSize,
 					DataID: maxDataID,
 				}
-				err = ma.SetObj(c, bktID, []string{"size", "did"}, updateObj)
+				err = ma.SetObj(c, bktID, []string{"s", "did"}, updateObj)
 				if err == nil {
 					hasChange = true
 				}
