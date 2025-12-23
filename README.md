@@ -200,9 +200,9 @@ Storage Layout:
 ## 📚 Documentation
 
 - [Full Documentation](https://orcastor.github.io/doc/)
-- [Quick Start Guide](QUICK_START_MOUNT.md)
+- [VFS Mount Guide](vfs/MOUNT_GUIDE.md) - Complete guide for VFS filesystem mounting
 - [S3 API Documentation](s3/README.md)
-- [VFS Mount Guide](MOUNT_README.md)
+- [No Main Database Mode Guide](docs/NO_BASE_DB_GUIDE.md) - Run without main database (no user management)
 
 ## 🤝 Contributing
 

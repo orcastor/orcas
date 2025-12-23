@@ -200,9 +200,9 @@ OrcaS 基于**内容寻址存储**原则构建，数据通过内容哈希而非�
 ## 📚 文档
 
 - [完整文档](https://orcastor.github.io/doc/)
-- [快速开始指南](QUICK_START_MOUNT.md)
+- [VFS 挂载指南](vfs/MOUNT_GUIDE.md) - VFS 文件系统挂载完整指南
 - [S3 API 文档](s3/README.md)
-- [VFS 挂载指南](MOUNT_README.md)
+- [VFS 挂载指南](vfs/MOUNT_GUIDE.md)
 
 ## 🤝 贡献
 
