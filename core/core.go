@@ -323,7 +323,7 @@ func (lh *LocalHandler) GetDataAdapter() DataAdapter {
 // SetBucketConfig sets bucket configuration for a bucket
 // This allows ConvertWritingVersions and other operations to access bucket config
 func (lh *LocalHandler) SetBucketConfig(bktID int64, bucket *BucketInfo) {
-	if bucket != nil {
+	if bucket != nil && lh.bucketConfigs != nil {
 		lh.bucketConfigs.Put(bktID, bucket)
 		// Note: CmprWay, CmprQlty, EndecWay, EndecKey are no longer stored in bucket config
 		// They should be provided via core.Config in business layer (cmd/vfs)

@@ -1712,8 +1712,27 @@ func DeleteObject(c *gin.Context) {
 	ctx := c.Request.Context()
 	obj, err := findObjectByPath(c, bktID, key)
 	if err != nil {
-		util.S3ErrorResponse(c, http.StatusNotFound, "NoSuchKey", "The specified key does not exist")
-		return
+		// In concurrent scenarios, object might not be found due to cache inconsistency
+		// Try invalidating cache and retry once
+		invalidatePathCache(bktID, key)
+		parentPath := util.FastDir(key)
+		if parentPath != "." && parentPath != "/" && parentPath != "" {
+			invalidatePathCache(bktID, parentPath)
+		}
+		// Try to get parent PID and invalidate dir list cache
+		if parentPath != "." && parentPath != "/" && parentPath != "" {
+			if parentObj, err2 := findObjectByPath(c, bktID, parentPath); err2 == nil && parentObj != nil {
+				invalidateDirListCache(parentObj.ID)
+			}
+		} else {
+			invalidateDirListCache(0)
+		}
+		// Retry once after cache invalidation
+		obj, err = findObjectByPath(c, bktID, key)
+		if err != nil {
+			util.S3ErrorResponse(c, http.StatusNotFound, "NoSuchKey", "The specified key does not exist")
+			return
+		}
 	}
 
 	if err := handler.Delete(ctx, bktID, obj.ID); err != nil {

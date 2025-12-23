@@ -803,9 +803,9 @@ func runRandomWriteOverlappingTest(t *testing.T, name string, totalSize, chunkSi
 	ofs := NewOrcasFS(lh, testCtx, testBktID)
 
 	// Prepare test data: overlapping writes (精简规模)
-	writeChunkSize := int64(512 * 1024)  // 精简: 1MB -> 512KB per write
-	writeCount := 8                      // 精简: 15 -> 8 times
-	overlapSize := int64(128 * 1024)     // 精简: 256KB -> 128KB overlap each time
+	writeChunkSize := int64(512 * 1024) // 精简: 1MB -> 512KB per write
+	writeCount := 8                     // 精简: 15 -> 8 times
+	overlapSize := int64(128 * 1024)    // 精简: 256KB -> 128KB overlap each time
 
 	hasCompression := cfg != nil && cfg.CmprWay > 0
 	hasEncryption := cfg != nil && cfg.EndecWay > 0
@@ -1182,10 +1182,10 @@ func runInstantUploadPerformanceTest(t *testing.T) {
 		numTests int
 		name     string
 	}{
-		{1 * 1024, 10, "1KB"},      // 精简: 50 -> 10
-		{10 * 1024, 10, "10KB"},   // 精简: 50 -> 10
-		{100 * 1024, 5, "100KB"},  // 精简: 30 -> 5
-		{1024 * 1024, 5, "1MB"},   // 精简: 20 -> 5
+		{1 * 1024, 10, "1KB"},         // 精简: 50 -> 10
+		{10 * 1024, 10, "10KB"},       // 精简: 50 -> 10
+		{100 * 1024, 5, "100KB"},      // 精简: 30 -> 5
+		{1024 * 1024, 5, "1MB"},       // 精简: 20 -> 5
 		{10 * 1024 * 1024, 3, "10MB"}, // 精简: 10 -> 3
 	}
 
