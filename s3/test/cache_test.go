@@ -74,10 +74,11 @@ func setupTestEnvironmentForCache(t *testing.T) (int64, *gin.Engine) {
 	// 创建测试用的gin engine
 	router := gin.New()
 	router.Use(func(c *gin.Context) {
-		// 模拟JWT认证，设置UID
+		// 模拟JWT认证，设置UID和ADMIN角色
 		c.Set("uid", int64(1))
 		c.Request = c.Request.WithContext(core.UserInfo2Ctx(c.Request.Context(), &core.UserInfo{
-			ID: 1,
+			ID:   1,
+			Role: core.ADMIN, // Set admin role for CreateBucket
 		}))
 		c.Next()
 	})

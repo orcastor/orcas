@@ -1455,38 +1455,49 @@ func doOrder(delim, order string, conds *[]interface{}) (string, string) {
 	if order == "" {
 		order = "id"
 	}
+
+	// 提取排序方向和原始字段名
 	fn := b.Gt
-	orderBy := order
-	switch order[0] {
-	case '-':
-		fn = b.Lt
-		order = orderToBormTag(order[1:])
-		orderBy = order + " desc"
-	case '+':
-		order = orderToBormTag(order[1:])
-		orderBy = order
+	isDesc := false
+	originalOrder := order // Keep original field name for toDelim
+	if len(order) > 0 {
+		switch order[0] {
+		case '-':
+			fn = b.Lt
+			isDesc = true
+			originalOrder = order[1:]
+		case '+':
+			originalOrder = order[1:]
+		}
+	}
+
+	// 转换为 borm tag
+	bormTag := orderToBormTag(originalOrder)
+
+	// 构建 orderBy 字符串
+	orderBy := bormTag
+	if isDesc {
+		orderBy = bormTag + " desc"
 	}
 
 	// Fields that don't need secondary sort by id
 	simpleFields := map[string]bool{"id": true, "n": true}
-	if !simpleFields[order] {
+	if !simpleFields[bormTag] {
 		orderBy = orderBy + ", id"
 	}
 
-	// 处理边界条件
+	// 处理边界条件（delim）
 	ds := strings.Split(delim, ":")
 	if len(ds) > 0 && ds[0] != "" {
-		if simpleFields[order] {
-			// Use borm tag for SQL queries
-			*conds = append(*conds, fn(order, ds[0]))
+		if simpleFields[bormTag] {
+			*conds = append(*conds, fn(bormTag, ds[0]))
 		} else if len(ds) == 2 {
-			// Use borm tag for SQL queries
-			*conds = append(*conds, b.Or(fn(order, ds[0]),
-				b.And(b.Eq(order, ds[0]), b.Gt("id", ds[1]))))
+			*conds = append(*conds, b.Or(fn(bormTag, ds[0]),
+				b.And(b.Eq(bormTag, ds[0]), b.Gt("id", ds[1]))))
 		}
 	}
 
-	return orderBy, order
+	return orderBy, originalOrder
 }
 
 func (dma *DefaultMetadataAdapter) ListObj(c Ctx, bktID, pid int64,
@@ -1825,7 +1836,13 @@ func (dba *DefaultBaseMetadataAdapter) UpdateBktQuota(c Ctx, bktID int64, quota 
 	}
 	// Note: Don't close the connection, it's from the pool
 
-	if _, err = b.TableContext(c, db, BKT_TBL).Update(&BucketInfo{Quota: quota},
+	// Create update object with ID and Quota fields
+	// borm sqlite branch requires ID field to be present
+	updateBkt := &BucketInfo{
+		ID:    bktID,
+		Quota: quota,
+	}
+	if _, err = b.TableContext(c, db, BKT_TBL).Update(updateBkt,
 		b.Fields("quota"), b.Where(b.Eq("id", bktID))); err != nil {
 		return fmt.Errorf("%w: UpdateBktQuota failed (bktID=%d, quota=%d): %v", ERR_EXEC_DB, bktID, quota, err)
 	}

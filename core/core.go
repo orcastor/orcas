@@ -418,9 +418,11 @@ func (lh *LocalHandler) PutData(c Ctx, bktID, dataID int64, sn int, buf []byte) 
 	if dataSize > 0 {
 		// Optimization: Use bucket cache to avoid database query on every write
 		var bucket *BucketInfo
-		if cached, ok := lh.bucketConfigs.Get(bktID); ok {
-			if bktInfo, ok := cached.(*BucketInfo); ok && bktInfo != nil {
-				bucket = bktInfo
+		if lh.bucketConfigs != nil {
+			if cached, ok := lh.bucketConfigs.Get(bktID); ok {
+				if bktInfo, ok := cached.(*BucketInfo); ok && bktInfo != nil {
+					bucket = bktInfo
+				}
 			}
 		}
 
@@ -477,9 +479,11 @@ func (lh *LocalHandler) PutDataFromReader(c Ctx, bktID, dataID int64, sn int, r 
 	if size > 0 {
 		// Optimization: Use bucket cache to avoid database query on every write
 		var bucket *BucketInfo
-		if cached, ok := lh.bucketConfigs.Get(bktID); ok {
-			if bktInfo, ok := cached.(*BucketInfo); ok && bktInfo != nil {
-				bucket = bktInfo
+		if lh.bucketConfigs != nil {
+			if cached, ok := lh.bucketConfigs.Get(bktID); ok {
+				if bktInfo, ok := cached.(*BucketInfo); ok && bktInfo != nil {
+					bucket = bktInfo
+				}
 			}
 		}
 
