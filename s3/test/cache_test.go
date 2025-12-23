@@ -132,8 +132,9 @@ func TestCachePutObjectListObjects(t *testing.T) {
 	w := httptest.NewRecorder()
 	router.ServeHTTP(w, req)
 	// Bucket may already exist (created in setup), so 200 or 409 is OK
+	// But if it returns 500, we should fail the test as bucket won't be available
 	if w.Code != http.StatusOK && w.Code != http.StatusConflict {
-		t.Logf("CreateBucket returned status=%d (may already exist), continuing", w.Code)
+		t.Fatalf("CreateBucket failed: status=%d, body=%s (bucket must exist for test)", w.Code, w.Body.String())
 	}
 
 	// 1. PutObject

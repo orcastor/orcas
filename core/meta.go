@@ -412,7 +412,6 @@ func GetDBWithKey(key string) (*sql.DB, error) {
 	return db, nil
 }
 
-
 // InitDB initializes the main database
 // If key is provided, the database will be encrypted with that key
 // If key is empty string, the database will be unencrypted
@@ -1365,6 +1364,27 @@ func (dma *DefaultMetadataAdapter) SetObj(c Ctx, bktID int64, fields []string, o
 	return nil
 }
 
+// orderToBormTag converts user-facing field names to borm table field tags
+// This is needed because borm sqlite branch requires using borm tags instead of field names
+// Returns the borm tag for the given order field name
+func orderToBormTag(order string) string {
+	switch order {
+	case "name":
+		return "n"
+	case "mtime":
+		return "m"
+	case "type":
+		return "t"
+	case "size":
+		return "s"
+	case "id":
+		return "id"
+	default:
+		// For unknown fields, return as-is (they might be valid borm tags already)
+		return order
+	}
+}
+
 func toDelim(field string, o *ObjectInfo) string {
 	var d interface{}
 	switch field {
@@ -1440,26 +1460,32 @@ func doOrder(delim, order string, conds *[]interface{}) (string, string) {
 	switch order[0] {
 	case '-':
 		fn = b.Lt
-		order = order[1:]
+		order = orderToBormTag(order[1:])
 		orderBy = order + " desc"
 	case '+':
-		order = order[1:]
+		order = orderToBormTag(order[1:])
 		orderBy = order
 	}
-	if order != "id" && order != "name" {
+
+	// Fields that don't need secondary sort by id
+	simpleFields := map[string]bool{"id": true, "n": true}
+	if !simpleFields[order] {
 		orderBy = orderBy + ", id"
 	}
 
 	// 处理边界条件
 	ds := strings.Split(delim, ":")
 	if len(ds) > 0 && ds[0] != "" {
-		if order == "id" || order == "name" {
+		if simpleFields[order] {
+			// Use borm tag for SQL queries
 			*conds = append(*conds, fn(order, ds[0]))
 		} else if len(ds) == 2 {
+			// Use borm tag for SQL queries
 			*conds = append(*conds, b.Or(fn(order, ds[0]),
 				b.And(b.Eq(order, ds[0]), b.Gt("id", ds[1]))))
 		}
 	}
+
 	return orderBy, order
 }
 
@@ -1478,9 +1504,11 @@ func (dma *DefaultMetadataAdapter) ListObj(c Ctx, bktID, pid int64,
 			escapedPattern := strings.ReplaceAll(pattern, "\\", "\\\\")
 			// Use b.Cond with the escaped pattern as a parameter to avoid borm parsing issues
 			// Note: ? has been converted to _ by escapeLikePattern, so no need to escape ? here
-			conds = append(conds, b.Cond("name LIKE ?", escapedPattern))
+			// Use borm tag "n" instead of "name"
+			conds = append(conds, b.Cond("n LIKE ?", escapedPattern))
 		} else {
-			conds = append(conds, b.Eq("name", wd))
+			// Use borm tag "n" instead of "name"
+			conds = append(conds, b.Eq("n", wd))
 		}
 	}
 
@@ -1999,12 +2027,13 @@ func (dma *DefaultMetadataAdapter) ListVersions(c Ctx, bktID int64, fileID int64
 	// If excludeWriting is true, exclude writing versions (name="0")
 	conds := []interface{}{b.Eq("pid", fileID), b.Eq("t", OBJ_TYPE_VERSION)}
 	if excludeWriting {
-		conds = append(conds, b.Neq("name", WritingVersionName))
+		// Use borm tag "n" instead of "name"
+		conds = append(conds, b.Neq("n", WritingVersionName))
 	}
-	// Use "mtime desc" format (lowercase) as borm expects
+	// Use borm tag "m" instead of "mtime"
 	_, err = b.TableContext(c, db, OBJ_TBL).Select(&versions,
 		b.Where(conds...),
-		b.OrderBy("mtime desc"))
+		b.OrderBy("m desc"))
 	if err != nil {
 		// Return ERR_QUERY_DB with detailed error information
 		return nil, fmt.Errorf("%w: ListVersions failed (bktID=%d, fileID=%d, excludeWriting=%v): %v", ERR_QUERY_DB, bktID, fileID, excludeWriting, err)
@@ -2023,7 +2052,11 @@ func (dma *DefaultMetadataAdapter) DeleteObj(c Ctx, bktID int64, id int64) error
 	// Get object information (read operation, but using same connection for consistency)
 	obj := &ObjectInfo{}
 	if _, err = b.TableContext(c, db, OBJ_TBL).Select(obj, b.Where(b.Eq("id", id))); err != nil {
-		return fmt.Errorf("%w: GetObjByDataID select obj failed (bktID=%d, id=%d): %v", ERR_QUERY_DB, bktID, id, err)
+		return fmt.Errorf("%w: DeleteObj select obj failed (bktID=%d, id=%d): %v", ERR_QUERY_DB, bktID, id, err)
+	}
+	// Check if object was found
+	if obj.ID == 0 {
+		return fmt.Errorf("%w: DeleteObj object not found (bktID=%d, id=%d)", ERR_QUERY_DB, bktID, id)
 	}
 
 	// Flip object's PID to negative to mark as deleted (so it disappears from original tree structure)
@@ -2038,7 +2071,8 @@ func (dma *DefaultMetadataAdapter) DeleteObj(c Ctx, bktID int64, id int64) error
 	// Check if there's already a deleted object with same name in same parent directory (PID < 0 and |PID| == original PID)
 	// If exists, rename current object to avoid conflict
 	var conflictingObjs []*ObjectInfo
-	conflictCond := []interface{}{b.Eq("pid", newPID), b.Eq("name", obj.Name), b.Neq("id", id)}
+	// Use borm tag "n" instead of "name"
+	conflictCond := []interface{}{b.Eq("pid", newPID), b.Eq("n", obj.Name), b.Neq("id", id)}
 	if _, err = b.TableContext(c, db, OBJ_TBL).Select(&conflictingObjs,
 		b.Where(conflictCond...)); err == nil && len(conflictingObjs) > 0 {
 		// Conflict exists, rename current object (add timestamp suffix)
@@ -2049,19 +2083,26 @@ func (dma *DefaultMetadataAdapter) DeleteObj(c Ctx, bktID int64, id int64) error
 	}
 
 	// Update object's PID and MTime, also update name if there's a conflict
-	updateFields := []string{"pid", "mtime"}
+	// Use borm tags "m" and "n" instead of "mtime" and "name"
+	updateFields := []string{"pid", "m"}
 	hasNameChange := len(conflictingObjs) > 0
 	if hasNameChange {
-		updateFields = append(updateFields, "name")
+		updateFields = append(updateFields, "n")
 	}
 
-	if _, err = b.TableContext(c, db, OBJ_TBL).Update(&ObjectInfo{
+	// Create update object with only the fields we want to update
+	updateObj := &ObjectInfo{
 		ID:    id,
 		PID:   newPID,
 		MTime: currentTime,
-		Name:  obj.Name,
-	}, b.Fields(updateFields...), b.Where(b.Eq("id", id))); err != nil {
-		return ERR_EXEC_DB
+	}
+	if hasNameChange {
+		updateObj.Name = obj.Name
+	}
+
+	if _, err = b.TableContext(c, db, OBJ_TBL).Update(updateObj,
+		b.Fields(updateFields...), b.Where(b.Eq("id", id))); err != nil {
+		return fmt.Errorf("%w: DeleteObj Update failed (bktID=%d, id=%d): %v", ERR_EXEC_DB, bktID, id, err)
 	}
 	return nil
 }
@@ -2077,20 +2118,21 @@ func (dma *DefaultMetadataAdapter) ListDeletedObjs(c Ctx, bktID int64, beforeTim
 	// PID < 0 or PID = -1 indicates deleted objects
 	conds := []interface{}{"pid < 0 OR pid = -1"}
 	if beforeTime > 0 {
-		conds = append(conds, b.Lte("mtime", beforeTime))
+		// Use borm tag "m" instead of "mtime"
+		conds = append(conds, b.Lte("m", beforeTime))
 	}
 
 	if limit > 0 {
 		if _, err = b.TableContext(c, db, OBJ_TBL).Select(&objs,
 			b.Where(conds...),
-			b.OrderBy("mtime"),
+			b.OrderBy("m"),
 			b.Limit(limit)); err != nil {
 			return nil, fmt.Errorf("%w: ListRecycleBin select failed (bktID=%d, limit=%d): %v", ERR_QUERY_DB, bktID, limit, err)
 		}
 	} else {
 		if _, err = b.TableContext(c, db, OBJ_TBL).Select(&objs,
 			b.Where(conds...),
-			b.OrderBy("mtime")); err != nil {
+			b.OrderBy("m")); err != nil {
 			return nil, fmt.Errorf("%w: ListRecycleBin select all failed (bktID=%d): %v", ERR_QUERY_DB, bktID, err)
 		}
 	}
@@ -2117,9 +2159,11 @@ func (dma *DefaultMetadataAdapter) ListRecycleBin(c Ctx, bktID int64, opt ListOp
 			// Escape backslash for SQL string literal (SQLite uses backslash for escaping in LIKE)
 			escapedPattern := strings.ReplaceAll(pattern, "\\", "\\\\")
 			// Use b.Cond with the escaped pattern as a parameter to avoid borm parsing issues
-			conds = append(conds, b.Cond("name LIKE ?", escapedPattern))
+			// Use borm tag "n" instead of "name"
+			conds = append(conds, b.Cond("n LIKE ?", escapedPattern))
 		} else {
-			conds = append(conds, b.Eq("name", opt.Word))
+			// Use borm tag "n" instead of "name"
+			conds = append(conds, b.Eq("n", opt.Word))
 		}
 	}
 
@@ -2147,7 +2191,14 @@ func (dma *DefaultMetadataAdapter) ListRecycleBin(c Ctx, bktID int64, opt ListOp
 			order = order[1:]
 			orderBy = order
 		}
-		if order != "id" && order != "name" {
+
+		// Map user-facing field names to borm tags for SQL queries
+		bormTag := orderToBormTag(order)
+		needsConversion := bormTag != order // Check if conversion was needed
+
+		// Fields that don't need secondary sort by id
+		simpleFields := map[string]bool{"id": true, "name": true, "type": true}
+		if !simpleFields[order] {
 			orderBy = orderBy + ", id"
 		}
 
@@ -2155,12 +2206,24 @@ func (dma *DefaultMetadataAdapter) ListRecycleBin(c Ctx, bktID int64, opt ListOp
 		if opt.Delim != "" {
 			ds := strings.Split(opt.Delim, ":")
 			if len(ds) > 0 && ds[0] != "" {
-				if order == "id" || order == "name" {
-					conds = append(conds, fn(order, ds[0]))
+				if simpleFields[order] {
+					// Use borm tag for SQL queries
+					conds = append(conds, fn(bormTag, ds[0]))
 				} else if len(ds) == 2 {
-					conds = append(conds, b.Or(fn(order, ds[0]),
-						b.And(b.Eq(order, ds[0]), b.Gt("id", ds[1]))))
+					// Use borm tag for SQL queries
+					conds = append(conds, b.Or(fn(bormTag, ds[0]),
+						b.And(b.Eq(bormTag, ds[0]), b.Gt("id", ds[1]))))
 				}
+			}
+		}
+
+		// For OrderBy, also use borm tag if needed
+		if needsConversion {
+			// Replace field name with borm tag in orderBy string
+			if strings.Contains(orderBy, " desc") {
+				orderBy = bormTag + " desc"
+			} else {
+				orderBy = bormTag
 			}
 		}
 
