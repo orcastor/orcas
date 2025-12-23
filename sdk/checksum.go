@@ -16,21 +16,21 @@ const (
 // CalculateChecksums calculates HdrXXH3, XXH3, and SHA-256 checksums from data
 // Returns HdrXXH3, XXH3, SHA256_0, SHA256_1, SHA256_2, SHA256_3, and error
 // This function is used for instant upload (deduplication) feature
-func CalculateChecksums(data []byte) (uint64, uint64, int64, int64, int64, int64, error) {
+func CalculateChecksums(data []byte) (int64, int64, int64, int64, int64, int64, error) {
 	if len(data) == 0 {
 		return 0, 0, 0, 0, 0, 0, nil
 	}
 
 	// Calculate HdrXXH3 (first 100KB or entire file if smaller)
-	var hdrXXH3 uint64
+	var hdrXXH3 int64
 	if len(data) > HdrSize {
-		hdrXXH3 = xxh3.Hash(data[0:HdrSize])
+		hdrXXH3 = int64(xxh3.Hash(data[0:HdrSize]))
 	} else {
-		hdrXXH3 = xxh3.Hash(data)
+		hdrXXH3 = int64(xxh3.Hash(data))
 	}
 
 	// Calculate XXH3 for entire file
-	fullXXH3 := xxh3.Hash(data)
+	fullXXH3 := int64(xxh3.Hash(data))
 
 	// Calculate SHA-256 for entire file
 	sha256Hash := sha256.Sum256(data)

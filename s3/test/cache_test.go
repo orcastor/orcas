@@ -127,10 +127,19 @@ func TestCachePutObjectListObjects(t *testing.T) {
 	key := "test-object-1"
 	testData := []byte("test data")
 
-	// 1. PutObject
-	req := httptest.NewRequest("PUT", fmt.Sprintf("/%s/%s", bucketName, key), bytes.NewReader(testData))
-	req.Header.Set("Content-Type", "application/octet-stream")
+	// 0. Create bucket via S3 API to ensure it's in the cache
+	req := httptest.NewRequest("PUT", fmt.Sprintf("/%s", bucketName), nil)
 	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	// Bucket may already exist (created in setup), so 200 or 409 is OK
+	if w.Code != http.StatusOK && w.Code != http.StatusConflict {
+		t.Logf("CreateBucket returned status=%d (may already exist), continuing", w.Code)
+	}
+
+	// 1. PutObject
+	req = httptest.NewRequest("PUT", fmt.Sprintf("/%s/%s", bucketName, key), bytes.NewReader(testData))
+	req.Header.Set("Content-Type", "application/octet-stream")
+	w = httptest.NewRecorder()
 	router.ServeHTTP(w, req)
 	if w.Code != http.StatusOK {
 		t.Fatalf("PutObject failed: status=%d, body=%s", w.Code, w.Body.String())
