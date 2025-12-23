@@ -197,12 +197,57 @@ OrcaS 基于**内容寻址存储**原则构建，数据通过内容哈希而非�
 - [S3 API 性能测试报告](s3/docs/PERFORMANCE_TEST_REPORT.zh.md)
 - [VFS 性能优化报告](vfs/PERFORMANCE_OPTIMIZATION_FINAL.zh.md)
 
+## 🔧 路径管理
+
+OrcaS 支持灵活的路径管理，允许在同一进程中使用不同的存储路径。这对于多租户场景或管理多个存储位置非常有用。
+
+### 环境变量（全局默认值）
+
+```bash
+export ORCAS_BASE=/var/orcas/base  # 元数据基础路径（主数据库）
+export ORCAS_DATA=/var/orcas/data  # 文件数据存储路径
+```
+
+### 基于 Context 的路径配置
+
+您可以为每个 context 覆盖全局路径，从而在同一进程中启用多个存储位置：
+
+```go
+import (
+    "context"
+    "github.com/orcastor/orcas/core"
+)
+
+// 方式1: 直接设置路径
+ctx := context.Background()
+ctx = core.Path2Ctx(ctx, "/path/to/base", "/path/to/data")
+
+// 方式2: 使用 Config 结构体
+cfg := &core.Config{
+    BasePath: "/custom/base/path",
+    DataPath: "/custom/data/path",
+    // ... 其他配置选项
+}
+ctx = core.Config2Ctx(ctx, cfg)
+
+// 使用此 context 的所有操作都将使用指定的路径
+handler := core.NewLocalHandler()
+dataID, err := handler.PutData(ctx, bktID, 0, -1, data)
+```
+
+### 优势
+
+- 🔄 **多租户支持**：不同的 context 可以使用不同的存储路径
+- 🎯 **灵活配置**：可以为每个操作覆盖路径，而无需更改全局设置
+- ⚙️ **向后兼容**：如果 context 中未设置，则回退到全局 `ORCAS_BASE` 和 `ORCAS_DATA`
+- 🚀 **进程隔离**：在同一进程中支持多个存储位置
+
 ## 📚 文档
 
 - [完整文档](https://orcastor.github.io/doc/)
 - [VFS 挂载指南](vfs/MOUNT_GUIDE.md) - VFS 文件系统挂载完整指南
 - [S3 API 文档](s3/README.md)
-- [VFS 挂载指南](vfs/MOUNT_GUIDE.md)
+- [无主数据库模式指南](docs/NO_BASE_DB_GUIDE.md) - 无需主数据库运行（无用户管理）
 
 ## 🤝 贡献
 

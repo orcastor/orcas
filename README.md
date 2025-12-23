@@ -197,6 +197,51 @@ Storage Layout:
 - [S3 API Performance Test Report](s3/docs/PERFORMANCE_TEST_REPORT.md)
 - [VFS Performance Optimization Report](vfs/PERFORMANCE_OPTIMIZATION_FINAL.md)
 
+## 🔧 Path Management
+
+OrcaS supports flexible path management, allowing you to use different storage paths within the same process. This is useful for multi-tenant scenarios or when managing multiple storage locations.
+
+### Environment Variables (Global Defaults)
+
+```bash
+export ORCAS_BASE=/var/orcas/base  # Base path for metadata (main database)
+export ORCAS_DATA=/var/orcas/data  # Data path for file data storage
+```
+
+### Context-Based Path Configuration
+
+You can override global paths per context, enabling multiple storage locations in the same process:
+
+```go
+import (
+    "context"
+    "github.com/orcastor/orcas/core"
+)
+
+// Method 1: Direct path setting
+ctx := context.Background()
+ctx = core.Path2Ctx(ctx, "/path/to/base", "/path/to/data")
+
+// Method 2: Using Config struct
+cfg := &core.Config{
+    BasePath: "/custom/base/path",
+    DataPath: "/custom/data/path",
+    // ... other config options
+}
+ctx = core.Config2Ctx(ctx, cfg)
+
+// All operations using this context will use the specified paths
+handler := core.NewLocalHandler()
+dataID, err := handler.PutData(ctx, bktID, 0, -1, data)
+```
+
+### Benefits
+
+- 🔄 **Multi-tenant Support**: Different contexts can use different storage paths
+- 🎯 **Flexible Configuration**: Override paths per operation without changing global settings
+- ⚙️ **Backward Compatible**: Falls back to global `ORCAS_BASE` and `ORCAS_DATA` if not set in context
+- 🚀 **Process Isolation**: Multiple storage locations in the same process
+
 ## 📚 Documentation
 
 - [Full Documentation](https://orcastor.github.io/doc/)
