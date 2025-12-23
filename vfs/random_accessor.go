@@ -2399,7 +2399,7 @@ func (ra *RandomAccessor) flushSequentialChunk() error {
 	}
 	ra.seqBuffer.xxh3Hash.Write(chunkData)
 	ra.seqBuffer.sha256Hash.Write(chunkData)
-	ra.seqBuffer.dataInfo.XXH3 = ra.seqBuffer.xxh3Hash.Sum64()
+	ra.seqBuffer.dataInfo.XXH3 = int64(ra.seqBuffer.xxh3Hash.Sum64())
 	sha256Sum := ra.seqBuffer.sha256Hash.Sum(nil)
 	ra.seqBuffer.dataInfo.SHA256_0 = int64(binary.BigEndian.Uint64(sha256Sum[0:8]))
 	ra.seqBuffer.dataInfo.SHA256_1 = int64(binary.BigEndian.Uint64(sha256Sum[8:16]))
@@ -2469,7 +2469,7 @@ func (ra *RandomAccessor) flushSequentialChunk() error {
 		ra.seqBuffer.cksumHash = xxh3.New()
 	}
 	ra.seqBuffer.cksumHash.Write(encodedChunk)
-	ra.seqBuffer.dataInfo.Cksum = ra.seqBuffer.cksumHash.Sum64()
+	ra.seqBuffer.dataInfo.Cksum = int64(ra.seqBuffer.cksumHash.Sum64())
 
 	// Update size (if compressed or encrypted)
 	originalChunkSize := len(chunkData)
@@ -4388,7 +4388,7 @@ func (ra *RandomAccessor) processWritesStreaming(
 	}
 
 	// Set XXH3, SHA-256 and checksum
-	dataInfo.XXH3 = dataXXH3
+	dataInfo.XXH3 = int64(dataXXH3)
 	sha256Sum := sha256Hash.Sum(nil)
 	dataInfo.SHA256_0 = int64(binary.BigEndian.Uint64(sha256Sum[0:8]))
 	dataInfo.SHA256_1 = int64(binary.BigEndian.Uint64(sha256Sum[8:16]))
@@ -4396,9 +4396,9 @@ func (ra *RandomAccessor) processWritesStreaming(
 	dataInfo.SHA256_3 = int64(binary.BigEndian.Uint64(sha256Sum[24:32]))
 	if dataInfo.Kind&core.DATA_CMPR_MASK == 0 && dataInfo.Kind&core.DATA_ENDEC_MASK == 0 {
 		dataInfo.Size = dataInfo.OrigSize
-		dataInfo.Cksum = dataXXH3
+		dataInfo.Cksum = int64(dataXXH3)
 	} else {
-		dataInfo.Cksum = cksumHash.Sum64()
+		dataInfo.Cksum = int64(cksumHash.Sum64())
 	}
 
 	// Save data metadata

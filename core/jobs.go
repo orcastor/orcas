@@ -1970,7 +1970,7 @@ func verifyChecksum(c Ctx, bktID int64, dataInfo *DataInfo, da DataAdapter, maxS
 	// Note: For unencrypted and uncompressed data, Cksum should equal XXH3
 	if needCksum {
 		calculated := xxh3Hash.Sum64()
-		if calculated != dataInfo.Cksum {
+			if int64(calculated) != dataInfo.Cksum {
 			return false
 		}
 	}
@@ -1986,7 +1986,7 @@ func verifyChecksum(c Ctx, bktID int64, dataInfo *DataInfo, da DataAdapter, maxS
 				return false
 			}
 			// Also verify they match in metadata (should be equal for unencrypted/uncompressed data)
-			if int64(dataInfo.Cksum) != dataInfo.XXH3 {
+			if dataInfo.Cksum != dataInfo.XXH3 {
 				return false
 			}
 		} else {

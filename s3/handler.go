@@ -1371,8 +1371,8 @@ func PutObject(c *gin.Context) {
 	// Pre-calculate checksums once for both instant upload and normal upload paths
 	// This avoids redundant calculation if instant upload fails
 	// Only calculate checksums if instant upload is enabled or if we need them for DataInfo
-	var hdrXXH3 uint64
-	var xxh3Val uint64
+	var hdrXXH3 int64
+	var xxh3Val int64
 	var sha256_0, sha256_1, sha256_2, sha256_3 int64
 	var checksumsCalculated bool
 	instantUploadEnabled := core.IsInstantUploadEnabled()
