@@ -1982,17 +1982,17 @@ func verifyChecksum(c Ctx, bktID int64, dataInfo *DataInfo, da DataAdapter, maxS
 		if needCksum {
 			// Both are needed, use separate hasher for XXH3
 			calculated := xxh3HashForXXH3.Sum64()
-			if calculated != dataInfo.XXH3 {
+			if int64(calculated) != dataInfo.XXH3 {
 				return false
 			}
 			// Also verify they match in metadata (should be equal for unencrypted/uncompressed data)
-			if dataInfo.Cksum != dataInfo.XXH3 {
+			if int64(dataInfo.Cksum) != dataInfo.XXH3 {
 				return false
 			}
 		} else {
 			// Only XXH3 is needed, verify it
 			calculated := xxh3Hash.Sum64()
-			if calculated != dataInfo.XXH3 {
+			if int64(calculated) != dataInfo.XXH3 {
 				return false
 			}
 		}
