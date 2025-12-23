@@ -315,35 +315,43 @@ func GetDB(c ...interface{}) (*sql.DB, error) {
 	// - _busy_timeout=10000: Wait up to 10 seconds for locks (increased for high concurrency)
 	// - _txlock=immediate: Use immediate transaction locks to reduce contention
 	param := "?_journal=WAL&cache=shared&mode=rwc&_busy_timeout=10000&_txlock=immediate"
-	dirPath := ORCAS_BASE
+	var dirPath string
 	var dbKey string
+	var ctx Ctx
 
 	if len(c) > 0 {
 		// Check if first parameter is a string (database key)
 		if keyStr, ok := c[0].(string); ok {
 			dbKey = keyStr
 			c = c[1:] // Remove key from remaining params
-		} else if ctx, ok := c[0].(Ctx); ok {
+		} else if ctxVal, ok := c[0].(Ctx); ok {
 			// If it's a Ctx, try to get key from context
+			ctx = ctxVal
 			if key := getKey(ctx); key != "" {
 				dbKey = key
 			}
 			c = c[1:] // Remove context from remaining params
-		} else if _, ok := c[0].(context.Context); ok {
+		} else if ctxVal, ok := c[0].(context.Context); ok {
 			// Handle standard context.Context (shouldn't happen, but be safe)
 			// Try to convert to Ctx and extract key
-			if key := getKey(Ctx(c[0].(context.Context))); key != "" {
+			ctx = Ctx(ctxVal)
+			if key := getKey(ctx); key != "" {
 				dbKey = key
 			}
 			c = c[1:] // Remove context from remaining params
 		}
 	}
 
+	// Get base path from context or use global variable
+	dirPath = getBasePath(ctx)
+
 	if len(c) > 0 {
 		// Next parameter should be bucket ID (int64)
 		// Ensure it's actually an int64, not accidentally a context
 		if bktID, ok := c[0].(int64); ok {
-			dirPath = filepath.Join(ORCAS_DATA, fmt.Sprint(bktID))
+			// Get data path from context or use global variable
+			dataPath := getDataPath(ctx)
+			dirPath = filepath.Join(dataPath, fmt.Sprint(bktID))
 		} else {
 			// Invalid parameter type - this should not happen
 			// Log error but try to continue with default path
@@ -1930,7 +1938,7 @@ func (dba *DefaultBaseMetadataAdapter) ListBkt(c Ctx, uid int64) (o []*BucketInf
 func (dba *DefaultBaseMetadataAdapter) ListAllBuckets(c Ctx) (o []*BucketInfo, err error) {
 	// Bucket info is now stored in bucket database, not main database
 	// Scan bucket databases to find all buckets in parallel
-	dataDir := ORCAS_DATA
+	dataDir := getDataPath(c)
 	entries, err := os.ReadDir(dataDir)
 	if err != nil {
 		// If data directory doesn't exist, return empty list

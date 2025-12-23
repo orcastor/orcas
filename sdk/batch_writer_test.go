@@ -360,14 +360,11 @@ func TestBatchWriterBufferFullWithNormalWrite(t *testing.T) {
 
 	// 第五步：使用handler直接写入数据（模拟putObject的fallback逻辑）
 	t.Log("Step 4: Write data using normal write path (simulating putObject fallback)")
-	// 确保context包含用户信息
-	userInfo := &core.UserInfo{
-		ID: 1,
-	}
-	ctxWithUser := core.UserInfo2Ctx(ctx, userInfo)
+	// ctx already contains user info from Login, use it directly
+	// The context returned from handler.Login() already has user info set via UserInfo2Ctx
 
 	testData := []byte("test data when both buffers full")
-	testDataID, err := handler.PutData(ctxWithUser, bktID, 0, -1, testData)
+	testDataID, err := handler.PutData(ctx, bktID, 0, -1, testData)
 	if err != nil {
 		t.Fatalf("PutData failed: %v", err)
 	}
@@ -382,7 +379,7 @@ func TestBatchWriterBufferFullWithNormalWrite(t *testing.T) {
 	t.Log("Step 5: Verify data can be read")
 	time.Sleep(100 * time.Millisecond) // 等待数据写入完成
 
-	readData, err := handler.GetData(ctxWithUser, bktID, testDataID, 0, 0, len(testData))
+	readData, err := handler.GetData(ctx, bktID, testDataID, 0, 0, len(testData))
 	if err != nil {
 		// 如果读取失败，可能是因为数据还在写入中，但PutData已经成功说明写入路径正常
 		t.Logf("GetData failed (may be due to async write): %v", err)

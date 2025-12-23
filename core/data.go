@@ -47,7 +47,8 @@ func toFilePath(path string, bcktID, dataID int64, sn int) string {
 }
 
 func (dda *DefaultDataAdapter) Write(c Ctx, bktID, dataID int64, sn int, buf []byte) error {
-	path := toFilePath(ORCAS_DATA, bktID, dataID, sn)
+	dataPath := getDataPath(c)
+	path := toFilePath(dataPath, bktID, dataID, sn)
 	// No need to check if it exists or if creation succeeds; if it fails, an error will be reported before writing the file below
 	os.MkdirAll(filepath.Dir(path), 0o766)
 
@@ -81,7 +82,8 @@ func (dda *DefaultDataAdapter) Update(c Ctx, bktID, dataID int64, sn int, offset
 		return nil // Nothing to update
 	}
 
-	path := toFilePath(ORCAS_DATA, bktID, dataID, sn)
+	dataPath := getDataPath(c)
+	path := toFilePath(dataPath, bktID, dataID, sn)
 	// Ensure directory exists
 	os.MkdirAll(filepath.Dir(path), 0o766)
 
@@ -135,7 +137,8 @@ func (dda *DefaultDataAdapter) Update(c Ctx, bktID, dataID int64, sn int, offset
 }
 
 func (dda *DefaultDataAdapter) Read(c Ctx, bktID, dataID int64, sn int) ([]byte, error) {
-	path := toFilePath(ORCAS_DATA, bktID, dataID, sn)
+	dataPath := getDataPath(c)
+	path := toFilePath(dataPath, bktID, dataID, sn)
 	data, err := ioutil.ReadFile(path)
 	// Only return empty data for sparse files (handled by caller based on DataInfo)
 	// For non-sparse files, return error if file doesn't exist
@@ -150,7 +153,8 @@ func (dda *DefaultDataAdapter) ReadBytes(c Ctx, bktID, dataID int64, sn, offset,
 		return dda.Read(c, bktID, dataID, sn)
 	}
 
-	path := toFilePath(ORCAS_DATA, bktID, dataID, sn)
+	dataPath := getDataPath(c)
+	path := toFilePath(dataPath, bktID, dataID, sn)
 	f, err := os.Open(path)
 	// Only handle missing files for sparse files (handled by caller based on DataInfo)
 	// For non-sparse files, return error if file doesn't exist
@@ -200,7 +204,8 @@ func (dda *DefaultDataAdapter) ReadBytes(c Ctx, bktID, dataID int64, sn, offset,
 // Delete deletes a specific data chunk (DataID + sn)
 // If the chunk doesn't exist, it returns nil (no error)
 func (dda *DefaultDataAdapter) Delete(c Ctx, bktID, dataID int64, sn int) error {
-	path := toFilePath(ORCAS_DATA, bktID, dataID, sn)
+	dataPath := getDataPath(c)
+	path := toFilePath(dataPath, bktID, dataID, sn)
 
 	// Check if file exists
 	if _, err := os.Stat(path); os.IsNotExist(err) {

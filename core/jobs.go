@@ -195,11 +195,12 @@ func delayedDelete(c Ctx, bktID, dataID int64, ma MetadataAdapter, da DataAdapte
 						return
 					}
 
-					dataSize := calculateDataSize(ORCAS_DATA, bktID, dataID)
+					dataPath := getDataPath(c)
+					dataSize := calculateDataSize(dataPath, bktID, dataID)
 					if dataSize > 0 {
 						ma.DecBktRealUsed(c, bktID, dataSize)
 					}
-					deleteDataFiles(ORCAS_DATA, bktID, dataID, ma, c)
+					deleteDataFiles(dataPath, bktID, dataID, ma, c)
 				}
 			}
 		}
@@ -881,7 +882,8 @@ func PermanentlyDeleteObject(c Ctx, bktID, id int64, h Handler, ma MetadataAdapt
 				// Defragmentation will clean up data blocks with same pkgID and pkgOffset
 			} else {
 				// Non-packaged data, calculate total data file size and decrease actual usage
-				dataSize := calculateDataSize(ORCAS_DATA, bktID, obj.DataID)
+				dataPath := getDataPath(c)
+				dataSize := calculateDataSize(dataPath, bktID, obj.DataID)
 				if dataSize > 0 {
 					// Decrease bucket's actual usage
 					if err := ma.DecBktRealUsed(c, bktID, dataSize); err != nil {
@@ -890,7 +892,7 @@ func PermanentlyDeleteObject(c Ctx, bktID, id int64, h Handler, ma MetadataAdapt
 					}
 				}
 				// Delete data files
-				deleteDataFiles(ORCAS_DATA, bktID, obj.DataID, ma, c)
+				deleteDataFiles(dataPath, bktID, obj.DataID, ma, c)
 			}
 		}
 		// If refCount == 0, may be abnormal situation, for safety don't delete data files
@@ -996,7 +998,8 @@ func CleanRecycleBin(c Ctx, bktID int64, h Handler, ma MetadataAdapter, da DataA
 					// Defragmentation will clean up data blocks with same pkgID and pkgOffset
 				} else {
 					// Non-packaged data, calculate total data file size and decrease actual usage
-					dataSize := calculateDataSize(ORCAS_DATA, bktID, dataID)
+					dataPath := getDataPath(c)
+					dataSize := calculateDataSize(dataPath, bktID, dataID)
 					if dataSize > 0 {
 						// Decrease bucket's actual usage
 						if err := ma.DecBktRealUsed(c, bktID, dataSize); err != nil {
@@ -1004,7 +1007,7 @@ func CleanRecycleBin(c Ctx, bktID int64, h Handler, ma MetadataAdapter, da DataA
 						}
 					}
 					// Data is unreferenced, safe to delete file
-					deleteDataFiles(ORCAS_DATA, bktID, dataID, ma, c)
+					deleteDataFiles(dataPath, bktID, dataID, ma, c)
 				}
 			}
 		}
@@ -1054,7 +1057,8 @@ func CleanRecycleBin(c Ctx, bktID int64, h Handler, ma MetadataAdapter, da DataA
 	for _, dataID := range dataIDList {
 		if refCounts[dataID] == 0 {
 			// Calculate total data file size and decrease actual usage
-			dataSize := calculateDataSize(ORCAS_DATA, bktID, dataID)
+			dataPath := getDataPath(c)
+			dataSize := calculateDataSize(dataPath, bktID, dataID)
 			if dataSize > 0 {
 				// Decrease bucket's actual usage
 				if err := ma.DecBktRealUsed(c, bktID, dataSize); err != nil {
@@ -1062,7 +1066,7 @@ func CleanRecycleBin(c Ctx, bktID int64, h Handler, ma MetadataAdapter, da DataA
 				}
 			}
 			// Data is unreferenced, safe to delete file
-			deleteDataFiles(ORCAS_DATA, bktID, dataID, ma, c)
+			deleteDataFiles(dataPath, bktID, dataID, ma, c)
 		}
 	}
 
@@ -1222,7 +1226,8 @@ func ScrubData(c Ctx, bktID int64, ma MetadataAdapter, da DataAdapter) (*ScrubRe
 			// If it's packaged data, check package file
 			if dataInfo.PkgID > 0 {
 				// Check if package file exists
-				if !dataFileExists(ORCAS_DATA, bktID, dataInfo.PkgID, 0) {
+				dataPath := getDataPath(c)
+				if !dataFileExists(dataPath, bktID, dataInfo.PkgID, 0) {
 					result.CorruptedData = append(result.CorruptedData, dataInfo.ID)
 					continue
 				}
@@ -1231,7 +1236,8 @@ func ScrubData(c Ctx, bktID int64, ma MetadataAdapter, da DataAdapter) (*ScrubRe
 				// Get bucket's chunk size configuration
 				chunkSize := getChunkSize(c, bktID, ma)
 				// Collect all existing chunks (pass Size and chunkSize to calculate expected max sn)
-				chunks := scanChunks(ORCAS_DATA, bktID, dataInfo.ID, dataInfo.Size, chunkSize)
+				dataPath := getDataPath(c)
+				chunks := scanChunks(dataPath, bktID, dataInfo.ID, dataInfo.Size, chunkSize)
 
 				if len(chunks) == 0 {
 					result.CorruptedData = append(result.CorruptedData, dataInfo.ID)
@@ -1295,7 +1301,8 @@ func ScrubData(c Ctx, bktID int64, ma MetadataAdapter, da DataAdapter) (*ScrubRe
 	}
 
 	// 4. Scan all data files in filesystem, find orphaned files without metadata references
-	bucketDataPath := filepath.Join(ORCAS_DATA, fmt.Sprint(bktID))
+	dataPath := getDataPath(c)
+	bucketDataPath := filepath.Join(dataPath, fmt.Sprint(bktID))
 	if _, err := os.Stat(bucketDataPath); err == nil {
 		// Use queue for level-order traversal (BFS)
 		queue := []string{bucketDataPath}
@@ -1399,12 +1406,13 @@ func ScanDirtyData(c Ctx, bktID int64, ma MetadataAdapter, da DataAdapter) (*Dir
 
 			// If it's packaged data, check if package file is readable
 			if dataInfo.PkgID > 0 {
-				if !dataFileExists(ORCAS_DATA, bktID, dataInfo.PkgID, 0) {
+				dataPath := getDataPath(c)
+				if !dataFileExists(dataPath, bktID, dataInfo.PkgID, 0) {
 					result.UnreadableData = append(result.UnreadableData, dataInfo.ID)
 					continue
 				}
 				// Try to read package data fragment
-				pkgReader, _, err := createPkgDataReader(ORCAS_DATA, bktID, dataInfo.PkgID, int(dataInfo.PkgOffset), int(dataInfo.Size))
+				pkgReader, _, err := createPkgDataReader(dataPath, bktID, dataInfo.PkgID, int(dataInfo.PkgOffset), int(dataInfo.Size))
 				if err != nil {
 					result.UnreadableData = append(result.UnreadableData, dataInfo.ID)
 					continue
@@ -1414,7 +1422,8 @@ func ScanDirtyData(c Ctx, bktID int64, ma MetadataAdapter, da DataAdapter) (*Dir
 				// Get bucket's chunk size configuration
 				chunkSize := getChunkSize(c, bktID, ma)
 				// Scan all chunks (pass Size and chunkSize to calculate expected max sn)
-				chunks := scanChunks(ORCAS_DATA, bktID, dataInfo.ID, dataInfo.Size, chunkSize)
+				dataPath := getDataPath(c)
+				chunks := scanChunks(dataPath, bktID, dataInfo.ID, dataInfo.Size, chunkSize)
 
 				if len(chunks) == 0 {
 					// No chunk files, skip (this should be detected by ScrubData)
@@ -1544,7 +1553,8 @@ func FixScrubIssues(c Ctx, bktID int64, result *ScrubResult, ma MetadataAdapter,
 	if options.FixOrphaned && len(result.OrphanedData) > 0 {
 		for _, dataID := range result.OrphanedData {
 			// Orphaned data has no metadata references, can directly delete files
-			dataSize := calculateDataSize(ORCAS_DATA, bktID, dataID)
+			dataPath := getDataPath(c)
+			dataSize := calculateDataSize(dataPath, bktID, dataID)
 			if dataSize > 0 {
 				// Decrease actual usage
 				if err := ma.DecBktRealUsed(c, bktID, dataSize); err != nil {
@@ -1554,7 +1564,7 @@ func FixScrubIssues(c Ctx, bktID int64, result *ScrubResult, ma MetadataAdapter,
 			}
 
 			// Delete files
-			deleteDataFiles(ORCAS_DATA, bktID, dataID, nil, nil)
+			deleteDataFiles(dataPath, bktID, dataID, nil, nil)
 			fixResult.FixedOrphaned++
 		}
 	}
@@ -1588,14 +1598,15 @@ func FixScrubIssues(c Ctx, bktID int64, result *ScrubResult, ma MetadataAdapter,
 						continue // Metadata deletion failed, don't continue deleting files
 					}
 
-					dataSize := calculateDataSize(ORCAS_DATA, bktID, dataID)
+					dataPath := getDataPath(c)
+					dataSize := calculateDataSize(dataPath, bktID, dataID)
 					if dataSize > 0 {
 						if err := ma.DecBktRealUsed(c, bktID, dataSize); err != nil {
 							fixResult.Errors = append(fixResult.Errors, fmt.Sprintf("failed to decrease real used for mismatched checksum data %d: %v", dataID, err))
 						}
 						fixResult.FreedSize += dataSize
 					}
-					deleteDataFiles(ORCAS_DATA, bktID, dataID, ma, c)
+					deleteDataFiles(dataPath, bktID, dataID, ma, c)
 					fixResult.FixedMismatchedChecksum++
 				}
 			} else {
@@ -1775,7 +1786,8 @@ func MergeDuplicateData(c Ctx, bktID int64, ma MetadataAdapter, da DataAdapter) 
 			}
 
 			// Check if master data file exists
-			if !dataFileExists(ORCAS_DATA, bktID, masterDataID, 0) && masterData.PkgID == 0 {
+			dataPath := getDataPath(c)
+			if !dataFileExists(dataPath, bktID, masterDataID, 0) && masterData.PkgID == 0 {
 				// Master data file doesn't exist, try to find another existing one as master
 				found := false
 				for _, dataID := range group.DataIDs {
@@ -1784,7 +1796,7 @@ func MergeDuplicateData(c Ctx, bktID int64, ma MetadataAdapter, da DataAdapter) 
 					}
 					data, err := ma.GetData(c, bktID, dataID)
 					if err == nil && data != nil {
-						if dataFileExists(ORCAS_DATA, bktID, dataID, 0) || data.PkgID > 0 {
+						if dataFileExists(dataPath, bktID, dataID, 0) || data.PkgID > 0 {
 							masterDataID = dataID
 							masterData = data
 							found = true
@@ -1824,7 +1836,8 @@ func MergeDuplicateData(c Ctx, bktID int64, ma MetadataAdapter, da DataAdapter) 
 				}
 
 				// Calculate data size (for calculating freed space)
-				dataSize := calculateDataSize(ORCAS_DATA, bktID, dataID)
+				dataPath := getDataPath(c)
+				dataSize := calculateDataSize(dataPath, bktID, dataID)
 				if dataSize > 0 {
 					totalFreedSize += dataSize
 				}
@@ -1888,7 +1901,8 @@ func verifyChecksum(c Ctx, bktID int64, dataInfo *DataInfo, da DataAdapter, maxS
 	if dataInfo.PkgID > 0 {
 		// Packaged data stored in PkgID file (sn=0), read Size bytes from PkgOffset position
 		var pkgReader *pkgReader
-		pkgReader, _, err = createPkgDataReader(ORCAS_DATA, bktID, dataInfo.PkgID, int(dataInfo.PkgOffset), int(dataInfo.Size))
+		dataPath := getDataPath(c)
+		pkgReader, _, err = createPkgDataReader(dataPath, bktID, dataInfo.PkgID, int(dataInfo.PkgOffset), int(dataInfo.Size))
 		if err != nil {
 			return false
 		}
@@ -2166,7 +2180,8 @@ func fillHoleWithFile(c Ctx, bktID int64, ma MetadataAdapter, da DataAdapter, ho
 	var err error
 	if dataInfo.PkgID > 0 {
 		// If already packaged, read from package file
-		pkgReader, _, err := createPkgDataReader(ORCAS_DATA, bktID, dataInfo.PkgID, int(dataInfo.PkgOffset), int(dataInfo.Size))
+		dataPath := getDataPath(c)
+		pkgReader, _, err := createPkgDataReader(dataPath, bktID, dataInfo.PkgID, int(dataInfo.PkgOffset), int(dataInfo.Size))
 		if err != nil {
 			(*filledFiles)[dataInfo.ID] = false
 			return false
@@ -2220,9 +2235,10 @@ func fillHoleWithFile(c Ctx, bktID int64, ma MetadataAdapter, da DataAdapter, ho
 
 	// Delete old data files if not packaged
 	if dataInfo.PkgID == 0 {
-		oldSize := calculateDataSize(ORCAS_DATA, bktID, dataInfo.ID)
+		dataPath := getDataPath(c)
+		oldSize := calculateDataSize(dataPath, bktID, dataInfo.ID)
 		if oldSize > 0 {
-			deleteDataFiles(ORCAS_DATA, bktID, dataInfo.ID, ma, c)
+			deleteDataFiles(dataPath, bktID, dataInfo.ID, ma, c)
 			ma.DecBktRealUsed(c, bktID, oldSize-dataInfo.Size)
 			result.FreedSize += oldSize - dataInfo.Size
 		}
@@ -2339,7 +2355,8 @@ func Defragment(c Ctx, bktID int64, a Admin, ma MetadataAdapter, da DataAdapter)
 		// Read package file to find holes
 		fileName := fmt.Sprintf("%d_%d", pkgID, 0)
 		hash := fmt.Sprintf("%X", sha256.Sum256([]byte(fileName)))
-		pkgPath := filepath.Join(ORCAS_DATA, fmt.Sprint(bktID), hash[58:61], hash[16:48], fileName)
+		dataPath := getDataPath(c)
+		pkgPath := filepath.Join(dataPath, fmt.Sprint(bktID), hash[58:61], hash[16:48], fileName)
 		pkgFile, err := os.Open(pkgPath)
 		if err != nil {
 			continue
@@ -2605,7 +2622,8 @@ func Defragment(c Ctx, bktID int64, a Admin, ma MetadataAdapter, da DataAdapter)
 				var dataBytes []byte
 				if dataInfo.PkgID > 0 {
 					// If already packaged, read from package file
-					pkgReader, _, err := createPkgDataReader(ORCAS_DATA, bktID, dataInfo.PkgID, int(dataInfo.PkgOffset), int(dataInfo.Size))
+					dataPath := getDataPath(c)
+				pkgReader, _, err := createPkgDataReader(dataPath, bktID, dataInfo.PkgID, int(dataInfo.PkgOffset), int(dataInfo.Size))
 					if err != nil {
 						continue // Read failed, skip
 					}
@@ -2664,10 +2682,11 @@ func Defragment(c Ctx, bktID int64, a Admin, ma MetadataAdapter, da DataAdapter)
 					// Simplified: only count non-packaged data size
 				} else {
 					// Calculate total size of chunk data
-					oldSize := calculateDataSize(ORCAS_DATA, bktID, dataInfo.ID)
+					dataPath := getDataPath(c)
+					oldSize := calculateDataSize(dataPath, bktID, dataInfo.ID)
 					freedSize += oldSize - dataInfo.Size // Subtract new packaged data size
 					// Delete old data files
-					deleteDataFiles(ORCAS_DATA, bktID, dataInfo.ID, ma, c)
+					deleteDataFiles(dataPath, bktID, dataInfo.ID, ma, c)
 				}
 			}
 
@@ -2690,7 +2709,8 @@ func Defragment(c Ctx, bktID int64, a Admin, ma MetadataAdapter, da DataAdapter)
 		// Use same path calculation as in core/data.go
 		fileName := fmt.Sprintf("%d_%d", pkgID, 0)
 		hash := fmt.Sprintf("%X", sha256.Sum256([]byte(fileName)))
-		pkgPath := filepath.Join(ORCAS_DATA, fmt.Sprint(bktID), hash[58:61], hash[16:48], fileName)
+		dataPath := getDataPath(c)
+		pkgPath := filepath.Join(dataPath, fmt.Sprint(bktID), hash[58:61], hash[16:48], fileName)
 		pkgFile, err := os.Open(pkgPath)
 		if err != nil {
 			continue
@@ -2770,7 +2790,9 @@ func Defragment(c Ctx, bktID int64, a Admin, ma MetadataAdapter, da DataAdapter)
 				}
 			}
 			// Pass nil to indicate not packaged data, but package file itself, need to delete entire file
-			deleteDataFiles(ORCAS_DATA, bktID, pkgID, nil, nil)
+			// Note: c may be nil here, use global ORCAS_DATA as fallback
+			dataPath := getDataPath(c)
+			deleteDataFiles(dataPath, bktID, pkgID, nil, nil)
 			result.CompactedPkgs++
 			continue
 		}

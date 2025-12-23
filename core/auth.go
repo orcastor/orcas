@@ -175,6 +175,74 @@ func getKey(c Ctx) string {
 	return ""
 }
 
+// Config2Ctx sets configuration paths (BasePath and DataPath) to context
+// This allows different paths to be used in the same process
+func Config2Ctx(c Ctx, cfg *Config) Ctx {
+	if cfg == nil {
+		return c
+	}
+	// Get existing context values
+	o := make(map[string]interface{})
+	if v, ok := c.Value("o").(map[string]interface{}); ok {
+		for k, val := range v {
+			o[k] = val
+		}
+	}
+	// Set paths if provided in config
+	if cfg.BasePath != "" {
+		o["basePath"] = cfg.BasePath
+	}
+	if cfg.DataPath != "" {
+		o["dataPath"] = cfg.DataPath
+	}
+	return context.WithValue(c, "o", o)
+}
+
+// Path2Ctx sets BasePath and DataPath to context
+// This allows different paths to be used in the same process
+// If basePath or dataPath is empty string, it will not override existing values in context
+func Path2Ctx(c Ctx, basePath, dataPath string) Ctx {
+	// Get existing context values
+	o := make(map[string]interface{})
+	if v, ok := c.Value("o").(map[string]interface{}); ok {
+		for k, val := range v {
+			o[k] = val
+		}
+	}
+	// Set paths if provided
+	if basePath != "" {
+		o["basePath"] = basePath
+	}
+	if dataPath != "" {
+		o["dataPath"] = dataPath
+	}
+	return context.WithValue(c, "o", o)
+}
+
+// getBasePath returns the base path from context, or falls back to global ORCAS_BASE
+func getBasePath(c Ctx) string {
+	if c != nil {
+		if v, ok := c.Value("o").(map[string]interface{}); ok {
+			if basePath, okk := v["basePath"].(string); okk && basePath != "" {
+				return basePath
+			}
+		}
+	}
+	return ORCAS_BASE
+}
+
+// getDataPath returns the data path from context, or falls back to global ORCAS_DATA
+func getDataPath(c Ctx) string {
+	if c != nil {
+		if v, ok := c.Value("o").(map[string]interface{}); ok {
+			if dataPath, okk := v["dataPath"].(string); okk && dataPath != "" {
+				return dataPath
+			}
+		}
+	}
+	return ORCAS_DATA
+}
+
 // NoAuthAccessCtrlMgr is an AccessCtrlMgr that bypasses all permission checks
 // This bypasses authentication and authorization checks that require the main database
 // (user table and ACL table), but bucket database operations (data and object metadata)

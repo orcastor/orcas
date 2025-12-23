@@ -1,10 +1,8 @@
 package sdk
 
 import (
-	"bytes"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"testing"
 
@@ -43,6 +41,28 @@ func init() {
 
 func TestUpload(t *testing.T) {
 	Convey("upload dir", t, func() {
+		// Ensure database is initialized
+		if core.ORCAS_BASE == "" {
+			tmpDir := filepath.Join(os.TempDir(), "orcas_upload_test")
+			os.MkdirAll(tmpDir, 0o755)
+			os.Setenv("ORCAS_BASE", tmpDir)
+			core.ORCAS_BASE = tmpDir
+		}
+		if core.ORCAS_DATA == "" {
+			tmpDir := filepath.Join(os.TempDir(), "orcas_upload_test_data")
+			os.MkdirAll(tmpDir, 0o755)
+			os.Setenv("ORCAS_DATA", tmpDir)
+			core.ORCAS_DATA = tmpDir
+		}
+		
+		// Initialize database if not already initialized
+		if err := core.InitDB(""); err != nil {
+			// Ignore error if database already exists
+			if err.Error() != "open db failed" {
+				So(err, ShouldBeNil)
+			}
+		}
+
 		// Create temporary test directory with test files
 		tmpDir, err := os.MkdirTemp("", "orcas_upload_test_")
 		So(err, ShouldBeNil)
@@ -83,6 +103,28 @@ func TestUpload(t *testing.T) {
 
 func TestDownload(t *testing.T) {
 	Convey("download dir", t, func() {
+		// Ensure database is initialized
+		if core.ORCAS_BASE == "" {
+			tmpDir := filepath.Join(os.TempDir(), "orcas_download_test")
+			os.MkdirAll(tmpDir, 0o755)
+			os.Setenv("ORCAS_BASE", tmpDir)
+			core.ORCAS_BASE = tmpDir
+		}
+		if core.ORCAS_DATA == "" {
+			tmpDir := filepath.Join(os.TempDir(), "orcas_download_test_data")
+			os.MkdirAll(tmpDir, 0o755)
+			os.Setenv("ORCAS_DATA", tmpDir)
+			core.ORCAS_DATA = tmpDir
+		}
+		
+		// Initialize database if not already initialized
+		if err := core.InitDB(""); err != nil {
+			// Ignore error if database already exists
+			if err.Error() != "open db failed" {
+				So(err, ShouldBeNil)
+			}
+		}
+
 		// Create temporary test directory with test files
 		tmpDir, err := os.MkdirTemp("", "orcas_download_test_")
 		So(err, ShouldBeNil)
@@ -137,8 +179,84 @@ func TestDownload(t *testing.T) {
 	})
 }
 
+// compareDirectories compares two directories recursively
+func compareDirectories(dir1, dir2 string) error {
+	return filepath.Walk(dir1, func(path1 string, info1 os.FileInfo, err1 error) error {
+		if err1 != nil {
+			return err1
+		}
+		
+		// Get relative path from base directory
+		relPath, err := filepath.Rel(dir1, path1)
+		if err != nil {
+			return err
+		}
+		
+		// Skip hidden files
+		if filepath.Base(relPath)[0] == '.' {
+			if info1.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		
+		path2 := filepath.Join(dir2, relPath)
+		info2, err2 := os.Stat(path2)
+		
+		if os.IsNotExist(err2) {
+			return fmt.Errorf("file %s exists in source but not in destination", relPath)
+		}
+		if err2 != nil {
+			return err2
+		}
+		
+		if info1.IsDir() != info2.IsDir() {
+			return fmt.Errorf("file type mismatch for %s", relPath)
+		}
+		
+		if !info1.IsDir() {
+			// Compare file contents
+			data1, err := os.ReadFile(path1)
+			if err != nil {
+				return err
+			}
+			data2, err := os.ReadFile(path2)
+			if err != nil {
+				return err
+			}
+			if string(data1) != string(data2) {
+				return fmt.Errorf("file content mismatch for %s", relPath)
+			}
+		}
+		
+		return nil
+	})
+}
+
 func TestCheck(t *testing.T) {
 	Convey("normal", t, func() {
+		// Ensure database is initialized
+		if core.ORCAS_BASE == "" {
+			tmpDir := filepath.Join(os.TempDir(), "orcas_check_test")
+			os.MkdirAll(tmpDir, 0o755)
+			os.Setenv("ORCAS_BASE", tmpDir)
+			core.ORCAS_BASE = tmpDir
+		}
+		if core.ORCAS_DATA == "" {
+			tmpDir := filepath.Join(os.TempDir(), "orcas_check_test_data")
+			os.MkdirAll(tmpDir, 0o755)
+			os.Setenv("ORCAS_DATA", tmpDir)
+			core.ORCAS_DATA = tmpDir
+		}
+		
+		// Initialize database if not already initialized
+		if err := core.InitDB(""); err != nil {
+			// Ignore error if database already exists
+			if err.Error() != "open db failed" {
+				So(err, ShouldBeNil)
+			}
+		}
+
 		// Create temporary test directory with test files
 		tmpDir, err := os.MkdirTemp("", "orcas_check_test_")
 		So(err, ShouldBeNil)
@@ -189,18 +307,36 @@ func TestCheck(t *testing.T) {
 		err = sdk.Download(c, bktID, id, downloadDir)
 		So(err, ShouldBeNil)
 
-		// Compare using diff command
-		var out bytes.Buffer
-		cmd := exec.Command("diff", "-urNa", "-x.*", tmpDir, filepath.Join(downloadDir, filepath.Base(tmpDir)))
-		cmd.Stdout = &out
-		err = cmd.Run()
-		So(out.String(), ShouldBeEmpty)
+		// Compare files using Go code (more portable than diff command)
+		err = compareDirectories(tmpDir, filepath.Join(downloadDir, filepath.Base(tmpDir)))
 		So(err, ShouldBeNil)
 	})
 }
 
 func TestACL(t *testing.T) {
 	Convey("ACL management", t, func() {
+		// Ensure database is initialized
+		if core.ORCAS_BASE == "" {
+			tmpDir := filepath.Join(os.TempDir(), "orcas_acl_test")
+			os.MkdirAll(tmpDir, 0o755)
+			os.Setenv("ORCAS_BASE", tmpDir)
+			core.ORCAS_BASE = tmpDir
+		}
+		if core.ORCAS_DATA == "" {
+			tmpDir := filepath.Join(os.TempDir(), "orcas_acl_test_data")
+			os.MkdirAll(tmpDir, 0o755)
+			os.Setenv("ORCAS_DATA", tmpDir)
+			core.ORCAS_DATA = tmpDir
+		}
+		
+		// Initialize database if not already initialized
+		if err := core.InitDB(""); err != nil {
+			// Ignore error if database already exists
+			if err.Error() != "open db failed" {
+				So(err, ShouldBeNil)
+			}
+		}
+
 		sdk := New(core.NewLocalHandler())
 		defer sdk.Close()
 

@@ -282,8 +282,9 @@ func (dp *DBPool) GetDBStats() map[string]interface{} {
 // with automatic path and key resolution (similar to original GetDB)
 func GetDBWithType(connType DBConnectionType, c ...interface{}) (*sql.DB, error) {
 	pool := GetDBPool()
-	dirPath := ORCAS_BASE
+	var dirPath string
 	var dbKey string
+	var ctx Ctx
 
 	// Parse parameters (same logic as original GetDB)
 	if len(c) > 0 {
@@ -305,18 +306,23 @@ func GetDBWithType(connType DBConnectionType, c ...interface{}) (*sql.DB, error)
 
 	if len(c) > 0 {
 		if bktID, ok := c[0].(int64); ok {
-			// Bucket database: use ORCAS_DATA
-			dirPath = filepath.Join(ORCAS_DATA, fmt.Sprint(bktID))
+			// Bucket database: get data path from context or use global variable
+			dataPath := getDataPath(ctx)
+			dirPath = filepath.Join(dataPath, fmt.Sprint(bktID))
 		}
 		if len(c) > 1 {
-			if ctx, ok := c[1].(Ctx); ok {
+			if ctxVal, ok := c[1].(Ctx); ok {
+				ctx = ctxVal
 				if key := getKey(ctx); key != "" {
 					dbKey = key
 				}
 			}
 		}
 	} else {
-		// Main database: require ORCAS_BASE
+		// Main database: get base path from context or use global variable
+		if dirPath == "" {
+			dirPath = getBasePath(ctx)
+		}
 		if dirPath == "" {
 			return nil, fmt.Errorf("ORCAS_BASE is not set, main database is not available")
 		}
