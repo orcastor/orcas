@@ -13,7 +13,7 @@ require (
 	github.com/mattn/go-sqlite3 v1.14.32
 	github.com/mholt/archiver/v3 v3.5.1
 	github.com/mkmueller/aes256 v0.0.0-20171112015946-1ce9e9b3f91a
-	github.com/orca-zhang/borm v0.0.0-20251222162248-ce6be9d18ce8
+	github.com/orca-zhang/borm v0.0.0-20251223101851-1bfd798dcda3
 	github.com/orca-zhang/ecache2 v0.0.1
 	github.com/orca-zhang/idgen v0.0.0-20220909041521-2662ff4c3c3e
 	github.com/prometheus/client_golang v1.12.1

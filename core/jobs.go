@@ -1280,7 +1280,7 @@ func ScrubData(c Ctx, bktID int64, ma MetadataAdapter, da DataAdapter) (*ScrubRe
 				}
 
 				// If data size > 0 and has checksum, verify checksum
-				if dataInfo.Size > 0 && (dataInfo.Cksum > 0 || dataInfo.XXH3 > 0 || dataInfo.SHA256_0 != 0) {
+				if dataInfo.Size > 0 && (dataInfo.Cksum != 0 || dataInfo.XXH3 != 0 || dataInfo.SHA256_0 != 0) {
 					if !verifyChecksum(c, bktID, dataInfo, da, maxSN) {
 						result.MismatchedChecksum = append(result.MismatchedChecksum, dataInfo.ID)
 					}
@@ -1658,32 +1658,45 @@ func scanChunks(basePath string, bktID, dataID int64, dataSize int64, chunkSize 
 		//   max sn = 3 - 1 = 2
 		expectedChunkCount := (dataSize + chunkSize - 1) / chunkSize // Round up
 		// Calculate expected maxSN: if expectedChunkCount is 1, maxSN should be 0; if 2, maxSN should be 1, etc.
-		// So maxSN = expectedChunkCount - 1, but we add 1 for tolerance to detect missing chunks
-		maxAllowedSN := int(expectedChunkCount) // Use exact count, but scan up to maxAllowedSN (exclusive)
+		// So maxSN = expectedChunkCount - 1, but we need to scan beyond to detect missing chunks
+		maxAllowedSN := int(expectedChunkCount) - 1 // Expected max SN (0-indexed)
+		if maxAllowedSN < 0 {
+			maxAllowedSN = 0 // At least one chunk
+		}
 		if maxAllowedSN > 100000 {
 			maxAllowedSN = 100000 // Set an absolute upper limit to prevent abnormal situations
 		}
 
-		// Scan from 0 to maxAllowedSN to find all existing chunks
-		// This allows detection of non-continuous chunks (e.g., chunk 0 and 2 exist, but chunk 1 is missing)
-		// We scan up to maxAllowedSN (exclusive) to avoid scanning non-existent chunks
-		// But we also need to scan beyond if we find chunks beyond expected range (for detecting orphaned chunks)
+		// Scan from 0 to find all existing chunks
+		// We need to scan beyond maxAllowedSN to detect:
+		// 1. Missing chunks within expected range (e.g., chunk 0 and 2 exist, but chunk 1 is missing)
+		// 2. Orphaned chunks beyond expected range
+		// Scan up to maxAllowedSN+10 or until we find no chunks for a while
 		maxFoundSN := -1
-		for sn := 0; sn <= maxAllowedSN+1; sn++ { // Scan one extra to detect chunks beyond expected range
+		consecutiveMissing := 0
+		scanLimit := maxAllowedSN + 10 // Scan well beyond expected range
+		if scanLimit > 1000 {
+			scanLimit = 1000 // Cap at reasonable limit
+		}
+		
+		for sn := 0; sn <= scanLimit; sn++ {
 			fileName := fmt.Sprintf("%d_%d", dataID, sn)
-			hash := fmt.Sprintf("%X", sha256.Sum256([]byte(fileName)))
-			path := filepath.Join(basePath, fmt.Sprint(bktID), hash[58:61], hash[16:48], fileName)
+			hash := fmt.Sprintf("%X", md5.Sum([]byte(fileName)))
+			path := filepath.Join(basePath, fmt.Sprint(bktID), hash[21:24], hash[8:24], fileName)
 
 			info, err := os.Stat(path)
 			if err != nil {
-				// File doesn't exist, continue to next chunk (don't break, to detect non-continuous chunks)
-				// But if we've found chunks and we're beyond expected range, we can stop
-				if sn > maxAllowedSN && maxFoundSN >= 0 {
+				// File doesn't exist
+				consecutiveMissing++
+				// If we're beyond expected range and haven't found chunks for a while, stop
+				if sn > maxAllowedSN+5 && consecutiveMissing > 5 && maxFoundSN >= 0 {
 					break
 				}
 				continue
 			}
 
+			// Found a chunk, reset consecutive missing counter
+			consecutiveMissing = 0
 			// Record chunk size
 			chunks[sn] = info.Size()
 			if sn > maxFoundSN {
@@ -1695,8 +1708,8 @@ func scanChunks(basePath string, bktID, dataID int64, dataSize int64, chunkSize 
 		sn := 0
 		for {
 			fileName := fmt.Sprintf("%d_%d", dataID, sn)
-			hash := fmt.Sprintf("%X", sha256.Sum256([]byte(fileName)))
-			path := filepath.Join(basePath, fmt.Sprint(bktID), hash[58:61], hash[16:48], fileName)
+			hash := fmt.Sprintf("%X", md5.Sum([]byte(fileName)))
+			path := filepath.Join(basePath, fmt.Sprint(bktID), hash[21:24], hash[8:24], fileName)
 
 			info, err := os.Stat(path)
 			if err != nil {
@@ -1920,8 +1933,8 @@ func verifyChecksum(c Ctx, bktID int64, dataInfo *DataInfo, da DataAdapter, maxS
 	var xxh3Hash *xxh3.Hasher
 	var xxh3HashForXXH3 *xxh3.Hasher // Separate hasher for XXH3 if both Cksum and XXH3 are needed
 	var sha256Hash hash.Hash
-	needCksum := dataInfo.Cksum > 0
-	needXXH3 := (dataInfo.Kind&DATA_ENDEC_MASK == 0 && dataInfo.Kind&DATA_CMPR_MASK == 0) && dataInfo.XXH3 > 0
+	needCksum := dataInfo.Cksum != 0
+	needXXH3 := (dataInfo.Kind&DATA_ENDEC_MASK == 0 && dataInfo.Kind&DATA_CMPR_MASK == 0) && dataInfo.XXH3 != 0
 	needSHA256 := (dataInfo.Kind&DATA_ENDEC_MASK == 0 && dataInfo.Kind&DATA_CMPR_MASK == 0) && dataInfo.SHA256_0 != 0
 
 	// If both Cksum and XXH3 are needed, we need separate hashers because Sum64() consumes the hash state
@@ -1970,7 +1983,7 @@ func verifyChecksum(c Ctx, bktID int64, dataInfo *DataInfo, da DataAdapter, maxS
 	// Note: For unencrypted and uncompressed data, Cksum should equal XXH3
 	if needCksum {
 		calculated := xxh3Hash.Sum64()
-			if int64(calculated) != dataInfo.Cksum {
+		if int64(calculated) != dataInfo.Cksum {
 			return false
 		}
 	}
