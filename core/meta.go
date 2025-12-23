@@ -1495,16 +1495,17 @@ func (dma *DefaultMetadataAdapter) ListObj(c Ctx, bktID, pid int64,
 	}
 	// Note: Don't close the connection, it's from the pool
 
-	// Build order conditions early to avoid modifying conds after count query
-	var orderBy string
-	orderBy, order = doOrder(delim, order, &conds)
-
-	// Use borm for count (it should handle raw SQL strings correctly)
+	// Count query should use conditions without pagination (delim)
+	// So we need to do count query before adding pagination conditions
 	if _, err = b.TableContext(c, db, OBJ_TBL).Select(&cnt,
 		b.Fields("count(1)"),
 		b.Where(conds...)); err != nil {
 		return nil, 0, "", fmt.Errorf("%w: ListObj count failed (bktID=%d, pid=%d, wd=%s): %v", ERR_QUERY_DB, bktID, pid, wd, err)
 	}
+
+	// Build order conditions and add pagination conditions for data query
+	var orderBy string
+	orderBy, order = doOrder(delim, order, &conds)
 
 	// Only query data if count > 0
 	if count > 0 {
