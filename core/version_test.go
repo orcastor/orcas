@@ -30,10 +30,10 @@ func TestGetOrCreateWritingVersion(t *testing.T) {
 		bucket := &BucketInfo{
 			ID:   testBktID,
 			Name: "test",
-			UID:  testUID,
 			Type: 1,
 		}
-		So(dma.PutBkt(c, []*BucketInfo{bucket}), ShouldBeNil)
+		ctx := UserInfo2Ctx(c, &UserInfo{ID: testUID})
+		So(dma.PutBkt(ctx, []*BucketInfo{bucket}), ShouldBeNil)
 
 		// Create user context for permission checks
 		userInfo := &UserInfo{
@@ -118,10 +118,10 @@ func TestListVersionsExcludeWriting(t *testing.T) {
 		bucket := &BucketInfo{
 			ID:   testBktID,
 			Name: "test",
-			UID:  testUID,
 			Type: 1,
 		}
-		So(dma.PutBkt(c, []*BucketInfo{bucket}), ShouldBeNil)
+		ctx := UserInfo2Ctx(c, &UserInfo{ID: testUID})
+		So(dma.PutBkt(ctx, []*BucketInfo{bucket}), ShouldBeNil)
 
 		// Create user context for permission checks
 		userInfo := &UserInfo{
@@ -198,11 +198,11 @@ func TestUpdateData(t *testing.T) {
 		bucket := &BucketInfo{
 			ID:   testBktID,
 			Name: "test",
-			UID:  testUID,
 			Type: 1,
 			Quota: 1000000, // 1MB quota
 		}
-		So(dma.PutBkt(c, []*BucketInfo{bucket}), ShouldBeNil)
+		ctx := UserInfo2Ctx(c, &UserInfo{ID: testUID})
+		So(dma.PutBkt(ctx, []*BucketInfo{bucket}), ShouldBeNil)
 
 		// Create user context for permission checks
 		userInfo := &UserInfo{
@@ -295,11 +295,11 @@ func TestSparseFileSupport(t *testing.T) {
 			bucket := &BucketInfo{
 				ID:    testBktID,
 				Name:  "test",
-				UID:   testUID, // Use testUID as bucket owner
 				Type:  1,
 				Quota: 1000000,
 			}
-			So(dma.PutBkt(c, []*BucketInfo{bucket}), ShouldBeNil)
+			ctx := UserInfo2Ctx(c, &UserInfo{ID: testUID})
+			So(dma.PutBkt(ctx, []*BucketInfo{bucket}), ShouldBeNil)
 
 			// Create sparse data info
 			dataID, _ := ig.New()
@@ -327,11 +327,11 @@ func TestSparseFileSupport(t *testing.T) {
 			bucket := &BucketInfo{
 				ID:    testBktID,
 				Name:  "test",
-				UID:   testUID, // Use testUID as bucket owner
 				Type:  1,
 				Quota: 1000000,
 			}
-			So(dma.PutBkt(c, []*BucketInfo{bucket}), ShouldBeNil)
+			ctx := UserInfo2Ctx(c, &UserInfo{ID: testUID})
+			So(dma.PutBkt(ctx, []*BucketInfo{bucket}), ShouldBeNil)
 
 			// Create non-sparse data info
 			dataID, _ := ig.New()
@@ -355,11 +355,11 @@ func TestSparseFileSupport(t *testing.T) {
 			bucket := &BucketInfo{
 				ID:    testBktID,
 				Name:  "test",
-				UID:   testUID, // Use testUID as bucket owner
 				Type:  1,
 				Quota: 1000000,
 			}
-			So(dma.PutBkt(c, []*BucketInfo{bucket}), ShouldBeNil)
+			ctx := UserInfo2Ctx(c, &UserInfo{ID: testUID})
+			So(dma.PutBkt(ctx, []*BucketInfo{bucket}), ShouldBeNil)
 
 			// Create sparse data info
 			dataID, _ := ig.New()
@@ -405,12 +405,12 @@ func TestSparseFileSupport(t *testing.T) {
 			bucket := &BucketInfo{
 				ID:        testBktID,
 				Name:      "test",
-				UID:       testUID, // Use testUID as bucket owner
 				Type:      1,
 				Quota:     1000000,
 				ChunkSize: 4 * 1024 * 1024, // 4MB
 			}
-			So(dma.PutBkt(c, []*BucketInfo{bucket}), ShouldBeNil)
+			ctx := UserInfo2Ctx(c, &UserInfo{ID: testUID})
+			So(dma.PutBkt(ctx, []*BucketInfo{bucket}), ShouldBeNil)
 
 			// Create sparse data info
 			dataID, _ := ig.New()
@@ -445,12 +445,12 @@ func TestSparseFileSupport(t *testing.T) {
 			bucket := &BucketInfo{
 				ID:        testBktID,
 				Name:      "test",
-				UID:       testUID, // Use testUID as bucket owner
 				Type:      1,
 				Quota:     1000000,
 				ChunkSize: 1024 * 1024, // 1MB chunks for easier testing
 			}
-			So(dma.PutBkt(c, []*BucketInfo{bucket}), ShouldBeNil)
+			ctx := UserInfo2Ctx(c, &UserInfo{ID: testUID})
+			So(dma.PutBkt(ctx, []*BucketInfo{bucket}), ShouldBeNil)
 
 			// Create sparse data info (5MB file)
 			dataID, _ := ig.New()
@@ -514,12 +514,12 @@ func TestSparseFileSupport(t *testing.T) {
 			bucket := &BucketInfo{
 				ID:        testBktID,
 				Name:      "test",
-				UID:       testUID, // Use testUID as bucket owner
 				Type:      1,
 				Quota:     10 * 1024 * 1024, // 10MB quota to accommodate test data
 				ChunkSize: 1024 * 1024,      // 1MB chunks
 			}
-			So(dma.PutBkt(c, []*BucketInfo{bucket}), ShouldBeNil)
+			ctx := UserInfo2Ctx(c, &UserInfo{ID: testUID})
+			So(dma.PutBkt(ctx, []*BucketInfo{bucket}), ShouldBeNil)
 
 			// Create sparse data info
 			dataID, _ := ig.New()
@@ -563,12 +563,12 @@ func TestSparseFileSupport(t *testing.T) {
 			bucket := &BucketInfo{
 				ID:        testBktID,
 				Name:      "test",
-				UID:       testUID, // Use testUID as bucket owner
 				Type:      1,
 				Quota:     1000000,
 				ChunkSize: 1024 * 1024, // 1MB chunks
 			}
-			So(dma.PutBkt(c, []*BucketInfo{bucket}), ShouldBeNil)
+			ctx := UserInfo2Ctx(c, &UserInfo{ID: testUID})
+			So(dma.PutBkt(ctx, []*BucketInfo{bucket}), ShouldBeNil)
 
 			// Create sparse data info
 			dataID, _ := ig.New()

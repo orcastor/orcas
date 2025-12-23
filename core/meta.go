@@ -7,8 +7,10 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
@@ -18,7 +20,6 @@ import (
 type BucketInfo struct {
 	ID           int64  `borm:"id" json:"i,omitempty"`             // Bucket ID
 	Name         string `borm:"name" json:"n,omitempty"`           // Bucket name
-	UID          int64  `borm:"uid" json:"u,omitempty"`            // Owner
 	Type         int    `borm:"type" json:"t,omitempty"`           // Bucket type, 0: none, 1: normal ...
 	Quota        int64  `borm:"quota" json:"q,omitempty"`          // Quota, negative means unlimited
 	Used         int64  `borm:"used" json:"s,omitempty"`           // Logical usage, counts original size of all versions
@@ -27,6 +28,13 @@ type BucketInfo struct {
 	DedupSavings int64  `borm:"dedup_savings" json:"ds,omitempty"` // Instant upload space savings, counts deduplicated data savings (LogicalUsed - unique data block size)
 	ChunkSize    int64  `borm:"chunk_size" json:"cs,omitempty"`    // Chunk size (bytes), must be >0 (defaults to system chunk size)
 	// SnapshotID int64 // Latest snapshot version ID
+}
+
+// BucketACL represents access control list for a bucket
+type BucketACL struct {
+	BktID int64 `borm:"bkt_id" json:"bkt_id,omitempty"` // Bucket ID
+	UID   int64 `borm:"uid" json:"uid,omitempty"`       // User ID
+	Perm  int   `borm:"perm" json:"perm,omitempty"`     // Permission flags (DR, DW, DD, MDR, MDW, MDD, or ALL)
 }
 
 type UserInfo struct {
@@ -138,9 +146,10 @@ func MarkSparseFile(dataInfo *DataInfo) {
 }
 
 const (
-	BKT_TBL = "bkt"
+	ACL_TBL = "acl" // Access Control List table
 	USR_TBL = "usr"
 
+	BKT_TBL  = "bkt"
 	OBJ_TBL  = "obj"
 	DATA_TBL = "data"
 )
@@ -192,7 +201,9 @@ type DuplicateGroup struct {
 	DataIDs  []int64 // List of DataIDs with same checksums
 }
 
-type DataMetadataAdapter interface {
+// DataMetadataAdapter manages data metadata stored in bucket databases
+// DataInfoMetadataAdapter manages data metadata stored in bucket databases
+type DataInfoMetadataAdapter interface {
 	RefData(c Ctx, bktID int64, d []*DataInfo) ([]int64, error)
 	PutData(c Ctx, bktID int64, d []*DataInfo) error
 	GetData(c Ctx, bktID, id int64) (*DataInfo, error)
@@ -232,13 +243,44 @@ type ObjectMetadataAdapter interface {
 	ListVersions(c Ctx, bktID int64, fileID int64, excludeWriting bool) ([]*ObjectInfo, error)
 }
 
+// ACLMetadataManager manages access control lists for buckets (many-to-many relationship)
+type ACLMetadataManager interface {
+	// PutACL adds or updates an ACL entry (bktID, uid pair) with permission
+	// perm: permission flags (DR, DW, DD, MDR, MDW, MDD, or ALL)
+	PutACL(c Ctx, bktID int64, uid int64, perm int) error
+	// ListACL lists all ACL entries for a bucket
+	ListACL(c Ctx, bktID int64) ([]*BucketACL, error)
+	// DeleteACL deletes a specific ACL entry (bktID, uid pair)
+	DeleteACL(c Ctx, bktID int64, uid int64) error
+	// DeleteAllACL deletes all ACL entries for a bucket
+	DeleteAllACL(c Ctx, bktID int64) error
+	// ListACLByUser lists all buckets accessible by a user
+	ListACLByUser(c Ctx, uid int64) ([]*BucketACL, error)
+	// CheckPermission checks if a user has the required permission for a bucket
+	// Returns true if the user's ACL permission covers the required action
+	CheckPermission(c Ctx, bktID int64, uid int64, action int) (bool, error)
+}
+
+// BaseMetadataAdapter manages base metadata (users, buckets, ACL) stored in main database
+type BaseMetadataAdapter interface {
+	Close()
+	UserMetadataAdapter
+	BucketMetadataAdapter
+	ACLMetadataManager
+}
+
+// DataMetadataAdapter manages data and object metadata stored in bucket databases
+type DataMetadataAdapter interface {
+	Close()
+	DataInfoMetadataAdapter
+	ObjectMetadataAdapter
+}
+
+// MetadataAdapter combines BaseMetadataAdapter and DataMetadataAdapter for backward compatibility
 type MetadataAdapter interface {
 	Close()
-
-	BucketMetadataAdapter
-	UserMetadataAdapter
+	BaseMetadataAdapter
 	DataMetadataAdapter
-	ObjectMetadataAdapter
 }
 
 // EscapeSQLString 转义SQL字符串，只遍历一次字符串
@@ -338,7 +380,11 @@ func GetDB(c ...interface{}) (*sql.DB, error) {
 }
 
 // GetDBWithKey opens database with specified encryption key
+// Requires ORCAS_BASE to be set, returns error if ORCAS_BASE is empty
 func GetDBWithKey(key string) (*sql.DB, error) {
+	if ORCAS_BASE == "" {
+		return nil, fmt.Errorf("ORCAS_BASE is not set, main database is not available")
+	}
 	param := "?_journal=WAL&cache=shared&mode=rwc&_busy_timeout=10000&_txlock=immediate"
 	if key != "" {
 		param += "&key=" + key
@@ -364,10 +410,16 @@ func GetDBWithKey(key string) (*sql.DB, error) {
 // 2. Creating a new database with new key
 // 3. Importing all data into new database
 // 4. Replacing old database with new one
+// Requires ORCAS_BASE to be set, returns error if ORCAS_BASE is empty
 func ChangeDBKey(oldKey, newKey string) error {
 	// If new key is same as old key, no change needed
 	if oldKey == newKey {
 		return nil
+	}
+
+	// Check if ORCAS_BASE is set
+	if ORCAS_BASE == "" {
+		return fmt.Errorf("ORCAS_BASE is not set, main database is not available")
 	}
 
 	// Get database file path
@@ -573,7 +625,11 @@ func ChangeDBKey(oldKey, newKey string) error {
 // InitDB initializes the main database
 // If key is provided, the database will be encrypted with that key
 // If key is empty string, the database will be unencrypted
+// Requires ORCAS_BASE to be set, returns error if ORCAS_BASE is empty
 func InitDB(key ...string) error {
+	if ORCAS_BASE == "" {
+		return fmt.Errorf("ORCAS_BASE is not set, cannot initialize main database")
+	}
 	var dbKey string
 	if len(key) > 0 {
 		dbKey = key[0]
@@ -593,28 +649,6 @@ func InitDB(key ...string) error {
 		defer db.Close()
 	}
 	// Note: If using pool, don't close the connection
-
-	_, err = db.Exec(`CREATE TABLE IF NOT EXISTS bkt (id BIGINT PRIMARY KEY NOT NULL,
-		uid BIGINT NOT NULL,
-		quota BIGINT NOT NULL,
-		used BIGINT NOT NULL,
-		real_used BIGINT NOT NULL DEFAULT 0,
-		logical_used BIGINT NOT NULL DEFAULT 0,
-		dedup_savings BIGINT NOT NULL DEFAULT 0,
-		type TINYINT NOT NULL,
-		name TEXT NOT NULL,
-		chunk_size BIGINT NOT NULL DEFAULT 0,
-		key TEXT NOT NULL DEFAULT '',
-		ref_level INTEGER NOT NULL DEFAULT 0,
-		cmpr_way INTEGER NOT NULL DEFAULT 0,
-		cmpr_qlty INTEGER NOT NULL DEFAULT 0,
-		endec_way INTEGER NOT NULL DEFAULT 0,
-		endec_key TEXT NOT NULL DEFAULT ''
-	)`)
-	if err != nil {
-		return fmt.Errorf("%w: create bkt table: %v", ERR_EXEC_DB, err)
-	}
-
 	_, err = db.Exec(`CREATE TABLE IF NOT EXISTS usr (id BIGINT PRIMARY KEY NOT NULL,
 		role TINYINT NOT NULL,
 		usr TEXT NOT NULL,
@@ -626,17 +660,30 @@ func InitDB(key ...string) error {
 		return fmt.Errorf("%w: create usr table: %v", ERR_EXEC_DB, err)
 	}
 
-	_, err = db.Exec(`CREATE INDEX IF NOT EXISTS ix_uid on bkt (uid)`)
-	if err != nil {
-		return fmt.Errorf("%w: create index ix_uid: %v", ERR_EXEC_DB, err)
-	}
-	_, err = db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS uk_name on bkt (name)`)
-	if err != nil {
-		return fmt.Errorf("%w: create index uk_name: %v", ERR_EXEC_DB, err)
-	}
 	_, err = db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS uk_usr on usr (usr)`)
 	if err != nil {
 		return fmt.Errorf("%w: create index uk_usr: %v", ERR_EXEC_DB, err)
+	}
+
+	// Create ACL table in main database (for global ACL management/indexing)
+	// Note: Each bucket database also has its own ACL table
+	_, err = db.Exec(`CREATE TABLE IF NOT EXISTS acl (
+		bkt_id BIGINT NOT NULL,
+		uid BIGINT NOT NULL,
+		perm INTEGER NOT NULL DEFAULT 0,
+		PRIMARY KEY (bkt_id, uid)
+	)`)
+	if err != nil {
+		return fmt.Errorf("%w: create acl table: %v", ERR_EXEC_DB, err)
+	}
+	// Create indexes for efficient querying
+	_, err = db.Exec(`CREATE INDEX IF NOT EXISTS ix_acl_uid ON acl (uid)`)
+	if err != nil {
+		return fmt.Errorf("%w: create index ix_acl_uid: %v", ERR_EXEC_DB, err)
+	}
+	_, err = db.Exec(`CREATE INDEX IF NOT EXISTS ix_acl_bkt_id ON acl (bkt_id)`)
+	if err != nil {
+		return fmt.Errorf("%w: create index ix_acl_bkt_id: %v", ERR_EXEC_DB, err)
 	}
 
 	// Create default admin user if no admin exists
@@ -702,6 +749,22 @@ func InitBucketDB(c Ctx, bktID int64) error {
 	}
 	// Note: If using pool, don't close the connection
 
+	// Create bkt table in bucket database (bucket info is now stored in bucket database)
+	// Note: UID is removed from bkt table, stored in ACL table instead
+	_, err = db.Exec(`CREATE TABLE IF NOT EXISTS bkt (id BIGINT PRIMARY KEY NOT NULL,
+		quota BIGINT NOT NULL,
+		used BIGINT NOT NULL,
+		real_used BIGINT NOT NULL DEFAULT 0,
+		logical_used BIGINT NOT NULL DEFAULT 0,
+		dedup_savings BIGINT NOT NULL DEFAULT 0,
+		type TINYINT NOT NULL,
+		name TEXT NOT NULL,
+		chunk_size BIGINT NOT NULL DEFAULT 0
+	)`)
+	if err != nil {
+		return fmt.Errorf("%w: create bkt table: %v", ERR_EXEC_DB, err)
+	}
+
 	_, err = db.Exec(`CREATE TABLE IF NOT EXISTS obj (id BIGINT PRIMARY KEY NOT NULL,
 		pid BIGINT NOT NULL,
 		did BIGINT NOT NULL,
@@ -748,9 +811,150 @@ func InitBucketDB(c Ctx, bktID int64) error {
 	return nil
 }
 
-type DefaultMetadataAdapter struct{}
+// DefaultBaseMetadataAdapter implements BaseMetadataAdapter
+type DefaultBaseMetadataAdapter struct{}
+
+func (dba *DefaultBaseMetadataAdapter) Close() {
+}
+
+// DefaultDataMetadataAdapter implements DataMetadataAdapter
+type DefaultDataMetadataAdapter struct{}
+
+func (dda *DefaultDataMetadataAdapter) Close() {
+}
+
+// DefaultMetadataAdapter combines BaseMetadataAdapter and DataMetadataAdapter
+// for backward compatibility
+type DefaultMetadataAdapter struct {
+	*DefaultBaseMetadataAdapter
+	*DefaultDataMetadataAdapter
+}
+
+func NewDefaultMetadataAdapter() *DefaultMetadataAdapter {
+	return &DefaultMetadataAdapter{
+		DefaultBaseMetadataAdapter: &DefaultBaseMetadataAdapter{},
+		DefaultDataMetadataAdapter: &DefaultDataMetadataAdapter{},
+	}
+}
 
 func (dma *DefaultMetadataAdapter) Close() {
+	// Both adapters are embedded, no need to close separately
+}
+
+// BaseMetadataAdapter implementation (ACL, User, Bucket)
+
+// ACLMetadataManager implementation
+// ACL is stored in main database, not in bucket database
+func (dba *DefaultBaseMetadataAdapter) PutACL(c Ctx, bktID int64, uid int64, perm int) error {
+	// Use write connection for main database
+	db, err := GetWriteDB()
+	if err != nil {
+		return fmt.Errorf("%w: PutACL GetWriteDB failed (bktID=%d): %v", ERR_OPEN_DB, bktID, err)
+	}
+	// Note: Don't close the connection, it's from the pool
+
+	// Default to ALL if perm is 0 or invalid
+	if perm == 0 {
+		perm = ALL
+	}
+
+	acl := &BucketACL{BktID: bktID, UID: uid, Perm: perm}
+	aclSlice := []*BucketACL{acl}
+	// Use ReplaceInto to insert or replace (since we have composite primary key)
+	if _, err = b.TableContext(c, db, ACL_TBL).ReplaceInto(&aclSlice); err != nil {
+		return fmt.Errorf("%w: PutACL failed (bktID=%d, uid=%d, perm=%d): %v", ERR_EXEC_DB, bktID, uid, perm, err)
+	}
+	return nil
+}
+
+func (dba *DefaultBaseMetadataAdapter) ListACL(c Ctx, bktID int64) ([]*BucketACL, error) {
+	// Use read connection for main database
+	db, err := GetReadDB()
+	if err != nil {
+		return nil, fmt.Errorf("%w: ListACL GetReadDB failed (bktID=%d): %v", ERR_OPEN_DB, bktID, err)
+	}
+	// Note: Don't close the connection, it's from the pool
+
+	var acls []*BucketACL
+	if _, err = b.TableContext(c, db, ACL_TBL).Select(&acls, b.Where(b.Eq("bkt_id", bktID))); err != nil {
+		return nil, fmt.Errorf("%w: ListACL failed (bktID=%d): %v", ERR_QUERY_DB, bktID, err)
+	}
+	return acls, nil
+}
+
+func (dba *DefaultBaseMetadataAdapter) DeleteACL(c Ctx, bktID int64, uid int64) error {
+	// Use write connection for main database
+	db, err := GetWriteDB()
+	if err != nil {
+		return fmt.Errorf("%w: DeleteACL GetWriteDB failed (bktID=%d, uid=%d): %v", ERR_OPEN_DB, bktID, uid, err)
+	}
+	// Note: Don't close the connection, it's from the pool
+
+	if _, err = b.TableContext(c, db, ACL_TBL).Delete(b.Where(b.Eq("bkt_id", bktID), b.Eq("uid", uid))); err != nil {
+		return fmt.Errorf("%w: DeleteACL failed (bktID=%d, uid=%d): %v", ERR_EXEC_DB, bktID, uid, err)
+	}
+	return nil
+}
+
+func (dba *DefaultBaseMetadataAdapter) DeleteAllACL(c Ctx, bktID int64) error {
+	// Use write connection for main database
+	db, err := GetWriteDB()
+	if err != nil {
+		return fmt.Errorf("%w: DeleteAllACL GetWriteDB failed (bktID=%d): %v", ERR_OPEN_DB, bktID, err)
+	}
+	// Note: Don't close the connection, it's from the pool
+
+	if _, err = b.TableContext(c, db, ACL_TBL).Delete(b.Where(b.Eq("bkt_id", bktID))); err != nil {
+		return fmt.Errorf("%w: DeleteAllACL failed (bktID=%d): %v", ERR_EXEC_DB, bktID, err)
+	}
+	return nil
+}
+
+// CheckPermission checks if a user has the required permission for a bucket
+// Returns true if the user's ACL permission covers the required action
+func (dba *DefaultBaseMetadataAdapter) CheckPermission(c Ctx, bktID int64, uid int64, action int) (bool, error) {
+	// Use read connection for main database
+	db, err := GetReadDB()
+	if err != nil {
+		return false, fmt.Errorf("%w: CheckPermission GetReadDB failed (bktID=%d): %v", ERR_OPEN_DB, bktID, err)
+	}
+	// Note: Don't close the connection, it's from the pool
+
+	var acls []*BucketACL
+	if _, err = b.TableContext(c, db, ACL_TBL).Select(&acls, b.Where(b.Eq("bkt_id", bktID), b.Eq("uid", uid))); err != nil {
+		return false, fmt.Errorf("%w: CheckPermission failed (bktID=%d, uid=%d): %v", ERR_QUERY_DB, bktID, uid, err)
+	}
+	if len(acls) == 0 {
+		return false, nil
+	}
+
+	// Check if any ACL entry has permission that covers the required action
+	// Permission covers action if (perm & action) == action
+	for _, acl := range acls {
+		if (acl.Perm & action) == action {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func (dba *DefaultBaseMetadataAdapter) ListACLByUser(c Ctx, uid int64) ([]*BucketACL, error) {
+	// ACL is stored in main database, query directly
+	db, err := GetReadDB()
+	if err != nil {
+		return nil, fmt.Errorf("%w: ListACLByUser GetReadDB failed (uid=%d): %v", ERR_OPEN_DB, uid, err)
+	}
+	// Note: Don't close the connection, it's from the pool
+
+	var acls []*BucketACL
+	if _, err = b.TableContext(c, db, ACL_TBL).Select(&acls, b.Where(b.Eq("uid", uid))); err != nil {
+		return nil, fmt.Errorf("%w: ListACLByUser failed (uid=%d): %v", ERR_QUERY_DB, uid, err)
+	}
+	// Sort results by BktID to ensure consistent ordering
+	sort.Slice(acls, func(i, j int) bool {
+		return acls[i].BktID < acls[j].BktID
+	})
+	return acls, nil
 }
 
 func (dma *DefaultMetadataAdapter) RefData(c Ctx, bktID int64, d []*DataInfo) ([]int64, error) {
@@ -1523,7 +1727,7 @@ func (dma *DefaultMetadataAdapter) ListObj(c Ctx, bktID, pid int64,
 	return
 }
 
-func (dma *DefaultMetadataAdapter) PutUsr(c Ctx, u *UserInfo) error {
+func (dba *DefaultBaseMetadataAdapter) PutUsr(c Ctx, u *UserInfo) error {
 	// Use write connection for user creation/update
 	db, err := GetWriteDB()
 	if err != nil {
@@ -1537,7 +1741,7 @@ func (dma *DefaultMetadataAdapter) PutUsr(c Ctx, u *UserInfo) error {
 	return nil
 }
 
-func (dma *DefaultMetadataAdapter) GetUsr(c Ctx, ids []int64) (o []*UserInfo, err error) {
+func (dba *DefaultBaseMetadataAdapter) GetUsr(c Ctx, ids []int64) (o []*UserInfo, err error) {
 	// Use read connection for user retrieval
 	db, err := GetReadDB()
 	if err != nil {
@@ -1551,7 +1755,7 @@ func (dma *DefaultMetadataAdapter) GetUsr(c Ctx, ids []int64) (o []*UserInfo, er
 	return
 }
 
-func (dma *DefaultMetadataAdapter) GetUsr2(c Ctx, usr string) (o *UserInfo, err error) {
+func (dba *DefaultBaseMetadataAdapter) GetUsr2(c Ctx, usr string) (o *UserInfo, err error) {
 	// Use read connection for user lookup
 	db, err := GetReadDB()
 	if err != nil {
@@ -1566,7 +1770,7 @@ func (dma *DefaultMetadataAdapter) GetUsr2(c Ctx, usr string) (o *UserInfo, err 
 	return
 }
 
-func (dma *DefaultMetadataAdapter) SetUsr(c Ctx, fields []string, u *UserInfo) error {
+func (dba *DefaultBaseMetadataAdapter) SetUsr(c Ctx, fields []string, u *UserInfo) error {
 	// Use write connection for user update
 	db, err := GetWriteDB()
 	if err != nil {
@@ -1581,7 +1785,7 @@ func (dma *DefaultMetadataAdapter) SetUsr(c Ctx, fields []string, u *UserInfo) e
 	return nil
 }
 
-func (dma *DefaultMetadataAdapter) ListUsers(c Ctx) (o []*UserInfo, err error) {
+func (dba *DefaultBaseMetadataAdapter) ListUsers(c Ctx) (o []*UserInfo, err error) {
 	// Use read connection for listing users
 	db, err := GetReadDB()
 	if err != nil {
@@ -1601,7 +1805,7 @@ func (dma *DefaultMetadataAdapter) ListUsers(c Ctx) (o []*UserInfo, err error) {
 	return
 }
 
-func (dma *DefaultMetadataAdapter) DeleteUser(c Ctx, userID int64) error {
+func (dba *DefaultBaseMetadataAdapter) DeleteUser(c Ctx, userID int64) error {
 	// Use write connection for user deletion
 	db, err := GetWriteDB()
 	if err != nil {
@@ -1615,15 +1819,11 @@ func (dma *DefaultMetadataAdapter) DeleteUser(c Ctx, userID int64) error {
 	return nil
 }
 
-func (dma *DefaultMetadataAdapter) PutBkt(c Ctx, o []*BucketInfo) error {
-	// Use write connection for bucket creation/update
-	db, err := GetWriteDB()
-	if err != nil {
-		return ERR_OPEN_DB
-	}
-	// Note: Don't close the connection, it's from the pool
-
+func (dba *DefaultBaseMetadataAdapter) PutBkt(c Ctx, o []*BucketInfo) error {
+	// Bucket info is now stored in bucket database, not main database
 	// CmprWay is now smart compression by default (checks file type)
+	uid := getUID(c) // Get UID from context for ACL creation
+
 	for _, bucket := range o {
 		if bucket != nil {
 			if bucket.ChunkSize <= 0 {
@@ -1632,63 +1832,161 @@ func (dma *DefaultMetadataAdapter) PutBkt(c Ctx, o []*BucketInfo) error {
 		}
 	}
 
-	if _, err = b.TableContext(c, db, BKT_TBL).ReplaceInto(&o); err != nil {
-		return fmt.Errorf("%w: PutBkt failed (count=%d): %v", ERR_EXEC_DB, len(o), err)
-	}
+	// Initialize bucket database and write bucket info to it
 	for _, x := range o {
-		InitBucketDB(c, x.ID)
+		if err := InitBucketDB(c, x.ID); err != nil {
+			return fmt.Errorf("%w: PutBkt InitBucketDB failed (bktID=%d): %v", ERR_EXEC_DB, x.ID, err)
+		}
+
+		// Use write connection for bucket database
+		db, err := GetWriteDB(c, x.ID)
+		if err != nil {
+			return fmt.Errorf("%w: PutBkt GetWriteDB failed (bktID=%d): %v", ERR_OPEN_DB, x.ID, err)
+		}
+		// Note: Don't close the connection, it's from the pool
+
+		// Write bucket info to bucket database
+		bktSlice := []*BucketInfo{x}
+		if _, err = b.TableContext(c, db, BKT_TBL).ReplaceInto(&bktSlice); err != nil {
+			return fmt.Errorf("%w: PutBkt failed (bktID=%d, count=%d): %v", ERR_EXEC_DB, x.ID, len(o), err)
+		}
+
+		// Create ACL for the bucket (if uid is available)
+		if uid > 0 {
+			if err = dba.PutACL(c, x.ID, uid, ALL); err != nil {
+				return fmt.Errorf("%w: PutBkt PutACL failed (bktID=%d, uid=%d): %v", ERR_EXEC_DB, x.ID, uid, err)
+			}
+		}
 	}
 	return nil
 }
 
-func (dma *DefaultMetadataAdapter) GetBkt(c Ctx, ids []int64) (o []*BucketInfo, err error) {
-	// Use read connection for bucket retrieval
-	// Pass context to ensure proper database access (for key extraction if needed)
-	db, err := GetReadDB(c)
-	if err != nil {
-		return nil, ERR_OPEN_DB
+func (dba *DefaultBaseMetadataAdapter) GetBkt(c Ctx, ids []int64) (o []*BucketInfo, err error) {
+	// Bucket info is now stored in bucket database, not main database
+	// Read from each bucket's database in parallel
+	if len(ids) == 0 {
+		return []*BucketInfo{}, nil
 	}
-	// Note: Don't close the connection, it's from the pool
 
-	if _, err = b.TableContext(c, db, BKT_TBL).Select(&o, b.Where(b.In("id", ids))); err != nil {
-		return nil, fmt.Errorf("%w: GetBkt failed (idsCount=%d): %v", ERR_QUERY_DB, len(ids), err)
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	results := make([]*BucketInfo, 0, len(ids))
+
+	for _, bktID := range ids {
+		wg.Add(1)
+		go func(id int64) {
+			defer wg.Done()
+
+			// Use read connection for bucket database
+			db, err := GetReadDB(c, id)
+			if err != nil {
+				// If bucket database doesn't exist, skip it
+				return
+			}
+			// Note: Don't close the connection, it's from the pool
+
+			var bucketInfo []*BucketInfo
+			if _, err = b.TableContext(c, db, BKT_TBL).Select(&bucketInfo, b.Where(b.Eq("id", id))); err != nil {
+				// If query fails, skip this bucket
+				return
+			}
+			if len(bucketInfo) > 0 {
+				mu.Lock()
+				results = append(results, bucketInfo[0])
+				mu.Unlock()
+			}
+		}(bktID)
 	}
-	return
+
+	wg.Wait()
+	// Sort results by ID to ensure consistent ordering
+	sort.Slice(results, func(i, j int) bool {
+		return results[i].ID < results[j].ID
+	})
+	return results, nil
 }
 
-func (dma *DefaultMetadataAdapter) ListBkt(c Ctx, uid int64) (o []*BucketInfo, err error) {
-	// Use read connection for bucket listing
-	db, err := GetReadDB()
+func (dba *DefaultBaseMetadataAdapter) ListBkt(c Ctx, uid int64) (o []*BucketInfo, err error) {
+	// Bucket info is now stored in bucket database, not main database
+	// Use ACL to find buckets owned by this user
+	acls, err := dba.ListACLByUser(c, uid)
 	if err != nil {
-		return nil, ERR_OPEN_DB
+		return nil, err
 	}
-	// Note: Don't close the connection, it's from the pool
+	if len(acls) == 0 {
+		return []*BucketInfo{}, nil
+	}
 
-	if _, err = b.TableContext(c, db, BKT_TBL).Select(&o, b.Where(b.Eq("uid", uid))); err != nil {
-		return nil, fmt.Errorf("%w: ListBkt failed (uid=%d): %v", ERR_QUERY_DB, uid, err)
+	// Get bucket IDs from ACLs
+	bktIDs := make([]int64, 0, len(acls))
+	for _, acl := range acls {
+		bktIDs = append(bktIDs, acl.BktID)
 	}
-	return
+
+	// Get bucket info for these buckets
+	return dba.GetBkt(c, bktIDs)
 }
 
-func (dma *DefaultMetadataAdapter) ListAllBuckets(c Ctx) (o []*BucketInfo, err error) {
-	// Use read connection for listing all buckets
-	db, err := GetReadDB()
+func (dba *DefaultBaseMetadataAdapter) ListAllBuckets(c Ctx) (o []*BucketInfo, err error) {
+	// Bucket info is now stored in bucket database, not main database
+	// Scan bucket databases to find all buckets in parallel
+	dataDir := ORCAS_DATA
+	entries, err := os.ReadDir(dataDir)
 	if err != nil {
-		return nil, ERR_OPEN_DB
+		// If data directory doesn't exist, return empty list
+		return []*BucketInfo{}, nil
 	}
-	// Note: Don't close the connection, it's from the pool
 
-	if _, err = b.TableContext(c, db, BKT_TBL).Select(&o); err != nil {
-		return nil, fmt.Errorf("%w: ListAllBuckets failed: %v", ERR_QUERY_DB, err)
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	results := make([]*BucketInfo, 0)
+
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		bktID, err := strconv.ParseInt(entry.Name(), 10, 64)
+		if err != nil {
+			continue
+		}
+
+		wg.Add(1)
+		go func(id int64) {
+			defer wg.Done()
+
+			// Try to read bucket info from bucket database
+			db, err := GetReadDB(c, id)
+			if err != nil {
+				return
+			}
+			// Note: Don't close the connection, it's from the pool
+
+			var bucketInfo []*BucketInfo
+			if _, err = b.TableContext(c, db, BKT_TBL).Select(&bucketInfo); err != nil {
+				return
+			}
+			if len(bucketInfo) > 0 {
+				mu.Lock()
+				results = append(results, bucketInfo...)
+				mu.Unlock()
+			}
+		}(bktID)
 	}
-	return
+
+	wg.Wait()
+	// Sort results by ID to ensure consistent ordering
+	sort.Slice(results, func(i, j int) bool {
+		return results[i].ID < results[j].ID
+	})
+	return results, nil
 }
 
-func (dma *DefaultMetadataAdapter) DeleteBkt(c Ctx, bktID int64) error {
-	// Use write connection for bucket deletion
-	db, err := GetWriteDB()
+func (dba *DefaultBaseMetadataAdapter) DeleteBkt(c Ctx, bktID int64) error {
+	// Bucket info is now stored in bucket database, not main database
+	// Use write connection for bucket database
+	db, err := GetWriteDB(c, bktID)
 	if err != nil {
-		return ERR_OPEN_DB
+		return fmt.Errorf("%w: DeleteBkt GetWriteDB failed (bktID=%d): %v", ERR_OPEN_DB, bktID, err)
 	}
 	// Note: Don't close the connection, it's from the pool
 
@@ -1698,11 +1996,12 @@ func (dma *DefaultMetadataAdapter) DeleteBkt(c Ctx, bktID int64) error {
 	return nil
 }
 
-func (dma *DefaultMetadataAdapter) UpdateBktQuota(c Ctx, bktID int64, quota int64) error {
-	// Use write connection for quota update
-	db, err := GetWriteDB()
+func (dba *DefaultBaseMetadataAdapter) UpdateBktQuota(c Ctx, bktID int64, quota int64) error {
+	// Bucket info is now stored in bucket database, not main database
+	// Use write connection for bucket database
+	db, err := GetWriteDB(c, bktID)
 	if err != nil {
-		return ERR_OPEN_DB
+		return fmt.Errorf("%w: UpdateBktQuota GetWriteDB failed (bktID=%d): %v", ERR_OPEN_DB, bktID, err)
 	}
 	// Note: Don't close the connection, it's from the pool
 
@@ -1713,49 +2012,49 @@ func (dma *DefaultMetadataAdapter) UpdateBktQuota(c Ctx, bktID int64, quota int6
 	return nil
 }
 
-func (dma *DefaultMetadataAdapter) IncBktRealUsed(c Ctx, bktID int64, size int64) error {
+func (dba *DefaultBaseMetadataAdapter) IncBktRealUsed(c Ctx, bktID int64, size int64) error {
 	// 使用ecache异步合并刷新，不立即写入数据库
 	updateBucketStatsCache(bktID, 0, size, 0, 0)
 	return nil
 }
 
-func (dma *DefaultMetadataAdapter) DecBktRealUsed(c Ctx, bktID int64, size int64) error {
+func (dba *DefaultBaseMetadataAdapter) DecBktRealUsed(c Ctx, bktID int64, size int64) error {
 	// 使用ecache异步合并刷新，不立即写入数据库
 	updateBucketStatsCache(bktID, 0, -size, 0, 0)
 	return nil
 }
 
-func (dma *DefaultMetadataAdapter) IncBktUsed(c Ctx, bktID int64, size int64) error {
+func (dba *DefaultBaseMetadataAdapter) IncBktUsed(c Ctx, bktID int64, size int64) error {
 	// 使用ecache异步合并刷新，不立即写入数据库
 	updateBucketStatsCache(bktID, size, 0, 0, 0)
 	return nil
 }
 
-func (dma *DefaultMetadataAdapter) DecBktUsed(c Ctx, bktID int64, size int64) error {
+func (dba *DefaultBaseMetadataAdapter) DecBktUsed(c Ctx, bktID int64, size int64) error {
 	// 使用ecache异步合并刷新，不立即写入数据库
 	updateBucketStatsCache(bktID, -size, 0, 0, 0)
 	return nil
 }
 
-func (dma *DefaultMetadataAdapter) IncBktLogicalUsed(c Ctx, bktID int64, size int64) error {
+func (dba *DefaultBaseMetadataAdapter) IncBktLogicalUsed(c Ctx, bktID int64, size int64) error {
 	// 使用ecache异步合并刷新，不立即写入数据库
 	updateBucketStatsCache(bktID, 0, 0, size, 0)
 	return nil
 }
 
-func (dma *DefaultMetadataAdapter) DecBktLogicalUsed(c Ctx, bktID int64, size int64) error {
+func (dba *DefaultBaseMetadataAdapter) DecBktLogicalUsed(c Ctx, bktID int64, size int64) error {
 	// 使用ecache异步合并刷新，不立即写入数据库
 	updateBucketStatsCache(bktID, 0, 0, -size, 0)
 	return nil
 }
 
-func (dma *DefaultMetadataAdapter) IncBktDedupSavings(c Ctx, bktID int64, size int64) error {
+func (dba *DefaultBaseMetadataAdapter) IncBktDedupSavings(c Ctx, bktID int64, size int64) error {
 	// 使用ecache异步合并刷新，不立即写入数据库
 	updateBucketStatsCache(bktID, 0, 0, 0, size)
 	return nil
 }
 
-func (dma *DefaultMetadataAdapter) DecBktDedupSavings(c Ctx, bktID int64, size int64) error {
+func (dba *DefaultBaseMetadataAdapter) DecBktDedupSavings(c Ctx, bktID int64, size int64) error {
 	// 使用ecache异步合并刷新，不立即写入数据库
 	updateBucketStatsCache(bktID, 0, 0, 0, -size)
 	return nil

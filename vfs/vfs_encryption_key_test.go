@@ -32,7 +32,7 @@ func TestVFSEncryptionKeyMismatch(t *testing.T) {
 		So(err, ShouldBeNil)
 
 		// Get user info for bucket creation
-		_, userInfo, _, err := handler.Login(ctx, "orcas", "orcas")
+		_, _, _, err = handler.Login(ctx, "orcas", "orcas")
 		So(err, ShouldBeNil)
 
 		// Create bucket
@@ -41,7 +41,6 @@ func TestVFSEncryptionKeyMismatch(t *testing.T) {
 		bkt := &core.BucketInfo{
 			ID:        testBktID,
 			Name:      "test-encryption-key-bucket",
-			UID:       userInfo.ID,
 			Type:      1,
 			Quota:     -1,
 			ChunkSize: 4 * 1024 * 1024, // 4MB chunk size
@@ -166,7 +165,7 @@ func TestVFSEncryptionKeyMismatchAfterReopen(t *testing.T) {
 		So(err, ShouldBeNil)
 
 		// Get user info for bucket creation
-		_, userInfo, _, err := handler.Login(ctx, "orcas", "orcas")
+		_, _, _, err = handler.Login(ctx, "orcas", "orcas")
 		So(err, ShouldBeNil)
 
 		// Create bucket
@@ -175,7 +174,6 @@ func TestVFSEncryptionKeyMismatchAfterReopen(t *testing.T) {
 		bkt := &core.BucketInfo{
 			ID:        testBktID,
 			Name:      "test-encryption-key-reopen-bucket",
-			UID:       userInfo.ID,
 			Type:      1,
 			Quota:     -1,
 			ChunkSize: 4 * 1024 * 1024, // 4MB chunk size

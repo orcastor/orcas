@@ -41,7 +41,7 @@ func TestVFSRepeatedChunkWriteReproduce(t *testing.T) {
 		So(err, ShouldBeNil)
 
 		// Get user info for bucket creation
-		_, userInfo, _, err := handler.Login(ctx, "orcas", "orcas")
+		_, _, _, err = handler.Login(ctx, "orcas", "orcas")
 		So(err, ShouldBeNil)
 
 		// Create bucket with encryption enabled
@@ -49,7 +49,6 @@ func TestVFSRepeatedChunkWriteReproduce(t *testing.T) {
 		bkt := &core.BucketInfo{
 			ID:        testBktID,
 			Name:      "test-reproduce-repeated-write-bucket",
-			UID:       userInfo.ID,
 			Type:      1,
 			Quota:     -1,
 			ChunkSize: 10 * 1024 * 1024, // 10MB chunk size
@@ -356,7 +355,7 @@ func TestVFSConcurrentUploadStressTest(t *testing.T) {
 		So(err, ShouldBeNil)
 
 		// Get user info for bucket creation
-		_, userInfo, _, err := handler.Login(ctx, "orcas", "orcas")
+		_, _, _, err = handler.Login(ctx, "orcas", "orcas")
 		So(err, ShouldBeNil)
 
 		// Create bucket with encryption enabled
@@ -364,7 +363,6 @@ func TestVFSConcurrentUploadStressTest(t *testing.T) {
 		bkt := &core.BucketInfo{
 			ID:        testBktID,
 			Name:      "test-stress-concurrent-bucket",
-			UID:       userInfo.ID,
 			Type:      1,
 			Quota:     -1,
 			ChunkSize: 10 * 1024 * 1024, // 10MB chunk size

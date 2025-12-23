@@ -2,6 +2,9 @@
 
 ORCAS VFS 使用 FUSE (Filesystem in Userspace) 技术，将 ORCAS 对象存储系统映射为本地文件系统，允许像操作普通文件系统一样操作 ORCAS 存储。
 
+- [English](README.md) | [中文](README.zh.md)
+- **[挂载指南](MOUNT_GUIDE.zh.md)** - OrcaS 文件系统挂载完整指南
+
 ## 平台支持
 
 - **Linux/macOS**: 使用 FUSE (Filesystem in Userspace) 技术，支持完整文件系统挂载功能
@@ -17,7 +20,7 @@ ORCAS VFS 使用 FUSE (Filesystem in Userspace) 技术，将 ORCAS 对象存储�
 - **文件读写**：支持随机读写文件内容
 - **目录遍历**：支持列出目录内容
 - **属性管理**：支持获取和设置文件属性（大小、修改时间等）
-- **SDK集成**：支持使用SDK的加密、压缩、秒传等特性
+- **配置支持**：支持加密、压缩、秒传等特性
   - **加密**：支持AES256和SM4加密
   - **压缩**：支持智能压缩（根据文件类型自动决定是否压缩）
   - **压缩算法**：支持Snappy、Zstd、Gzip、Brotli
@@ -33,7 +36,6 @@ package main
 import (
     "context"
     "github.com/orcastor/orcas/core"
-    "github.com/orcastor/orcas/sdk"
     "github.com/orcastor/orcas/vfs"
 )
 
@@ -47,9 +49,9 @@ func main() {
         panic(err)
     }
     
-    // 配置SDK选项（加密、压缩、秒传等）
-    sdkCfg := &sdk.Config{
-        RefLevel:  sdk.FULL,                    // 秒传级别：FULL（完整文件秒传）
+    // 配置选项（加密、压缩、秒传等）
+    cfg := &core.Config{
+        RefLevel:  core.REF_LEVEL_FULL,         // 秒传级别：FULL（完整文件秒传）
         CmprWay:   core.DATA_CMPR_GZIP,         // 压缩方式：Gzip（默认智能压缩）
         CmprQlty:  5,                           // 压缩级别：5
         EndecWay:  core.DATA_ENDEC_AES256,      // 加密方式：AES256
@@ -61,7 +63,7 @@ func main() {
         MountPoint: "/mnt/orcas",
         Foreground: true,
         AllowOther: false,
-        SDKConfig:  sdkCfg,  // 传入SDK配置
+        Config:     cfg,  // 传入配置
     })
     if err != nil {
         panic(err)
@@ -80,8 +82,8 @@ func main() {
 - `AllowRoot`: 是否允许root访问
 - `DefaultPermissions`: 使用默认权限检查
 - `FuseOptions`: 自定义FUSE选项
-- `SDKConfig`: SDK配置（用于加密、压缩、秒传等特性）
-  - `RefLevel`: 秒传级别（OFF/FULL/FAST）
+- `Config`: 配置（用于加密、压缩、秒传等特性）
+  - `RefLevel`: 秒传级别（REF_LEVEL_OFF/REF_LEVEL_FULL/REF_LEVEL_FAST）
   - `CmprWay`: 压缩方式（默认智能压缩，根据文件类型自动决定）
   - `CmprQlty`: 压缩级别
   - `EndecWay`: 加密方式（AES256/SM4）
@@ -179,7 +181,6 @@ go test -bench=BenchmarkRandomAccessor -benchmem -cpuprofile=cpu.prof -memprofil
 - **依赖项**：
   - `github.com/hanwen/go-fuse/v2`：FUSE 库（仅 Linux/macOS）
   - `github.com/orcastor/orcas/core`：ORCAS 核心库
-  - `github.com/orcastor/orcas/sdk`：ORCAS SDK
 
 ### 环境变量
 
@@ -218,7 +219,6 @@ brew install --cask macfuse
    import (
        "context"
        "github.com/orcastor/orcas/core"
-       "github.com/orcastor/orcas/sdk"
        "github.com/orcastor/orcas/vfs"
    )
 
@@ -226,12 +226,11 @@ brew install --cask macfuse
        h := core.NewLocalHandler()
        ctx, _, _, _ := h.Login(context.Background(), "username", "password")
        
-       sdkCfg := &sdk.Config{}
+       cfg := &core.Config{}
        instance, err := vfs.Mount(h, ctx, bucketID, &vfs.MountOptions{
            MountPoint:  "M:\\",
            Foreground:  true,
-           ThreadCount: 5,
-           SDKConfig:   sdkCfg,
+           Config:      cfg,
        })
        if err != nil {
            panic(err)

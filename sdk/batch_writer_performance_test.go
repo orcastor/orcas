@@ -80,7 +80,6 @@ func setupTestEnvironmentForBatchWrite(t *testing.T, batchWriteEnabled bool) (in
 	bkt := &core.BucketInfo{
 		ID:    testBktID,
 		Name:  "test-bucket",
-		UID:   userInfo.ID, // 使用登录返回的用户 ID
 		Type:  1,
 		Quota: -1, // 无限制配额
 	}

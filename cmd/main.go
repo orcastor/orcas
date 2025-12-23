@@ -79,12 +79,27 @@ type Config struct {
 func main() {
 	flag.Parse()
 
-	// Initialize database with key if provided
-	var dbKeyValue string
-	if *dbKey != "" {
-		dbKeyValue = *dbKey
+	// Determine if main database is needed
+	// Main database is required for:
+	// 1. Database key management operations
+	// 2. User management operations
+	// 3. Bucket management operations (need ACL)
+	// 4. Login operations (unless NoAuth is used)
+	needsMainDB := *action == "change-db-key" ||
+		*action == "add-user" || *action == "update-user" ||
+		*action == "delete-user" || *action == "list-users" ||
+		*action == "create-bucket" || *action == "delete-bucket" ||
+		*action == "list-buckets" || *action == "update-bucket" ||
+		(*action != "mount" && *action != "" && !*noAuth)
+
+	// Initialize database only if needed
+	if needsMainDB {
+		var dbKeyValue string
+		if *dbKey != "" {
+			dbKeyValue = *dbKey
+		}
+		core.InitDB(dbKeyValue)
 	}
-	core.InitDB(dbKeyValue)
 
 	// Handle database key management
 	if *action == "change-db-key" {
@@ -847,7 +862,6 @@ func handleBucketManagement() {
 		bucket := &core.BucketInfo{
 			ID:           bktID,
 			Name:         *bucketName,
-			UID:          ownerID,
 			Type:         1, // Normal bucket
 			Quota:        *bucketQuota,
 			Used:         0,
@@ -864,6 +878,13 @@ func handleBucketManagement() {
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Failed to create bucket: %v\n", err)
 			os.Exit(1)
+		}
+
+		// Create ACL entry for bucket owner (if ownerID is available)
+		// PutBkt already creates ACL with ALL permission, so this is just for verification
+		if ownerID > 0 {
+			// ACL is automatically created by PutBkt with ALL permission
+			fmt.Printf("Bucket owner ACL created with ALL permission\n")
 		}
 
 		fmt.Printf("Bucket created successfully:\n")

@@ -680,7 +680,6 @@ func CreateBucket(c *gin.Context) {
 	bkt := &core.BucketInfo{
 		ID:   core.NewID(),
 		Name: bucketName,
-		UID:  uid,
 		Type: 1,
 	}
 
@@ -689,6 +688,9 @@ func CreateBucket(c *gin.Context) {
 		util.S3ErrorResponse(c, http.StatusInternalServerError, "InternalError", err.Error())
 		return
 	}
+
+	// Create ACL entry for bucket owner (PutBkt already creates ACL with ALL permission)
+	// The ACL is created automatically by PutBkt, so we don't need to create it again
 
 	// Invalidate cache after creating bucket
 	invalidateBucketListCache(uid)

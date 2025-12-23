@@ -78,14 +78,13 @@ func TestVFSRandomAccessor(t *testing.T) {
 		lh.SetAdapter(dma, dda)
 
 		// 登录以获取上下文
-		testCtx, userInfo, _, err := lh.Login(c, "orcas", "orcas")
+		testCtx, _, _, err := lh.Login(c, "orcas", "orcas")
 		So(err, ShouldBeNil)
 
 		// 创建桶（使用登录用户的UID）
 		bucket := &core.BucketInfo{
 			ID:       testBktID,
 			Name:     "test_bucket",
-			UID:      userInfo.ID,
 			Type:     1,
 			Quota:    1000000,
 			Used:     0,
@@ -273,14 +272,13 @@ func TestVFSRandomAccessorWithSDK(t *testing.T) {
 		lh.SetAdapter(dma, dda)
 
 		// 登录以获取上下文
-		testCtx, userInfo, _, err := lh.Login(c, "orcas", "orcas")
+		testCtx, _, _, err := lh.Login(c, "orcas", "orcas")
 		So(err, ShouldBeNil)
 
 		// 创建桶（使用登录用户的UID）
 		bucket := &core.BucketInfo{
 			ID:       testBktID,
 			Name:     "test_bucket",
-			UID:      userInfo.ID,
 			Type:     1,
 			Quota:    1000000,
 			Used:     0,
@@ -747,14 +745,13 @@ func TestRandomAccessorReadWithEncryption(t *testing.T) {
 		lh.SetAdapter(dma, dda)
 
 		// 登录以获取上下文
-		testCtx, userInfo, _, err := lh.Login(c, "orcas", "orcas")
+		testCtx, _, _, err := lh.Login(c, "orcas", "orcas")
 		So(err, ShouldBeNil)
 
 		// 创建桶（使用登录用户的UID）
 		bucket := &core.BucketInfo{
 			ID:       testBktID,
 			Name:     "test_bucket",
-			UID:      userInfo.ID,
 			Type:     1,
 			Quota:    1000000,
 			Used:     0,
@@ -835,14 +832,13 @@ func TestRandomAccessorReadOptimization(t *testing.T) {
 		lh.SetAdapter(dma, dda)
 
 		// 登录以获取上下文
-		testCtx, userInfo, _, err := lh.Login(c, "orcas", "orcas")
+		testCtx, _, _, err := lh.Login(c, "orcas", "orcas")
 		So(err, ShouldBeNil)
 
 		// 创建桶
 		bucket := &core.BucketInfo{
 			ID:       testBktID,
 			Name:     "test_bucket",
-			UID:      userInfo.ID,
 			Type:     1,
 			Quota:    1000000,
 			Used:     0,
@@ -1154,13 +1150,12 @@ func TestSequentialWriteFallbackToRandom(t *testing.T) {
 		lh := core.NewLocalHandler().(*core.LocalHandler)
 		lh.SetAdapter(dma, dda)
 
-		testCtx, userInfo, _, err := lh.Login(c, "orcas", "orcas")
+		testCtx, _, _, err := lh.Login(c, "orcas", "orcas")
 		So(err, ShouldBeNil)
 
 		bucket := &core.BucketInfo{
 			ID:       testBktID,
 			Name:     "test_bucket",
-			UID:      userInfo.ID,
 			Type:     1,
 			Quota:    1000000,
 			Used:     0,
@@ -1256,13 +1251,12 @@ func TestMultipleFlush(t *testing.T) {
 		lh := core.NewLocalHandler().(*core.LocalHandler)
 		lh.SetAdapter(dma, dda)
 
-		testCtx, userInfo, _, err := lh.Login(c, "orcas", "orcas")
+		testCtx, _, _, err := lh.Login(c, "orcas", "orcas")
 		So(err, ShouldBeNil)
 
 		bucket := &core.BucketInfo{
 			ID:       testBktID,
 			Name:     "test_bucket",
-			UID:      userInfo.ID,
 			Type:     1,
 			Quota:    1000000,
 			Used:     0,
@@ -1331,13 +1325,12 @@ func TestWriteToExistingFile(t *testing.T) {
 		lh := core.NewLocalHandler().(*core.LocalHandler)
 		lh.SetAdapter(dma, dda)
 
-		testCtx, userInfo, _, err := lh.Login(c, "orcas", "orcas")
+		testCtx, _, _, err := lh.Login(c, "orcas", "orcas")
 		So(err, ShouldBeNil)
 
 		bucket := &core.BucketInfo{
 			ID:       testBktID,
 			Name:     "test_bucket",
-			UID:      userInfo.ID,
 			Type:     1,
 			Quota:    1000000,
 			Used:     0,
@@ -1450,13 +1443,12 @@ func TestDifferentCompressionAlgorithms(t *testing.T) {
 		lh := core.NewLocalHandler().(*core.LocalHandler)
 		lh.SetAdapter(dma, dda)
 
-		testCtx, userInfo, _, err := lh.Login(c, "orcas", "orcas")
+		testCtx, _, _, err := lh.Login(c, "orcas", "orcas")
 		So(err, ShouldBeNil)
 
 		bucket := &core.BucketInfo{
 			ID:       testBktID,
 			Name:     "test_bucket",
-			UID:      userInfo.ID,
 			Type:     1,
 			Quota:    1000000,
 			Used:     0,
@@ -1529,13 +1521,12 @@ func TestDifferentEncryptionMethods(t *testing.T) {
 		lh := core.NewLocalHandler().(*core.LocalHandler)
 		lh.SetAdapter(dma, dda)
 
-		testCtx, userInfo, _, err := lh.Login(c, "orcas", "orcas")
+		testCtx, _, _, err := lh.Login(c, "orcas", "orcas")
 		So(err, ShouldBeNil)
 
 		bucket := &core.BucketInfo{
 			ID:       testBktID,
 			Name:     "test_bucket",
-			UID:      userInfo.ID,
 			Type:     1,
 			Quota:    1000000,
 			Used:     0,
@@ -1606,13 +1597,12 @@ func TestLargeFileOperations(t *testing.T) {
 		lh := core.NewLocalHandler().(*core.LocalHandler)
 		lh.SetAdapter(dma, dda)
 
-		testCtx, userInfo, _, err := lh.Login(c, "orcas", "orcas")
+		testCtx, _, _, err := lh.Login(c, "orcas", "orcas")
 		So(err, ShouldBeNil)
 
 		bucket := &core.BucketInfo{
 			ID:       testBktID,
 			Name:     "test_bucket",
-			UID:      userInfo.ID,
 			Type:     1,
 			Quota:    10000000000, // 10GB
 			Used:     0,
@@ -1696,13 +1686,12 @@ func TestConcurrentReadWrite(t *testing.T) {
 		lh := core.NewLocalHandler().(*core.LocalHandler)
 		lh.SetAdapter(dma, dda)
 
-		testCtx, userInfo, _, err := lh.Login(c, "orcas", "orcas")
+		testCtx, _, _, err := lh.Login(c, "orcas", "orcas")
 		So(err, ShouldBeNil)
 
 		bucket := &core.BucketInfo{
 			ID:       testBktID,
 			Name:     "test_bucket",
-			UID:      userInfo.ID,
 			Type:     1,
 			Quota:    1000000,
 			Used:     0,
@@ -1786,13 +1775,12 @@ func TestEmptyWrite(t *testing.T) {
 		lh := core.NewLocalHandler().(*core.LocalHandler)
 		lh.SetAdapter(dma, dda)
 
-		testCtx, userInfo, _, err := lh.Login(c, "orcas", "orcas")
+		testCtx, _, _, err := lh.Login(c, "orcas", "orcas")
 		So(err, ShouldBeNil)
 
 		bucket := &core.BucketInfo{
 			ID:       testBktID,
 			Name:     "test_bucket",
-			UID:      userInfo.ID,
 			Type:     1,
 			Quota:    1000000,
 			Used:     0,
@@ -1855,13 +1843,12 @@ func TestReadAfterClose(t *testing.T) {
 		lh := core.NewLocalHandler().(*core.LocalHandler)
 		lh.SetAdapter(dma, dda)
 
-		testCtx, userInfo, _, err := lh.Login(c, "orcas", "orcas")
+		testCtx, _, _, err := lh.Login(c, "orcas", "orcas")
 		So(err, ShouldBeNil)
 
 		bucket := &core.BucketInfo{
 			ID:       testBktID,
 			Name:     "test_bucket",
-			UID:      userInfo.ID,
 			Type:     1,
 			Quota:    1000000,
 			Used:     0,
@@ -1924,13 +1911,12 @@ func TestTruncate(t *testing.T) {
 		lh := core.NewLocalHandler().(*core.LocalHandler)
 		lh.SetAdapter(dma, dda)
 
-		testCtx, userInfo, _, err := lh.Login(c, "orcas", "orcas")
+		testCtx, _, _, err := lh.Login(c, "orcas", "orcas")
 		So(err, ShouldBeNil)
 
 		bucket := &core.BucketInfo{
 			ID:       testBktID,
 			Name:     "test_bucket",
-			UID:      userInfo.ID,
 			Type:     1,
 			Quota:    1000000,
 			Used:     0,
@@ -2142,13 +2128,12 @@ func TestTruncateAndWrite(t *testing.T) {
 		lh := core.NewLocalHandler().(*core.LocalHandler)
 		lh.SetAdapter(dma, dda)
 
-		testCtx, userInfo, _, err := lh.Login(c, "orcas", "orcas")
+		testCtx, _, _, err := lh.Login(c, "orcas", "orcas")
 		So(err, ShouldBeNil)
 
 		bucket := &core.BucketInfo{
 			ID:       testBktID,
 			Name:     "test_bucket",
-			UID:      userInfo.ID,
 			Type:     1,
 			Quota:    1000000,
 			Used:     0,
@@ -2214,13 +2199,12 @@ func TestTruncateWithCompression(t *testing.T) {
 		lh := core.NewLocalHandler().(*core.LocalHandler)
 		lh.SetAdapter(dma, dda)
 
-		testCtx, userInfo, _, err := lh.Login(c, "orcas", "orcas")
+		testCtx, _, _, err := lh.Login(c, "orcas", "orcas")
 		So(err, ShouldBeNil)
 
 		bucket := &core.BucketInfo{
 			ID:       testBktID,
 			Name:     "test_bucket",
-			UID:      userInfo.ID,
 			Type:     1,
 			Quota:    1000000,
 			Used:     0,
@@ -2290,13 +2274,12 @@ func TestBatchWriteManagerSmallFile(t *testing.T) {
 		lh := core.NewLocalHandler().(*core.LocalHandler)
 		lh.SetAdapter(dma, dda)
 
-		testCtx, userInfo, _, err := lh.Login(c, "orcas", "orcas")
+		testCtx, _, _, err := lh.Login(c, "orcas", "orcas")
 		So(err, ShouldBeNil)
 
 		bucket := &core.BucketInfo{
 			ID:       testBktID,
 			Name:     "test_bucket",
-			UID:      userInfo.ID,
 			Type:     1,
 			Quota:    1000000,
 			Used:     0,
@@ -2379,13 +2362,12 @@ func TestSequentialWriteLargeFile(t *testing.T) {
 		lh := core.NewLocalHandler().(*core.LocalHandler)
 		lh.SetAdapter(dma, dda)
 
-		testCtx, userInfo, _, err := lh.Login(c, "orcas", "orcas")
+		testCtx, _, _, err := lh.Login(c, "orcas", "orcas")
 		So(err, ShouldBeNil)
 
 		bucket := &core.BucketInfo{
 			ID:       testBktID,
 			Name:     "test_bucket",
-			UID:      userInfo.ID,
 			Type:     1,
 			Quota:    10000000, // 增加配额以支持大文件测试
 			Used:     0,
@@ -2462,13 +2444,12 @@ func TestTruncateReferenceDataBlock(t *testing.T) {
 		lh := core.NewLocalHandler().(*core.LocalHandler)
 		lh.SetAdapter(dma, dda)
 
-		testCtx, userInfo, _, err := lh.Login(c, "orcas", "orcas")
+		testCtx, _, _, err := lh.Login(c, "orcas", "orcas")
 		So(err, ShouldBeNil)
 
 		bucket := &core.BucketInfo{
 			ID:       testBktID,
 			Name:     "test_bucket",
-			UID:      userInfo.ID,
 			Type:     1,
 			Quota:    1000000,
 			Used:     0,

@@ -62,7 +62,6 @@ func TestDokanyMountOptions(t *testing.T) {
 	bkt := &core.BucketInfo{
 		ID:        testBktID,
 		Name:      "test-bucket",
-		UID:       userInfo.ID,
 		Type:      1,
 		Quota:     -1,
 		ChunkSize: 4 * 1024 * 1024,
@@ -132,7 +131,6 @@ func TestDokanyOperations(t *testing.T) {
 	bkt := &core.BucketInfo{
 		ID:        testBktID,
 		Name:      "test-bucket",
-		UID:       userInfo.ID,
 		Type:      1,
 		Quota:     -1,
 		ChunkSize: 4 * 1024 * 1024,
@@ -246,7 +244,6 @@ func TestDokanyDirectoryOperations(t *testing.T) {
 	bkt := &core.BucketInfo{
 		ID:        testBktID,
 		Name:      "test-bucket",
-		UID:       userInfo.ID,
 		Type:      1,
 		Quota:     -1,
 		ChunkSize: 4 * 1024 * 1024,
@@ -388,7 +385,6 @@ func TestDokanyCreateFile(t *testing.T) {
 	bkt := &core.BucketInfo{
 		ID:        testBktID,
 		Name:      "test-bucket",
-		UID:       userInfo.ID,
 		Type:      1,
 		Quota:     -1,
 		ChunkSize: 4 * 1024 * 1024,
@@ -456,7 +452,6 @@ func TestDokanyWriteAndRead(t *testing.T) {
 	bkt := &core.BucketInfo{
 		ID:        testBktID,
 		Name:      "test-bucket",
-		UID:       userInfo.ID,
 		Type:      1,
 		Quota:     -1,
 		ChunkSize: 4 * 1024 * 1024,
@@ -707,7 +702,6 @@ func TestTmpFileRenameCacheUpdate(t *testing.T) {
 	bkt := &core.BucketInfo{
 		ID:        testBktID,
 		Name:      "test-bucket",
-		UID:       userInfo.ID,
 		Type:      1,
 		Quota:     -1,
 		ChunkSize: 4 * 1024 * 1024,
@@ -862,7 +856,6 @@ func TestRenameBeforeFlush(t *testing.T) {
 	bkt := &core.BucketInfo{
 		ID:        testBktID,
 		Name:      "test-bucket",
-		UID:       userInfo.ID,
 		Type:      1,
 		Quota:     -1,
 		ChunkSize: 4 * 1024 * 1024,

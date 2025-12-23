@@ -36,7 +36,7 @@ func TestVFSUploadDownload(t *testing.T) {
 		So(err, ShouldBeNil)
 
 		// Get user info for bucket creation
-		_, userInfo, _, err := handler.Login(ctx, "orcas", "orcas")
+		_, _, _, err = handler.Login(ctx, "orcas", "orcas")
 		So(err, ShouldBeNil)
 
 		// Create bucket
@@ -44,7 +44,6 @@ func TestVFSUploadDownload(t *testing.T) {
 		bkt := &core.BucketInfo{
 			ID:        testBktID,
 			Name:      "test-upload-download-bucket",
-			UID:       userInfo.ID,
 			Type:      1,
 			Quota:     -1,
 			ChunkSize: 4 * 1024 * 1024, // 4MB chunk size
@@ -128,7 +127,7 @@ func TestVFSLargeFileUploadDownload(t *testing.T) {
 		So(err, ShouldBeNil)
 
 		// Get user info for bucket creation
-		_, userInfo, _, err := handler.Login(ctx, "orcas", "orcas")
+		_, _, _, err = handler.Login(ctx, "orcas", "orcas")
 		So(err, ShouldBeNil)
 
 		// Create bucket
@@ -136,7 +135,6 @@ func TestVFSLargeFileUploadDownload(t *testing.T) {
 		bkt := &core.BucketInfo{
 			ID:        testBktID,
 			Name:      "test-large-file-upload-download-bucket",
-			UID:       userInfo.ID,
 			Type:      1,
 			Quota:     -1,
 			ChunkSize: 10 * 1024 * 1024, // 10MB chunk size
@@ -259,7 +257,7 @@ func TestVFSRandomAccessUploadDownload(t *testing.T) {
 		So(err, ShouldBeNil)
 
 		// Get user info for bucket creation
-		_, userInfo, _, err := handler.Login(ctx, "orcas", "orcas")
+		_, _, _, err = handler.Login(ctx, "orcas", "orcas")
 		So(err, ShouldBeNil)
 
 		// Create bucket
@@ -267,7 +265,6 @@ func TestVFSRandomAccessUploadDownload(t *testing.T) {
 		bkt := &core.BucketInfo{
 			ID:        testBktID,
 			Name:      "test-random-access-upload-download-bucket",
-			UID:       userInfo.ID,
 			Type:      1,
 			Quota:     -1,
 			ChunkSize: 10 * 1024 * 1024, // 10MB chunk size
@@ -422,7 +419,7 @@ func TestVFSMultipleFileUploadDownload(t *testing.T) {
 		So(err, ShouldBeNil)
 
 		// Get user info for bucket creation
-		_, userInfo, _, err := handler.Login(ctx, "orcas", "orcas")
+		_, _, _, err = handler.Login(ctx, "orcas", "orcas")
 		So(err, ShouldBeNil)
 
 		// Create bucket
@@ -430,7 +427,6 @@ func TestVFSMultipleFileUploadDownload(t *testing.T) {
 		bkt := &core.BucketInfo{
 			ID:        testBktID,
 			Name:      "test-multiple-file-upload-download-bucket",
-			UID:       userInfo.ID,
 			Type:      1,
 			Quota:     -1,
 			ChunkSize: 4 * 1024 * 1024, // 4MB chunk size
@@ -530,7 +526,7 @@ func TestVFSAppendUploadDownload(t *testing.T) {
 		So(err, ShouldBeNil)
 
 		// Get user info for bucket creation
-		_, userInfo, _, err := handler.Login(ctx, "orcas", "orcas")
+		_, _, _, err = handler.Login(ctx, "orcas", "orcas")
 		So(err, ShouldBeNil)
 
 		// Create bucket
@@ -538,7 +534,6 @@ func TestVFSAppendUploadDownload(t *testing.T) {
 		bkt := &core.BucketInfo{
 			ID:        testBktID,
 			Name:      "test-append-upload-download-bucket",
-			UID:       userInfo.ID,
 			Type:      1,
 			Quota:     -1,
 			ChunkSize: 4 * 1024 * 1024, // 4MB chunk size
@@ -652,7 +647,7 @@ func TestVFSOverwriteUploadDownload(t *testing.T) {
 		So(err, ShouldBeNil)
 
 		// Get user info for bucket creation
-		_, userInfo, _, err := handler.Login(ctx, "orcas", "orcas")
+		_, _, _, err = handler.Login(ctx, "orcas", "orcas")
 		So(err, ShouldBeNil)
 
 		// Create bucket
@@ -660,7 +655,6 @@ func TestVFSOverwriteUploadDownload(t *testing.T) {
 		bkt := &core.BucketInfo{
 			ID:        testBktID,
 			Name:      "test-overwrite-upload-download-bucket",
-			UID:       userInfo.ID,
 			Type:      1,
 			Quota:     -1,
 			ChunkSize: 4 * 1024 * 1024, // 4MB chunk size
@@ -753,7 +747,7 @@ func TestVFSPartialDownload(t *testing.T) {
 		So(err, ShouldBeNil)
 
 		// Get user info for bucket creation
-		_, userInfo, _, err := handler.Login(ctx, "orcas", "orcas")
+		_, _, _, err = handler.Login(ctx, "orcas", "orcas")
 		So(err, ShouldBeNil)
 
 		// Create bucket
@@ -761,7 +755,6 @@ func TestVFSPartialDownload(t *testing.T) {
 		bkt := &core.BucketInfo{
 			ID:        testBktID,
 			Name:      "test-partial-download-bucket",
-			UID:       userInfo.ID,
 			Type:      1,
 			Quota:     -1,
 			ChunkSize: 4 * 1024 * 1024, // 4MB chunk size

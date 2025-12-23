@@ -92,7 +92,6 @@ func main() {
 	testBucket := &core.BucketInfo{
 		ID:   core.NewID(),
 		Name: "test-bucket",
-		UID:  testUserID,
 		Type: 1,
 	}
 	admin := core.NewLocalAdmin()

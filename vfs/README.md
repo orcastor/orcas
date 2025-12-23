@@ -3,6 +3,7 @@
 ORCAS VFS uses FUSE (Filesystem in Userspace) technology to map the ORCAS object storage system as a local filesystem, allowing you to operate ORCAS storage like a regular filesystem.
 
 - [English](README.md) | [中文](README.zh.md)
+- **[Mount Guide](MOUNT_GUIDE.md)** - Complete guide for mounting OrcaS filesystem
 
 ## Platform Support
 
@@ -19,7 +20,7 @@ ORCAS VFS uses FUSE (Filesystem in Userspace) technology to map the ORCAS object
 - **File Read/Write**: Support random read/write of file content
 - **Directory Traversal**: List directory contents
 - **Attribute Management**: Get and set file attributes (size, modification time, etc.)
-- **SDK Integration**: Support SDK features like encryption, compression, instant upload
+- **Configuration Support**: Support encryption, compression, instant upload features
   - **Encryption**: Support AES256 and SM4 encryption
   - **Compression**: Support smart compression (automatically decide based on file type)
   - **Compression Algorithms**: Support Snappy, Zstd, Gzip, Brotli
@@ -35,7 +36,6 @@ package main
 import (
     "context"
     "github.com/orcastor/orcas/core"
-    "github.com/orcastor/orcas/sdk"
     "github.com/orcastor/orcas/vfs"
 )
 
@@ -49,9 +49,9 @@ func main() {
         panic(err)
     }
     
-    // Configure SDK options (encryption, compression, instant upload, etc.)
-    sdkCfg := &sdk.Config{
-        RefLevel:  sdk.FULL,                    // Instant upload level: FULL (full file instant upload)
+    // Configure options (encryption, compression, instant upload, etc.)
+    cfg := &core.Config{
+        RefLevel:  core.REF_LEVEL_FULL,         // Instant upload level: FULL (full file instant upload)
         CmprWay:   core.DATA_CMPR_GZIP,         // Compression: Gzip (smart compression by default)
         CmprQlty:  5,                           // Compression level: 5
         EndecWay:  core.DATA_ENDEC_AES256,      // Encryption method: AES256
@@ -63,7 +63,7 @@ func main() {
         MountPoint: "/mnt/orcas",
         Foreground: true,
         AllowOther: false,
-        SDKConfig:  sdkCfg,  // Pass SDK configuration
+        Config:     cfg,  // Pass configuration
     })
     if err != nil {
         panic(err)
@@ -82,8 +82,8 @@ func main() {
 - `AllowRoot`: Allow root access
 - `DefaultPermissions`: Use default permission checks
 - `FuseOptions`: Custom FUSE options
-- `SDKConfig`: SDK configuration (for encryption, compression, instant upload, etc.)
-  - `RefLevel`: Instant upload level (OFF/FULL/FAST)
+- `Config`: Configuration (for encryption, compression, instant upload, etc.)
+  - `RefLevel`: Instant upload level (REF_LEVEL_OFF/REF_LEVEL_FULL/REF_LEVEL_FAST)
   - `CmprWay`: Compression method (smart compression by default, automatically decides based on file type)
   - `CmprQlty`: Compression level
   - `EndecWay`: Encryption method (AES256/SM4)
@@ -181,7 +181,6 @@ Benchmark test file `random_access_bench_test.go` includes the following tests:
 - **Dependencies**:
   - `github.com/hanwen/go-fuse/v2`: FUSE library (Linux/macOS only)
   - `github.com/orcastor/orcas/core`: ORCAS core library
-  - `github.com/orcastor/orcas/sdk`: ORCAS SDK
 
 ### Environment Variables
 
@@ -220,7 +219,6 @@ To use filesystem mounting functionality on Windows, install Dokany:
    import (
        "context"
        "github.com/orcastor/orcas/core"
-       "github.com/orcastor/orcas/sdk"
        "github.com/orcastor/orcas/vfs"
    )
 
@@ -228,12 +226,11 @@ To use filesystem mounting functionality on Windows, install Dokany:
        h := core.NewLocalHandler()
        ctx, _, _, _ := h.Login(context.Background(), "username", "password")
        
-       sdkCfg := &sdk.Config{}
+       cfg := &core.Config{}
        instance, err := vfs.Mount(h, ctx, bucketID, &vfs.MountOptions{
            MountPoint:  "M:\\",
            Foreground:  true,
-           ThreadCount: 5,
-           SDKConfig:   sdkCfg,
+           Config:      cfg,
        })
        if err != nil {
            panic(err)

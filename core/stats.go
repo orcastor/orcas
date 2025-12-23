@@ -100,8 +100,8 @@ func flushBucketStats(bktID int64, delta *BucketStatsDelta) {
 	delta.Reset()
 
 	// Batch update database
-	// Use write connection for statistics update
-	db, err := GetWriteDB()
+	// Use write connection for bucket database (bucket info is now stored in bucket database)
+	db, err := GetWriteDB(nil, bktID)
 	if err != nil {
 		return
 	}

@@ -42,7 +42,7 @@ func TestVFSConcurrentChunkUpload(t *testing.T) {
 		So(err, ShouldBeNil)
 
 		// Get user info for bucket creation
-		_, userInfo, _, err := handler.Login(ctx, "orcas", "orcas")
+		_, _, _, err = handler.Login(ctx, "orcas", "orcas")
 		So(err, ShouldBeNil)
 
 		// Create bucket with encryption enabled
@@ -50,7 +50,6 @@ func TestVFSConcurrentChunkUpload(t *testing.T) {
 		bkt := &core.BucketInfo{
 			ID:        testBktID,
 			Name:      "test-concurrent-upload-encrypted-bucket",
-			UID:       userInfo.ID,
 			Type:      1,
 			Quota:     -1,
 			ChunkSize: 10 * 1024 * 1024, // 10MB chunk size
@@ -291,7 +290,7 @@ func TestVFSRepeatedChunkWrite(t *testing.T) {
 		So(err, ShouldBeNil)
 
 		// Get user info for bucket creation
-		_, userInfo, _, err := handler.Login(ctx, "orcas", "orcas")
+		_, _, _, err = handler.Login(ctx, "orcas", "orcas")
 		So(err, ShouldBeNil)
 
 		// Create bucket with encryption enabled
@@ -299,7 +298,6 @@ func TestVFSRepeatedChunkWrite(t *testing.T) {
 		bkt := &core.BucketInfo{
 			ID:        testBktID,
 			Name:      "test-repeated-write-encrypted-bucket",
-			UID:       userInfo.ID,
 			Type:      1,
 			Quota:     -1,
 			ChunkSize: 10 * 1024 * 1024, // 10MB chunk size
@@ -500,7 +498,7 @@ func TestVFSConcurrentChunkUploadWithWait(t *testing.T) {
 		So(err, ShouldBeNil)
 
 		// Get user info for bucket creation
-		_, userInfo, _, err := handler.Login(ctx, "orcas", "orcas")
+		_, _, _, err = handler.Login(ctx, "orcas", "orcas")
 		So(err, ShouldBeNil)
 
 		// Create bucket with encryption enabled
@@ -508,7 +506,6 @@ func TestVFSConcurrentChunkUploadWithWait(t *testing.T) {
 		bkt := &core.BucketInfo{
 			ID:        testBktID,
 			Name:      "test-concurrent-wait-encrypted-bucket",
-			UID:       userInfo.ID,
 			Type:      1,
 			Quota:     -1,
 			ChunkSize: 10 * 1024 * 1024, // 10MB chunk size

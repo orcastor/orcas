@@ -305,6 +305,7 @@ func GetDBWithType(connType DBConnectionType, c ...interface{}) (*sql.DB, error)
 
 	if len(c) > 0 {
 		if bktID, ok := c[0].(int64); ok {
+			// Bucket database: use ORCAS_DATA
 			dirPath = filepath.Join(ORCAS_DATA, fmt.Sprint(bktID))
 		}
 		if len(c) > 1 {
@@ -313,6 +314,11 @@ func GetDBWithType(connType DBConnectionType, c ...interface{}) (*sql.DB, error)
 					dbKey = key
 				}
 			}
+		}
+	} else {
+		// Main database: require ORCAS_BASE
+		if dirPath == "" {
+			return nil, fmt.Errorf("ORCAS_BASE is not set, main database is not available")
 		}
 	}
 

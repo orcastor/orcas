@@ -11,7 +11,9 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
+	"github.com/orca-zhang/ecache2"
 	"github.com/orca-zhang/idgen"
 	"golang.org/x/crypto/pbkdf2"
 )
@@ -181,41 +183,34 @@ type LocalHandler struct {
 	da  DataAdapter
 	acm AccessCtrlMgr
 	opt Options
-	// SDK config registry: map[bktID] -> SDK config
-	// This allows ConvertWritingVersions to access SDK config for compression/encryption
-	sdkConfigs sync.Map // map[int64]*SDKConfigInfo
-	// Bucket config registry: map[bktID] -> BucketInfo
+	// Bucket config cache: key is bktID (int64), value is *BucketInfo
 	// This allows access to bucket configuration for compression/encryption
-	bucketConfigs sync.Map // map[int64]*BucketInfo
-}
-
-// SDKConfigInfo stores SDK configuration for a bucket
-// This is a simplified version of sdk.Config, containing only compression/encryption settings
-type SDKConfigInfo struct {
-	CmprWay  uint32 // Compression method (core.DATA_CMPR_MASK), smart compression by default
-	CmprQlty uint32 // Compression quality
-	EndecWay uint32 // Encryption method (core.DATA_ENDEC_MASK)
-	EndecKey string // Encryption key
+	// Cache expires after 5 minutes to ensure bucket config changes are reflected
+	bucketConfigs *ecache2.Cache[int64]
 }
 
 func NewLocalHandler() Handler {
 	dma := &DefaultMetadataAdapter{}
 	return &LocalHandler{
-		ma:  dma,
-		da:  &DefaultDataAdapter{},
-		acm: &DefaultAccessCtrlMgr{ma: dma},
+		ma:            dma,
+		da:            &DefaultDataAdapter{},
+		acm:           &DefaultAccessCtrlMgr{ma: dma},
+		bucketConfigs: ecache2.NewLRUCache[int64](16, 256, 5*time.Minute),
 	}
 }
 
 // NewNoAuthHandler creates a Handler that bypasses all authentication and permission checks
-// This is useful for testing, internal operations, or when authentication is handled externally
-// The handler uses NoAuthAccessCtrlMgr which always allows all operations
+// This bypasses main database operations (user authentication and ACL permission checks),
+// but bucket database operations (data and object metadata) are still performed normally.
+// This is useful for testing, internal operations, or when authentication is handled externally.
+// The handler uses NoAuthAccessCtrlMgr which always allows all operations without querying the main database.
 func NewNoAuthHandler() Handler {
 	dma := &DefaultMetadataAdapter{}
 	return &LocalHandler{
-		ma:  dma,
-		da:  &DefaultDataAdapter{},
-		acm: &NoAuthAccessCtrlMgr{},
+		ma:            dma,
+		da:            &DefaultDataAdapter{},
+		acm:           &NoAuthAccessCtrlMgr{},
+		bucketConfigs: ecache2.NewLRUCache[int64](16, 256, 5*time.Minute),
 	}
 }
 
@@ -228,9 +223,10 @@ func NewHandlerWithAccessCtrl(acm AccessCtrlMgr) Handler {
 	}
 	acm.SetAdapter(dma)
 	return &LocalHandler{
-		ma:  dma,
-		da:  &DefaultDataAdapter{},
-		acm: acm,
+		ma:            dma,
+		da:            &DefaultDataAdapter{},
+		acm:           acm,
+		bucketConfigs: ecache2.NewLRUCache[int64](16, 256, 5*time.Minute),
 	}
 }
 
@@ -248,9 +244,10 @@ func NewHandlerWithAdapters(ma MetadataAdapter, da DataAdapter, acm AccessCtrlMg
 	}
 	acm.SetAdapter(ma)
 	return &LocalHandler{
-		ma:  ma,
-		da:  da,
-		acm: acm,
+		ma:            ma,
+		da:            da,
+		acm:           acm,
+		bucketConfigs: ecache2.NewLRUCache[int64](16, 256, 5*time.Minute),
 	}
 }
 
@@ -282,36 +279,13 @@ func (lh *LocalHandler) GetDataAdapter() DataAdapter {
 	return lh.da
 }
 
-// SetSDKConfig sets SDK configuration for a bucket
-// This allows ConvertWritingVersions to access compression/encryption settings
-// cmprWay is smart compression by default (checks file type)
-func (lh *LocalHandler) SetSDKConfig(bktID int64, cmprWay, cmprQlty, endecWay uint32, endecKey string) {
-	lh.sdkConfigs.Store(bktID, &SDKConfigInfo{
-		CmprWay:  cmprWay, // Smart compression by default (checks file type)
-		CmprQlty: cmprQlty,
-		EndecWay: endecWay,
-		EndecKey: endecKey,
-	})
-}
-
-// GetSDKConfig gets SDK configuration for a bucket
-func (lh *LocalHandler) GetSDKConfig(bktID int64) *SDKConfigInfo {
-	if cfg, ok := lh.sdkConfigs.Load(bktID); ok {
-		if sdkCfg, ok := cfg.(*SDKConfigInfo); ok {
-			return sdkCfg
-		}
-	}
-	return nil
-}
-
 // SetBucketConfig sets bucket configuration for a bucket
 // This allows ConvertWritingVersions and other operations to access bucket config
 func (lh *LocalHandler) SetBucketConfig(bktID int64, bucket *BucketInfo) {
 	if bucket != nil {
-		lh.bucketConfigs.Store(bktID, bucket)
+		lh.bucketConfigs.Put(bktID, bucket)
 		// Note: CmprWay, CmprQlty, EndecWay, EndecKey are no longer stored in bucket config
 		// They should be provided via core.Config in business layer (cmd/vfs)
-		// This function is kept for backward compatibility but does not sync to SDKConfig anymore
 	}
 }
 
@@ -400,7 +374,7 @@ func (lh *LocalHandler) PutData(c Ctx, bktID, dataID int64, sn int, buf []byte) 
 	if dataSize > 0 {
 		// Optimization: Use bucket cache to avoid database query on every write
 		var bucket *BucketInfo
-		if cached, ok := lh.bucketConfigs.Load(bktID); ok {
+		if cached, ok := lh.bucketConfigs.Get(bktID); ok {
 			if bktInfo, ok := cached.(*BucketInfo); ok && bktInfo != nil {
 				bucket = bktInfo
 			}
@@ -459,7 +433,7 @@ func (lh *LocalHandler) PutDataFromReader(c Ctx, bktID, dataID int64, sn int, r 
 	if size > 0 {
 		// Optimization: Use bucket cache to avoid database query on every write
 		var bucket *BucketInfo
-		if cached, ok := lh.bucketConfigs.Load(bktID); ok {
+		if cached, ok := lh.bucketConfigs.Get(bktID); ok {
 			if bktInfo, ok := cached.(*BucketInfo); ok && bktInfo != nil {
 				bucket = bktInfo
 			}
@@ -1106,8 +1080,10 @@ func NewLocalAdmin() Admin {
 }
 
 // NewNoAuthAdmin creates an Admin that bypasses all authentication and permission checks
-// This is useful for testing, internal operations, or when authentication is handled externally
-// The admin uses NoAuthAccessCtrlMgr which always allows all operations
+// This bypasses main database operations (user authentication and ACL permission checks),
+// but bucket database operations (data and object metadata) are still performed normally.
+// This is useful for testing, internal operations, or when authentication is handled externally.
+// The admin uses NoAuthAccessCtrlMgr which always allows all operations without querying the main database.
 func NewNoAuthAdmin() Admin {
 	dma := &DefaultMetadataAdapter{}
 	return &LocalAdmin{

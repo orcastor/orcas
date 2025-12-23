@@ -320,7 +320,6 @@ func setupTestEnvironmentForInstantUpload(t *testing.T) (int64, *gin.Engine) {
 	bkt := &core.BucketInfo{
 		ID:        testBktID,
 		Name:      "test-bucket",
-		UID:       1,
 		Type:      1,
 		Quota:     -1,              // Unlimited quota
 		ChunkSize: 4 * 1024 * 1024, // 4MB chunk size

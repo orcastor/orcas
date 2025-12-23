@@ -8,13 +8,13 @@ import (
 )
 
 const (
-	NA  = 1 << iota
-	DR  // Data Read
-	DW  // Data Write
-	DD  // Data Delete
-	MDR // Metadata Read
-	MDW // Metadata Write
-	MDD // Metadata Delete
+	NA  = 0
+	DR  = 1 << (iota - 1) // Data Read
+	DW                    // Data Write
+	DD                    // Data Delete
+	MDR                   // Metadata Read
+	MDW                   // Metadata Write
+	MDD                   // Metadata Delete
 
 	DRW    = DR | DW               // Data Read/Write
 	MDRW   = MDR | MDW             // Metadata Read/Write
@@ -54,24 +54,16 @@ func (dacm *DefaultAccessCtrlMgr) CheckPermission(c Ctx, action int, bktID int64
 	if uid <= 0 {
 		return ERR_NEED_LOGIN
 	}
-	bk := [2]int64{1, bktID} // Type 1 = bucket ownership
-	if v, ok := cache.Get(bk); ok {
-		if u, ok := v.(int64); ok && u == uid {
-			return nil
-		} else {
-			return ERR_NO_PERM
-		}
-	}
-	b, err := dacm.ma.GetBkt(c, []int64{bktID})
+	// Check if user has the required permission via ACL
+	hasPermission, err := dacm.ma.CheckPermission(c, bktID, uid, action)
 	if err != nil {
 		return err
 	}
-	// check is owner of the bucket
-	if len(b) > 0 {
-		cache.Put(bk, b[0].UID)
-		if b[0].UID == uid {
-			return nil
-		}
+	if hasPermission {
+		// Cache the permission check result
+		bk := [2]int64{1, bktID} // Type 1 = bucket access
+		cache.Put(bk, uid)
+		return nil
 	}
 	return ERR_NO_PERM
 }
@@ -112,30 +104,23 @@ func (dacm *DefaultAccessCtrlMgr) CheckRole(c Ctx, role uint32) error {
 	return ERR_NO_ROLE
 }
 
-// CheckOwn Check if the user is the owner of the bucket
+// CheckOwn Check if the user has access to the bucket (via ACL)
+// This is equivalent to checking if user has any permission (ALL)
 func (dacm *DefaultAccessCtrlMgr) CheckOwn(c Ctx, bktID int64) error {
 	uid := getUID(c)
 	if uid <= 0 {
 		return ERR_NEED_LOGIN
 	}
-	bk := [2]int64{1, bktID} // Type 1 = bucket ownership
-	if v, ok := cache.Get(bk); ok {
-		if u, ok := v.(int64); ok && u == uid {
-			return nil
-		} else {
-			return ERR_NO_PERM
-		}
-	}
-	b, err := dacm.ma.GetBkt(c, []int64{bktID})
+	// Check if user has any permission (we use READ as minimum permission check)
+	hasPermission, err := dacm.ma.CheckPermission(c, bktID, uid, READ)
 	if err != nil {
 		return err
 	}
-	// Check if user is the owner of the bucket
-	if len(b) > 0 {
-		cache.Put(bk, b[0].UID)
-		if b[0].UID == uid {
-			return nil
-		}
+	if hasPermission {
+		// Cache the permission check result
+		bk := [2]int64{1, bktID} // Type 1 = bucket access
+		cache.Put(bk, uid)
+		return nil
 	}
 	return ERR_NO_PERM
 }
@@ -191,24 +176,30 @@ func getKey(c Ctx) string {
 }
 
 // NoAuthAccessCtrlMgr is an AccessCtrlMgr that bypasses all permission checks
+// This bypasses authentication and authorization checks that require the main database
+// (user table and ACL table), but bucket database operations (data and object metadata)
+// are still performed normally.
 // This is useful for testing, internal operations, or when authentication is handled externally
 type NoAuthAccessCtrlMgr struct{}
 
 func (nacm *NoAuthAccessCtrlMgr) SetAdapter(ma MetadataAdapter) {
 	// No-op: NoAuthAccessCtrlMgr doesn't need MetadataAdapter
+	// It bypasses permission checks, so it doesn't need to query the main database
 }
 
 func (nacm *NoAuthAccessCtrlMgr) CheckPermission(c Ctx, action int, bktID int64) error {
-	// Always allow: bypass permission check
+	// Always allow: bypass permission check (no main database ACL query)
+	// Bucket database operations (data/object metadata) will still be performed
 	return nil
 }
 
 func (nacm *NoAuthAccessCtrlMgr) CheckRole(c Ctx, role uint32) error {
-	// Always allow: bypass role check
+	// Always allow: bypass role check (no main database user query)
 	return nil
 }
 
 func (nacm *NoAuthAccessCtrlMgr) CheckOwn(c Ctx, bktID int64) error {
-	// Always allow: bypass ownership check
+	// Always allow: bypass ownership check (no main database ACL query)
+	// Bucket database operations will still be performed normally
 	return nil
 }

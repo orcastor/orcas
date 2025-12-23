@@ -33,14 +33,13 @@ func TestTempFileWriterLargeFileWithEncryption(t *testing.T) {
 		lh := core.NewLocalHandler().(*core.LocalHandler)
 		lh.SetAdapter(dma, dda)
 
-		testCtx, userInfo, _, err := lh.Login(c, "orcas", "orcas")
+		testCtx, _, _, err := lh.Login(c, "orcas", "orcas")
 		So(err, ShouldBeNil)
 
 		// Create bucket with encryption enabled
 		bucket := &core.BucketInfo{
 			ID:        testBktID,
 			Name:      "test_bucket_encrypted",
-			UID:       userInfo.ID,
 			Type:      1,
 			Quota:     1000000000, // 1GB quota
 			Used:      0,
@@ -455,13 +454,12 @@ func TestTempFileWriterMemoryEfficiency(t *testing.T) {
 		lh := core.NewLocalHandler().(*core.LocalHandler)
 		lh.SetAdapter(dma, dda)
 
-		testCtx, userInfo, _, err := lh.Login(c, "orcas", "orcas")
+		testCtx, _, _, err := lh.Login(c, "orcas", "orcas")
 		So(err, ShouldBeNil)
 
 		bucket := &core.BucketInfo{
 			ID:        testBktID,
 			Name:      "test_bucket_memory",
-			UID:       userInfo.ID,
 			Type:      1,
 			Quota:     1000000000,
 			Used:      0,

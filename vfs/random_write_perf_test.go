@@ -179,13 +179,12 @@ func TestRandomWriteSparseFile(t *testing.T) {
 		lh := core.NewLocalHandler().(*core.LocalHandler)
 		lh.SetAdapter(dma, dda)
 
-		testCtx, userInfo, _, err := lh.Login(context.Background(), "orcas", "orcas")
+		testCtx, _, _, err := lh.Login(context.Background(), "orcas", "orcas")
 		So(err, ShouldBeNil)
 
 		bucket := &core.BucketInfo{
 			ID:    testBktID,
 			Name:  "test",
-			UID:   userInfo.ID,
 			Type:  1,
 			Quota: 100 << 30, // 100GB quota
 		}

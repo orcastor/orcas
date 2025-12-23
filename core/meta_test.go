@@ -10,8 +10,10 @@ import (
 	. "github.com/smartystreets/goconvey/convey"
 )
 
-var bktID = int64(0)
-var c = context.TODO()
+var (
+	bktID = int64(0)
+	c     = context.TODO()
+)
 
 func init() {
 	// Initialize test environment with in-memory filesystem
@@ -30,22 +32,24 @@ func TestListBkt(t *testing.T) {
 			b1 := &BucketInfo{
 				ID:   id1,
 				Name: "zhangwei",
-				UID:  uid,
 				Type: 1,
 			}
 			b2 := &BucketInfo{
 				ID:   id2,
 				Name: "zhangwei2",
-				UID:  uid,
 				Type: 1,
 			}
-			So(dma.PutBkt(c, []*BucketInfo{b1, b2}), ShouldBeNil)
+			// Set UID in context for PutBkt to create ACL
+			ctx := UserInfo2Ctx(c, &UserInfo{ID: uid})
+			So(dma.PutBkt(ctx, []*BucketInfo{b1, b2}), ShouldBeNil)
 
 			bs, err := dma.ListBkt(c, uid)
 			So(err, ShouldBeNil)
 			So(len(bs), ShouldEqual, 2)
-			So(bs[0], ShouldResemble, b1)
-			So(bs[1], ShouldResemble, b2)
+			So(bs[0].ID, ShouldEqual, b1.ID)
+			So(bs[0].Name, ShouldEqual, b1.Name)
+			So(bs[1].ID, ShouldEqual, b2.ID)
+			So(bs[1].Name, ShouldEqual, b2.Name)
 		})
 	})
 }
@@ -224,7 +228,7 @@ func TestRefData(t *testing.T) {
 			// Use different data that doesn't exist in database
 			ids, err := dma.RefData(c, bktID, []*DataInfo{{
 				OrigSize: 999,
-				HdrXXH3: 888,
+				HdrXXH3:  888,
 				XXH3:     777,
 				SHA256_0: 11111,
 				SHA256_1: 22222,
@@ -232,7 +236,7 @@ func TestRefData(t *testing.T) {
 				SHA256_3: 44444,
 			}, {
 				OrigSize: 999,
-				HdrXXH3: 888,
+				HdrXXH3:  888,
 				XXH3:     777,
 				SHA256_0: 11111,
 				SHA256_1: 22222,

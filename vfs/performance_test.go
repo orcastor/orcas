@@ -13,7 +13,6 @@ import (
 
 	"github.com/orca-zhang/idgen"
 	"github.com/orcastor/orcas/core"
-	"github.com/orcastor/orcas/sdk"
 )
 
 // PerformanceMetrics performance metrics
@@ -62,7 +61,7 @@ func ensureTestUser(t *testing.T) {
 }
 
 // runPerformanceTest runs performance test and returns metrics
-func runPerformanceTest(t *testing.T, name string, dataSize, chunkSize int64, writeOps, concurrency int, sdkCfg *sdk.Config) PerformanceMetrics {
+func runPerformanceTest(t *testing.T, name string, dataSize, chunkSize int64, writeOps, concurrency int, cfg *core.Config) PerformanceMetrics {
 	// Initialize
 	if core.ORCAS_BASE == "" {
 		tmpDir := filepath.Join(os.TempDir(), "orcas_perf_test")
@@ -95,7 +94,7 @@ func runPerformanceTest(t *testing.T, name string, dataSize, chunkSize int64, wr
 	lh := core.NewLocalHandler().(*core.LocalHandler)
 	lh.SetAdapter(dma, dda)
 
-	testCtx, userInfo, _, err := lh.Login(context.Background(), "orcas", "orcas")
+	testCtx, _, _, err := lh.Login(context.Background(), "orcas", "orcas")
 	if err != nil {
 		t.Fatalf("Login failed: %v", err)
 	}
@@ -103,7 +102,6 @@ func runPerformanceTest(t *testing.T, name string, dataSize, chunkSize int64, wr
 	bucket := &core.BucketInfo{
 		ID:       testBktID,
 		Name:     "perf_bucket",
-		UID:      userInfo.ID,
 		Type:     1,
 		Quota:    10000000000, // 10GB
 		Used:     0,
@@ -136,8 +134,8 @@ func runPerformanceTest(t *testing.T, name string, dataSize, chunkSize int64, wr
 		testData[i] = byte(i % 256)
 	}
 
-	hasCompression := sdkCfg != nil && sdkCfg.CmprWay > 0
-	hasEncryption := sdkCfg != nil && sdkCfg.EndecWay > 0
+	hasCompression := cfg != nil && cfg.CmprWay > 0
+	hasEncryption := cfg != nil && cfg.EndecWay > 0
 
 	// Record start state
 	var startMem runtime.MemStats
@@ -285,33 +283,33 @@ func TestPerformanceComprehensive(t *testing.T) {
 
 	// Test scenario 4: Encryption, single thread (精简规模)
 	t.Run("Encrypted_SingleThread", func(t *testing.T) {
-		sdkCfg := &sdk.Config{
+		cfg := &core.Config{
 			EndecWay: core.DATA_ENDEC_AES256,
 			EndecKey: "this is a test encryption key that is long enough for AES256",
 		}
-		result := runPerformanceTest(t, "encrypted_single", 256*1024, 4*1024*1024, 10, 1, sdkCfg) // 精简: 20 -> 10
+		result := runPerformanceTest(t, "encrypted_single", 256*1024, 4*1024*1024, 10, 1, cfg) // 精简: 20 -> 10
 		results = append(results, result)
 	})
 
 	// Test scenario 5: Compression, single thread (精简规模)
 	t.Run("Compressed_SingleThread", func(t *testing.T) {
-		sdkCfg := &sdk.Config{
-			CmprWay: core.DATA_CMPR_SNAPPY,
+		cfg := &core.Config{
+			CmprWay:  core.DATA_CMPR_SNAPPY,
 			CmprQlty: 1,
 		}
-		result := runPerformanceTest(t, "compressed_single", 256*1024, 4*1024*1024, 10, 1, sdkCfg) // 精简: 20 -> 10
+		result := runPerformanceTest(t, "compressed_single", 256*1024, 4*1024*1024, 10, 1, cfg) // 精简: 20 -> 10
 		results = append(results, result)
 	})
 
 	// Test scenario 6: Compression+Encryption, single thread (精简规模)
 	t.Run("CompressedEncrypted_SingleThread", func(t *testing.T) {
-		sdkCfg := &sdk.Config{
-			CmprWay: core.DATA_CMPR_SNAPPY,
+		cfg := &core.Config{
+			CmprWay:  core.DATA_CMPR_SNAPPY,
 			CmprQlty: 1,
 			EndecWay: core.DATA_ENDEC_AES256,
 			EndecKey: "this is a test encryption key that is long enough for AES256",
 		}
-		result := runPerformanceTest(t, "compressed_encrypted_single", 256*1024, 4*1024*1024, 10, 1, sdkCfg) // 精简: 20 -> 10
+		result := runPerformanceTest(t, "compressed_encrypted_single", 256*1024, 4*1024*1024, 10, 1, cfg) // 精简: 20 -> 10
 		results = append(results, result)
 	})
 
@@ -323,13 +321,13 @@ func TestPerformanceComprehensive(t *testing.T) {
 
 	// Test scenario 8: Large file+Compression+Encryption, single thread (精简规模: 100MB -> 20MB)
 	t.Run("LargeFile_CompressedEncrypted_SingleThread", func(t *testing.T) {
-		sdkCfg := &sdk.Config{
-			CmprWay: core.DATA_CMPR_SNAPPY,
+		cfg := &core.Config{
+			CmprWay:  core.DATA_CMPR_SNAPPY,
 			CmprQlty: 1,
 			EndecWay: core.DATA_ENDEC_AES256,
 			EndecKey: "this is a test encryption key that is long enough for AES256",
 		}
-		result := runPerformanceTest(t, "large_compressed_encrypted_single", 20*1024*1024, 4*1024*1024, 1, 1, sdkCfg) // 精简: 100MB -> 20MB
+		result := runPerformanceTest(t, "large_compressed_encrypted_single", 20*1024*1024, 4*1024*1024, 1, 1, cfg) // 精简: 100MB -> 20MB
 		results = append(results, result)
 	})
 
@@ -341,13 +339,13 @@ func TestPerformanceComprehensive(t *testing.T) {
 
 	// Test scenario 10: Sequential write+Compression+Encryption optimization (精简规模: 10MB -> 5MB)
 	t.Run("SequentialWrite_CompressedEncrypted", func(t *testing.T) {
-		sdkCfg := &sdk.Config{
-			CmprWay: core.DATA_CMPR_SNAPPY,
+		cfg := &core.Config{
+			CmprWay:  core.DATA_CMPR_SNAPPY,
 			CmprQlty: 1,
 			EndecWay: core.DATA_ENDEC_AES256,
 			EndecKey: "this is a test encryption key that is long enough for AES256",
 		}
-		result := runSequentialWriteTest(t, "sequential_write_compressed_encrypted", 5*1024*1024, 4*1024*1024, sdkCfg) // 精简: 10MB -> 5MB
+		result := runSequentialWriteTest(t, "sequential_write_compressed_encrypted", 5*1024*1024, 4*1024*1024, cfg) // 精简: 10MB -> 5MB
 		results = append(results, result)
 	})
 
@@ -359,13 +357,13 @@ func TestPerformanceComprehensive(t *testing.T) {
 
 	// Test scenario 12: Random write+Compression+Encryption (精简规模)
 	t.Run("RandomWrite_CompressedEncrypted", func(t *testing.T) {
-		sdkCfg := &sdk.Config{
-			CmprWay: core.DATA_CMPR_SNAPPY,
+		cfg := &core.Config{
+			CmprWay:  core.DATA_CMPR_SNAPPY,
 			CmprQlty: 1,
 			EndecWay: core.DATA_ENDEC_AES256,
 			EndecKey: "this is a test encryption key that is long enough for AES256",
 		}
-		result := runRandomWriteTest(t, "random_write_compressed_encrypted", 5*1024*1024, 4*1024*1024, sdkCfg) // 精简: 10MB -> 5MB
+		result := runRandomWriteTest(t, "random_write_compressed_encrypted", 5*1024*1024, 4*1024*1024, cfg) // 精简: 10MB -> 5MB
 		results = append(results, result)
 	})
 
@@ -414,7 +412,7 @@ func TestPerformanceComprehensive(t *testing.T) {
 }
 
 // runSequentialWriteTest runs sequential write performance test (test sequential write optimization)
-func runSequentialWriteTest(t *testing.T, name string, totalSize, chunkSize int64, sdkCfg *sdk.Config) PerformanceMetrics {
+func runSequentialWriteTest(t *testing.T, name string, totalSize, chunkSize int64, cfg *core.Config) PerformanceMetrics {
 	// Initialize
 	if core.ORCAS_BASE == "" {
 		tmpDir := filepath.Join(os.TempDir(), "orcas_perf_test")
@@ -449,7 +447,7 @@ func runSequentialWriteTest(t *testing.T, name string, totalSize, chunkSize int6
 	lh := core.NewLocalHandler().(*core.LocalHandler)
 	lh.SetAdapter(dma, dda)
 
-	testCtx, userInfo, _, err := lh.Login(context.Background(), "orcas", "orcas")
+	testCtx, _, _, err := lh.Login(context.Background(), "orcas", "orcas")
 	if err != nil {
 		t.Fatalf("Login failed: %v", err)
 	}
@@ -457,7 +455,6 @@ func runSequentialWriteTest(t *testing.T, name string, totalSize, chunkSize int6
 	bucket := &core.BucketInfo{
 		ID:       testBktID,
 		Name:     "perf_bucket",
-		UID:      userInfo.ID,
 		Type:     1,
 		Quota:    10000000000, // 10GB
 		Used:     0,
@@ -491,8 +488,8 @@ func runSequentialWriteTest(t *testing.T, name string, totalSize, chunkSize int6
 		writeCount = 1
 	}
 
-	hasCompression := sdkCfg != nil && sdkCfg.CmprWay > 0
-	hasEncryption := sdkCfg != nil && sdkCfg.EndecWay > 0
+	hasCompression := cfg != nil && cfg.CmprWay > 0
+	hasEncryption := cfg != nil && cfg.EndecWay > 0
 
 	// Record start state
 	var startMem runtime.MemStats
@@ -563,7 +560,7 @@ func runSequentialWriteTest(t *testing.T, name string, totalSize, chunkSize int6
 }
 
 // runRandomWriteTest runs random write performance test (different offsets, non-contiguous)
-func runRandomWriteTest(t *testing.T, name string, totalSize, chunkSize int64, sdkCfg *sdk.Config) PerformanceMetrics {
+func runRandomWriteTest(t *testing.T, name string, totalSize, chunkSize int64, cfg *core.Config) PerformanceMetrics {
 	// Initialize (same as runSequentialWriteTest)
 	if core.ORCAS_BASE == "" {
 		tmpDir := filepath.Join(os.TempDir(), "orcas_perf_test")
@@ -598,7 +595,7 @@ func runRandomWriteTest(t *testing.T, name string, totalSize, chunkSize int64, s
 	lh := core.NewLocalHandler().(*core.LocalHandler)
 	lh.SetAdapter(dma, dda)
 
-	testCtx, userInfo, _, err := lh.Login(context.Background(), "orcas", "orcas")
+	testCtx, _, _, err := lh.Login(context.Background(), "orcas", "orcas")
 	if err != nil {
 		t.Fatalf("Login failed: %v", err)
 	}
@@ -606,7 +603,6 @@ func runRandomWriteTest(t *testing.T, name string, totalSize, chunkSize int64, s
 	bucket := &core.BucketInfo{
 		ID:       testBktID,
 		Name:     "perf_bucket",
-		UID:      userInfo.ID,
 		Type:     1,
 		Quota:    10000000000, // 10GB
 		Used:     0,
@@ -639,8 +635,8 @@ func runRandomWriteTest(t *testing.T, name string, totalSize, chunkSize int64, s
 	writeCount := 10                    // 精简: 20 -> 10 times
 	writeSize := writeChunkSize
 
-	hasCompression := sdkCfg != nil && sdkCfg.CmprWay > 0
-	hasEncryption := sdkCfg != nil && sdkCfg.EndecWay > 0
+	hasCompression := cfg != nil && cfg.CmprWay > 0
+	hasEncryption := cfg != nil && cfg.EndecWay > 0
 
 	// Record start state
 	var startMem runtime.MemStats
@@ -736,7 +732,7 @@ func runRandomWriteTest(t *testing.T, name string, totalSize, chunkSize int64, s
 }
 
 // runRandomWriteOverlappingTest runs random write performance test (overlapping writes)
-func runRandomWriteOverlappingTest(t *testing.T, name string, totalSize, chunkSize int64, sdkCfg *sdk.Config) PerformanceMetrics {
+func runRandomWriteOverlappingTest(t *testing.T, name string, totalSize, chunkSize int64, cfg *core.Config) PerformanceMetrics {
 	// Initialize (same as runSequentialWriteTest)
 	if core.ORCAS_BASE == "" {
 		tmpDir := filepath.Join(os.TempDir(), "orcas_perf_test")
@@ -769,7 +765,7 @@ func runRandomWriteOverlappingTest(t *testing.T, name string, totalSize, chunkSi
 	lh := core.NewLocalHandler().(*core.LocalHandler)
 	lh.SetAdapter(dma, dda)
 
-	testCtx, userInfo, _, err := lh.Login(context.Background(), "orcas", "orcas")
+	testCtx, _, _, err := lh.Login(context.Background(), "orcas", "orcas")
 	if err != nil {
 		t.Fatalf("Login failed: %v", err)
 	}
@@ -777,7 +773,6 @@ func runRandomWriteOverlappingTest(t *testing.T, name string, totalSize, chunkSi
 	bucket := &core.BucketInfo{
 		ID:       testBktID,
 		Name:     "perf_bucket",
-		UID:      userInfo.ID,
 		Type:     1,
 		Quota:    10000000000, // 10GB
 		Used:     0,
@@ -809,8 +804,8 @@ func runRandomWriteOverlappingTest(t *testing.T, name string, totalSize, chunkSi
 	writeCount := 8                      // 精简: 15 -> 8 times
 	overlapSize := int64(128 * 1024)     // 精简: 256KB -> 128KB overlap each time
 
-	hasCompression := sdkCfg != nil && sdkCfg.CmprWay > 0
-	hasEncryption := sdkCfg != nil && sdkCfg.EndecWay > 0
+	hasCompression := cfg != nil && cfg.CmprWay > 0
+	hasEncryption := cfg != nil && cfg.EndecWay > 0
 
 	// Record start state
 	var startMem runtime.MemStats
@@ -876,7 +871,7 @@ func runRandomWriteOverlappingTest(t *testing.T, name string, totalSize, chunkSi
 }
 
 // runRandomWriteSmallChunksTest runs random write performance test (small data chunks, multiple writes)
-func runRandomWriteSmallChunksTest(t *testing.T, name string, totalSize, chunkSize int64, sdkCfg *sdk.Config) PerformanceMetrics {
+func runRandomWriteSmallChunksTest(t *testing.T, name string, totalSize, chunkSize int64, cfg *core.Config) PerformanceMetrics {
 	// Initialize (same as runSequentialWriteTest)
 	if core.ORCAS_BASE == "" {
 		tmpDir := filepath.Join(os.TempDir(), "orcas_perf_test")
@@ -909,7 +904,7 @@ func runRandomWriteSmallChunksTest(t *testing.T, name string, totalSize, chunkSi
 	lh := core.NewLocalHandler().(*core.LocalHandler)
 	lh.SetAdapter(dma, dda)
 
-	testCtx, userInfo, _, err := lh.Login(context.Background(), "orcas", "orcas")
+	testCtx, _, _, err := lh.Login(context.Background(), "orcas", "orcas")
 	if err != nil {
 		t.Fatalf("Login failed: %v", err)
 	}
@@ -917,7 +912,6 @@ func runRandomWriteSmallChunksTest(t *testing.T, name string, totalSize, chunkSi
 	bucket := &core.BucketInfo{
 		ID:       testBktID,
 		Name:     "perf_bucket",
-		UID:      userInfo.ID,
 		Type:     1,
 		Quota:    10000000000, // 10GB
 		Used:     0,
@@ -948,8 +942,8 @@ func runRandomWriteSmallChunksTest(t *testing.T, name string, totalSize, chunkSi
 	writeChunkSize := int64(64 * 1024) // 64KB per write
 	writeCount := 30                   // 精简: 100 -> 30 times
 
-	hasCompression := sdkCfg != nil && sdkCfg.CmprWay > 0
-	hasEncryption := sdkCfg != nil && sdkCfg.EndecWay > 0
+	hasCompression := cfg != nil && cfg.CmprWay > 0
+	hasEncryption := cfg != nil && cfg.EndecWay > 0
 
 	// Record start state
 	var startMem runtime.MemStats
@@ -1164,7 +1158,7 @@ func runInstantUploadPerformanceTest(t *testing.T) {
 	lh := core.NewLocalHandler().(*core.LocalHandler)
 	lh.SetAdapter(dma, dda)
 
-	testCtx, userInfo, _, err := lh.Login(context.Background(), "orcas", "orcas")
+	testCtx, _, _, err := lh.Login(context.Background(), "orcas", "orcas")
 	if err != nil {
 		t.Fatalf("Login failed: %v", err)
 	}
@@ -1173,7 +1167,6 @@ func runInstantUploadPerformanceTest(t *testing.T) {
 	bucket := &core.BucketInfo{
 		ID:        testBktID,
 		Name:      "test-bucket",
-		UID:       userInfo.ID,
 		Type:      1,
 		Quota:     10 << 30, // 10GB
 		ChunkSize: 4 * 1024 * 1024,

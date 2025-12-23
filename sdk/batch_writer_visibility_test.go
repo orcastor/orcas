@@ -67,7 +67,6 @@ func setupTestEnvironmentForBatchWriterVisibility(t *testing.T) (int64, context.
 	bkt := &core.BucketInfo{
 		ID:    testBktID,
 		Name:  "test-bucket",
-		UID:   1,
 		Type:  1,
 		Quota: -1, // 无限制配额
 	}

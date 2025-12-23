@@ -219,7 +219,8 @@ type ConvertWritingVersionsResult struct {
 // This is a scheduled job that processes completed writing versions in batches
 // It finds versions that need conversion (completed but still using uncompressed/unencrypted DataID)
 // and converts them according to the file's compression/encryption requirements
-func ConvertWritingVersions(c Ctx, bktID int64, lh *LocalHandler) (*ConvertWritingVersionsResult, error) {
+// cfg: Config containing compression/encryption settings (CmprWay, CmprQlty, EndecWay, EndecKey)
+func ConvertWritingVersions(c Ctx, bktID int64, lh *LocalHandler, cfg *Config) (*ConvertWritingVersionsResult, error) {
 	// Acquire work lock to ensure only one conversion is processing for the same bucket
 	key := fmt.Sprintf("convert_writing_versions_%d", bktID)
 	acquired, release := acquireWorkLock(key)
@@ -303,7 +304,7 @@ func ConvertWritingVersions(c Ctx, bktID int64, lh *LocalHandler) (*ConvertWriti
 				}
 
 				// Convert version
-				converted, freedSize, err := convertVersionData(c, bktID, version, originalDataID, chunkSizeInt, lh)
+				converted, freedSize, err := convertVersionData(c, bktID, version, originalDataID, chunkSizeInt, lh, cfg)
 				if err != nil {
 					result.Errors = append(result.Errors, fmt.Sprintf("failed to convert version %d: %v", version.ID, err))
 					result.FailedVersions++
@@ -376,7 +377,8 @@ func checkVersionNeedsConversion(c Ctx, bktID int64, version *ObjectInfo, ma Met
 }
 
 // convertVersionData converts a version's data from uncompressed/unencrypted to compressed/encrypted
-func convertVersionData(c Ctx, bktID int64, version *ObjectInfo, originalDataID int64, chunkSizeInt int, lh *LocalHandler) (bool, int64, error) {
+// cfg: Config containing compression/encryption settings (CmprWay, CmprQlty, EndecWay, EndecKey)
+func convertVersionData(c Ctx, bktID int64, version *ObjectInfo, originalDataID int64, chunkSizeInt int, lh *LocalHandler, cfg *Config) (bool, int64, error) {
 	// Get original DataInfo to get compression/encryption settings
 	originalDataInfo, err := lh.ma.GetData(c, bktID, originalDataID)
 	if err != nil || originalDataInfo == nil {
@@ -417,10 +419,9 @@ func convertVersionData(c Ctx, bktID int64, version *ObjectInfo, originalDataID 
 	// Calculate number of chunks
 	numChunks := int((version.Size + int64(chunkSizeInt) - 1) / int64(chunkSizeInt))
 
-	// Get SDK config for compression/encryption
-	sdkCfg := lh.GetSDKConfig(bktID)
-	if sdkCfg == nil {
-		// No SDK config available, cannot perform compression/encryption
+	// Check if Config is available for compression/encryption
+	if cfg == nil {
+		// No Config available, cannot perform compression/encryption
 		// Return false to indicate conversion was skipped
 		return false, 0, nil
 	}
@@ -438,7 +439,7 @@ func convertVersionData(c Ctx, bktID int64, version *ObjectInfo, originalDataID 
 		}
 
 		// Apply compression/encryption
-		processedData, err := processChunkData(chunkData, needsCompression, needsEncryption, originalDataInfo, sdkCfg)
+		processedData, err := processChunkData(chunkData, needsCompression, needsEncryption, originalDataInfo, cfg)
 		if err != nil {
 			return false, 0, fmt.Errorf("failed to process chunk %d: %v", sn, err)
 		}
@@ -509,20 +510,20 @@ func convertVersionData(c Ctx, bktID int64, version *ObjectInfo, originalDataID 
 }
 
 // processChunkData processes chunk data with compression and/or encryption
-func processChunkData(originalData []byte, needsCompression, needsEncryption bool, dataInfo *DataInfo, sdkCfg *SDKConfigInfo) ([]byte, error) {
+func processChunkData(originalData []byte, needsCompression, needsEncryption bool, dataInfo *DataInfo, cfg *Config) ([]byte, error) {
 	data := originalData
 
 	// 1. Apply compression (if needed)
-	if needsCompression && sdkCfg.CmprWay > 0 {
+	if needsCompression && cfg.CmprWay > 0 {
 		var cmpr archiver.Compressor
 		if dataInfo.Kind&DATA_CMPR_SNAPPY != 0 {
 			cmpr = &archiver.Snappy{}
 		} else if dataInfo.Kind&DATA_CMPR_ZSTD != 0 {
-			cmpr = &archiver.Zstd{EncoderOptions: []zstd.EOption{zstd.WithEncoderLevel(zstd.EncoderLevelFromZstd(int(sdkCfg.CmprQlty)))}}
+			cmpr = &archiver.Zstd{EncoderOptions: []zstd.EOption{zstd.WithEncoderLevel(zstd.EncoderLevelFromZstd(int(cfg.CmprQlty)))}}
 		} else if dataInfo.Kind&DATA_CMPR_GZIP != 0 {
-			cmpr = &archiver.Gz{CompressionLevel: int(sdkCfg.CmprQlty)}
+			cmpr = &archiver.Gz{CompressionLevel: int(cfg.CmprQlty)}
 		} else if dataInfo.Kind&DATA_CMPR_BR != 0 {
-			cmpr = &archiver.Brotli{Quality: int(sdkCfg.CmprQlty)}
+			cmpr = &archiver.Brotli{Quality: int(cfg.CmprQlty)}
 		}
 
 		if cmpr != nil {
@@ -537,12 +538,12 @@ func processChunkData(originalData []byte, needsCompression, needsEncryption boo
 	}
 
 	// 2. Apply encryption (if needed)
-	if needsEncryption && sdkCfg.EndecWay > 0 && sdkCfg.EndecKey != "" {
+	if needsEncryption && cfg.EndecWay > 0 && cfg.EndecKey != "" {
 		var err error
 		if dataInfo.Kind&DATA_ENDEC_AES256 != 0 {
-			data, err = aes256.Encrypt(sdkCfg.EndecKey, data)
+			data, err = aes256.Encrypt(cfg.EndecKey, data)
 		} else if dataInfo.Kind&DATA_ENDEC_SM4 != 0 {
-			data, err = sm4.Sm4Cbc([]byte(sdkCfg.EndecKey), data, true)
+			data, err = sm4.Sm4Cbc([]byte(cfg.EndecKey), data, true)
 		}
 		if err != nil {
 			return nil, fmt.Errorf("encryption failed: %v", err)
@@ -771,7 +772,7 @@ func PermanentlyDeleteObject(c Ctx, bktID, id int64, h Handler, ma MetadataAdapt
 		if err != nil {
 			return err
 		}
-		
+
 		// Filter non-deleted children
 		nonDeletedChildren := make([]*ObjectInfo, 0, len(children))
 		for _, child := range children {
@@ -779,7 +780,7 @@ func PermanentlyDeleteObject(c Ctx, bktID, id int64, h Handler, ma MetadataAdapt
 				nonDeletedChildren = append(nonDeletedChildren, child)
 			}
 		}
-		
+
 		if len(nonDeletedChildren) > 0 {
 			// Use concurrent deletion with limited concurrency to avoid overwhelming the system
 			// Limit concurrent deletions to 10 to balance performance and resource usage
@@ -788,29 +789,29 @@ func PermanentlyDeleteObject(c Ctx, bktID, id int64, h Handler, ma MetadataAdapt
 			var wg sync.WaitGroup
 			var deleteErrors []error
 			var errorsMu sync.Mutex
-			
+
 			// Concurrently delete child objects
 			for _, child := range nonDeletedChildren {
 				wg.Add(1)
 				go func(childID int64) {
 					defer wg.Done()
-					
+
 					// Acquire semaphore
 					sem <- struct{}{}
 					defer func() { <-sem }()
-					
+
 					// Recursively delete child object
 					if err := PermanentlyDeleteObject(c, bktID, childID, h, ma, da); err != nil {
 						errorsMu.Lock()
 						deleteErrors = append(deleteErrors, fmt.Errorf("failed to delete child object %d: %w", childID, err))
 						errorsMu.Unlock()
-				}
+					}
 				}(child.ID)
 			}
-			
+
 			// Wait for all deletions to complete
 			wg.Wait()
-			
+
 			// If there were errors, log them but don't fail the entire operation
 			// This allows partial deletion to succeed even if some child objects fail
 			if len(deleteErrors) > 0 {

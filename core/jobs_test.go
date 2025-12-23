@@ -1097,13 +1097,13 @@ func TestQuotaAndUsed(t *testing.T) {
 		bucket := &BucketInfo{
 			ID:       testBktID,
 			Name:     "test_bucket",
-			UID:      uid,
 			Type:     1,
 			Quota:    1000, // 1KB配额
 			Used:     0,
 			RealUsed: 0,
 		}
-		So(dma.PutBkt(c, []*BucketInfo{bucket}), ShouldBeNil)
+		ctx := UserInfo2Ctx(c, &UserInfo{ID: uid})
+		So(dma.PutBkt(ctx, []*BucketInfo{bucket}), ShouldBeNil)
 
 		// 创建用户上下文用于权限检查
 		userInfo := &UserInfo{
@@ -1434,11 +1434,11 @@ func TestDefragment(t *testing.T) {
 		bucket := &BucketInfo{
 			ID:        testBktID,
 			Name:      "test_bucket",
-			UID:       uid,
 			Type:      1,
 			ChunkSize: 4 * 1024 * 1024, // 4MB
 		}
-		So(dma.PutBkt(c, []*BucketInfo{bucket}), ShouldBeNil)
+		ctx := UserInfo2Ctx(c, &UserInfo{ID: uid})
+		So(dma.PutBkt(ctx, []*BucketInfo{bucket}), ShouldBeNil)
 
 		admin := NewNoAuthAdmin()
 

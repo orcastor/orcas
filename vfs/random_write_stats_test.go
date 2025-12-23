@@ -25,7 +25,7 @@ func TestRandomWriteRedundancy(t *testing.T) {
 	lh := core.NewLocalHandler().(*core.LocalHandler)
 	lh.SetAdapter(dma, dda)
 
-	ctx, userInfo, _, err := lh.Login(context.Background(), "orcas", "orcas")
+	ctx, _, _, err := lh.Login(context.Background(), "orcas", "orcas")
 	if err != nil {
 		t.Fatalf("Login failed: %v", err)
 	}
@@ -33,7 +33,6 @@ func TestRandomWriteRedundancy(t *testing.T) {
 	bucket := &core.BucketInfo{
 		ID:    testBktID,
 		Name:  "test",
-		UID:   userInfo.ID,
 		Type:  1,
 		Quota: 10 << 30, // 10GB quota
 	}

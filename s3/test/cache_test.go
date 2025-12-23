@@ -60,7 +60,6 @@ func setupTestEnvironmentForCache(t *testing.T) (int64, *gin.Engine) {
 	bkt := &core.BucketInfo{
 		ID:    testBktID,
 		Name:  "test-bucket",
-		UID:   1,
 		Type:  1,
 		Quota: -1, // 无限制配额
 	}
