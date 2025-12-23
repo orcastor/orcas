@@ -20,7 +20,7 @@ import (
 
 var (
 	configFile  = flag.String("config", "", "Configuration file path (JSON format)")
-	action      = flag.String("action", "", "Operation type: upload, download, mount, add-user, update-user, delete-user, list-users, create-bucket, delete-bucket, list-buckets, update-bucket, change-db-key")
+	action      = flag.String("action", "", "Operation type: upload, download, mount, add-user, update-user, delete-user, list-users, create-bucket, delete-bucket, list-buckets, update-bucket")
 	localPath   = flag.String("local", "", "Local file or directory path")
 	remotePath  = flag.String("remote", "", "Remote path (relative to bucket root directory)")
 	mountPoint  = flag.String("mountpoint", "", "Mount point path (for mount action)")
@@ -30,8 +30,7 @@ var (
 	bucketOwner = flag.String("owner", "", "Bucket owner username or user ID (for create-bucket, default is current user)")
 
 	// Database key parameters
-	dbKey    = flag.String("dbkey", "", "Main database encryption key (for InitDB and change-db-key, used as old    key)")
-	newDbKey = flag.String("newdbkey", "", "New database encryption key (for change-db   -key)")
+	dbKey    = flag.String("dbkey", "", "Main database encryption key (for InitDB)")
 
 	//  Configuration parameters (can be set via command line arguments or configuration file)
 	userName = flag.String("user", "", "Username")
@@ -83,12 +82,10 @@ func main() {
 
 	// Determine if main database is needed
 	// Main database is required for:
-	// 1. Database key management operations
-	// 2. User management operations
-	// 3. Bucket management operations (need ACL)
-	// 4. Login operations (unless NoAuth is used)
-	needsMainDB := *action == "change-db-key" ||
-		*action == "add-user" || *action == "update-user" ||
+	// 1. User management operations
+	// 2. Bucket management operations (need ACL)
+	// 3. Login operations (unless NoAuth is used)
+	needsMainDB := *action == "add-user" || *action == "update-user" ||
 		*action == "delete-user" || *action == "list-users" ||
 		*action == "create-bucket" || *action == "delete-bucket" ||
 		*action == "list-buckets" || *action == "update-bucket" ||
@@ -101,12 +98,6 @@ func main() {
 			dbKeyValue = *dbKey
 		}
 		core.InitDB(dbKeyValue)
-	}
-
-	// Handle database key management
-	if *action == "change-db-key" {
-		handleChangeDBKey()
-		return
 	}
 
 	// Handle user management and bucket management commands
@@ -1033,25 +1024,6 @@ func handleBucketManagement() {
 		fmt.Fprintf(os.Stderr, "Error: Unknown bucket management action: %s\n", *action)
 		os.Exit(1)
 	}
-}
-
-func handleChangeDBKey() {
-	// dbKey is used as oldKey, newDbKey can be empty (unencrypted)
-	oldKey := *dbKey
-	newKey := *newDbKey
-
-	fmt.Printf("Changing database encryption key...\n")
-	fmt.Printf("  Old key: %s\n", maskKey(oldKey))
-	fmt.Printf("  New key: %s\n", maskKey(newKey))
-
-	err := core.ChangeDBKey(oldKey, newKey)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to change database key: %v\n", err)
-		os.Exit(1)
-	}
-
-	fmt.Println("Database key changed successfully!")
-	fmt.Println("  Backup file: meta.db.backup")
 }
 
 func getCompressionString(cmprWay uint32) string {
