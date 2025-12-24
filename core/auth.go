@@ -175,31 +175,6 @@ func getKey(c Ctx) string {
 	return ""
 }
 
-
-// getBasePath returns the base path from context, or falls back to current directory "."
-func getBasePath(c Ctx) string {
-	if c != nil {
-		if v, ok := c.Value("o").(map[string]interface{}); ok {
-			if basePath, okk := v["basePath"].(string); okk && basePath != "" {
-				return basePath
-			}
-		}
-	}
-	return "."
-}
-
-// getDataPath returns the data path from context, or falls back to current directory "."
-func getDataPath(c Ctx) string {
-	if c != nil {
-		if v, ok := c.Value("o").(map[string]interface{}); ok {
-			if dataPath, okk := v["dataPath"].(string); okk && dataPath != "" {
-				return dataPath
-			}
-		}
-	}
-	return "."
-}
-
 // NoAuthAccessCtrlMgr is an AccessCtrlMgr that bypasses all permission checks
 // This bypasses authentication and authorization checks that require the main database
 // (user table and ACL table), but bucket database operations (data and object metadata)

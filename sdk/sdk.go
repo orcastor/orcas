@@ -29,15 +29,12 @@ const (
 	SKIP   = core.CONFLICT_SKIP   // Skip
 )
 
-// Config is now defined in core package, use type alias for backward compatibility
-type Config = core.Config
-
 type OrcasSDK interface {
 	H() core.Handler
 
 	Close()
 
-	Login(cfg Config) (core.Ctx, *core.UserInfo, []*core.BucketInfo, error)
+	Login(cfg core.Config) (core.Ctx, *core.UserInfo, []*core.BucketInfo, error)
 
 	Path2ID(c core.Ctx, bktID, pid int64, rpath string) (id int64, err error)
 	ID2Path(c core.Ctx, bktID, id int64) (rpath string, err error)
@@ -48,7 +45,7 @@ type OrcasSDK interface {
 
 type OrcasSDKImpl struct {
 	h   core.Handler
-	cfg Config
+	cfg core.Config
 	bl  []string
 	f   *Fanout
 }
@@ -65,7 +62,7 @@ func (osi *OrcasSDKImpl) H() core.Handler {
 	return osi.h
 }
 
-func (osi *OrcasSDKImpl) Login(cfg Config) (core.Ctx, *core.UserInfo, []*core.BucketInfo, error) {
+func (osi *OrcasSDKImpl) Login(cfg core.Config) (core.Ctx, *core.UserInfo, []*core.BucketInfo, error) {
 	if cfg.UserName == "" {
 		return nil, nil, nil, errors.New(`UserName is empty.`)
 	}

@@ -52,7 +52,7 @@ func TestDokanyMountOptions(t *testing.T) {
 	}
 
 	// Get user info for bucket creation
-	_, userInfo, _, err := handler.Login(ctx, "orcas", "orcas")
+	_, _, _, err = handler.Login(ctx, "orcas", "orcas")
 	if err != nil {
 		t.Fatalf("Login failed: %v", err)
 	}
@@ -121,7 +121,7 @@ func TestDokanyOperations(t *testing.T) {
 	}
 
 	// Get user info for bucket creation
-	_, userInfo, _, err := handler.Login(ctx, "orcas", "orcas")
+	_, _, _, err = handler.Login(ctx, "orcas", "orcas")
 	if err != nil {
 		t.Fatalf("Login failed: %v", err)
 	}
@@ -234,7 +234,7 @@ func TestDokanyDirectoryOperations(t *testing.T) {
 	}
 
 	// Get user info for bucket creation
-	_, userInfo, _, err := handler.Login(ctx, "orcas", "orcas")
+	_, _, _, err = handler.Login(ctx, "orcas", "orcas")
 	if err != nil {
 		t.Fatalf("Login failed: %v", err)
 	}
@@ -375,7 +375,7 @@ func TestDokanyCreateFile(t *testing.T) {
 	}
 
 	// Get user info for bucket creation
-	_, userInfo, _, err := handler.Login(ctx, "orcas", "orcas")
+	_, _, _, err = handler.Login(ctx, "orcas", "orcas")
 	if err != nil {
 		t.Fatalf("Login failed: %v", err)
 	}
@@ -442,7 +442,7 @@ func TestDokanyWriteAndRead(t *testing.T) {
 	}
 
 	// Get user info for bucket creation
-	_, userInfo, _, err := handler.Login(ctx, "orcas", "orcas")
+	_, _, _, err = handler.Login(ctx, "orcas", "orcas")
 	if err != nil {
 		t.Fatalf("Login failed: %v", err)
 	}
@@ -692,7 +692,7 @@ func TestTmpFileRenameCacheUpdate(t *testing.T) {
 	}
 
 	// Get user info for bucket creation
-	_, userInfo, _, err := handler.Login(ctx, "orcas", "orcas")
+	_, _, _, err = handler.Login(ctx, "orcas", "orcas")
 	if err != nil {
 		t.Fatalf("Login failed: %v", err)
 	}
@@ -846,7 +846,7 @@ func TestRenameBeforeFlush(t *testing.T) {
 	}
 
 	// Get user info for bucket creation
-	_, userInfo, _, err := handler.Login(ctx, "orcas", "orcas")
+	_, _, _, err = handler.Login(ctx, "orcas", "orcas")
 	if err != nil {
 		t.Fatalf("Login failed: %v", err)
 	}

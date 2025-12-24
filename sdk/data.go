@@ -35,17 +35,17 @@ const (
 )
 
 type listener struct {
-	bktID     int64
-	d         *core.DataInfo
-	cfg       Config
-	action    uint32
+	bktID      int64
+	d          *core.DataInfo
+	cfg        core.Config
+	action     uint32
 	sha256Hash hash.Hash
 	xxh3Hash   *xxh3.Hasher
-	once      bool
-	sn, cnt   int
-	cmprBuf   bytes.Buffer
-	cmpr      archiver.Compressor
-	chunkSize int64 // Chunk size obtained from bucket configuration
+	once       bool
+	sn, cnt    int
+	cmprBuf    bytes.Buffer
+	cmpr       archiver.Compressor
+	chunkSize  int64 // Chunk size obtained from bucket configuration
 }
 
 // getChunkSize gets chunk size (obtained from bucket configuration, uses default value if not set)
@@ -56,7 +56,7 @@ func (l *listener) getChunkSize() int64 {
 	return DEFAULT_CHUNK
 }
 
-func newListener(bktID int64, d *core.DataInfo, cfg Config, action uint32, chunkSize int64) *listener {
+func newListener(bktID int64, d *core.DataInfo, cfg core.Config, action uint32, chunkSize int64) *listener {
 	l := &listener{bktID: bktID, d: d, cfg: cfg, action: action, chunkSize: chunkSize}
 	if action&XXH3_SHA256 != 0 {
 		l.sha256Hash = sha256.New()
@@ -91,9 +91,9 @@ func (l *listener) OnData(c core.Ctx, h core.Handler, dp *dataPkger, buf []byte)
 	if l.cnt == 0 {
 		if l.action&HDR_XXH3 != 0 {
 			if len(buf) > HdrSize {
-				l.d.HdrXXH3 = xxh3.Hash(buf[0:HdrSize])
+				l.d.HdrXXH3 = int64(xxh3.Hash(buf[0:HdrSize]))
 			} else {
-				l.d.HdrXXH3 = xxh3.Hash(buf)
+				l.d.HdrXXH3 = int64(xxh3.Hash(buf))
 			}
 		}
 		// If smart compression is enabled, check file type to determine whether to compress
@@ -168,7 +168,7 @@ func (l *listener) OnData(c core.Ctx, h core.Handler, dp *dataPkger, buf []byte)
 			// Update Cksum using XXH3
 			xxh3Hash := xxh3.New()
 			xxh3Hash.Write(encodedBuf)
-			l.d.Cksum = xxh3Hash.Sum64()
+			l.d.Cksum = int64(xxh3Hash.Sum64())
 			l.d.Size += int64(len(encodedBuf))
 		}
 
@@ -199,7 +199,7 @@ func (l *listener) OnData(c core.Ctx, h core.Handler, dp *dataPkger, buf []byte)
 func (l *listener) OnFinish(c core.Ctx, h core.Handler) error {
 	if l.action&XXH3_SHA256 != 0 {
 		// Calculate XXH3 and SHA-256
-		l.d.XXH3 = l.xxh3Hash.Sum64()
+		l.d.XXH3 = int64(l.xxh3Hash.Sum64())
 		sha256Sum := l.sha256Hash.Sum(nil)
 		l.d.SHA256_0 = int64(binary.BigEndian.Uint64(sha256Sum[0:8]))
 		l.d.SHA256_1 = int64(binary.BigEndian.Uint64(sha256Sum[8:16]))
@@ -222,7 +222,7 @@ func (l *listener) OnFinish(c core.Ctx, h core.Handler) error {
 		// Update Cksum using XXH3
 		xxh3Hash := xxh3.New()
 		xxh3Hash.Write(encodedBuf)
-		l.d.Cksum = xxh3Hash.Sum64()
+		l.d.Cksum = int64(xxh3Hash.Sum64())
 		l.d.Size += int64(len(encodedBuf))
 	}
 	// If neither compressed nor encrypted, use original data's XXH3 and size

@@ -1399,8 +1399,8 @@ func PutObject(c *gin.Context) {
 	// Pre-calculate checksums once for both instant upload and normal upload paths
 	// This avoids redundant calculation if instant upload fails
 	// Only calculate checksums if instant upload is enabled or if we need them for DataInfo
-	var hdrXXH3 uint64
-	var xxh3Val uint64
+	var hdrXXH3 int64
+	var xxh3Val int64
 	var sha256_0, sha256_1, sha256_2, sha256_3 int64
 	var checksumsCalculated bool
 	instantUploadEnabled := core.IsInstantUploadEnabled()
@@ -1740,8 +1740,27 @@ func DeleteObject(c *gin.Context) {
 	ctx := c.Request.Context()
 	obj, err := findObjectByPath(c, bktID, key)
 	if err != nil {
-		util.S3ErrorResponse(c, http.StatusNotFound, "NoSuchKey", "The specified key does not exist")
-		return
+		// In concurrent scenarios, object might not be found due to cache inconsistency
+		// Try invalidating cache and retry once
+		invalidatePathCache(bktID, key)
+		parentPath := util.FastDir(key)
+		if parentPath != "." && parentPath != "/" && parentPath != "" {
+			invalidatePathCache(bktID, parentPath)
+		}
+		// Try to get parent PID and invalidate dir list cache
+		if parentPath != "." && parentPath != "/" && parentPath != "" {
+			if parentObj, err2 := findObjectByPath(c, bktID, parentPath); err2 == nil && parentObj != nil {
+				invalidateDirListCache(parentObj.ID)
+			}
+		} else {
+			invalidateDirListCache(0)
+		}
+		// Retry once after cache invalidation
+		obj, err = findObjectByPath(c, bktID, key)
+		if err != nil {
+			util.S3ErrorResponse(c, http.StatusNotFound, "NoSuchKey", "The specified key does not exist")
+			return
+		}
 	}
 
 	if err := handler.Delete(ctx, bktID, obj.ID); err != nil {

@@ -27,8 +27,17 @@ func init() {
 
 func TestRefData(t *testing.T) {
 	Convey("normal", t, func() {
-		dma := &DefaultMetadataAdapter{}
-		InitBucketDB(".", bktID)
+		baseDir, dataDir, cleanup := SetupTestDirs("test_ref_data")
+		defer cleanup()
+
+		InitDB(baseDir, "")
+		dma := &DefaultMetadataAdapter{
+			DefaultBaseMetadataAdapter: &DefaultBaseMetadataAdapter{},
+			DefaultDataMetadataAdapter: &DefaultDataMetadataAdapter{},
+		}
+		dma.DefaultBaseMetadataAdapter.SetPath(baseDir)
+		dma.DefaultDataMetadataAdapter.SetPath(dataDir)
+		InitBucketDB(dataDir, bktID)
 
 		id, _ := idgen.NewIDGen(nil, 0).New()
 		So(dma.PutData(c, bktID, []*DataInfo{{
@@ -364,7 +373,7 @@ func TestSetObj(t *testing.T) {
 		So(o[1], ShouldResemble, d1)
 		Convey("set obj name", func() {
 			d.Name = "test1"
-			dma.SetObj(c, bktID, []string{"name"}, &ObjectInfo{ID: id, Name: d.Name})
+			dma.SetObj(c, bktID, []string{"n"}, &ObjectInfo{ID: id, Name: d.Name})
 			o, err = dma.GetObj(c, bktID, ids)
 			So(err, ShouldBeNil)
 			So(len(o), ShouldEqual, 2)
@@ -374,7 +383,7 @@ func TestSetObj(t *testing.T) {
 
 		Convey("same obj name", func() {
 			d.Name = "test2"
-			err := dma.SetObj(c, bktID, []string{"name"}, &ObjectInfo{ID: id, Name: d.Name})
+			err := dma.SetObj(c, bktID, []string{"n"}, &ObjectInfo{ID: id, Name: d.Name})
 			So(err, ShouldEqual, ERR_DUP_KEY)
 		})
 	})

@@ -285,6 +285,10 @@ func (lh *LocalHandler) SetPaths(basePath, dataPath string) {
 		dma.DefaultBaseMetadataAdapter.SetPath(basePath)
 		dma.DefaultDataMetadataAdapter.SetPath(dataPath)
 	}
+	// Also set data path in data adapter
+	if dda, ok := lh.da.(*DefaultDataAdapter); ok {
+		dda.SetPath(dataPath)
+	}
 }
 
 // GetDataAdapter returns the DataAdapter instance
@@ -296,7 +300,7 @@ func (lh *LocalHandler) GetDataAdapter() DataAdapter {
 // SetBucketConfig sets bucket configuration for a bucket
 // This allows ConvertWritingVersions and other operations to access bucket config
 func (lh *LocalHandler) SetBucketConfig(bktID int64, bucket *BucketInfo) {
-	if bucket != nil {
+	if bucket != nil && lh.bucketConfigs != nil {
 		lh.bucketConfigs.Put(bktID, bucket)
 		// Note: CmprWay, CmprQlty, EndecWay, EndecKey are no longer stored in bucket config
 		// They should be provided via core.Config in business layer (cmd/vfs)
@@ -402,9 +406,11 @@ func (lh *LocalHandler) PutData(c Ctx, bktID, dataID int64, sn int, buf []byte) 
 	if dataSize > 0 {
 		// Optimization: Use bucket cache to avoid database query on every write
 		var bucket *BucketInfo
-		if cached, ok := lh.bucketConfigs.Get(bktID); ok {
-			if bktInfo, ok := cached.(*BucketInfo); ok && bktInfo != nil {
-				bucket = bktInfo
+		if lh.bucketConfigs != nil {
+			if cached, ok := lh.bucketConfigs.Get(bktID); ok {
+				if bktInfo, ok := cached.(*BucketInfo); ok && bktInfo != nil {
+					bucket = bktInfo
+				}
 			}
 		}
 
@@ -461,9 +467,11 @@ func (lh *LocalHandler) PutDataFromReader(c Ctx, bktID, dataID int64, sn int, r 
 	if size > 0 {
 		// Optimization: Use bucket cache to avoid database query on every write
 		var bucket *BucketInfo
-		if cached, ok := lh.bucketConfigs.Get(bktID); ok {
-			if bktInfo, ok := cached.(*BucketInfo); ok && bktInfo != nil {
-				bucket = bktInfo
+		if lh.bucketConfigs != nil {
+			if cached, ok := lh.bucketConfigs.Get(bktID); ok {
+				if bktInfo, ok := cached.(*BucketInfo); ok && bktInfo != nil {
+					bucket = bktInfo
+				}
 			}
 		}
 
@@ -893,14 +901,14 @@ func (lh *LocalHandler) Put(c Ctx, bktID int64, o []*ObjectInfo) ([]int64, error
 							Size:   dataInfo.OrigSize,
 							MTime:  obj.MTime,
 						}
-						lh.ma.SetObj(c, bktID, []string{"did", "size", "mtime"}, updateObj)
+						lh.ma.SetObj(c, bktID, []string{"did", "s", "m"}, updateObj)
 					} else {
 						updateObj := &ObjectInfo{
 							ID:     parent.ID,
 							DataID: obj.DataID,
 							MTime:  obj.MTime,
 						}
-						lh.ma.SetObj(c, bktID, []string{"did", "mtime"}, updateObj)
+						lh.ma.SetObj(c, bktID, []string{"did", "m"}, updateObj)
 					}
 				}
 			}
@@ -970,7 +978,7 @@ func (lh *LocalHandler) Rename(c Ctx, bktID, id int64, name string) error {
 	if err := lh.acm.CheckPermission(c, MDW, bktID); err != nil {
 		return err
 	}
-	return lh.ma.SetObj(c, bktID, []string{"name"}, &ObjectInfo{ID: id, Name: name})
+	return lh.ma.SetObj(c, bktID, []string{"n"}, &ObjectInfo{ID: id, Name: name})
 }
 
 // CreateVersionFromFile creates a new version from an existing file
@@ -1075,14 +1083,7 @@ func (lh *LocalHandler) GetBktInfo(c Ctx, bktID int64) (*BucketInfo, error) {
 	if len(buckets) == 0 {
 		return nil, ERR_QUERY_DB
 	}
-	bucket := buckets[0]
-	// 同步bucket配置到SDKConfig
-	if bucket != nil {
-		// CmprWay is now smart compression by default
-		// Compression and encryption config are no longer stored in bucket, should be provided via SDK config
-		// lh.SetSDKConfig(bktID, 0, 0, 0, "")
-	}
-	return bucket, nil
+	return buckets[0], nil
 }
 
 func (lh *LocalHandler) UpdateFileLatestVersion(c Ctx, bktID int64) error {
@@ -1099,16 +1100,23 @@ type LocalAdmin struct {
 }
 
 func NewLocalAdmin() Admin {
+	return NewLocalAdminWithPaths(".", ".")
+}
+
+// NewLocalAdminWithPaths creates a LocalAdmin with specified paths
+func NewLocalAdminWithPaths(basePath, dataPath string) Admin {
 	dma := &DefaultMetadataAdapter{
 		DefaultBaseMetadataAdapter: &DefaultBaseMetadataAdapter{},
 		DefaultDataMetadataAdapter: &DefaultDataMetadataAdapter{},
 	}
-	// Set default paths to current directory
-	dma.DefaultBaseMetadataAdapter.SetPath(".")
-	dma.DefaultDataMetadataAdapter.SetPath(".")
+	// Set paths
+	dma.DefaultBaseMetadataAdapter.SetPath(basePath)
+	dma.DefaultDataMetadataAdapter.SetPath(dataPath)
+	dda := &DefaultDataAdapter{}
+	dda.SetPath(dataPath)
 	return &LocalAdmin{
 		ma:  dma,
-		da:  &DefaultDataAdapter{},
+		da:  dda,
 		acm: &DefaultAccessCtrlMgr{ma: dma},
 	}
 }
@@ -1119,16 +1127,23 @@ func NewLocalAdmin() Admin {
 // This is useful for testing, internal operations, or when authentication is handled externally.
 // The admin uses NoAuthAccessCtrlMgr which always allows all operations without querying the main database.
 func NewNoAuthAdmin() Admin {
+	return NewNoAuthAdminWithPaths(".", ".")
+}
+
+// NewNoAuthAdminWithPaths creates a NoAuthAdmin with specified paths
+func NewNoAuthAdminWithPaths(basePath, dataPath string) Admin {
 	dma := &DefaultMetadataAdapter{
 		DefaultBaseMetadataAdapter: &DefaultBaseMetadataAdapter{},
 		DefaultDataMetadataAdapter: &DefaultDataMetadataAdapter{},
 	}
-	// Set default paths to current directory
-	dma.DefaultBaseMetadataAdapter.SetPath(".")
-	dma.DefaultDataMetadataAdapter.SetPath(".")
+	// Set paths
+	dma.DefaultBaseMetadataAdapter.SetPath(basePath)
+	dma.DefaultDataMetadataAdapter.SetPath(dataPath)
+	dda := &DefaultDataAdapter{}
+	dda.SetPath(dataPath)
 	return &LocalAdmin{
 		ma:  dma,
-		da:  &DefaultDataAdapter{},
+		da:  dda,
 		acm: &NoAuthAccessCtrlMgr{},
 	}
 }

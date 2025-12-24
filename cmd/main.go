@@ -32,6 +32,10 @@ var (
 	// Database key parameters
 	dbKey = flag.String("dbkey", "", "Main database encryption key (for InitDB)")
 
+	// Path parameters
+	basePath = flag.String("basepath", "", "Base path for metadata (database storage location)")
+	dataPath = flag.String("datapath", "", "Data path for file data storage location")
+
 	//  Configuration parameters (can be set via command line arguments or configuration file)
 	userName = flag.String("user", "", "Username")
 	password = flag.String("pass", "", "Password")
@@ -60,21 +64,6 @@ var (
 	noAuth     = flag.Bool("noauth", false, "Bypass authentication and permission checks (no user required, for mount action)")
 )
 
-type Config struct {
-	UserName string `json:"user_name"`
-	Password string `json:"password"`
-	NoAuth   bool   `json:"no_auth"` // If true, bypass authentication (no user required)
-	RefLevel string `json:"ref_level"`
-	CmprWay  string `json:"cmpr_way"`
-	CmprQlty int    `json:"cmpr_qlty"`
-	EndecWay string `json:"endec_way"`
-	EndecKey string `json:"endec_key"`
-	DontSync string `json:"dont_sync"`
-	Conflict string `json:"conflict"`
-	NameTmpl string `json:"name_tmpl"`
-	WorkersN int    `json:"workers_n"`
-}
-
 func main() {
 	flag.Parse()
 
@@ -88,31 +77,6 @@ func main() {
 		*action == "create-bucket" || *action == "delete-bucket" ||
 		*action == "list-buckets" || *action == "update-bucket" ||
 		(*action != "mount" && *action != "" && !*noAuth)
-
-	// Initialize database only if needed
-	if needsMainDB {
-		var dbKeyValue string
-		if *dbKey != "" {
-			dbKeyValue = *dbKey
-		}
-		core.InitDB(os.Getenv("ORCAS_BASE"), dbKeyValue)
-	}
-
-	// Handle user management and bucket management commands
-	if *action == "add-user" || *action == "update-user" || *action == "delete-user" || *action == "list-users" {
-		handleUserManagement()
-		return
-	}
-	if *action == "create-bucket" || *action == "delete-bucket" || *action == "list-buckets" || *action == "update-bucket" {
-		handleBucketManagement()
-		return
-	}
-
-	// Handle mount operation
-	if *action == "mount" {
-		handleMount()
-		return
-	}
 
 	// Load configuration for upload/download operations
 	cfg, err := loadConfig()
@@ -141,16 +105,38 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Convert configuration to SDK Config
-	sdkCfg := convertToSDKConfig(cfg)
+	// Initialize database only if needed
+	if needsMainDB {
+		var dbKeyValue string
+		if *dbKey != "" {
+			dbKeyValue = *dbKey
+		}
+		core.InitDB(cfg.BasePath, dbKeyValue)
+	}
+
+	// Handle user management and bucket management commands
+	if *action == "add-user" || *action == "update-user" || *action == "delete-user" || *action == "list-users" {
+		handleUserManagement()
+		return
+	}
+	if *action == "create-bucket" || *action == "delete-bucket" || *action == "list-buckets" || *action == "update-bucket" {
+		handleBucketManagement()
+		return
+	}
+
+	// Handle mount operation
+	if *action == "mount" {
+		handleMount()
+		return
+	}
 
 	// Create SDK instance
-	handler := core.NewLocalHandler("", "")
+	handler := core.NewLocalHandler(cfg.BasePath, cfg.DataPath)
 	sdkInstance := sdk.New(handler)
 	defer sdkInstance.Close()
 
 	// Login
-	ctx, userInfo, buckets, err := sdkInstance.Login(sdkCfg)
+	ctx, userInfo, buckets, err := sdkInstance.Login(cfg)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Login failed: %v\n", err)
 		os.Exit(1)
@@ -260,15 +246,13 @@ func handleMount() {
 		os.Exit(1)
 	}
 
-	// Convert configuration to SDK Config
-	sdkCfg := convertToSDKConfig(cfg)
 	// Validate encryption key length
-	if sdkCfg.EndecWay == core.DATA_ENDEC_AES256 && len(sdkCfg.EndecKey) <= 16 {
-		fmt.Fprintf(os.Stderr, "Error: AES256 encryption key must be longer than 16 characters (current length: %d)\n", len(sdkCfg.EndecKey))
+	if cfg.EndecWay == core.DATA_ENDEC_AES256 && len(cfg.EndecKey) <= 16 {
+		fmt.Fprintf(os.Stderr, "Error: AES256 encryption key must be longer than 16 characters (current length: %d)\n", len(cfg.EndecKey))
 		os.Exit(1)
 	}
-	if sdkCfg.EndecWay == core.DATA_ENDEC_SM4 && len(sdkCfg.EndecKey) != 16 {
-		fmt.Fprintf(os.Stderr, "Error: SM4 encryption key must be exactly 16 characters (current length: %d)\n", len(sdkCfg.EndecKey))
+	if cfg.EndecWay == core.DATA_ENDEC_SM4 && len(cfg.EndecKey) != 16 {
+		fmt.Fprintf(os.Stderr, "Error: SM4 encryption key must be exactly 16 characters (current length: %d)\n", len(cfg.EndecKey))
 		os.Exit(1)
 	}
 
@@ -281,6 +265,10 @@ func handleMount() {
 		// NoAuth mode: use NoAuthHandler and skip login
 		handler = core.NewNoAuthHandler("", "")
 		defer handler.Close()
+		// Set paths if configured
+		if cfg.BasePath != "" || cfg.DataPath != "" {
+			handler.SetPaths(cfg.BasePath, cfg.DataPath)
+		}
 		ctx = context.Background()
 
 		// In NoAuth mode, bucket ID must be specified
@@ -295,6 +283,10 @@ func handleMount() {
 		// Normal mode: use LocalHandler and login
 		handler = core.NewLocalHandler("", "")
 		defer handler.Close()
+		// Set paths if configured
+		if cfg.BasePath != "" || cfg.DataPath != "" {
+			handler.SetPaths(cfg.BasePath, cfg.DataPath)
+		}
 
 		// Login
 		var userInfo *core.UserInfo
@@ -335,19 +327,19 @@ func handleMount() {
 	// Display configuration
 	fmt.Printf("\nMount Configuration:\n")
 	fmt.Printf("  Mount Point: %s\n", *mountPoint)
-	if sdkCfg.EndecWay == core.DATA_ENDEC_AES256 {
+	if cfg.EndecWay == core.DATA_ENDEC_AES256 {
 		fmt.Printf("  Encryption: AES256\n")
-	} else if sdkCfg.EndecWay == core.DATA_ENDEC_SM4 {
+	} else if cfg.EndecWay == core.DATA_ENDEC_SM4 {
 		fmt.Printf("  Encryption: SM4\n")
 	}
-	if sdkCfg.CmprWay == core.DATA_CMPR_SNAPPY {
-		fmt.Printf("  Compression: SNAPPY (level: %d)\n", sdkCfg.CmprQlty)
-	} else if sdkCfg.CmprWay == core.DATA_CMPR_ZSTD {
-		fmt.Printf("  Compression: ZSTD (level: %d)\n", sdkCfg.CmprQlty)
-	} else if sdkCfg.CmprWay == core.DATA_CMPR_GZIP {
-		fmt.Printf("  Compression: GZIP (level: %d)\n", sdkCfg.CmprQlty)
-	} else if sdkCfg.CmprWay == core.DATA_CMPR_BR {
-		fmt.Printf("  Compression: BROTLI (level: %d)\n", sdkCfg.CmprQlty)
+	if cfg.CmprWay == core.DATA_CMPR_SNAPPY {
+		fmt.Printf("  Compression: SNAPPY (level: %d)\n", cfg.CmprQlty)
+	} else if cfg.CmprWay == core.DATA_CMPR_ZSTD {
+		fmt.Printf("  Compression: ZSTD (level: %d)\n", cfg.CmprQlty)
+	} else if cfg.CmprWay == core.DATA_CMPR_GZIP {
+		fmt.Printf("  Compression: GZIP (level: %d)\n", cfg.CmprQlty)
+	} else if cfg.CmprWay == core.DATA_CMPR_BR {
+		fmt.Printf("  Compression: BROTLI (level: %d)\n", cfg.CmprQlty)
 	}
 	if *requireKey {
 		fmt.Printf("  Require Key: Enabled (EPERM if KEY not provided)\n")
@@ -364,7 +356,7 @@ func handleMount() {
 	mountOpts := &vfs.MountOptions{
 		MountPoint: *mountPoint,
 		Foreground: true,
-		Config:     &sdkCfg,
+		Config:     &cfg,
 		Debug:      *debug,
 		RequireKey: *requireKey,
 	}
@@ -387,14 +379,19 @@ func handleMount() {
 	fmt.Println("Filesystem unmounted successfully")
 }
 
-func loadConfig() (*Config, error) {
-	cfg := &Config{}
+func loadConfig() (core.Config, error) {
+	cfg := core.Config{}
 
 	// If configuration file is specified, load it first
 	if *configFile != "" {
-		if err := loadJSONConfig(*configFile, cfg); err != nil {
-			return nil, fmt.Errorf("failed to load configuration file: %v", err)
+		data, err := os.ReadFile(*configFile)
+		if err != nil {
+			return core.Config{}, fmt.Errorf("failed to load configuration file: %v", err)
 		}
+		if err := json.Unmarshal(data, &cfg); err != nil {
+			return core.Config{}, fmt.Errorf("failed to load configuration file: %v", err)
+		}
+		return cfg, nil
 	}
 
 	// Command line arguments override values in configuration file
@@ -416,17 +413,17 @@ func loadConfig() (*Config, error) {
 		cfg.NoAuth = true
 	}
 	if *refLevel != "" {
-		cfg.RefLevel = *refLevel
+		cfg.RefLevel = core.REF_LEVEL_FULL
 	}
 	if *cmprWay != "" {
-		cfg.CmprWay = *cmprWay
+		cfg.CmprWay = core.DATA_CMPR_GZIP
 	}
 	// cmprqlty default value is 0, if command line sets a value greater than 0, use it
 	if *cmprQlty > 0 {
-		cfg.CmprQlty = *cmprQlty
+		cfg.CmprQlty = uint32(*cmprQlty)
 	}
 	if *endecWay != "" {
-		cfg.EndecWay = *endecWay
+		cfg.EndecWay = core.DATA_ENDEC_AES256
 	}
 	if *endecKey != "" {
 		cfg.EndecKey = *endecKey
@@ -435,25 +432,36 @@ func loadConfig() (*Config, error) {
 		cfg.DontSync = *dontSync
 	}
 	if *conflict != "" {
-		cfg.Conflict = *conflict
+		cfg.Conflict = core.CONFLICT_COVER
 	}
 	if *nameTmpl != "" {
 		cfg.NameTmpl = *nameTmpl
 	}
 	// workers default value is 0, if command line sets a value greater than 0, use it
 	if *workersN > 0 {
-		cfg.WorkersN = *workersN
+		cfg.WorkersN = uint32(*workersN)
+	}
+
+	// BasePath and DataPath priority: command line > config file > environment variables
+	// Command line arguments have highest priority
+	if *basePath != "" {
+		cfg.BasePath = *basePath
+	} else if cfg.BasePath == "" {
+		// Fallback to environment variable if not set in config file
+		if envBasePath := os.Getenv("ORCAS_BASE"); envBasePath != "" {
+			cfg.BasePath = envBasePath
+		}
+	}
+	if *dataPath != "" {
+		cfg.DataPath = *dataPath
+	} else if cfg.DataPath == "" {
+		// Fallback to environment variable if not set in config file
+		if envDataPath := os.Getenv("ORCAS_DATA"); envDataPath != "" {
+			cfg.DataPath = envDataPath
+		}
 	}
 
 	return cfg, nil
-}
-
-func loadJSONConfig(path string, cfg *Config) error {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return err
-	}
-	return json.Unmarshal(data, cfg)
 }
 
 // readPassword reads password from stdin with hidden input
@@ -535,75 +543,6 @@ func readPassword(prompt string) (string, error) {
 	return password, err
 }
 
-func convertToSDKConfig(cfg *Config) core.Config {
-	sdkCfg := core.Config{
-		UserName: cfg.UserName,
-		Password: cfg.Password,
-		NoAuth:   cfg.NoAuth,
-		DontSync: cfg.DontSync,
-		NameTmpl: cfg.NameTmpl,
-	}
-
-	// Convert RefLevel
-	switch cfg.RefLevel {
-	case "FULL":
-		sdkCfg.RefLevel = core.REF_LEVEL_FULL
-	case "FAST":
-		sdkCfg.RefLevel = core.REF_LEVEL_FAST
-	default:
-		sdkCfg.RefLevel = core.REF_LEVEL_OFF
-	}
-
-	// Convert CmprWay
-	switch cfg.CmprWay {
-	case "SNAPPY":
-		sdkCfg.CmprWay = core.DATA_CMPR_SNAPPY
-	case "ZSTD":
-		sdkCfg.CmprWay = core.DATA_CMPR_ZSTD
-	case "GZIP":
-		sdkCfg.CmprWay = core.DATA_CMPR_GZIP
-	case "BR":
-		sdkCfg.CmprWay = core.DATA_CMPR_BR
-	}
-
-	if cfg.CmprQlty > 0 {
-		sdkCfg.CmprQlty = uint32(cfg.CmprQlty)
-	}
-
-	// Convert EndecWay
-	switch cfg.EndecWay {
-	case "AES256":
-		sdkCfg.EndecWay = core.DATA_ENDEC_AES256
-		sdkCfg.EndecKey = cfg.EndecKey
-	case "SM4":
-		sdkCfg.EndecWay = core.DATA_ENDEC_SM4
-		sdkCfg.EndecKey = cfg.EndecKey
-	}
-	// If EndecKey is provided but EndecWay is not specified, still set the key
-	// (it will be used if the data requires decryption)
-	if cfg.EndecKey != "" && sdkCfg.EndecKey == "" {
-		sdkCfg.EndecKey = cfg.EndecKey
-	}
-
-	// Convert Conflict
-	switch cfg.Conflict {
-	case "RENAME":
-		sdkCfg.Conflict = core.CONFLICT_RENAME
-	case "THROW":
-		sdkCfg.Conflict = core.CONFLICT_THROW
-	case "SKIP":
-		sdkCfg.Conflict = core.CONFLICT_SKIP
-	default:
-		sdkCfg.Conflict = core.CONFLICT_COVER
-	}
-
-	if cfg.WorkersN > 0 {
-		sdkCfg.WorkersN = uint32(cfg.WorkersN)
-	}
-
-	return sdkCfg
-}
-
 func handleUserManagement() {
 	// Load configuration for admin login
 	cfg, err := loadConfig()
@@ -623,7 +562,7 @@ func handleUserManagement() {
 	}
 
 	// Create handler and login as admin
-	handler := core.NewLocalHandler("", "")
+	handler := core.NewLocalHandler(cfg.BasePath, cfg.DataPath)
 	ctx, userInfo, _, err := handler.Login(context.Background(), cfg.UserName, cfg.Password)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Login failed: %v\n", err)
@@ -768,7 +707,7 @@ func handleBucketManagement() {
 	}
 
 	// Create handler and login as admin
-	handler := core.NewLocalHandler("", "")
+	handler := core.NewLocalHandler(cfg.BasePath, cfg.DataPath)
 	ctx, userInfo, _, err := handler.Login(context.Background(), cfg.UserName, cfg.Password)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Login failed: %v\n", err)

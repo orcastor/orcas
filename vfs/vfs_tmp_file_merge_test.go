@@ -140,7 +140,7 @@ func TestTmpFileMergeAndDirectoryListing(t *testing.T) {
 
 		// Rename .tmp file to target file name
 		errno := rootNode.Rename(context.Background(), tmpFileName, targetNode, targetFileName, 0)
-		So(errno, ShouldEqual, 0)
+		So(int(errno), ShouldEqual, 0)
 
 		// Step 5: Verify directory listing after rename
 		// Wait a bit for async operations and delayed double delete to complete

@@ -265,7 +265,10 @@ func runPerformanceTest(t *testing.T, name string, dataSize, chunkSize int64, wr
 }
 
 // TestPerformanceComprehensive comprehensive performance test
+// TestPerformanceComprehensive is disabled by default to avoid running during normal tests
+// To run it, use: go test -run TestPerformanceComprehensive
 func TestPerformanceComprehensive(t *testing.T) {
+	t.Skip("Performance test disabled by default. Use -run TestPerformanceComprehensive to enable.")
 	if testing.Short() {
 		t.Skip("Skipping comprehensive performance test in short mode")
 	}

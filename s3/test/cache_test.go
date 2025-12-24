@@ -77,10 +77,11 @@ func setupTestEnvironmentForCache(t *testing.T) (int64, *gin.Engine) {
 	// 创建测试用的gin engine
 	router := gin.New()
 	router.Use(func(c *gin.Context) {
-		// 模拟JWT认证，设置UID
+		// 模拟JWT认证，设置UID和ADMIN角色
 		c.Set("uid", int64(1))
 		c.Request = c.Request.WithContext(core.UserInfo2Ctx(c.Request.Context(), &core.UserInfo{
-			ID: 1,
+			ID:   1,
+			Role: core.ADMIN, // Set admin role for CreateBucket
 		}))
 		c.Next()
 	})
@@ -130,10 +131,20 @@ func TestCachePutObjectListObjects(t *testing.T) {
 	key := "test-object-1"
 	testData := []byte("test data")
 
-	// 1. PutObject
-	req := httptest.NewRequest("PUT", fmt.Sprintf("/%s/%s", bucketName, key), bytes.NewReader(testData))
-	req.Header.Set("Content-Type", "application/octet-stream")
+	// 0. Create bucket via S3 API to ensure it's in the cache
+	req := httptest.NewRequest("PUT", fmt.Sprintf("/%s", bucketName), nil)
 	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	// Bucket may already exist (created in setup), so 200 or 409 is OK
+	// But if it returns 500, we should fail the test as bucket won't be available
+	if w.Code != http.StatusOK && w.Code != http.StatusConflict {
+		t.Fatalf("CreateBucket failed: status=%d, body=%s (bucket must exist for test)", w.Code, w.Body.String())
+	}
+
+	// 1. PutObject
+	req = httptest.NewRequest("PUT", fmt.Sprintf("/%s/%s", bucketName, key), bytes.NewReader(testData))
+	req.Header.Set("Content-Type", "application/octet-stream")
+	w = httptest.NewRecorder()
 	router.ServeHTTP(w, req)
 	if w.Code != http.StatusOK {
 		t.Fatalf("PutObject failed: status=%d, body=%s", w.Code, w.Body.String())

@@ -108,3 +108,15 @@ func CleanAllTestData() error {
 	}
 	return nil
 }
+
+// SetupTestDirs creates temporary directories for a test and returns cleanup function
+// Returns baseDir, dataDir, and cleanup function
+func SetupTestDirs(prefix string) (baseDir, dataDir string, cleanup func()) {
+	baseDir, _ = os.MkdirTemp("", prefix+"_base_")
+	dataDir, _ = os.MkdirTemp("", prefix+"_data_")
+	cleanup = func() {
+		os.RemoveAll(baseDir)
+		os.RemoveAll(dataDir)
+	}
+	return
+}

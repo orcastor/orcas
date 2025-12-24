@@ -203,31 +203,25 @@ OrcaS 支持灵活的路径管理，允许在同一进程中使用不同的存�
 
 默认情况下，OrcaS 使用当前目录（`.`）作为基础路径和数据路径。您可以使用下面的方法为每个 context 配置自定义路径。
 
-### 基于 Context 的路径配置
+### 路径配置
 
-您可以为每个 context 覆盖全局路径，从而在同一进程中启用多个存储位置：
+路径可以通过环境变量或在初始化处理器时通过 `Config` 结构体进行配置：
 
 ```go
 import (
-    "context"
     "github.com/orcastor/orcas/core"
 )
 
-// 方式1: 直接设置路径
-ctx := context.Background()
-ctx = core.Path2Ctx(ctx, "/path/to/base", "/path/to/data")
-
-// 方式2: 使用 Config 结构体
+// 通过 Config 结构体或环境变量设置路径
 cfg := &core.Config{
-    BasePath: "/custom/base/path",
-    DataPath: "/custom/data/path",
+    BasePath: "/custom/base/path",  // 覆盖 ORCAS_BASE
+    DataPath: "/custom/data/path",  // 覆盖 ORCAS_DATA
     // ... 其他配置选项
 }
-ctx = core.Config2Ctx(ctx, cfg)
 
-// 使用此 context 的所有操作都将使用指定的路径
+// Config 在创建处理器或挂载文件系统时使用
 handler := core.NewLocalHandler()
-dataID, err := handler.PutData(ctx, bktID, 0, -1, data)
+// 将使用 Config 或环境变量中的路径
 ```
 
 ### 优势

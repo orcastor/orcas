@@ -15,7 +15,7 @@ import (
 // Note: ORCAS_BASE and ORCAS_DATA are no longer used as environment variables.
 // Paths are configured via context using Path2Ctx or Config2Ctx, defaulting to current directory (.)
 var (
-	cfg = Config{
+	cfg = core.Config{
 		UserName: "orcas",
 		Password: "orcas",
 		RefLevel: FULL,
@@ -28,28 +28,28 @@ var (
 )
 
 func init() {
-	core.InitDB(".", "")
+	// Use temporary directories for init
+	baseDir, dataDir, _ := core.SetupTestDirs("sdk_init")
+	core.InitDB(baseDir, "")
 
-	sdk := New(core.NewLocalHandler(".", "."))
+	sdk := New(core.NewLocalHandler(baseDir, dataDir))
 	defer sdk.Close()
 
 	c, _, b, _ := sdk.Login(cfg)
 	if len(b) <= 0 {
 		bktID, _ := idgen.NewIDGen(nil, 0).New()
-		core.InitBucketDB(".", bktID)
-		core.NewLocalAdmin().PutBkt(c, []*core.BucketInfo{{ID: bktID, Name: "下载", Type: 1}})
+		core.InitBucketDB(dataDir, bktID)
+		admin := core.NewLocalAdminWithPaths(baseDir, dataDir)
+		admin.PutBkt(c, []*core.BucketInfo{{ID: bktID, Name: "下载", Type: 1}})
 	}
 }
 
 func TestUpload(t *testing.T) {
 	Convey("upload dir", t, func() {
-		// Initialize database if not already initialized (paths now managed via Handler)
-		if err := core.InitDB(".", ""); err != nil {
-			// Ignore error if database already exists
-			if err.Error() != "open db failed" {
-				So(err, ShouldBeNil)
-			}
-		}
+		baseDir, dataDir, cleanup := core.SetupTestDirs("sdk_upload")
+		defer cleanup()
+
+		core.InitDB(baseDir, "")
 
 		// Create temporary test directory with test files
 		tmpDir, err := os.MkdirTemp("", "orcas_upload_test_")
@@ -67,7 +67,7 @@ func TestUpload(t *testing.T) {
 		err = os.WriteFile(testFile2, []byte("test content 2"), 0o644)
 		So(err, ShouldBeNil)
 
-		sdk := New(core.NewLocalHandler("", ""))
+		sdk := New(core.NewLocalHandler(baseDir, dataDir))
 		defer sdk.Close()
 
 		c, _, b, err := sdk.Login(cfg)
@@ -77,8 +77,8 @@ func TestUpload(t *testing.T) {
 		if len(b) <= 0 {
 			// Create bucket if none exists
 			bktID, _ = idgen.NewIDGen(nil, 0).New()
-			core.InitBucketDB(".", bktID)
-			admin := core.NewLocalAdmin()
+			core.InitBucketDB(dataDir, bktID)
+			admin := core.NewLocalAdminWithPaths(baseDir, dataDir)
 			err = admin.PutBkt(c, []*core.BucketInfo{{ID: bktID, Name: "test-bucket", Type: 1}})
 			So(err, ShouldBeNil)
 		} else {
@@ -91,13 +91,10 @@ func TestUpload(t *testing.T) {
 
 func TestDownload(t *testing.T) {
 	Convey("download dir", t, func() {
-		// Initialize database if not already initialized (paths now managed via Handler)
-		if err := core.InitDB(".", ""); err != nil {
-			// Ignore error if database already exists
-			if err.Error() != "open db failed" {
-				So(err, ShouldBeNil)
-			}
-		}
+		baseDir, dataDir, cleanup := core.SetupTestDirs("sdk_download")
+		defer cleanup()
+
+		core.InitDB(baseDir, "")
 
 		// Create temporary test directory with test files
 		tmpDir, err := os.MkdirTemp("", "orcas_download_test_")
@@ -115,7 +112,7 @@ func TestDownload(t *testing.T) {
 		err = os.WriteFile(testFile2, []byte("test content 2"), 0o644)
 		So(err, ShouldBeNil)
 
-		sdk := New(core.NewLocalHandler("", ""))
+		sdk := New(core.NewLocalHandler(baseDir, dataDir))
 		defer sdk.Close()
 
 		c, _, b, err := sdk.Login(cfg)
@@ -125,8 +122,8 @@ func TestDownload(t *testing.T) {
 		if len(b) <= 0 {
 			// Create bucket if none exists
 			bktID, _ = idgen.NewIDGen(nil, 0).New()
-			core.InitBucketDB(".", bktID)
-			admin := core.NewLocalAdmin()
+			core.InitBucketDB(dataDir, bktID)
+			admin := core.NewLocalAdminWithPaths(baseDir, dataDir)
 			err = admin.PutBkt(c, []*core.BucketInfo{{ID: bktID, Name: "test-bucket", Type: 1}})
 			So(err, ShouldBeNil)
 		} else {
@@ -209,13 +206,10 @@ func compareDirectories(dir1, dir2 string) error {
 
 func TestCheck(t *testing.T) {
 	Convey("normal", t, func() {
-		// Initialize database if not already initialized (paths now managed via Handler)
-		if err := core.InitDB(".", ""); err != nil {
-			// Ignore error if database already exists
-			if err.Error() != "open db failed" {
-				So(err, ShouldBeNil)
-			}
-		}
+		baseDir, dataDir, cleanup := core.SetupTestDirs("sdk_check")
+		defer cleanup()
+
+		core.InitDB(baseDir, "")
 
 		// Create temporary test directory with test files
 		tmpDir, err := os.MkdirTemp("", "orcas_check_test_")
@@ -233,7 +227,7 @@ func TestCheck(t *testing.T) {
 		err = os.WriteFile(testFile2, []byte("test content 2"), 0o644)
 		So(err, ShouldBeNil)
 
-		sdk := New(core.NewLocalHandler("", ""))
+		sdk := New(core.NewLocalHandler(baseDir, dataDir))
 		defer sdk.Close()
 
 		c, _, b, err := sdk.Login(cfg)
@@ -243,8 +237,8 @@ func TestCheck(t *testing.T) {
 		if len(b) <= 0 {
 			// Create bucket if none exists
 			bktID, _ = idgen.NewIDGen(nil, 0).New()
-			core.InitBucketDB(".", bktID)
-			admin := core.NewLocalAdmin()
+			core.InitBucketDB(dataDir, bktID)
+			admin := core.NewLocalAdminWithPaths(baseDir, dataDir)
 			err = admin.PutBkt(c, []*core.BucketInfo{{ID: bktID, Name: "test-bucket", Type: 1}})
 			So(err, ShouldBeNil)
 		} else {
@@ -275,15 +269,12 @@ func TestCheck(t *testing.T) {
 
 func TestACL(t *testing.T) {
 	Convey("ACL management", t, func() {
-		// Initialize database if not already initialized (paths now managed via Handler)
-		if err := core.InitDB(".", ""); err != nil {
-			// Ignore error if database already exists
-			if err.Error() != "open db failed" {
-				So(err, ShouldBeNil)
-			}
-		}
+		baseDir, dataDir, cleanup := core.SetupTestDirs("sdk_acl")
+		defer cleanup()
 
-		sdk := New(core.NewLocalHandler("", ""))
+		core.InitDB(baseDir, "")
+
+		sdk := New(core.NewLocalHandler(baseDir, dataDir))
 		defer sdk.Close()
 
 		c, userInfo, b, err := sdk.Login(cfg)
@@ -293,8 +284,8 @@ func TestACL(t *testing.T) {
 		if len(b) <= 0 {
 			// Create bucket if none exists
 			bktID, _ = idgen.NewIDGen(nil, 0).New()
-			core.InitBucketDB(".", bktID)
-			admin := core.NewLocalAdmin()
+			core.InitBucketDB(dataDir, bktID)
+			admin := core.NewLocalAdminWithPaths(baseDir, dataDir)
 			err = admin.PutBkt(c, []*core.BucketInfo{{ID: bktID, Name: "test-bucket", Type: 1}})
 			So(err, ShouldBeNil)
 		} else {
@@ -302,15 +293,15 @@ func TestACL(t *testing.T) {
 		}
 
 		// Get Admin to access ACL management methods
-		admin := core.NewLocalAdmin()
+		admin := core.NewLocalAdminWithPaths(baseDir, dataDir)
 
 		// Get MetadataAdapter for permission checking (CheckPermission and ListACLByUser are still in MetadataAdapter)
 		ma := &core.DefaultMetadataAdapter{
 			DefaultBaseMetadataAdapter: &core.DefaultBaseMetadataAdapter{},
 			DefaultDataMetadataAdapter: &core.DefaultDataMetadataAdapter{},
 		}
-		ma.DefaultBaseMetadataAdapter.SetPath(".")
-		ma.DefaultDataMetadataAdapter.SetPath(".")
+		ma.DefaultBaseMetadataAdapter.SetPath(baseDir)
+		ma.DefaultDataMetadataAdapter.SetPath(dataDir)
 
 		// Test PutACL: Grant READ permission to current user
 		err = admin.PutACL(c, bktID, userInfo.ID, core.READ)

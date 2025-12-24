@@ -203,31 +203,25 @@ OrcaS supports flexible path management, allowing you to use different storage p
 
 By default, OrcaS uses the current directory (`.`) for both base and data paths. You can configure custom paths per context using the methods below.
 
-### Context-Based Path Configuration
+### Path Configuration
 
-You can override global paths per context, enabling multiple storage locations in the same process:
+Paths can be configured via environment variables or through the `Config` struct when initializing handlers:
 
 ```go
 import (
-    "context"
     "github.com/orcastor/orcas/core"
 )
 
-// Method 1: Direct path setting
-ctx := context.Background()
-ctx = core.Path2Ctx(ctx, "/path/to/base", "/path/to/data")
-
-// Method 2: Using Config struct
+// Paths are set via Config struct or environment variables
 cfg := &core.Config{
-    BasePath: "/custom/base/path",
-    DataPath: "/custom/data/path",
+    BasePath: "/custom/base/path",  // Override ORCAS_BASE
+    DataPath: "/custom/data/path",  // Override ORCAS_DATA
     // ... other config options
 }
-ctx = core.Config2Ctx(ctx, cfg)
 
-// All operations using this context will use the specified paths
+// Config is used when creating handlers or mounting filesystems
 handler := core.NewLocalHandler()
-dataID, err := handler.PutData(ctx, bktID, 0, -1, data)
+// Paths from Config or environment variables will be used
 ```
 
 ### Benefits
