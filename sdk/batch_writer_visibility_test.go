@@ -49,7 +49,7 @@ func setupTestEnvironmentForBatchWriterVisibility(t *testing.T) (int64, context.
 		t.Fatalf("InitBucketDB failed: %v", err)
 	}
 
-	admin := core.NewLocalAdmin()
+	admin := core.NewLocalAdmin(".", ".")
 	bkt := &core.BucketInfo{
 		ID:    testBktID,
 		Name:  "test-bucket",

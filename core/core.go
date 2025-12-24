@@ -229,7 +229,8 @@ func NewLocalHandler(basePath, dataPath string) Handler {
 // The handler uses NoAuthAccessCtrlMgr which always allows all operations without querying the main database.
 // basePath: path for main database and bucket databases (empty string for default)
 // dataPath: path for data file storage (empty string for default)
-func NewNoAuthHandler(basePath, dataPath string) Handler {
+func NewNoAuthHandler(dataPath string) Handler {
+	basePath := ""
 	dma := &DefaultMetadataAdapter{
 		DefaultBaseMetadataAdapter: &DefaultBaseMetadataAdapter{},
 		DefaultDataMetadataAdapter: &DefaultDataMetadataAdapter{},
@@ -1057,12 +1058,8 @@ type LocalAdmin struct {
 	acm AccessCtrlMgr
 }
 
-func NewLocalAdmin() Admin {
-	return NewLocalAdminWithPaths(".", ".")
-}
-
-// NewLocalAdminWithPaths creates a LocalAdmin with specified paths
-func NewLocalAdminWithPaths(basePath, dataPath string) Admin {
+// NewLocalAdmin creates a LocalAdmin with specified paths
+func NewLocalAdmin(basePath, dataPath string) Admin {
 	dma := &DefaultMetadataAdapter{
 		DefaultBaseMetadataAdapter: &DefaultBaseMetadataAdapter{},
 		DefaultDataMetadataAdapter: &DefaultDataMetadataAdapter{},
@@ -1084,18 +1081,11 @@ func NewLocalAdminWithPaths(basePath, dataPath string) Admin {
 // but bucket database operations (data and object metadata) are still performed normally.
 // This is useful for testing, internal operations, or when authentication is handled externally.
 // The admin uses NoAuthAccessCtrlMgr which always allows all operations without querying the main database.
-func NewNoAuthAdmin() Admin {
-	return NewNoAuthAdminWithPaths(".", ".")
-}
-
-// NewNoAuthAdminWithPaths creates a NoAuthAdmin with specified paths
-func NewNoAuthAdminWithPaths(basePath, dataPath string) Admin {
+func NewNoAuthAdmin(dataPath string) Admin {
 	dma := &DefaultMetadataAdapter{
 		DefaultBaseMetadataAdapter: &DefaultBaseMetadataAdapter{},
 		DefaultDataMetadataAdapter: &DefaultDataMetadataAdapter{},
 	}
-	// Set paths
-	dma.DefaultBaseMetadataAdapter.SetPath(basePath)
 	dma.DefaultDataMetadataAdapter.SetPath(dataPath)
 	dda := &DefaultDataAdapter{}
 	dda.SetPath(dataPath)

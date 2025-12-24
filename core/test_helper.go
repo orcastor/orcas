@@ -58,7 +58,7 @@ func CleanTestDB(bktID int64) error {
 
 	// Clean main database
 	if testBaseDir != "" {
-		dbPath := filepath.Join(testBaseDir, "meta.db")
+		dbPath := filepath.Join(testBaseDir, ".db")
 		os.Remove(dbPath)
 		os.Remove(dbPath + "-wal")
 		os.Remove(dbPath + "-shm")
@@ -67,7 +67,7 @@ func CleanTestDB(bktID int64) error {
 	// Clean bucket database
 	if testDataDir != "" && bktID > 0 {
 		bktDir := filepath.Join(testDataDir, fmt.Sprint(bktID))
-		dbPath := filepath.Join(bktDir, "meta.db")
+		dbPath := filepath.Join(bktDir, ".db")
 		os.Remove(dbPath)
 		os.Remove(dbPath + "-wal")
 		os.Remove(dbPath + "-shm")
@@ -82,13 +82,13 @@ func CleanTestDB(bktID int64) error {
 func CleanTestBucketData(bktID int64) error {
 	if testDataDir != "" && bktID > 0 {
 		bktDir := filepath.Join(testDataDir, fmt.Sprint(bktID))
-		// Remove all files in bucket directory except meta.db
+		// Remove all files in bucket directory except .db
 		entries, err := os.ReadDir(bktDir)
 		if err != nil {
 			return err
 		}
 		for _, entry := range entries {
-			if entry.Name() != "meta.db" && entry.Name() != "meta.db-wal" && entry.Name() != "meta.db-shm" {
+			if entry.Name() != ".db" && entry.Name() != ".db-wal" && entry.Name() != ".db-shm" {
 				os.Remove(filepath.Join(bktDir, entry.Name()))
 			}
 		}

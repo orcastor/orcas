@@ -312,7 +312,7 @@ func setupTestEnvironmentForInstantUpload(t *testing.T) (int64, *gin.Engine) {
 		t.Fatalf("Login failed: %v", err)
 	}
 
-	admin := core.NewLocalAdmin()
+	admin := core.NewLocalAdmin(".", ".")
 	bkt := &core.BucketInfo{
 		ID:        testBktID,
 		Name:      "test-bucket",
@@ -430,7 +430,7 @@ func getBucketIDByNameForTest(ctx context.Context, name string) (int64, error) {
 	}
 	ma.DefaultBaseMetadataAdapter.SetPath(".")
 	ma.DefaultDataMetadataAdapter.SetPath(".")
-	
+
 	// Use ACL + GetBkt combination instead of ListBkt
 	acls, err := ma.ListACLByUser(userCtx, 1) // UID = 1 for test user
 	if err != nil {
@@ -439,7 +439,7 @@ func getBucketIDByNameForTest(ctx context.Context, name string) (int64, error) {
 	if len(acls) == 0 {
 		return 0, fmt.Errorf("no buckets found for user")
 	}
-	
+
 	bktIDs := make([]int64, 0, len(acls))
 	for _, acl := range acls {
 		bktIDs = append(bktIDs, acl.BktID)

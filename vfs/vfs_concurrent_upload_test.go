@@ -46,7 +46,7 @@ func TestVFSConcurrentChunkUpload(t *testing.T) {
 		So(err, ShouldBeNil)
 
 		// Create bucket with encryption enabled
-		admin := core.NewLocalAdmin()
+		admin := core.NewLocalAdmin(".", ".")
 		bkt := &core.BucketInfo{
 			ID:        testBktID,
 			Name:      "test-concurrent-upload-encrypted-bucket",
@@ -291,7 +291,7 @@ func TestVFSRepeatedChunkWrite(t *testing.T) {
 		So(err, ShouldBeNil)
 
 		// Create bucket with encryption enabled
-		admin := core.NewLocalAdmin()
+		admin := core.NewLocalAdmin(".", ".")
 		bkt := &core.BucketInfo{
 			ID:        testBktID,
 			Name:      "test-repeated-write-encrypted-bucket",
@@ -496,7 +496,7 @@ func TestVFSConcurrentChunkUploadWithWait(t *testing.T) {
 		So(err, ShouldBeNil)
 
 		// Create bucket with encryption enabled
-		admin := core.NewLocalAdmin()
+		admin := core.NewLocalAdmin(".", ".")
 		bkt := &core.BucketInfo{
 			ID:        testBktID,
 			Name:      "test-concurrent-wait-encrypted-bucket",

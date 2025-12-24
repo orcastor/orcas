@@ -58,7 +58,7 @@ func TestDokanyMountOptions(t *testing.T) {
 	}
 
 	// Create bucket
-	admin := core.NewLocalAdmin()
+	admin := core.NewLocalAdmin(".", ".")
 	bkt := &core.BucketInfo{
 		ID:        testBktID,
 		Name:      "test-bucket",
@@ -127,7 +127,7 @@ func TestDokanyOperations(t *testing.T) {
 	}
 
 	// Create bucket
-	admin := core.NewLocalAdmin()
+	admin := core.NewLocalAdmin(".", ".")
 	bkt := &core.BucketInfo{
 		ID:        testBktID,
 		Name:      "test-bucket",
@@ -240,7 +240,7 @@ func TestDokanyDirectoryOperations(t *testing.T) {
 	}
 
 	// Create bucket
-	admin := core.NewLocalAdmin()
+	admin := core.NewLocalAdmin(".", ".")
 	bkt := &core.BucketInfo{
 		ID:        testBktID,
 		Name:      "test-bucket",
@@ -381,7 +381,7 @@ func TestDokanyCreateFile(t *testing.T) {
 	}
 
 	// Create bucket
-	admin := core.NewLocalAdmin()
+	admin := core.NewLocalAdmin(".", ".")
 	bkt := &core.BucketInfo{
 		ID:        testBktID,
 		Name:      "test-bucket",
@@ -448,7 +448,7 @@ func TestDokanyWriteAndRead(t *testing.T) {
 	}
 
 	// Create bucket
-	admin := core.NewLocalAdmin()
+	admin := core.NewLocalAdmin(".", ".")
 	bkt := &core.BucketInfo{
 		ID:        testBktID,
 		Name:      "test-bucket",
@@ -698,7 +698,7 @@ func TestTmpFileRenameCacheUpdate(t *testing.T) {
 	}
 
 	// Create bucket
-	admin := core.NewLocalAdmin()
+	admin := core.NewLocalAdmin(".", ".")
 	bkt := &core.BucketInfo{
 		ID:        testBktID,
 		Name:      "test-bucket",
@@ -852,7 +852,7 @@ func TestRenameBeforeFlush(t *testing.T) {
 	}
 
 	// Create bucket
-	admin := core.NewLocalAdmin()
+	admin := core.NewLocalAdmin(".", ".")
 	bkt := &core.BucketInfo{
 		ID:        testBktID,
 		Name:      "test-bucket",

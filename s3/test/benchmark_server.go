@@ -92,7 +92,7 @@ func main() {
 		UID:  testUserID,
 		Type: 1,
 	}
-	admin := core.NewLocalAdmin()
+	admin := core.NewLocalAdmin(".", ".")
 
 	// Create context with user info for bucket creation
 	ctx := context.Background()

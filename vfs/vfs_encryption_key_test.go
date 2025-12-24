@@ -36,7 +36,7 @@ func TestVFSEncryptionKeyMismatch(t *testing.T) {
 		So(err, ShouldBeNil)
 
 		// Create bucket
-		admin := core.NewLocalAdmin()
+		admin := core.NewLocalAdmin(".", ".")
 		encryptionKey := "test-encryption-key-12345678901234567890123456789012" // 32 bytes for AES256
 		bkt := &core.BucketInfo{
 			ID:        testBktID,
@@ -166,7 +166,7 @@ func TestVFSEncryptionKeyMismatchAfterReopen(t *testing.T) {
 		So(err, ShouldBeNil)
 
 		// Create bucket
-		admin := core.NewLocalAdmin()
+		admin := core.NewLocalAdmin(".", ".")
 		encryptionKey := "test-encryption-key-12345678901234567890123456789012" // 32 bytes for AES256
 		bkt := &core.BucketInfo{
 			ID:        testBktID,

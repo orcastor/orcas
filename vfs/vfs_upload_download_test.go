@@ -40,7 +40,7 @@ func TestVFSUploadDownload(t *testing.T) {
 		So(err, ShouldBeNil)
 
 		// Create bucket
-		admin := core.NewLocalAdmin()
+		admin := core.NewLocalAdmin(".", ".")
 		bkt := &core.BucketInfo{
 			ID:        testBktID,
 			Name:      "test-upload-download-bucket",
@@ -131,7 +131,7 @@ func TestVFSLargeFileUploadDownload(t *testing.T) {
 		So(err, ShouldBeNil)
 
 		// Create bucket
-		admin := core.NewLocalAdmin()
+		admin := core.NewLocalAdmin(".", ".")
 		bkt := &core.BucketInfo{
 			ID:        testBktID,
 			Name:      "test-large-file-upload-download-bucket",
@@ -261,7 +261,7 @@ func TestVFSRandomAccessUploadDownload(t *testing.T) {
 		So(err, ShouldBeNil)
 
 		// Create bucket
-		admin := core.NewLocalAdmin()
+		admin := core.NewLocalAdmin(".", ".")
 		bkt := &core.BucketInfo{
 			ID:        testBktID,
 			Name:      "test-random-access-upload-download-bucket",
@@ -423,7 +423,7 @@ func TestVFSMultipleFileUploadDownload(t *testing.T) {
 		So(err, ShouldBeNil)
 
 		// Create bucket
-		admin := core.NewLocalAdmin()
+		admin := core.NewLocalAdmin(".", ".")
 		bkt := &core.BucketInfo{
 			ID:        testBktID,
 			Name:      "test-multiple-file-upload-download-bucket",
@@ -530,7 +530,7 @@ func TestVFSAppendUploadDownload(t *testing.T) {
 		So(err, ShouldBeNil)
 
 		// Create bucket
-		admin := core.NewLocalAdmin()
+		admin := core.NewLocalAdmin(".", ".")
 		bkt := &core.BucketInfo{
 			ID:        testBktID,
 			Name:      "test-append-upload-download-bucket",
@@ -651,7 +651,7 @@ func TestVFSOverwriteUploadDownload(t *testing.T) {
 		So(err, ShouldBeNil)
 
 		// Create bucket
-		admin := core.NewLocalAdmin()
+		admin := core.NewLocalAdmin(".", ".")
 		bkt := &core.BucketInfo{
 			ID:        testBktID,
 			Name:      "test-overwrite-upload-download-bucket",
@@ -751,7 +751,7 @@ func TestVFSPartialDownload(t *testing.T) {
 		So(err, ShouldBeNil)
 
 		// Create bucket
-		admin := core.NewLocalAdmin()
+		admin := core.NewLocalAdmin(".", ".")
 		bkt := &core.BucketInfo{
 			ID:        testBktID,
 			Name:      "test-partial-download-bucket",

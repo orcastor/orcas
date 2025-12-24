@@ -34,7 +34,7 @@ func TestTmpFileMergeAndDirectoryListing(t *testing.T) {
 		So(err, ShouldBeNil)
 
 		// Create bucket
-		admin := core.NewLocalAdmin()
+		admin := core.NewLocalAdmin(".", ".")
 		bkt := &core.BucketInfo{
 			ID:        testBktID,
 			Name:      "test-tmp-merge-bucket",

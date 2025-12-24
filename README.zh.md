@@ -201,34 +201,83 @@ OrcaS 基于**内容寻址存储**原则构建，数据通过内容哈希而非�
 
 OrcaS 支持灵活的路径管理，允许在同一进程中使用不同的存储路径。这对于多租户场景或管理多个存储位置非常有用。
 
-默认情况下，OrcaS 使用当前目录（`.`）作为基础路径和数据路径。您可以使用下面的方法为每个 context 配置自定义路径。
+### 创建带路径的 Handler
 
-### 路径配置
+#### LocalHandler
 
-路径可以通过环境变量或在初始化处理器时通过 `Config` 结构体进行配置：
+`NewLocalHandler` 需要 `basePath` 和 `dataPath` 两个参数：
 
 ```go
 import (
     "github.com/orcastor/orcas/core"
 )
 
-// 通过 Config 结构体或环境变量设置路径
-cfg := &core.Config{
-    BasePath: "/custom/base/path",  // 覆盖 ORCAS_BASE
-    DataPath: "/custom/data/path",  // 覆盖 ORCAS_DATA
-    // ... 其他配置选项
-}
+// 使用自定义路径创建 handler
+handler := core.NewLocalHandler("/custom/base/path", "/custom/data/path")
+defer handler.Close()
 
-// Config 在创建处理器或挂载文件系统时使用
-handler := core.NewLocalHandler()
-// 将使用 Config 或环境变量中的路径
+// basePath: 主数据库和桶数据库的路径
+// dataPath: 数据文件存储的路径
+```
+
+#### NoAuthHandler
+
+`NewNoAuthHandler` 只需要 `dataPath` 参数。`basePath` 会自动设置为空字符串（无主数据库）：
+
+```go
+// 创建 NoAuthHandler（绕过身份验证）
+handler := core.NewNoAuthHandler("/custom/data/path")
+defer handler.Close()
+
+// 只需要 dataPath，NoAuth 模式下 basePath 始终为空
+```
+
+### 创建带路径的 Admin
+
+#### LocalAdmin
+
+`NewLocalAdmin` 需要 `basePath` 和 `dataPath` 两个参数：
+
+```go
+// 使用自定义路径创建 admin
+admin := core.NewLocalAdmin("/custom/base/path", "/custom/data/path")
+
+// basePath: 主数据库和桶数据库的路径
+// dataPath: 数据文件存储的路径
+```
+
+#### NoAuthAdmin
+
+`NewNoAuthAdmin` 只需要 `dataPath` 参数。`basePath` 会自动设置为空字符串（无主数据库）：
+
+```go
+// 创建 NoAuthAdmin（绕过身份验证和权限检查）
+admin := core.NewNoAuthAdmin("/custom/data/path")
+
+// 只需要 dataPath，NoAuth 模式下 basePath 始终为空
+```
+
+### 路径使用示例
+
+```go
+// 示例：使用当前目录作为两个路径
+handler := core.NewLocalHandler(".", ".")
+admin := core.NewLocalAdmin(".", ".")
+
+// 示例：为 base 和 data 使用不同的路径
+handler := core.NewLocalHandler("/var/orcas/base", "/var/orcas/data")
+admin := core.NewLocalAdmin("/var/orcas/base", "/var/orcas/data")
+
+// 示例：NoAuth 模式（无主数据库，只需要数据路径）
+handler := core.NewNoAuthHandler("/var/orcas/data")
+admin := core.NewNoAuthAdmin("/var/orcas/data")
 ```
 
 ### 优势
 
 - 🔄 **多租户支持**：不同的 context 可以使用不同的存储路径
-- 🎯 **灵活配置**：可以为每个操作覆盖路径，而无需更改全局设置
-- ⚙️ **默认行为**：如果 context 中未设置，则使用当前目录（`.`）
+- 🎯 **灵活配置**：在创建 handler/admin 时直接指定路径
+- ⚙️ **NoAuth 模式**：简化 NoAuth handler/admin 的路径管理（只需要 dataPath）
 - 🚀 **进程隔离**：在同一进程中支持多个存储位置
 
 ## 📚 文档

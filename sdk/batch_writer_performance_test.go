@@ -62,7 +62,7 @@ func setupTestEnvironmentForBatchWrite(t *testing.T, batchWriteEnabled bool) (in
 		t.Fatalf("Login returned invalid user info: %v", userInfo)
 	}
 
-	admin := core.NewLocalAdmin()
+	admin := core.NewLocalAdmin(".", ".")
 	bkt := &core.BucketInfo{
 		ID:    testBktID,
 		Name:  "test-bucket",

@@ -346,7 +346,7 @@ func GetMainDBWithKey(basePathOrKey ...interface{}) (*sql.DB, error) {
 		param += "&key=" + key
 	}
 	os.MkdirAll(basePath, 0o766)
-	db, err := sql.Open("sqlite3", filepath.Join(basePath, "meta.db")+param)
+	db, err := sql.Open("sqlite3", filepath.Join(basePath, ".db")+param)
 	if err != nil {
 		return nil, err
 	}

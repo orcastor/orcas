@@ -59,7 +59,7 @@ func setupTestEnvironmentForCache(t *testing.T) (int64, *gin.Engine) {
 		t.Fatalf("Login failed: %v", err)
 	}
 
-	admin := core.NewLocalAdmin()
+	admin := core.NewLocalAdmin(".", ".")
 	bkt := &core.BucketInfo{
 		ID:    testBktID,
 		Name:  "test-bucket",

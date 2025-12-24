@@ -208,7 +208,7 @@ func TestUpdateData(t *testing.T) {
 		}
 		ctx := UserInfo2Ctx(c, &UserInfo{ID: testUID, Role: ADMIN})
 		// Use admin to create bucket (automatically creates ACL)
-		admin := NewNoAuthAdminWithPaths(".", ".")
+		admin := NewNoAuthAdmin(".")
 		So(admin.PutBkt(ctx, []*BucketInfo{bucket}), ShouldBeNil)
 		// Create ACL for user
 		So(dma.PutACL(ctx, testBktID, testUID, ALL), ShouldBeNil)
@@ -315,7 +315,7 @@ func TestSparseFileSupport(t *testing.T) {
 			}
 			ctx := UserInfo2Ctx(c, &UserInfo{ID: testUID, Role: ADMIN})
 			// Use admin to create bucket (automatically creates ACL)
-			admin := NewNoAuthAdminWithPaths(".", ".")
+			admin := NewNoAuthAdmin(".")
 			So(admin.PutBkt(ctx, []*BucketInfo{bucket}), ShouldBeNil)
 			// Create ACL for user
 			So(dma.PutACL(ctx, testBktID, testUID, ALL), ShouldBeNil)
@@ -351,7 +351,7 @@ func TestSparseFileSupport(t *testing.T) {
 			}
 			ctx := UserInfo2Ctx(c, &UserInfo{ID: testUID, Role: ADMIN})
 			// Use admin to create bucket (automatically creates ACL)
-			admin := NewNoAuthAdminWithPaths(".", ".")
+			admin := NewNoAuthAdmin(".")
 			So(admin.PutBkt(ctx, []*BucketInfo{bucket}), ShouldBeNil)
 			// Create ACL for user
 			So(dma.PutACL(ctx, testBktID, testUID, ALL), ShouldBeNil)
@@ -383,7 +383,7 @@ func TestSparseFileSupport(t *testing.T) {
 			}
 			ctx := UserInfo2Ctx(c, &UserInfo{ID: testUID, Role: ADMIN})
 			// Use admin to create bucket (automatically creates ACL)
-			admin := NewNoAuthAdminWithPaths(".", ".")
+			admin := NewNoAuthAdmin(".")
 			So(admin.PutBkt(ctx, []*BucketInfo{bucket}), ShouldBeNil)
 			// Create ACL for user
 			So(dma.PutACL(ctx, testBktID, testUID, ALL), ShouldBeNil)
@@ -438,7 +438,7 @@ func TestSparseFileSupport(t *testing.T) {
 			}
 			ctx := UserInfo2Ctx(c, &UserInfo{ID: testUID, Role: ADMIN})
 			// Use admin to create bucket (automatically creates ACL)
-			admin := NewNoAuthAdminWithPaths(".", ".")
+			admin := NewNoAuthAdmin(".")
 			So(admin.PutBkt(ctx, []*BucketInfo{bucket}), ShouldBeNil)
 			// Create ACL for user
 			So(dma.PutACL(ctx, testBktID, testUID, ALL), ShouldBeNil)
@@ -482,7 +482,7 @@ func TestSparseFileSupport(t *testing.T) {
 			}
 			ctx := UserInfo2Ctx(c, &UserInfo{ID: testUID, Role: ADMIN})
 			// Use admin to create bucket (automatically creates ACL)
-			admin := NewNoAuthAdminWithPaths(".", ".")
+			admin := NewNoAuthAdmin(".")
 			So(admin.PutBkt(ctx, []*BucketInfo{bucket}), ShouldBeNil)
 			// Create ACL for user
 			So(dma.PutACL(ctx, testBktID, testUID, ALL), ShouldBeNil)
@@ -555,7 +555,7 @@ func TestSparseFileSupport(t *testing.T) {
 			}
 			ctx := UserInfo2Ctx(c, &UserInfo{ID: testUID, Role: ADMIN})
 			// Use admin to create bucket (automatically creates ACL)
-			admin := NewNoAuthAdminWithPaths(".", ".")
+			admin := NewNoAuthAdmin(".")
 			So(admin.PutBkt(ctx, []*BucketInfo{bucket}), ShouldBeNil)
 			// Create ACL for user
 			So(dma.PutACL(ctx, testBktID, testUID, ALL), ShouldBeNil)
@@ -608,7 +608,7 @@ func TestSparseFileSupport(t *testing.T) {
 			}
 			ctx := UserInfo2Ctx(c, &UserInfo{ID: testUID, Role: ADMIN})
 			// Use admin to create bucket (automatically creates ACL)
-			admin := NewNoAuthAdminWithPaths(".", ".")
+			admin := NewNoAuthAdmin(".")
 			So(admin.PutBkt(ctx, []*BucketInfo{bucket}), ShouldBeNil)
 			// Create ACL for user
 			So(dma.PutACL(ctx, testBktID, testUID, ALL), ShouldBeNil)

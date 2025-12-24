@@ -342,7 +342,7 @@ func (cs *CronScheduler) runDefragmentJob(ctx context.Context) error {
 			}
 
 			// Create Admin instance for Defragment
-			admin := NewLocalAdmin()
+			admin := NewLocalAdmin(".", ".")
 			_, err := Defragment(ctx, bkt.ID, admin, cs.ma, cs.da)
 			if err != nil {
 				// 记录错误但继续处理其他bucket

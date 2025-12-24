@@ -263,11 +263,15 @@ func handleMount() {
 
 	if cfg.NoAuth {
 		// NoAuth mode: use NoAuthHandler and skip login
-		handler = core.NewNoAuthHandler("", "")
+		dataPath := ""
+		if cfg.DataPath != "" {
+			dataPath = cfg.DataPath
+		}
+		handler = core.NewNoAuthHandler(dataPath)
 		defer handler.Close()
-		// Set paths if configured
-		if cfg.BasePath != "" || cfg.DataPath != "" {
-			handler.SetPaths(cfg.BasePath, cfg.DataPath)
+		// Set paths if configured (basePath is always empty for NoAuth)
+		if cfg.DataPath != "" {
+			handler.SetPaths("", cfg.DataPath)
 		}
 		ctx = context.Background()
 
@@ -576,7 +580,7 @@ func handleUserManagement() {
 	}
 
 	// Create admin instance
-	admin := core.NewLocalAdmin()
+	admin := core.NewLocalAdmin(".", ".")
 	defer admin.Close()
 
 	// Execute user management command
@@ -721,7 +725,7 @@ func handleBucketManagement() {
 	}
 
 	// Create admin instance
-	admin := core.NewLocalAdmin()
+	admin := core.NewLocalAdmin(".", ".")
 	defer admin.Close()
 
 	// Execute bucket management command

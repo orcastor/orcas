@@ -21,7 +21,7 @@ func TestInitDBWithKey(t *testing.T) {
 			So(err, ShouldBeNil)
 
 			// Verify database file exists
-			dbPath := filepath.Join(tmpDir, "meta.db")
+			dbPath := filepath.Join(tmpDir, ".db")
 			_, err = os.Stat(dbPath)
 			So(err, ShouldBeNil)
 		})
@@ -31,7 +31,7 @@ func TestInitDBWithKey(t *testing.T) {
 			So(err, ShouldBeNil)
 
 			// Verify database file exists
-			dbPath := filepath.Join(tmpDir, "meta.db")
+			dbPath := filepath.Join(tmpDir, ".db")
 			_, err = os.Stat(dbPath)
 			So(err, ShouldBeNil)
 

@@ -244,7 +244,7 @@ func getBucketsByUser(c *gin.Context, uid int64) ([]*core.BucketInfo, error) {
 	}
 	ma.DefaultBaseMetadataAdapter.SetPath(".")
 	ma.DefaultDataMetadataAdapter.SetPath(".")
-	
+
 	// Get ACLs for the user
 	acls, err := ma.ListACLByUser(ctx, uid)
 	if err != nil {
@@ -253,13 +253,13 @@ func getBucketsByUser(c *gin.Context, uid int64) ([]*core.BucketInfo, error) {
 	if len(acls) == 0 {
 		return []*core.BucketInfo{}, nil
 	}
-	
+
 	// Get bucket IDs from ACLs
 	bktIDs := make([]int64, 0, len(acls))
 	for _, acl := range acls {
 		bktIDs = append(bktIDs, acl.BktID)
 	}
-	
+
 	// Get bucket info for these buckets
 	buckets, err := ma.GetBkt(ctx, bktIDs)
 	if err != nil {
@@ -728,7 +728,7 @@ func CreateBucket(c *gin.Context) {
 		Type: 1,
 	}
 
-	admin := core.NewLocalAdmin()
+	admin := core.NewLocalAdmin(".", ".")
 	if err := admin.PutBkt(ctx, []*core.BucketInfo{bkt}); err != nil {
 		util.S3ErrorResponse(c, http.StatusInternalServerError, "InternalError", err.Error())
 		return
@@ -767,7 +767,7 @@ func DeleteBucket(c *gin.Context) {
 		return
 	}
 
-	admin := core.NewLocalAdmin()
+	admin := core.NewLocalAdmin(".", ".")
 	if err := admin.DeleteBkt(ctx, bktID); err != nil {
 		util.S3ErrorResponse(c, http.StatusInternalServerError, "InternalError", err.Error())
 		return

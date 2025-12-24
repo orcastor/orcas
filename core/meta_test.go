@@ -234,7 +234,11 @@ func TestGetData(t *testing.T) {
 	Convey("normal", t, func() {
 		Convey("get data info", func() {
 			InitBucketDB(".", bktID)
-			dma := &DefaultMetadataAdapter{}
+			dma := &DefaultMetadataAdapter{
+				DefaultBaseMetadataAdapter: &DefaultBaseMetadataAdapter{},
+				DefaultDataMetadataAdapter: &DefaultDataMetadataAdapter{},
+			}
+			dma.DefaultDataMetadataAdapter.SetPath(".")
 			id, _ := idgen.NewIDGen(nil, 0).New()
 			d := &DataInfo{
 				ID:   id,
@@ -255,7 +259,11 @@ func TestPutObj(t *testing.T) {
 		Convey("put same name obj", func() {
 			InitBucketDB(".", bktID)
 
-			dma := &DefaultMetadataAdapter{}
+			dma := &DefaultMetadataAdapter{
+				DefaultBaseMetadataAdapter: &DefaultBaseMetadataAdapter{},
+				DefaultDataMetadataAdapter: &DefaultDataMetadataAdapter{},
+			}
+			dma.DefaultDataMetadataAdapter.SetPath(".")
 			ig := idgen.NewIDGen(nil, 0)
 			id, _ := ig.New()
 			pid, _ := ig.New()
@@ -302,7 +310,11 @@ func TestGetObj(t *testing.T) {
 		Convey("get obj info", func() {
 			InitBucketDB(".", bktID)
 
-			dma := &DefaultMetadataAdapter{}
+			dma := &DefaultMetadataAdapter{
+				DefaultBaseMetadataAdapter: &DefaultBaseMetadataAdapter{},
+				DefaultDataMetadataAdapter: &DefaultDataMetadataAdapter{},
+			}
+			dma.DefaultDataMetadataAdapter.SetPath(".")
 			ig := idgen.NewIDGen(nil, 0)
 			id, _ := ig.New()
 			pid, _ := ig.New()
@@ -334,7 +346,11 @@ func TestSetObj(t *testing.T) {
 	Convey("normal", t, func() {
 		InitBucketDB(".", bktID)
 
-		dma := &DefaultMetadataAdapter{}
+		dma := &DefaultMetadataAdapter{
+			DefaultBaseMetadataAdapter: &DefaultBaseMetadataAdapter{},
+			DefaultDataMetadataAdapter: &DefaultDataMetadataAdapter{},
+		}
+		dma.DefaultDataMetadataAdapter.SetPath(".")
 		ig := idgen.NewIDGen(nil, 0)
 		id, _ := ig.New()
 		pid, _ := ig.New()
@@ -399,7 +415,11 @@ func TestListObj(t *testing.T) {
 		InitDB(".", "") // Initialize main database first
 		InitBucketDB(".", testBktID)
 
-		dma := &DefaultMetadataAdapter{}
+		dma := &DefaultMetadataAdapter{
+			DefaultBaseMetadataAdapter: &DefaultBaseMetadataAdapter{},
+			DefaultDataMetadataAdapter: &DefaultDataMetadataAdapter{},
+		}
+		dma.DefaultDataMetadataAdapter.SetPath(".")
 		pid, _ := ig.New()
 
 		id1, _ := ig.New()
@@ -623,7 +643,11 @@ func TestListObjsByType(t *testing.T) {
 		CleanTestBucketData(testBktID)
 		InitDB(".", "") // Initialize main database first
 		InitBucketDB(".", testBktID)
-		dma := &DefaultMetadataAdapter{}
+		dma := &DefaultMetadataAdapter{
+			DefaultBaseMetadataAdapter: &DefaultBaseMetadataAdapter{},
+			DefaultDataMetadataAdapter: &DefaultDataMetadataAdapter{},
+		}
+		dma.DefaultDataMetadataAdapter.SetPath(".")
 		pid, _ := ig.New()
 
 		// Create multiple files
@@ -726,7 +750,11 @@ func TestListChildren(t *testing.T) {
 		CleanTestBucketData(testBktID)
 		InitDB(".", "") // Initialize main database first
 		InitBucketDB(".", testBktID)
-		dma := &DefaultMetadataAdapter{}
+		dma := &DefaultMetadataAdapter{
+			DefaultBaseMetadataAdapter: &DefaultBaseMetadataAdapter{},
+			DefaultDataMetadataAdapter: &DefaultDataMetadataAdapter{},
+		}
+		dma.DefaultDataMetadataAdapter.SetPath(".")
 		parentID, _ := ig.New()
 
 		// Create parent directory
@@ -811,7 +839,11 @@ func TestListChildren(t *testing.T) {
 func TestListVersions(t *testing.T) {
 	Convey("ListVersions with excludeWriting", t, func() {
 		InitBucketDB(".", bktID)
-		dma := &DefaultMetadataAdapter{}
+		dma := &DefaultMetadataAdapter{
+			DefaultBaseMetadataAdapter: &DefaultBaseMetadataAdapter{},
+			DefaultDataMetadataAdapter: &DefaultDataMetadataAdapter{},
+		}
+		dma.DefaultDataMetadataAdapter.SetPath(".")
 		ig := idgen.NewIDGen(nil, 0)
 		fileID, _ := ig.New()
 
@@ -886,7 +918,11 @@ func TestListVersions(t *testing.T) {
 func TestGetObjByDataID(t *testing.T) {
 	Convey("GetObjByDataID", t, func() {
 		InitBucketDB(".", bktID)
-		dma := &DefaultMetadataAdapter{}
+		dma := &DefaultMetadataAdapter{
+			DefaultBaseMetadataAdapter: &DefaultBaseMetadataAdapter{},
+			DefaultDataMetadataAdapter: &DefaultDataMetadataAdapter{},
+		}
+		dma.DefaultDataMetadataAdapter.SetPath(".")
 		ig := idgen.NewIDGen(nil, 0)
 		dataID, _ := ig.New()
 
@@ -931,7 +967,11 @@ func TestGetObjByDataID(t *testing.T) {
 func TestDeleteObj(t *testing.T) {
 	Convey("DeleteObj", t, func() {
 		InitBucketDB(".", bktID)
-		dma := &DefaultMetadataAdapter{}
+		dma := &DefaultMetadataAdapter{
+			DefaultBaseMetadataAdapter: &DefaultBaseMetadataAdapter{},
+			DefaultDataMetadataAdapter: &DefaultDataMetadataAdapter{},
+		}
+		dma.DefaultDataMetadataAdapter.SetPath(".")
 		ig := idgen.NewIDGen(nil, 0)
 		pid, _ := ig.New()
 
@@ -1002,9 +1042,9 @@ func TestPutBktWithCustomPath(t *testing.T) {
 		defer os.RemoveAll(tmpDataDir)
 
 		// Remove any existing database files to ensure clean state
-		os.Remove(filepath.Join(tmpBaseDir, "meta.db"))
-		os.Remove(filepath.Join(tmpBaseDir, "meta.db-wal"))
-		os.Remove(filepath.Join(tmpBaseDir, "meta.db-shm"))
+		os.Remove(filepath.Join(tmpBaseDir, ".db"))
+		os.Remove(filepath.Join(tmpBaseDir, ".db-wal"))
+		os.Remove(filepath.Join(tmpBaseDir, ".db-shm"))
 
 		// Close connection pool to ensure clean state
 		pool := GetDBPool()
@@ -1048,13 +1088,13 @@ func TestPutBktWithCustomPath(t *testing.T) {
 		So(err, ShouldBeNil)
 
 		// Verify bucket database was created in custom data path
-		expectedDBPath := filepath.Join(tmpDataDir, fmt.Sprint(bktID), "meta.db")
+		expectedDBPath := filepath.Join(tmpDataDir, fmt.Sprint(bktID), ".db")
 		_, err = os.Stat(expectedDBPath)
 		So(err, ShouldBeNil)
 
 		// Verify bucket database is NOT in current directory (if different)
 		if tmpDataDir != "." {
-			currentDirDBPath := filepath.Join(".", fmt.Sprint(bktID), "meta.db")
+			currentDirDBPath := filepath.Join(".", fmt.Sprint(bktID), ".db")
 			_, err = os.Stat(currentDirDBPath)
 			So(err, ShouldNotBeNil) // Should not exist
 		}
@@ -1088,9 +1128,9 @@ func TestPutBktWithConfig2Ctx(t *testing.T) {
 		defer os.RemoveAll(tmpDataDir)
 
 		// Remove any existing database files to ensure clean state
-		os.Remove(filepath.Join(tmpBaseDir, "meta.db"))
-		os.Remove(filepath.Join(tmpBaseDir, "meta.db-wal"))
-		os.Remove(filepath.Join(tmpBaseDir, "meta.db-shm"))
+		os.Remove(filepath.Join(tmpBaseDir, ".db"))
+		os.Remove(filepath.Join(tmpBaseDir, ".db-wal"))
+		os.Remove(filepath.Join(tmpBaseDir, ".db-shm"))
 
 		// Create context (paths now managed via Handler)
 		ctx := context.Background()
@@ -1127,13 +1167,13 @@ func TestPutBktWithConfig2Ctx(t *testing.T) {
 		So(err, ShouldBeNil)
 
 		// Verify bucket database was created in custom data path
-		expectedDBPath := filepath.Join(tmpDataDir, fmt.Sprint(bktID), "meta.db")
+		expectedDBPath := filepath.Join(tmpDataDir, fmt.Sprint(bktID), ".db")
 		_, err = os.Stat(expectedDBPath)
 		So(err, ShouldBeNil)
 
 		// Verify bucket database is NOT in current directory (if different)
 		if tmpDataDir != "." {
-			currentDirDBPath := filepath.Join(".", fmt.Sprint(bktID), "meta.db")
+			currentDirDBPath := filepath.Join(".", fmt.Sprint(bktID), ".db")
 			_, err = os.Stat(currentDirDBPath)
 			So(err, ShouldNotBeNil) // Should not exist
 		}
@@ -1229,11 +1269,11 @@ func TestPutBktMultiplePaths(t *testing.T) {
 		So(err, ShouldBeNil)
 
 		// Verify both buckets exist in their respective paths
-		dbPath1 := filepath.Join(tmpDataDir1, fmt.Sprint(bktID1), "meta.db")
+		dbPath1 := filepath.Join(tmpDataDir1, fmt.Sprint(bktID1), ".db")
 		_, err = os.Stat(dbPath1)
 		So(err, ShouldBeNil)
 
-		dbPath2 := filepath.Join(tmpDataDir2, fmt.Sprint(bktID2), "meta.db")
+		dbPath2 := filepath.Join(tmpDataDir2, fmt.Sprint(bktID2), ".db")
 		_, err = os.Stat(dbPath2)
 		So(err, ShouldBeNil)
 
@@ -1251,11 +1291,11 @@ func TestPutBktMultiplePaths(t *testing.T) {
 		So(bkts2[0].Name, ShouldEqual, "bucket-path2")
 
 		// Verify bucket1 is NOT in path2 and bucket2 is NOT in path1
-		wrongPath1 := filepath.Join(tmpDataDir2, fmt.Sprint(bktID1), "meta.db")
+		wrongPath1 := filepath.Join(tmpDataDir2, fmt.Sprint(bktID1), ".db")
 		_, err = os.Stat(wrongPath1)
 		So(err, ShouldNotBeNil)
 
-		wrongPath2 := filepath.Join(tmpDataDir1, fmt.Sprint(bktID2), "meta.db")
+		wrongPath2 := filepath.Join(tmpDataDir1, fmt.Sprint(bktID2), ".db")
 		_, err = os.Stat(wrongPath2)
 		So(err, ShouldNotBeNil)
 	})
@@ -1275,13 +1315,13 @@ func TestHandlerWithoutMainDB(t *testing.T) {
 		defer os.RemoveAll(tmpDataDir)
 
 		// Verify main database does not exist
-		mainDBPath := filepath.Join(tmpBaseDir, "meta.db")
+		mainDBPath := filepath.Join(tmpBaseDir, ".db")
 		_, err = os.Stat(mainDBPath)
 		So(err, ShouldNotBeNil) // Should not exist
 
 		// Create NoAuthHandler without calling InitDB
 		// NoAuthHandler bypasses main database authentication and ACL checks
-		handler := NewNoAuthHandler(tmpBaseDir, tmpDataDir)
+		handler := NewNoAuthHandler(tmpDataDir)
 		defer handler.Close()
 
 		ctx := context.Background()
@@ -1313,7 +1353,7 @@ func TestHandlerWithoutMainDB(t *testing.T) {
 		So(err, ShouldBeNil)
 
 		// Verify bucket database exists
-		bktDBPath := filepath.Join(tmpDataDir, fmt.Sprint(bktID), "meta.db")
+		bktDBPath := filepath.Join(tmpDataDir, fmt.Sprint(bktID), ".db")
 		_, err = os.Stat(bktDBPath)
 		So(err, ShouldBeNil) // Should exist
 

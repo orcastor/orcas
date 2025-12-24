@@ -77,7 +77,7 @@ func GetDBPool() *DBPool {
 // getDatabasePool gets or creates a database pool for the given path and key
 func (dp *DBPool) getDatabasePool(dirPath, dbKey string) (*DatabasePool, error) {
 	// Create a unique key for this database
-	dbPath := filepath.Join(dirPath, "meta.db")
+	dbPath := filepath.Join(dirPath, ".db")
 	poolKey := fmt.Sprintf("%s:%s", dbPath, dbKey)
 
 	// Try to get existing pool (with double-check locking pattern)
@@ -188,7 +188,7 @@ func (dp *DBPool) GetDB(connType DBConnectionType, dirPath, dbKey string) (*sql.
 
 // ReleaseDB releases a reference to a database pool
 func (dp *DBPool) ReleaseDB(dirPath, dbKey string) {
-	dbPath := filepath.Join(dirPath, "meta.db")
+	dbPath := filepath.Join(dirPath, ".db")
 	poolKey := fmt.Sprintf("%s:%s", dbPath, dbKey)
 
 	if pool, ok := dp.pools.Load(poolKey); ok {

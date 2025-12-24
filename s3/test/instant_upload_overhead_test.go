@@ -334,7 +334,7 @@ func setupTestEnvironmentForInstantUploadOverhead(t testing.TB) (int64, *gin.Eng
 		t.Fatalf("Login failed: %v", err)
 	}
 
-	admin := core.NewLocalAdmin()
+	admin := core.NewLocalAdmin(".", ".")
 	bkt := &core.BucketInfo{
 		ID:        testBktID,
 		Name:      "test-bucket",

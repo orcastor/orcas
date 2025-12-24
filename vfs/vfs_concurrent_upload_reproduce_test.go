@@ -44,7 +44,7 @@ func TestVFSRepeatedChunkWriteReproduce(t *testing.T) {
 		So(err, ShouldBeNil)
 
 		// Create bucket with encryption enabled
-		admin := core.NewLocalAdmin()
+		admin := core.NewLocalAdmin(".", ".")
 		bkt := &core.BucketInfo{
 			ID:        testBktID,
 			Name:      "test-reproduce-repeated-write-bucket",
@@ -355,7 +355,7 @@ func TestVFSConcurrentUploadStressTest(t *testing.T) {
 		So(err, ShouldBeNil)
 
 		// Create bucket with encryption enabled
-		admin := core.NewLocalAdmin()
+		admin := core.NewLocalAdmin(".", ".")
 		bkt := &core.BucketInfo{
 			ID:        testBktID,
 			Name:      "test-stress-concurrent-bucket",

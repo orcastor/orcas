@@ -39,7 +39,7 @@ func init() {
 	if len(b) <= 0 {
 		bktID, _ := idgen.NewIDGen(nil, 0).New()
 		core.InitBucketDB(dataDir, bktID)
-		admin := core.NewLocalAdminWithPaths(baseDir, dataDir)
+		admin := core.NewLocalAdmin(baseDir, dataDir)
 		admin.PutBkt(c, []*core.BucketInfo{{ID: bktID, Name: "下载", Type: 1}})
 	}
 }
@@ -78,7 +78,7 @@ func TestUpload(t *testing.T) {
 			// Create bucket if none exists
 			bktID, _ = idgen.NewIDGen(nil, 0).New()
 			core.InitBucketDB(dataDir, bktID)
-			admin := core.NewLocalAdminWithPaths(baseDir, dataDir)
+			admin := core.NewLocalAdmin(baseDir, dataDir)
 			err = admin.PutBkt(c, []*core.BucketInfo{{ID: bktID, Name: "test-bucket", Type: 1}})
 			So(err, ShouldBeNil)
 		} else {
@@ -123,7 +123,7 @@ func TestDownload(t *testing.T) {
 			// Create bucket if none exists
 			bktID, _ = idgen.NewIDGen(nil, 0).New()
 			core.InitBucketDB(dataDir, bktID)
-			admin := core.NewLocalAdminWithPaths(baseDir, dataDir)
+			admin := core.NewLocalAdmin(baseDir, dataDir)
 			err = admin.PutBkt(c, []*core.BucketInfo{{ID: bktID, Name: "test-bucket", Type: 1}})
 			So(err, ShouldBeNil)
 		} else {
@@ -238,7 +238,7 @@ func TestCheck(t *testing.T) {
 			// Create bucket if none exists
 			bktID, _ = idgen.NewIDGen(nil, 0).New()
 			core.InitBucketDB(dataDir, bktID)
-			admin := core.NewLocalAdminWithPaths(baseDir, dataDir)
+			admin := core.NewLocalAdmin(baseDir, dataDir)
 			err = admin.PutBkt(c, []*core.BucketInfo{{ID: bktID, Name: "test-bucket", Type: 1}})
 			So(err, ShouldBeNil)
 		} else {
@@ -285,7 +285,7 @@ func TestACL(t *testing.T) {
 			// Create bucket if none exists
 			bktID, _ = idgen.NewIDGen(nil, 0).New()
 			core.InitBucketDB(dataDir, bktID)
-			admin := core.NewLocalAdminWithPaths(baseDir, dataDir)
+			admin := core.NewLocalAdmin(baseDir, dataDir)
 			err = admin.PutBkt(c, []*core.BucketInfo{{ID: bktID, Name: "test-bucket", Type: 1}})
 			So(err, ShouldBeNil)
 		} else {
@@ -293,7 +293,7 @@ func TestACL(t *testing.T) {
 		}
 
 		// Get Admin to access ACL management methods
-		admin := core.NewLocalAdminWithPaths(baseDir, dataDir)
+		admin := core.NewLocalAdmin(baseDir, dataDir)
 
 		// Get MetadataAdapter for permission checking (CheckPermission and ListACLByUser are still in MetadataAdapter)
 		ma := &core.DefaultMetadataAdapter{

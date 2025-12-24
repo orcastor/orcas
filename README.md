@@ -201,34 +201,83 @@ Storage Layout:
 
 OrcaS supports flexible path management, allowing you to use different storage paths within the same process. This is useful for multi-tenant scenarios or when managing multiple storage locations.
 
-By default, OrcaS uses the current directory (`.`) for both base and data paths. You can configure custom paths per context using the methods below.
+### Creating Handlers with Paths
 
-### Path Configuration
+#### LocalHandler
 
-Paths can be configured via environment variables or through the `Config` struct when initializing handlers:
+`NewLocalHandler` requires both `basePath` and `dataPath` parameters:
 
 ```go
 import (
     "github.com/orcastor/orcas/core"
 )
 
-// Paths are set via Config struct or environment variables
-cfg := &core.Config{
-    BasePath: "/custom/base/path",  // Override ORCAS_BASE
-    DataPath: "/custom/data/path",  // Override ORCAS_DATA
-    // ... other config options
-}
+// Create handler with custom paths
+handler := core.NewLocalHandler("/custom/base/path", "/custom/data/path")
+defer handler.Close()
 
-// Config is used when creating handlers or mounting filesystems
-handler := core.NewLocalHandler()
-// Paths from Config or environment variables will be used
+// basePath: path for main database and bucket databases
+// dataPath: path for data file storage
+```
+
+#### NoAuthHandler
+
+`NewNoAuthHandler` only requires `dataPath` parameter. The `basePath` is automatically set to empty string (no main database):
+
+```go
+// Create NoAuthHandler (bypasses authentication)
+handler := core.NewNoAuthHandler("/custom/data/path")
+defer handler.Close()
+
+// Only dataPath is needed, basePath is always empty for NoAuth mode
+```
+
+### Creating Admins with Paths
+
+#### LocalAdmin
+
+`NewLocalAdmin` requires both `basePath` and `dataPath` parameters:
+
+```go
+// Create admin with custom paths
+admin := core.NewLocalAdmin("/custom/base/path", "/custom/data/path")
+
+// basePath: path for main database and bucket databases
+// dataPath: path for data file storage
+```
+
+#### NoAuthAdmin
+
+`NewNoAuthAdmin` only requires `dataPath` parameter. The `basePath` is automatically set to empty string (no main database):
+
+```go
+// Create NoAuthAdmin (bypasses authentication and permission checks)
+admin := core.NewNoAuthAdmin("/custom/data/path")
+
+// Only dataPath is needed, basePath is always empty for NoAuth mode
+```
+
+### Path Usage Examples
+
+```go
+// Example: Using current directory for both paths
+handler := core.NewLocalHandler(".", ".")
+admin := core.NewLocalAdmin(".", ".")
+
+// Example: Separate paths for base and data
+handler := core.NewLocalHandler("/var/orcas/base", "/var/orcas/data")
+admin := core.NewLocalAdmin("/var/orcas/base", "/var/orcas/data")
+
+// Example: NoAuth mode (no main database, only data path)
+handler := core.NewNoAuthHandler("/var/orcas/data")
+admin := core.NewNoAuthAdmin("/var/orcas/data")
 ```
 
 ### Benefits
 
 - 🔄 **Multi-tenant Support**: Different contexts can use different storage paths
-- 🎯 **Flexible Configuration**: Override paths per operation without changing global settings
-- ⚙️ **Default Behavior**: Uses current directory (`.`) if not set in context
+- 🎯 **Flexible Configuration**: Specify paths directly when creating handlers/admins
+- ⚙️ **NoAuth Mode**: Simplified path management for NoAuth handlers/admins (only dataPath needed)
 - 🚀 **Process Isolation**: Multiple storage locations in the same process
 
 ## 📚 Documentation

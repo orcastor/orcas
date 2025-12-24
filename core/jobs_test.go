@@ -367,8 +367,9 @@ func TestDeleteAndRecycle(t *testing.T) {
 			So(dirObj, ShouldNotBeNil)
 			So(fileObj, ShouldNotBeNil)
 
-			// 目录的PID应该是-1（因为原PID是0）
-			So(dirObj.PID, ShouldEqual, -1)
+			// 目录的PID应该是-testBktID（因为原PID是testBktID）
+			So(dirObj.PID, ShouldBeLessThan, 0)
+			So(-dirObj.PID, ShouldEqual, testBktID)
 			// 文件的PID应该是-dirID（因为原PID是dirID）
 			So(fileObj.PID, ShouldBeLessThan, 0)
 			So(-fileObj.PID, ShouldEqual, dirID)
@@ -1146,7 +1147,7 @@ func TestQuotaAndUsed(t *testing.T) {
 		ctx := UserInfo2Ctx(c, &UserInfo{ID: uid, Role: ADMIN})
 
 		// 使用 admin 创建 bucket，这样会自动创建 ACL
-		admin := NewNoAuthAdminWithPaths(baseDir, dataDir)
+		admin := NewNoAuthAdmin(dataDir)
 		So(admin.PutBkt(ctx, []*BucketInfo{bucket}), ShouldBeNil)
 
 		// 手动创建 ACL 给用户（因为 PutBkt 需要 ADMIN 角色，但我们需要 USER 角色来测试）
@@ -1428,7 +1429,7 @@ func TestQuotaAndUsed(t *testing.T) {
 
 		Convey("SetQuota interface", func() {
 			// Create Admin instance for SetQuota with no auth (for testing)
-			admin := NewNoAuthAdminWithPaths(baseDir, dataDir)
+			admin := NewNoAuthAdmin(dataDir)
 
 			// Set quota
 			err := admin.SetQuota(testCtx, testBktID, 2000)
@@ -1507,7 +1508,7 @@ func TestDefragment(t *testing.T) {
 		ctx := UserInfo2Ctx(c, &UserInfo{ID: uid})
 		So(dma.PutBkt(ctx, []*BucketInfo{bucket}), ShouldBeNil)
 
-		admin := NewNoAuthAdminWithPaths(baseDir, dataDir)
+		admin := NewNoAuthAdmin(dataDir)
 
 		Convey("defragment with small files", func() {
 			// Create multiple small files (精简规模)

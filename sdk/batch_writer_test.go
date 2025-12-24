@@ -51,7 +51,7 @@ func setupTestEnvironmentForBatchWriterBufferFullTest(t *testing.T) (int64, cont
 		t.Fatalf("InitBucketDB failed: %v", err)
 	}
 
-	admin := core.NewLocalAdmin()
+	admin := core.NewLocalAdmin(".", ".")
 	bkt := &core.BucketInfo{
 		ID:    testBktID,
 		Name:  "test-bucket",
