@@ -458,7 +458,10 @@ func (n *OrcasNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut)
 // Implements delayed cache refresh: marks cache as stale instead of immediately deleting
 func (n *OrcasNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
 	if errno := n.fs.checkKey(); errno != 0 {
-		return nil, errno
+		if n.objID != core.ROOT_OID {
+			return nil, errno
+		}
+		return fs.NewListDirStream([]fuse.DirEntry{}), 0
 	}
 
 	obj, err := n.getObj()
