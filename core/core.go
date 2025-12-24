@@ -242,9 +242,11 @@ func NewNoAuthHandler(basePath, dataPath string) Handler {
 	// Set paths in metadata adapter
 	dma.DefaultBaseMetadataAdapter.SetPath(basePath)
 	dma.DefaultDataMetadataAdapter.SetPath(dataPath)
+	dda := &DefaultDataAdapter{}
+	dda.SetPath(dataPath)
 	return &LocalHandler{
 		ma:            dma,
-		da:            &DefaultDataAdapter{},
+		da:            dda,
 		acm:           &NoAuthAccessCtrlMgr{},
 		bucketConfigs: ecache2.NewLRUCache[int64](16, 256, 5*time.Minute),
 		basePath:      basePath,
