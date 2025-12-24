@@ -291,11 +291,10 @@ OrcaS 支持完全无主数据库的运行模式，适用于不需要用户管�
 
 **无主数据库模式：**
 ```bash
-# 不设置 ORCAS_BASE（或设置为空）
-# export ORCAS_BASE=""  # 可选，不设置即可
-
-# 必须设置 ORCAS_DATA（bucket 数据库存储位置）
-export ORCAS_DATA=/var/orcas/data
+# 路径通过 context 使用 Path2Ctx 或 Config2Ctx 进行配置。
+# 默认情况下，OrcaS 使用当前目录（.）作为基础路径和数据路径。
+# 示例：
+# ctx = core.Path2Ctx(ctx, "", "/var/orcas/data")  # 空的基础路径，自定义数据路径
 ```
 
 ### 使用示例

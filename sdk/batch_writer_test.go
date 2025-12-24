@@ -5,7 +5,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -22,28 +21,15 @@ func setupTestEnvironmentForBatchWriterBufferFullTest(t *testing.T) (int64, cont
 	// 设置较小的buffer size以便测试
 	os.Setenv("ORCAS_MAX_WRITE_BUFFER_SIZE", "1048576") // 1MB
 
-	// 初始化环境变量
-	if core.ORCAS_BASE == "" {
-		tmpDir := filepath.Join(os.TempDir(), "orcas_sdk_buffer_full_test")
-		os.MkdirAll(tmpDir, 0o755)
-		os.Setenv("ORCAS_BASE", tmpDir)
-		core.ORCAS_BASE = tmpDir
-	}
-	if core.ORCAS_DATA == "" {
-		tmpDir := filepath.Join(os.TempDir(), "orcas_sdk_buffer_full_test_data")
-		os.MkdirAll(tmpDir, 0o755)
-		os.Setenv("ORCAS_DATA", tmpDir)
-		core.ORCAS_DATA = tmpDir
-	}
-
-	core.InitDB("")
+	// 初始化数据库（路径现在通过 Handler 管理）
+	core.InitDB(".", "")
 
 	// 确保测试用户存在
-	handler := core.NewLocalHandler()
+	handler := core.NewLocalHandler("", "")
 	ctx, _, _, err := handler.Login(context.Background(), "orcas", "orcas")
 	if err != nil {
 		// 如果登录失败，尝试创建用户
-		db, err := core.GetDB()
+		db, err := core.GetMainDBWithKey(".", "")
 		if err != nil {
 			t.Fatalf("GetDB failed: %v", err)
 		}
@@ -60,7 +46,7 @@ func setupTestEnvironmentForBatchWriterBufferFullTest(t *testing.T) (int64, cont
 	// 创建测试bucket
 	ig := idgen.NewIDGen(nil, 0)
 	testBktID, _ := ig.New()
-	err = core.InitBucketDB(ctx, testBktID)
+	err = core.InitBucketDB(".", testBktID)
 	if err != nil {
 		t.Fatalf("InitBucketDB failed: %v", err)
 	}

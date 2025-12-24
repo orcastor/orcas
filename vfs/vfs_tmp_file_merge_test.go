@@ -19,14 +19,14 @@ import (
 func TestTmpFileMergeAndDirectoryListing(t *testing.T) {
 	Convey("Test .tmp file merge and directory listing accuracy", t, func() {
 		ensureTestUser(t)
-		handler := core.NewLocalHandler()
+		handler := core.NewLocalHandler("", "")
 		ctx := context.Background()
 		ctx, _, _, err := handler.Login(ctx, "orcas", "orcas")
 		So(err, ShouldBeNil)
 
 		ig := idgen.NewIDGen(nil, 0)
 		testBktID, _ := ig.New()
-		err = core.InitBucketDB(ctx, testBktID)
+		err = core.InitBucketDB(".", testBktID)
 		So(err, ShouldBeNil)
 
 		// Get user info for bucket creation

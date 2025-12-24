@@ -21,7 +21,7 @@ import (
 )
 
 var (
-	handler = core.NewLocalHandler()
+	handler = core.NewLocalHandler(".", ".")
 
 	// pathCache caches path to object mapping
 	// key: "<bktID>:<path>", value: *core.ObjectInfo
@@ -186,7 +186,12 @@ func getBucketByName(c *gin.Context, name string) (*core.BucketInfo, error) {
 					// Verify the cached bucket still exists in current database
 					// This is important for tests where each test has its own database
 					ctx := c.Request.Context()
-					ma := &core.DefaultMetadataAdapter{}
+					ma := &core.DefaultMetadataAdapter{
+						DefaultBaseMetadataAdapter: &core.DefaultBaseMetadataAdapter{},
+						DefaultDataMetadataAdapter: &core.DefaultDataMetadataAdapter{},
+					}
+					ma.DefaultBaseMetadataAdapter.SetPath(".")
+					ma.DefaultDataMetadataAdapter.SetPath(".")
 					buckets, err := ma.GetBkt(ctx, []int64{cachedBkt.ID})
 					if err == nil && len(buckets) > 0 && buckets[0].ID == cachedBkt.ID {
 						// Bucket exists in current database, use cached value
@@ -216,9 +221,32 @@ func getBucketsByUser(c *gin.Context, uid int64) ([]*core.BucketInfo, error) {
 		}
 	}
 
-	// Query from database
-	ma := &core.DefaultMetadataAdapter{}
-	buckets, err := ma.ListBkt(ctx, uid)
+	// Query from database using ACL + GetBkt combination
+	// Create adapter with default paths (handler's paths are set via SetHandlerPaths)
+	ma := &core.DefaultMetadataAdapter{
+		DefaultBaseMetadataAdapter: &core.DefaultBaseMetadataAdapter{},
+		DefaultDataMetadataAdapter: &core.DefaultDataMetadataAdapter{},
+	}
+	ma.DefaultBaseMetadataAdapter.SetPath(".")
+	ma.DefaultDataMetadataAdapter.SetPath(".")
+	
+	// Get ACLs for the user
+	acls, err := ma.ListACLByUser(ctx, uid)
+	if err != nil {
+		return nil, err
+	}
+	if len(acls) == 0 {
+		return []*core.BucketInfo{}, nil
+	}
+	
+	// Get bucket IDs from ACLs
+	bktIDs := make([]int64, 0, len(acls))
+	for _, acl := range acls {
+		bktIDs = append(bktIDs, acl.BktID)
+	}
+	
+	// Get bucket info for these buckets
+	buckets, err := ma.GetBkt(ctx, bktIDs)
 	if err != nil {
 		return nil, err
 	}
@@ -3027,4 +3055,11 @@ func ListParts(c *gin.Context) {
 
 	c.Header("Content-Type", "application/xml")
 	c.XML(http.StatusOK, result)
+}
+
+// SetHandlerPaths sets the base path and data path for the global handler
+// basePath: path for main database and bucket databases
+// dataPath: path for data file storage
+func SetHandlerPaths(basePath, dataPath string) {
+	handler.SetPaths(basePath, dataPath)
 }

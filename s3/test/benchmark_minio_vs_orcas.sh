@@ -97,9 +97,10 @@ else
     echo "RAM disk created at: $RAMDISK_PATH"
 fi
 
-# Setup orcas directories
+# Setup orcas directories (using temporary directories)
+ORCAS_BASE="/tmp/orcas_benchmark"
+ORCAS_DATA="/tmp/orcas_benchmark_data"
 mkdir -p "$ORCAS_BASE" "$ORCAS_DATA"
-export ORCAS_BASE ORCAS_DATA
 
 # Build orcas benchmark server
 echo -e "${GREEN}=== Building orcas S3 benchmark server ===${NC}"
@@ -131,28 +132,20 @@ func main() {
 	}
 
 	// Setup directories
-	baseDir := os.Getenv("ORCAS_BASE")
-	if baseDir == "" {
-		baseDir = filepath.Join(os.TempDir(), "orcas_benchmark")
-		os.MkdirAll(baseDir, 0o755)
-		os.Setenv("ORCAS_BASE", baseDir)
-		core.ORCAS_BASE = baseDir
-	}
+	baseDir := filepath.Join(os.TempDir(), "orcas_benchmark")
+	os.MkdirAll(baseDir, 0o755)
+	core.ORCAS_BASE = baseDir
 
-	dataDir := os.Getenv("ORCAS_DATA")
-	if dataDir == "" {
-		dataDir = filepath.Join(os.TempDir(), "orcas_benchmark_data")
-		os.MkdirAll(dataDir, 0o755)
-		os.Setenv("ORCAS_DATA", dataDir)
-		core.ORCAS_DATA = dataDir
-	}
+	dataDir := filepath.Join(os.TempDir(), "orcas_benchmark_data")
+	os.MkdirAll(dataDir, 0o755)
+	core.ORCAS_DATA = dataDir
 
 	// Initialize database
 	core.InitDB("")
 
 	// Ensure test user exists
 	hashedPwd := "1000:Zd54dfEjoftaY8NiAINGag==:q1yB510yT5tGIGNewItVSg=="
-	db, err := core.GetDB()
+	db, err := core.GetMainDBWithKey(".", "")
 	if err == nil {
 		db.Exec(`INSERT OR IGNORE INTO usr (id, role, usr, pwd, name, avatar) VALUES (1, 1, 'orcas', ?, 'orcas', '', '')`, hashedPwd)
 		db.Close()
@@ -224,7 +217,7 @@ rm -f benchmark_main.go
 # Start orcas S3 server
 echo -e "${GREEN}=== Starting orcas S3 server on port $ORCAS_PORT ===${NC}"
 # Skip signature verification for benchmarking (set ORCAS_SKIP_SIG_VERIFY=1)
-ORCAS_BASE="$ORCAS_BASE" ORCAS_DATA="$ORCAS_DATA" ORCAS_PORT="$ORCAS_PORT" \
+ORCAS_PORT="$ORCAS_PORT" \
     ORCAS_SKIP_SIG_VERIFY=1 \
     ./orcas_benchmark_server > /tmp/orcas_server.log 2>&1 &
 ORCAS_PID=$!

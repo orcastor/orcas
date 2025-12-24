@@ -9,10 +9,10 @@ import (
 
 func TestRefNegativeID(t *testing.T) {
 	Convey("Ref with negative ID (same batch reference)", t, func() {
-		InitDB()
+		InitDB(".", "")
 		ig := idgen.NewIDGen(nil, 0)
 		testBktID, _ := ig.New()
-		InitBucketDB(c, testBktID)
+		InitBucketDB(".", testBktID)
 
 		dma := &DefaultMetadataAdapter{}
 
@@ -96,10 +96,10 @@ func TestRefNegativeID(t *testing.T) {
 
 func TestPutDataInfoNegativeID(t *testing.T) {
 	Convey("PutDataInfo with negative ID (same batch reference)", t, func() {
-		InitDB()
+		InitDB(".", "")
 		ig := idgen.NewIDGen(nil, 0)
 		testBktID, _ := ig.New()
-		InitBucketDB(c, testBktID)
+		InitBucketDB(".", testBktID)
 
 		dma := &DefaultMetadataAdapter{}
 
@@ -134,10 +134,10 @@ func TestPutDataInfoNegativeID(t *testing.T) {
 
 func TestPutNegativePID(t *testing.T) {
 	Convey("Put with negative PID (same batch reference)", t, func() {
-		InitDB()
+		InitDB(".", "")
 		ig := idgen.NewIDGen(nil, 0)
 		testBktID, _ := ig.New()
-		InitBucketDB(c, testBktID)
+		InitBucketDB(".", testBktID)
 
 		dma := &DefaultMetadataAdapter{}
 

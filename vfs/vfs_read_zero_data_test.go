@@ -22,14 +22,14 @@ func init() {
 func TestVFSReadZeroData(t *testing.T) {
 	Convey("Test VFS Read returns zero data after upload", t, func() {
 		ensureTestUser(t)
-		handler := core.NewLocalHandler()
+		handler := core.NewLocalHandler("", "")
 		ctx := context.Background()
 		ctx, _, _, err := handler.Login(ctx, "orcas", "orcas")
 		So(err, ShouldBeNil)
 
 		ig := idgen.NewIDGen(nil, 0)
 		testBktID, _ := ig.New()
-		err = core.InitBucketDB(ctx, testBktID)
+		err = core.InitBucketDB(".", testBktID)
 		So(err, ShouldBeNil)
 
 		// Get user info for bucket creation
@@ -172,14 +172,14 @@ func TestVFSReadZeroData(t *testing.T) {
 func TestVFSReadZeroDataAfterReopen(t *testing.T) {
 	Convey("Test VFS Read returns zero data after reopen", t, func() {
 		ensureTestUser(t)
-		handler := core.NewLocalHandler()
+		handler := core.NewLocalHandler("", "")
 		ctx := context.Background()
 		ctx, _, _, err := handler.Login(ctx, "orcas", "orcas")
 		So(err, ShouldBeNil)
 
 		ig := idgen.NewIDGen(nil, 0)
 		testBktID, _ := ig.New()
-		err = core.InitBucketDB(ctx, testBktID)
+		err = core.InitBucketDB(".", testBktID)
 		So(err, ShouldBeNil)
 
 		// Get user info for bucket creation

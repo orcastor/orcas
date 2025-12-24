@@ -187,7 +187,7 @@ func TestCronScheduler(t *testing.T) {
 
 		dma := &DefaultMetadataAdapter{}
 		dda := &DefaultDataAdapter{}
-		lh := NewLocalHandler().(*LocalHandler)
+		lh := NewLocalHandler("", "").(*LocalHandler)
 		lh.SetAdapter(dma, dda)
 
 		config := GetCronJobConfig()

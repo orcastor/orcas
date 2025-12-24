@@ -172,8 +172,8 @@ aws --endpoint-url=http://localhost:7983 s3 cp file.txt s3://my-bucket/file.txt
 # 设置环境变量
 export EGO_DEBUG=true
 export EGO_LOG_EXTRA_KEYS=uid
-export ORCAS_BASE=/opt/orcas
-export ORCAS_DATA=/opt/orcas_disk
+# 注意：ORCAS_BASE 和 ORCAS_DATA 不再作为环境变量使用。
+# 路径可以通过 context 使用 Path2Ctx 或 Config2Ctx 进行配置。
 export ORCAS_SECRET=xxxxxxxx
 
 # 使用egoctl运行

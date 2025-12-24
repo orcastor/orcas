@@ -50,8 +50,11 @@ if mountpoint -q "$MOUNTPOINT" 2>/dev/null; then
 fi
 
 # 检查是否使用无主数据库模式
-if [ -z "$ORCAS_BASE" ] || [ "$ORCAS_BASE" = "" ]; then
-    echo "检测到无主数据库模式（ORCAS_BASE 未设置）"
+# 注意：ORCAS_BASE 和 ORCAS_DATA 环境变量已不再使用
+# 路径现在通过 context 配置，默认使用当前目录
+# 如果未指定 basePath，将使用 -noauth 模式
+if [ -z "$BASE_PATH" ] || [ "$BASE_PATH" = "" ]; then
+    echo "检测到无主数据库模式（BASE_PATH 未设置）"
     echo "将使用 -noauth 模式"
     
     if [ -z "$BUCKET_ID" ]; then

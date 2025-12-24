@@ -82,7 +82,7 @@ func TestInstantUploadBasic(t *testing.T) {
 	time.Sleep(500 * time.Millisecond)
 
 	// 4. Verify both files share the same DataID (instant upload deduplication)
-	handler := core.NewLocalHandler()
+	handler := core.NewLocalHandler("", "")
 	ctx, _, _, err := handler.Login(context.Background(), "orcas", "orcas")
 	if err != nil {
 		t.Fatalf("Login failed: %v", err)
@@ -159,7 +159,7 @@ func TestInstantUploadDifferentData(t *testing.T) {
 	time.Sleep(500 * time.Millisecond)
 
 	// 3. Verify files have different DataIDs
-	handler := core.NewLocalHandler()
+	handler := core.NewLocalHandler("", "")
 	ctx, _, _, err := handler.Login(context.Background(), "orcas", "orcas")
 	if err != nil {
 		t.Fatalf("Login failed: %v", err)
@@ -237,7 +237,7 @@ func TestInstantUploadCopyObject(t *testing.T) {
 	time.Sleep(500 * time.Millisecond)
 
 	// 3. Verify both files share the same DataID
-	handler := core.NewLocalHandler()
+	handler := core.NewLocalHandler("", "")
 	ctx, _, _, err := handler.Login(context.Background(), "orcas", "orcas")
 	if err != nil {
 		t.Fatalf("Login failed: %v", err)
@@ -287,16 +287,12 @@ func setupTestEnvironmentForInstantUpload(t *testing.T) (int64, *gin.Engine) {
 	os.MkdirAll(baseDir, 0o755)
 	os.MkdirAll(dataDir, 0o755)
 
-	// Set environment variables
-	os.Setenv("ORCAS_BASE", baseDir)
-	os.Setenv("ORCAS_DATA", dataDir)
 	// Disable batch write to avoid permission issues in tests
 	os.Setenv("ORCAS_BATCH_WRITE_ENABLED", "false")
-	core.ORCAS_BASE = baseDir
-	core.ORCAS_DATA = dataDir
+	// Paths now managed via Handler, not global variables
 
 	// Initialize database
-	core.InitDB("")
+	core.InitDB(".", "")
 	time.Sleep(50 * time.Millisecond)
 
 	ensureTestUserForInstantUpload(t)
@@ -304,13 +300,13 @@ func setupTestEnvironmentForInstantUpload(t *testing.T) (int64, *gin.Engine) {
 	// Create test bucket
 	ig := idgen.NewIDGen(nil, 0)
 	testBktID, _ := ig.New()
-	err := core.InitBucketDB(context.Background(), testBktID)
+	err := core.InitBucketDB(".", testBktID)
 	if err != nil {
 		t.Fatalf("InitBucketDB failed: %v", err)
 	}
 
 	// Login and create bucket
-	handler := core.NewLocalHandler()
+	handler := core.NewLocalHandler("", "")
 	ctx, _, _, err := handler.Login(context.Background(), "orcas", "orcas")
 	if err != nil {
 		t.Fatalf("Login failed: %v", err)
@@ -359,7 +355,7 @@ func setupTestEnvironmentForInstantUpload(t *testing.T) (int64, *gin.Engine) {
 
 // findObjectByPathForTest finds object by path (for testing)
 func findObjectByPathForTest(ctx context.Context, bktID int64, path string) (*core.ObjectInfo, error) {
-	handler := core.NewLocalHandler()
+	handler := core.NewLocalHandler("", "")
 	// Ensure context has user info for permission check
 	userCtx := core.UserInfo2Ctx(ctx, &core.UserInfo{ID: 1})
 
@@ -428,8 +424,27 @@ func getBucketIDByNameForTest(ctx context.Context, name string) (int64, error) {
 	// Ensure context has user info
 	userCtx := core.UserInfo2Ctx(ctx, &core.UserInfo{ID: 1})
 
-	ma := &core.DefaultMetadataAdapter{}
-	buckets, err := ma.ListBkt(userCtx, 1) // UID = 1 for test user
+	ma := &core.DefaultMetadataAdapter{
+		DefaultBaseMetadataAdapter: &core.DefaultBaseMetadataAdapter{},
+		DefaultDataMetadataAdapter: &core.DefaultDataMetadataAdapter{},
+	}
+	ma.DefaultBaseMetadataAdapter.SetPath(".")
+	ma.DefaultDataMetadataAdapter.SetPath(".")
+	
+	// Use ACL + GetBkt combination instead of ListBkt
+	acls, err := ma.ListACLByUser(userCtx, 1) // UID = 1 for test user
+	if err != nil {
+		return 0, err
+	}
+	if len(acls) == 0 {
+		return 0, fmt.Errorf("no buckets found for user")
+	}
+	
+	bktIDs := make([]int64, 0, len(acls))
+	for _, acl := range acls {
+		bktIDs = append(bktIDs, acl.BktID)
+	}
+	buckets, err := ma.GetBkt(userCtx, bktIDs)
 	if err != nil {
 		return 0, err
 	}
@@ -475,7 +490,7 @@ func splitPath(path string) []string {
 
 // ensureTestUserForInstantUpload ensures test user exists
 func ensureTestUserForInstantUpload(t *testing.T) {
-	handler := core.NewLocalHandler()
+	handler := core.NewLocalHandler("", "")
 	ctx := context.Background()
 
 	// Try to login first
@@ -486,7 +501,7 @@ func ensureTestUserForInstantUpload(t *testing.T) {
 
 	// Use the same approach as multipart test
 	hashedPwd := "1000:Zd54dfEjoftaY8NiAINGag==:q1yB510yT5tGIGNewItVSg=="
-	db, err := core.GetDB()
+	db, err := core.GetMainDBWithKey(".", "")
 	if err != nil {
 		t.Logf("Warning: Failed to get DB: %v", err)
 		return

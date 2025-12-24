@@ -193,15 +193,6 @@ pass orcas | orcas-cli -action upload -local /path/to/file -remote /file -user o
 cat password.txt | orcas-cli -action upload -local /path/to/file -remote /file -user orcas
 ```
 
-## Environment Variables
-
-The tool uses ORCAS system environment variable configuration, mainly including:
-
-- `ORCAS_BASE`: Base path, used to store metadata and other base files
-- `ORCAS_DATA`: Data path, used to store data files
-
-For detailed description, please refer to `core/const.go`.
-
 ## Default Administrator Account
 
 A default administrator account is automatically created when the system is initialized:

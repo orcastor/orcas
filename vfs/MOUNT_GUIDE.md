@@ -291,11 +291,10 @@ OrcaS supports a completely no-base-database operation mode, suitable for scenar
 
 **No Base Database Mode:**
 ```bash
-# Do not set ORCAS_BASE (or set to empty)
-# export ORCAS_BASE=""  # Optional, just don't set it
-
-# Must set ORCAS_DATA (bucket database storage location)
-export ORCAS_DATA=/var/orcas/data
+# Paths are configured via context using Path2Ctx or Config2Ctx.
+# By default, OrcaS uses the current directory (.) for both base and data paths.
+# Example:
+# ctx = core.Path2Ctx(ctx, "", "/var/orcas/data")  # Empty base path, custom data path
 ```
 
 ### Usage Example

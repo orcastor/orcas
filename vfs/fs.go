@@ -5,9 +5,9 @@ package vfs
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 	"io"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -16,6 +16,7 @@ import (
 
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
+	b "github.com/orca-zhang/borm"
 	"github.com/orca-zhang/ecache2"
 	"github.com/orcastor/orcas/core"
 )
@@ -1537,10 +1538,10 @@ func (n *OrcasNode) Mkdir(ctx context.Context, name string, mode uint32, out *fu
 	// Cache new directory object for GetAttr optimization
 	cacheKey := dirObj.ID
 	fileObjCache.Put(cacheKey, dirObj)
-	
+
 	// Update parent directory listing cache with new directory
 	n.appendChildToDirCache(obj.ID, dirObj)
-	
+
 	// IMPORTANT: Clear readdirCache and mark as stale to ensure Readdir sees the new directory
 	// This is critical because Readdir checks readdirCache first, and if it exists,
 	// it returns cached entries without checking dirListCache
@@ -3863,42 +3864,46 @@ func (n *OrcasNode) queryFileByNameDirectly(parentID int64, fileName string) (in
 	// Query database directly using handler's metadata adapter
 	// We need to access the metadata adapter to query directly
 	// Since handler doesn't expose direct SQL query, we'll use GetReadDB from core
-	db, err := core.GetReadDB(n.fs.c, n.fs.bktID)
+	// Bucket database: use dataPath/<bktID>/
+	bktDirPath := filepath.Join(n.fs.DataPath, fmt.Sprint(n.fs.bktID))
+	db, err := core.GetReadDB(bktDirPath, "")
 	if err != nil {
 		DebugLog("[VFS queryFileByNameDirectly] ERROR: Failed to get database connection: %v", err)
 		return 0, nil
 	}
 	// Note: Don't close the connection, it's from the pool
 
-	var obj core.ObjectInfo
 	// Query for file with matching name and parent ID (including deleted files)
 	// Unique constraint is on (pid, name), so we need to check:
 	// 1. pid = parentID (non-deleted file)
 	// 2. pid = -parentID (deleted file, if parentID > 0)
 	// 3. pid = -1 (deleted file from root, if parentID == 0)
-	var rows *sql.Rows
+	var objs []core.ObjectInfo
+	var whereConds []interface{}
 	if parentID == 0 {
 		// Root directory: check pid = 0 and pid = -1
-		query := "SELECT id, pid, did, size, mtime, type, name, extra FROM obj WHERE name = ? AND type = ? AND (pid = ? OR pid = -1) LIMIT 1"
-		rows, err = db.Query(query, fileName, core.OBJ_TYPE_FILE, parentID)
+		whereConds = []interface{}{
+			b.Eq("name", fileName),
+			b.Eq("type", core.OBJ_TYPE_FILE),
+			b.Or(b.Eq("pid", 0), b.Eq("pid", -1)),
+		}
 	} else {
 		// Non-root: check pid = parentID and pid = -parentID
-		query := "SELECT id, pid, did, size, mtime, type, name, extra FROM obj WHERE name = ? AND type = ? AND (pid = ? OR pid = ?) LIMIT 1"
-		rows, err = db.Query(query, fileName, core.OBJ_TYPE_FILE, parentID, -parentID)
+		whereConds = []interface{}{
+			b.Eq("name", fileName),
+			b.Eq("type", core.OBJ_TYPE_FILE),
+			b.Or(b.Eq("pid", parentID), b.Eq("pid", -parentID)),
+		}
 	}
+	_, err = b.TableContext(n.fs.c, db, core.OBJ_TBL).Select(&objs, b.Where(whereConds...), b.Limit(1))
 	if err != nil {
 		DebugLog("[VFS queryFileByNameDirectly] ERROR: Failed to query database: %v", err)
 		return 0, nil
 	}
-	defer rows.Close()
 
-	if rows.Next() {
-		err = rows.Scan(&obj.ID, &obj.PID, &obj.DataID, &obj.Size, &obj.MTime, &obj.Type, &obj.Name, &obj.Extra)
-		if err == nil {
-			// Found file, return it (even if deleted)
-			return obj.ID, &obj
-		}
-		DebugLog("[VFS queryFileByNameDirectly] ERROR: Failed to scan row: %v", err)
+	if len(objs) > 0 {
+		// Found file, return it (even if deleted)
+		return objs[0].ID, &objs[0]
 	}
 
 	return 0, nil

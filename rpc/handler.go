@@ -7,7 +7,7 @@ import (
 	"github.com/orcastor/orcas/rpc/util"
 )
 
-var hanlder = core.NewLocalHandler()
+var hanlder = core.NewLocalHandler("", "")
 
 func login(ctx *gin.Context) {
 	var req struct {

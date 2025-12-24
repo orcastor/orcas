@@ -21,8 +21,8 @@ func TestScrub(t *testing.T) {
 		// Clean up before test
 		CleanTestDB(testBktID)
 		CleanTestBucketData(testBktID)
-		InitDB()
-		err := InitBucketDB(c, testBktID)
+		InitDB(".", "")
+		err := InitBucketDB(".", testBktID)
 		So(err, ShouldBeNil)
 
 		dma := &DefaultMetadataAdapter{}
@@ -259,7 +259,7 @@ func TestDeleteAndRecycle(t *testing.T) {
 	Convey("Delete and Recycle objects", t, func() {
 		ig := idgen.NewIDGen(nil, 0)
 		testBktID, _ := ig.New()
-		InitBucketDB(c, testBktID)
+		InitBucketDB(".", testBktID)
 
 		dma := &DefaultMetadataAdapter{}
 		dda := &DefaultDataAdapter{}
@@ -388,7 +388,7 @@ func TestDeleteAndRecycle(t *testing.T) {
 
 		Convey("clean recycle bin", func() {
 			// 创建LocalHandler
-			lh := NewLocalHandler().(*LocalHandler)
+			lh := NewLocalHandler("", "").(*LocalHandler)
 			lh.SetAdapter(dma, dda)
 
 			// 创建对象和数据
@@ -463,7 +463,7 @@ func TestDeleteAndRecycle(t *testing.T) {
 			So(err, ShouldBeNil)
 
 			// 创建LocalHandler
-			lh := NewLocalHandler().(*LocalHandler)
+			lh := NewLocalHandler("", "").(*LocalHandler)
 			lh.SetAdapter(dma, dda)
 
 			// 删除 obj1
@@ -634,7 +634,7 @@ func TestDeleteAndRecycle(t *testing.T) {
 
 		Convey("clean recycle bin with multiple objects", func() {
 			// 创建LocalHandler
-			lh := NewLocalHandler().(*LocalHandler)
+			lh := NewLocalHandler("", "").(*LocalHandler)
 			lh.SetAdapter(dma, dda)
 
 			// 创建多个对象并删除，然后逐个清理
@@ -680,7 +680,7 @@ func TestDeleteAndRecycle(t *testing.T) {
 
 		Convey("clean recycle bin with time window", func() {
 			// 创建LocalHandler
-			lh := NewLocalHandler().(*LocalHandler)
+			lh := NewLocalHandler("", "").(*LocalHandler)
 			lh.SetAdapter(dma, dda)
 
 			// 创建对象并删除
@@ -723,7 +723,7 @@ func TestDeleteAndRecycle(t *testing.T) {
 
 		Convey("clean non-existent object from recycle bin", func() {
 			// 创建LocalHandler
-			lh := NewLocalHandler().(*LocalHandler)
+			lh := NewLocalHandler("", "").(*LocalHandler)
 			lh.SetAdapter(dma, dda)
 
 			// 尝试清理不存在的对象
@@ -772,8 +772,8 @@ func TestScanDirtyData(t *testing.T) {
 		// Clean up before test
 		CleanTestDB(testBktID)
 		CleanTestBucketData(testBktID)
-		InitDB()
-		err := InitBucketDB(c, testBktID)
+		InitDB(".", "")
+		err := InitBucketDB(".", testBktID)
 		So(err, ShouldBeNil)
 
 		dma := &DefaultMetadataAdapter{}
@@ -920,7 +920,7 @@ func TestPermanentlyDelete(t *testing.T) {
 	Convey("Permanently delete objects", t, func() {
 		ig := idgen.NewIDGen(nil, 0)
 		testBktID, _ := ig.New()
-		InitBucketDB(c, testBktID)
+		InitBucketDB(".", testBktID)
 
 		dma := &DefaultMetadataAdapter{}
 		dda := &DefaultDataAdapter{}
@@ -928,7 +928,7 @@ func TestPermanentlyDelete(t *testing.T) {
 
 		Convey("permanently delete file", func() {
 			// 创建LocalHandler
-			lh := NewLocalHandler().(*LocalHandler)
+			lh := NewLocalHandler("", "").(*LocalHandler)
 			lh.SetAdapter(dma, dda)
 
 			// 创建测试文件
@@ -973,7 +973,7 @@ func TestPermanentlyDelete(t *testing.T) {
 
 		Convey("permanently delete directory recursively", func() {
 			// 创建LocalHandler
-			lh := NewLocalHandler().(*LocalHandler)
+			lh := NewLocalHandler("", "").(*LocalHandler)
 			lh.SetAdapter(dma, dda)
 
 			// 创建目录和子文件
@@ -1026,7 +1026,7 @@ func TestPermanentlyDelete(t *testing.T) {
 
 		Convey("permanently delete file with shared data", func() {
 			// 创建LocalHandler
-			lh := NewLocalHandler().(*LocalHandler)
+			lh := NewLocalHandler("", "").(*LocalHandler)
 			lh.SetAdapter(dma, dda)
 
 			// 创建两个文件共享同一个数据
@@ -1083,10 +1083,10 @@ func TestPermanentlyDelete(t *testing.T) {
 
 func TestQuotaAndUsed(t *testing.T) {
 	Convey("Quota and Used management", t, func() {
-		InitDB()
+		InitDB(".", "")
 		ig := idgen.NewIDGen(nil, 0)
 		testBktID, _ := ig.New()
-		InitBucketDB(c, testBktID)
+		InitBucketDB(".", testBktID)
 
 		dma := &DefaultMetadataAdapter{}
 		dda := &DefaultDataAdapter{}
@@ -1113,7 +1113,7 @@ func TestQuotaAndUsed(t *testing.T) {
 		testCtx := UserInfo2Ctx(c, userInfo)
 
 		// 创建LocalHandler用于测试
-		lh := NewLocalHandler().(*LocalHandler)
+		lh := NewLocalHandler("", "").(*LocalHandler)
 		lh.SetAdapter(dma, dda)
 
 		Convey("upload file within quota", func() {
@@ -1420,10 +1420,10 @@ func TestQuotaAndUsed(t *testing.T) {
 
 func TestDefragment(t *testing.T) {
 	Convey("Defragment small files and fill holes", t, func() {
-		InitDB()
+		InitDB(".", "")
 		ig := idgen.NewIDGen(nil, 0)
 		testBktID, _ := ig.New()
-		InitBucketDB(c, testBktID)
+		InitBucketDB(".", testBktID)
 
 		dma := &DefaultMetadataAdapter{}
 		dda := &DefaultDataAdapter{}
@@ -1505,7 +1505,8 @@ func TestDefragment(t *testing.T) {
 				var readData []byte
 				if dataInfo.PkgID > 0 {
 					// Packaged data
-					pkgReader, _, err := createPkgDataReader(ORCAS_DATA, testBktID, dataInfo.PkgID, int(dataInfo.PkgOffset), int(dataInfo.Size))
+					dataPath := getDataPath(c)
+					pkgReader, _, err := createPkgDataReader(dataPath, testBktID, dataInfo.PkgID, int(dataInfo.PkgOffset), int(dataInfo.Size))
 					So(err, ShouldBeNil)
 					readData = make([]byte, dataInfo.Size)
 					_, err = io.ReadFull(pkgReader, readData)
@@ -1664,7 +1665,8 @@ func TestDefragment(t *testing.T) {
 			// Note: PkgID may be 0 if hole filling didn't occur, but data should still be readable
 			if updatedInfo.PkgID > 0 {
 				// If hole was filled, verify data integrity
-				pkgReader, _, err := createPkgDataReader(ORCAS_DATA, testBktID, updatedInfo.PkgID, int(updatedInfo.PkgOffset), int(updatedInfo.Size))
+				dataPath := getDataPath(c)
+				pkgReader, _, err := createPkgDataReader(dataPath, testBktID, updatedInfo.PkgID, int(updatedInfo.PkgOffset), int(updatedInfo.Size))
 				So(err, ShouldBeNil)
 				readData := make([]byte, updatedInfo.Size)
 				_, err = io.ReadFull(pkgReader, readData)
@@ -1795,7 +1797,8 @@ func TestDefragment(t *testing.T) {
 				if dataInfo.PkgID > 0 {
 					packagedCount++
 					// Verify data integrity
-					pkgReader, _, err := createPkgDataReader(ORCAS_DATA, testBktID, dataInfo.PkgID, int(dataInfo.PkgOffset), int(dataInfo.Size))
+					dataPath := getDataPath(c)
+					pkgReader, _, err := createPkgDataReader(dataPath, testBktID, dataInfo.PkgID, int(dataInfo.PkgOffset), int(dataInfo.Size))
 					So(err, ShouldBeNil)
 					readData := make([]byte, dataInfo.Size)
 					_, err = io.ReadFull(pkgReader, readData)
@@ -1941,7 +1944,8 @@ func TestDefragment(t *testing.T) {
 			// Verify data can still be read correctly
 			var readData1, readData3 []byte
 			if updatedInfo1.PkgID > 0 {
-				pkgReader, _, err := createPkgDataReader(ORCAS_DATA, testBktID, updatedInfo1.PkgID, int(updatedInfo1.PkgOffset), int(updatedInfo1.Size))
+				dataPath := getDataPath(c)
+				pkgReader, _, err := createPkgDataReader(dataPath, testBktID, updatedInfo1.PkgID, int(updatedInfo1.PkgOffset), int(updatedInfo1.Size))
 				if err == nil {
 					readData1 = make([]byte, updatedInfo1.Size)
 					_, err = io.ReadFull(pkgReader, readData1)
@@ -1970,7 +1974,8 @@ func TestDefragment(t *testing.T) {
 			}
 
 			if updatedInfo3.PkgID > 0 {
-				pkgReader, _, err := createPkgDataReader(ORCAS_DATA, testBktID, updatedInfo3.PkgID, int(updatedInfo3.PkgOffset), int(updatedInfo3.Size))
+				dataPath := getDataPath(c)
+				pkgReader, _, err := createPkgDataReader(dataPath, testBktID, updatedInfo3.PkgID, int(updatedInfo3.PkgOffset), int(updatedInfo3.Size))
 				if err == nil {
 					readData3 = make([]byte, updatedInfo3.Size)
 					_, err = io.ReadFull(pkgReader, readData3)
@@ -2180,7 +2185,8 @@ func TestDefragment(t *testing.T) {
 
 					var readData []byte
 					if dataInfo.PkgID > 0 {
-						pkgReader, _, err := createPkgDataReader(ORCAS_DATA, testBktID, dataInfo.PkgID, int(dataInfo.PkgOffset), int(dataInfo.Size))
+						dataPath := getDataPath(c)
+					pkgReader, _, err := createPkgDataReader(dataPath, testBktID, dataInfo.PkgID, int(dataInfo.PkgOffset), int(dataInfo.Size))
 						So(err, ShouldBeNil)
 						readData = make([]byte, dataInfo.Size)
 						_, err = io.ReadFull(pkgReader, readData)

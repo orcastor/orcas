@@ -309,15 +309,12 @@ func setupTestEnvironmentForInstantUploadOverhead(t testing.TB) (int64, *gin.Eng
 	os.MkdirAll(dataDir, 0o755)
 
 	// Set environment variables
-	os.Setenv("ORCAS_BASE", baseDir)
-	os.Setenv("ORCAS_DATA", dataDir)
 	// Disable batch write to avoid permission issues in tests
 	os.Setenv("ORCAS_BATCH_WRITE_ENABLED", "false")
-	core.ORCAS_BASE = baseDir
-	core.ORCAS_DATA = dataDir
+	// Paths now managed via Handler, not global variables
 
 	// Initialize database
-	core.InitDB("")
+	core.InitDB(".", "")
 	time.Sleep(50 * time.Millisecond)
 
 	ensureTestUserForInstantUploadOverhead(t)
@@ -325,13 +322,13 @@ func setupTestEnvironmentForInstantUploadOverhead(t testing.TB) (int64, *gin.Eng
 	// Create test bucket
 	ig := idgen.NewIDGen(nil, 0)
 	testBktID, _ := ig.New()
-	err := core.InitBucketDB(context.Background(), testBktID)
+	err := core.InitBucketDB(".", testBktID)
 	if err != nil {
 		t.Fatalf("InitBucketDB failed: %v", err)
 	}
 
 	// Login and create bucket
-	handler := core.NewLocalHandler()
+	handler := core.NewLocalHandler("", "")
 	ctx, _, _, err := handler.Login(context.Background(), "orcas", "orcas")
 	if err != nil {
 		t.Fatalf("Login failed: %v", err)
@@ -380,7 +377,7 @@ func setupTestEnvironmentForInstantUploadOverhead(t testing.TB) (int64, *gin.Eng
 
 // ensureTestUserForInstantUploadOverhead ensures test user exists
 func ensureTestUserForInstantUploadOverhead(t testing.TB) {
-	handler := core.NewLocalHandler()
+	handler := core.NewLocalHandler("", "")
 	ctx := context.Background()
 
 	// Try to login first
@@ -391,7 +388,7 @@ func ensureTestUserForInstantUploadOverhead(t testing.TB) {
 
 	// Use the same approach as multipart test
 	hashedPwd := "1000:Zd54dfEjoftaY8NiAINGag==:q1yB510yT5tGIGNewItVSg=="
-	db, err := core.GetDB()
+	db, err := core.GetMainDBWithKey(".", "")
 	if err != nil {
 		t.Logf("Warning: Failed to get DB: %v", err)
 		return

@@ -201,12 +201,7 @@ Storage Layout:
 
 OrcaS supports flexible path management, allowing you to use different storage paths within the same process. This is useful for multi-tenant scenarios or when managing multiple storage locations.
 
-### Environment Variables (Global Defaults)
-
-```bash
-export ORCAS_BASE=/var/orcas/base  # Base path for metadata (main database)
-export ORCAS_DATA=/var/orcas/data  # Data path for file data storage
-```
+By default, OrcaS uses the current directory (`.`) for both base and data paths. You can configure custom paths per context using the methods below.
 
 ### Context-Based Path Configuration
 
@@ -239,7 +234,7 @@ dataID, err := handler.PutData(ctx, bktID, 0, -1, data)
 
 - 🔄 **Multi-tenant Support**: Different contexts can use different storage paths
 - 🎯 **Flexible Configuration**: Override paths per operation without changing global settings
-- ⚙️ **Backward Compatible**: Falls back to global `ORCAS_BASE` and `ORCAS_DATA` if not set in context
+- ⚙️ **Default Behavior**: Uses current directory (`.`) if not set in context
 - 🚀 **Process Isolation**: Multiple storage locations in the same process
 
 ## 📚 Documentation

@@ -31,18 +31,15 @@ func setupTestEnvironmentForMultipart(t *testing.T) (int64, *gin.Engine) {
 	os.MkdirAll(dataDir, 0o755)
 
 	// 设置环境变量
-	os.Setenv("ORCAS_BASE", baseDir)
-	os.Setenv("ORCAS_DATA", dataDir)
 	// 禁用批量写入以避免测试中的时序问题
 	os.Setenv("ORCAS_BATCH_WRITE_ENABLED", "false")
-	core.ORCAS_BASE = baseDir
-	core.ORCAS_DATA = dataDir
+	// 路径现在通过 Handler 管理，不再使用全局变量
 
-	// 初始化数据库（必须在设置环境变量之后）
+	// 初始化数据库
 	// 注意：core.InitDB()会检查数据库是否已初始化，如果已初始化则不会重新初始化
 	// 为了确保每个测试使用独立的数据库，我们需要先关闭旧连接
 	// 但由于core.InitDB()的实现，我们需要确保环境变量已设置
-	core.InitDB("")
+	core.InitDB(".", "")
 
 	// 等待一小段时间确保数据库连接稳定
 	time.Sleep(50 * time.Millisecond)
@@ -52,13 +49,13 @@ func setupTestEnvironmentForMultipart(t *testing.T) (int64, *gin.Engine) {
 	// 创建测试bucket
 	ig := idgen.NewIDGen(nil, 0)
 	testBktID, _ := ig.New()
-	err := core.InitBucketDB(context.Background(), testBktID)
+	err := core.InitBucketDB(".", testBktID)
 	if err != nil {
 		t.Fatalf("InitBucketDB failed: %v", err)
 	}
 
 	// 登录并创建bucket
-	handler := core.NewLocalHandler()
+	handler := core.NewLocalHandler("", "")
 	ctx, _, _, err := handler.Login(context.Background(), "orcas", "orcas")
 	if err != nil {
 		t.Fatalf("Login failed: %v", err)
@@ -147,7 +144,7 @@ func setupTestEnvironmentForMultipart(t *testing.T) (int64, *gin.Engine) {
 
 // ensureTestUserForMultipart 确保测试用户存在
 func ensureTestUserForMultipart(t *testing.T) {
-	handler := core.NewLocalHandler()
+	handler := core.NewLocalHandler("", "")
 	ctx := context.Background()
 	_, _, _, err := handler.Login(ctx, "orcas", "orcas")
 	if err == nil {
@@ -156,7 +153,7 @@ func ensureTestUserForMultipart(t *testing.T) {
 
 	// 如果登录失败，尝试创建用户
 	hashedPwd := "1000:Zd54dfEjoftaY8NiAINGag==:q1yB510yT5tGIGNewItVSg=="
-	db, err := core.GetDB()
+	db, err := core.GetMainDBWithKey(".", "")
 	if err != nil {
 		t.Logf("Warning: Failed to get DB: %v", err)
 		return

@@ -14,8 +14,8 @@ Environment Variable Configuration List
 The following are all environment variable configuration items supported by the ORCAS system:
 
 1. Basic Path Configuration
-   - ORCAS_BASE: Base path for storing metadata and other basic files (string)
-   - ORCAS_DATA: Data path for storing data files (string)
+   - BasePath: Base path for storing metadata and other basic files (string, defaults to current directory ".")
+   - DataPath: Data path for storing data files (string, defaults to current directory ".")
 
 2. Delete Delay Configuration
    - ORCAS_DELETE_DELAY: Delete delay time (seconds), wait for the specified time before deleting data files
@@ -116,8 +116,8 @@ The following are all environment variable configuration items supported by the 
      Example: export ORCAS_CRON_DEFRAGMENT_THRESHOLD=20
 
 Usage Example:
-   export ORCAS_BASE=/var/orcas/base
-   export ORCAS_DATA=/var/orcas/data
+   // Paths default to current directory "." if not set
+   // They can be set via Handler's SetPaths method or when creating Handler
    export ORCAS_DELETE_DELAY=10
    export ORCAS_BATCH_INTERVAL_MS=200
    export ORCAS_MIN_VERSION_INTERVAL_SEC=300
@@ -405,18 +405,6 @@ func GetWriteBufferConfig() WriteBufferConfig {
 	return config
 }
 
-var (
-	ORCAS_BASE = os.Getenv("ORCAS_BASE")
-	ORCAS_DATA = func() string {
-		data := os.Getenv("ORCAS_DATA")
-		if data == "" {
-			// If ORCAS_DATA is empty, use ORCAS_BASE as fallback
-			return os.Getenv("ORCAS_BASE")
-		}
-		return data
-	}()
-)
-
 // Instant upload level setting
 const (
 	REF_LEVEL_OFF  = iota // OFF
@@ -438,8 +426,8 @@ type Config struct {
 	UserName string // Username
 	Password string // Password
 	NoAuth   bool   // If true, bypass authentication and permission checks (no user required)
-	BasePath string // Base path for metadata (database storage location), if empty uses global ORCAS_BASE
-	DataPath string // Data path for file data storage location, if empty uses global ORCAS_DATA
+	BasePath string // Base path for metadata (database storage location), if empty uses current directory "."
+	DataPath string // Data path for file data storage location, if empty uses current directory "."
 	RefLevel uint32 // Instant upload level setting: REF_LEVEL_OFF (default) / REF_LEVEL_FULL: Ref / REF_LEVEL_FAST: TryRef+Ref
 	PkgThres uint32 // Package count limit, default 1000 if not set
 	CmprWay  uint32 // Compression method (smart compression by default, decides whether to compress based on file type), see DATA_CMPR_MASK

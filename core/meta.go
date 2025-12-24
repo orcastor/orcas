@@ -167,7 +167,6 @@ type BucketMetadataAdapter interface {
 	PutBkt(c Ctx, o []*BucketInfo) error
 	DeleteBkt(c Ctx, bktID int64) error
 	GetBkt(c Ctx, ids []int64) ([]*BucketInfo, error)
-	ListBkt(c Ctx, uid int64) ([]*BucketInfo, error)
 	ListAllBuckets(c Ctx) ([]*BucketInfo, error) // Get all buckets (for scheduled tasks)
 	// Update bucket quota and usage
 	UpdateBktQuota(c Ctx, bktID int64, quota int64) error
@@ -243,8 +242,13 @@ type ObjectMetadataAdapter interface {
 	ListVersions(c Ctx, bktID int64, fileID int64, excludeWriting bool) ([]*ObjectInfo, error)
 }
 
-// ACLMetadataManager manages access control lists for buckets (many-to-many relationship)
-type ACLMetadataManager interface {
+// ACLMetadataAdapter provides ACL CRUD operations
+type ACLMetadataAdapter interface {
+	// CheckPermission checks if a user has the required permission for a bucket
+	// Returns true if the user's ACL permission covers the required action
+	CheckPermission(c Ctx, bktID int64, uid int64, action int) (bool, error)
+	// ListACLByUser lists all buckets accessible by a user
+	ListACLByUser(c Ctx, uid int64) ([]*BucketACL, error)
 	// PutACL adds or updates an ACL entry (bktID, uid pair) with permission
 	// perm: permission flags (DR, DW, DD, MDR, MDW, MDD, or ALL)
 	PutACL(c Ctx, bktID int64, uid int64, perm int) error
@@ -254,24 +258,21 @@ type ACLMetadataManager interface {
 	DeleteACL(c Ctx, bktID int64, uid int64) error
 	// DeleteAllACL deletes all ACL entries for a bucket
 	DeleteAllACL(c Ctx, bktID int64) error
-	// ListACLByUser lists all buckets accessible by a user
-	ListACLByUser(c Ctx, uid int64) ([]*BucketACL, error)
-	// CheckPermission checks if a user has the required permission for a bucket
-	// Returns true if the user's ACL permission covers the required action
-	CheckPermission(c Ctx, bktID int64, uid int64, action int) (bool, error)
 }
 
-// BaseMetadataAdapter manages base metadata (users, buckets, ACL) stored in main database
+// BaseMetadataAdapter manages base metadata (users, ACL) stored in main database
+// Note: BucketMetadataAdapter is now part of DataMetadataAdapter since buckets are stored in bucket databases
 type BaseMetadataAdapter interface {
 	Close()
 	UserMetadataAdapter
-	BucketMetadataAdapter
-	ACLMetadataManager
+	ACLMetadataAdapter
 }
 
 // DataMetadataAdapter manages data and object metadata stored in bucket databases
+// Also manages bucket metadata since buckets are stored in bucket databases (dataPath)
 type DataMetadataAdapter interface {
 	Close()
+	BucketMetadataAdapter // Buckets are stored in bucket databases, not main database
 	DataInfoMetadataAdapter
 	ObjectMetadataAdapter
 }
@@ -307,99 +308,45 @@ func EscapeSQLString(s string) string {
 	return builder.String()
 }
 
-func GetDB(c ...interface{}) (*sql.DB, error) {
-	// Use proper parameters for concurrent access:
-	// - _journal=WAL: Write-Ahead Logging for better concurrency
-	// - cache=shared: Share cache between connections
-	// - mode=rwc: Read-Write-Create mode
-	// - _busy_timeout=10000: Wait up to 10 seconds for locks (increased for high concurrency)
-	// - _txlock=immediate: Use immediate transaction locks to reduce contention
-	param := "?_journal=WAL&cache=shared&mode=rwc&_busy_timeout=10000&_txlock=immediate"
-	var dirPath string
-	var dbKey string
-	var ctx Ctx
+// GetMainDBWithKey opens main database with specified encryption key
+// basePath: path for main database directory (empty string defaults to current directory ".")
+// key: encryption key (optional, empty string means unencrypted)
+// Can be called as: GetMainDBWithKey(basePath, key) or GetMainDBWithKey(basePath)
+func GetMainDBWithKey(basePathOrKey ...interface{}) (*sql.DB, error) {
+	var basePath string
+	var key string
 
-	if len(c) > 0 {
-		// Check if first parameter is a string (database key)
-		if keyStr, ok := c[0].(string); ok {
-			dbKey = keyStr
-			c = c[1:] // Remove key from remaining params
-		} else if ctxVal, ok := c[0].(Ctx); ok {
-			// If it's a Ctx, try to get key from context
-			ctx = ctxVal
-			if key := getKey(ctx); key != "" {
-				dbKey = key
-			}
-			c = c[1:] // Remove context from remaining params
-		} else if ctxVal, ok := c[0].(context.Context); ok {
-			// Handle standard context.Context (shouldn't happen, but be safe)
-			// Try to convert to Ctx and extract key
-			ctx = Ctx(ctxVal)
-			if key := getKey(ctx); key != "" {
-				dbKey = key
-			}
-			c = c[1:] // Remove context from remaining params
-		}
-	}
-
-	// Get base path from context or use global variable
-	dirPath = getBasePath(ctx)
-
-	if len(c) > 0 {
-		// Next parameter should be bucket ID (int64)
-		// Ensure it's actually an int64, not accidentally a context
-		if bktID, ok := c[0].(int64); ok {
-			// Get data path from context or use global variable
-			dataPath := getDataPath(ctx)
-			dirPath = filepath.Join(dataPath, fmt.Sprint(bktID))
-		} else {
-			// Invalid parameter type - this should not happen
-			// Log error but try to continue with default path
-			return nil, fmt.Errorf("invalid bucket ID type: expected int64, got %T", c[0])
-		}
-		if len(c) > 1 {
-			if ctx, ok := c[1].(Ctx); ok {
-				if key := getKey(ctx); key != "" {
-					dbKey = key
+	// Parse parameters: can be GetMainDBWithKey(basePath, key), GetMainDBWithKey(basePath), or GetMainDBWithKey(key) for backward compatibility
+	if len(basePathOrKey) > 0 {
+		if pathStr, ok := basePathOrKey[0].(string); ok {
+			// First parameter is string - could be basePath or key (for backward compatibility)
+			if len(basePathOrKey) > 1 {
+				// Two parameters: first is basePath, second is key
+				basePath = pathStr
+				if keyStr, ok := basePathOrKey[1].(string); ok {
+					key = keyStr
 				}
+			} else {
+				// Single string parameter: check if it looks like a path or key
+				// For backward compatibility, if it's a single string, treat it as key
+				// and use default path "."
+				key = pathStr
+				basePath = "."
 			}
 		}
 	}
 
-	if dbKey != "" {
-		param += "&key=" + dbKey
+	// Default to current directory if basePath is empty
+	if basePath == "" {
+		basePath = "."
 	}
 
-	os.MkdirAll(dirPath, 0o766)
-	db, err := sql.Open("sqlite3", filepath.Join(dirPath, "meta.db")+param)
-	if err != nil {
-		return nil, err
-	}
-
-	// Set connection pool limits for better concurrency
-	// MaxOpenConns = 25: Allow up to 25 concurrent connections (good for 10 concurrent clients)
-	// MaxIdleConns = 10: Keep 10 connections in pool for reuse
-	// ConnMaxLifetime = 0: Connections don't expire (reuse indefinitely)
-	db.SetMaxOpenConns(25)
-	db.SetMaxIdleConns(10)
-	db.SetConnMaxLifetime(0)
-
-	return db, nil
-}
-
-// GetDBWithKey opens database with specified encryption key
-// Requires ORCAS_BASE to be set, returns error if ORCAS_BASE is empty
-func GetDBWithKey(key string) (*sql.DB, error) {
-	if ORCAS_BASE == "" {
-		return nil, fmt.Errorf("ORCAS_BASE is not set, main database is not available")
-	}
 	param := "?_journal=WAL&cache=shared&mode=rwc&_busy_timeout=10000&_txlock=immediate"
 	if key != "" {
 		param += "&key=" + key
 	}
-	dirPath := ORCAS_BASE
-	os.MkdirAll(dirPath, 0o766)
-	db, err := sql.Open("sqlite3", filepath.Join(dirPath, "meta.db")+param)
+	os.MkdirAll(basePath, 0o766)
+	db, err := sql.Open("sqlite3", filepath.Join(basePath, "meta.db")+param)
 	if err != nil {
 		return nil, err
 	}
@@ -412,245 +359,23 @@ func GetDBWithKey(key string) (*sql.DB, error) {
 	return db, nil
 }
 
-// ChangeDBKey changes the database encryption key
-// This function re-encrypts the database with a new key by:
-// 1. Exporting all data from old database
-// 2. Creating a new database with new key
-// 3. Importing all data into new database
-// 4. Replacing old database with new one
-// Requires ORCAS_BASE to be set, returns error if ORCAS_BASE is empty
-func ChangeDBKey(oldKey, newKey string) error {
-	// If new key is same as old key, no change needed
-	if oldKey == newKey {
-		return nil
-	}
-
-	// Check if ORCAS_BASE is set
-	if ORCAS_BASE == "" {
-		return fmt.Errorf("ORCAS_BASE is not set, main database is not available")
-	}
-
-	// Get database file path
-	dbPath := filepath.Join(ORCAS_BASE, "meta.db")
-
-	// Check if database file exists before opening
-	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
-		return fmt.Errorf("database file does not exist")
-	}
-
-	// Open database with old key
-	dbOld, err := GetDBWithKey(oldKey)
-	if err != nil {
-		return ERR_OPEN_DB
-	}
-	defer dbOld.Close()
-
-	// Verify old key works by querying
-	var count int
-	err = dbOld.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE type='table'").Scan(&count)
-	if err != nil {
-		return fmt.Errorf("old key verification failed: %v", err)
-	}
-
-	tempPath := dbPath + ".tmp"
-
-	// Step 1: Create temporary database with new key
-	dbNew, err := func() (*sql.DB, error) {
-		param := "?_journal=WAL&cache=shared&mode=rwc&nolock=1"
-		if newKey != "" {
-			param += "&key=" + newKey
-		}
-		return sql.Open("sqlite3", tempPath+param)
-	}()
-	if err != nil {
-		return fmt.Errorf("failed to create new database: %v", err)
-	}
-	defer dbNew.Close()
-
-	// Step 2: Get all table names
-	rows, err := dbOld.Query("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")
-	if err != nil {
-		return fmt.Errorf("failed to query tables: %v", err)
-	}
-	defer rows.Close()
-
-	var tables []string
-	for rows.Next() {
-		var tableName string
-		if err := rows.Scan(&tableName); err != nil {
-			continue
-		}
-		tables = append(tables, tableName)
-	}
-	rows.Close()
-
-	// Step 3: Create all tables in new database
-	for _, tableName := range tables {
-		// Get CREATE TABLE statement
-		var createSQL string
-		err = dbOld.QueryRow("SELECT sql FROM sqlite_master WHERE type='table' AND name=?", tableName).Scan(&createSQL)
-		if err != nil {
-			return fmt.Errorf("failed to get CREATE TABLE for %s: %v", tableName, err)
-		}
-
-		// Execute CREATE TABLE in new database
-		_, err = dbNew.Exec(createSQL)
-		if err != nil {
-			return fmt.Errorf("failed to create table %s: %v", tableName, err)
-		}
-	}
-
-	// Step 4: Copy all data from old to new database
-	for _, tableName := range tables {
-		// Get all data from old table
-		rows, err := dbOld.Query(fmt.Sprintf("SELECT * FROM %s", tableName))
-		if err != nil {
-			return fmt.Errorf("failed to query table %s: %v", tableName, err)
-		}
-
-		// Get column names
-		columns, err := rows.Columns()
-		if err != nil {
-			rows.Close()
-			return fmt.Errorf("failed to get columns for %s: %v", tableName, err)
-		}
-
-		// Build INSERT statement
-		placeholders := strings.Repeat("?,", len(columns))
-		placeholders = placeholders[:len(placeholders)-1] // Remove trailing comma
-		insertSQL := fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s)",
-			tableName, strings.Join(columns, ","), placeholders)
-
-		// Insert rows
-		for rows.Next() {
-			values := make([]interface{}, len(columns))
-			valuePtrs := make([]interface{}, len(columns))
-			for i := range values {
-				valuePtrs[i] = &values[i]
-			}
-
-			if err := rows.Scan(valuePtrs...); err != nil {
-				rows.Close()
-				return fmt.Errorf("failed to scan row from %s: %v", tableName, err)
-			}
-
-			_, err = dbNew.Exec(insertSQL, values...)
-			if err != nil {
-				rows.Close()
-				return fmt.Errorf("failed to insert row into %s: %v", tableName, err)
-			}
-		}
-		rows.Close()
-	}
-
-	// Step 5: Copy indexes
-	indexRows, err := dbOld.Query("SELECT sql FROM sqlite_master WHERE type='index' AND name NOT LIKE 'sqlite_%'")
-	if err == nil {
-		defer indexRows.Close()
-		for indexRows.Next() {
-			var indexSQL string
-			if err := indexRows.Scan(&indexSQL); err != nil {
-				continue
-			}
-			if indexSQL != "" {
-				_, _ = dbNew.Exec(indexSQL) // Ignore errors for indexes
-			}
-		}
-	}
-
-	// Step 6: Close databases and wait for connections to fully close
-	// This is especially important on Windows where SQLite files cannot be renamed
-	// while any connection is open
-
-	// First, close the direct connections we opened
-	dbOld.Close()
-	dbNew.Close()
-
-	// Also close any connections from the connection pool that might be holding the file open
-	// This is critical on Windows where file handles must be fully released before renaming
-	pool := GetDBPool()
-	pool.CloseDBForPath(dbPath)
-
-	// Wait for connections to fully close (especially important on Windows)
-	// SQLite connections may take a moment to fully release file handles
-	time.Sleep(200 * time.Millisecond)
-
-	// Retry renaming with exponential backoff (up to 10 attempts)
-	// This handles cases where connections haven't fully closed yet
-	var renameErr error
-	backupPath := dbPath + ".backup"
-	for i := 0; i < 10; i++ {
-		if i > 0 {
-			// Exponential backoff: 200ms, 400ms, 800ms, 1600ms, etc.
-			time.Sleep(time.Duration(200*(1<<uint(i-1))) * time.Millisecond)
-		}
-		renameErr = os.Rename(dbPath, backupPath)
-		if renameErr == nil {
-			break
-		}
-		// If rename failed, try to close any remaining connections
-		// Force close the database connections again and close pool connections
-		dbOld.Close()
-		dbNew.Close()
-		pool.CloseDBForPath(dbPath)
-	}
-
-	// Step 7: Replace old database with new one
-	// Backup old database first
-	if renameErr != nil {
-		return fmt.Errorf("failed to backup old database: %v", renameErr)
-	}
-
-	// Move new database to final location
-	if err := os.Rename(tempPath, dbPath); err != nil {
-		// Restore backup on error
-		os.Rename(backupPath, dbPath)
-		return fmt.Errorf("failed to replace database: %v", err)
-	}
-
-	// Step 8: Verify new key works
-	dbVerify, err := GetDBWithKey(newKey)
-	if err != nil {
-		// Restore backup on error
-		os.Rename(backupPath, dbPath)
-		return ERR_OPEN_DB
-	}
-	defer dbVerify.Close()
-
-	err = dbVerify.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE type='table'").Scan(&count)
-	if err != nil {
-		// Restore backup on error
-		os.Rename(backupPath, dbPath)
-		return fmt.Errorf("new key verification failed: %v", err)
-	}
-
-	// Step 9: Keep backup file for safety (can be removed manually if needed)
-	// os.Remove(backupPath) // Commented out to keep backup for safety
-
-	return nil
-}
-
 // InitDB initializes the main database
-// If key is provided, the database will be encrypted with that key
-// If key is empty string, the database will be unencrypted
-// Requires ORCAS_BASE to be set, returns error if ORCAS_BASE is empty
-func InitDB(key ...string) error {
-	if ORCAS_BASE == "" {
-		return fmt.Errorf("ORCAS_BASE is not set, cannot initialize main database")
-	}
-	var dbKey string
-	if len(key) > 0 {
-		dbKey = key[0]
+// basePath: path for main database (empty string defaults to current directory ".")
+// key: encryption key (empty string means unencrypted)
+func InitDB(basePath, key string) error {
+	// Default to current directory if basePath is empty
+	if basePath == "" {
+		basePath = "."
 	}
 
 	// Initialize connection pool if not already initialized
 	InitDBPool(10, 5, 5, 0)
 
 	// For initialization, use write connection
-	db, err := GetWriteDB()
+	db, err := GetWriteDB(basePath, key)
 	if err != nil {
 		// Fallback to old method if pool not available
-		db, err = GetDBWithKey(dbKey)
+		db, err = GetMainDBWithKey(basePath, key)
 		if err != nil {
 			return ERR_OPEN_DB
 		}
@@ -741,15 +466,33 @@ func initDefaultAdmin(db *sql.DB) {
 	}
 }
 
-func InitBucketDB(c Ctx, bktID int64) error {
+// InitBucketDB initializes a bucket database
+// dataPath: path for bucket databases (empty string defaults to current directory ".")
+// bktID: bucket ID
+// key: encryption key (optional, empty string means unencrypted)
+func InitBucketDB(dataPath string, bktID int64, key ...string) error {
+	// Default to current directory if dataPath is empty
+	if dataPath == "" {
+		dataPath = "."
+	}
+
+	var dbKey string
+	if len(key) > 0 {
+		dbKey = key[0]
+	}
+
 	// Initialize connection pool if not already initialized
 	InitDBPool(10, 5, 5, 0)
 
 	// For initialization, use write connection
-	db, err := GetWriteDB(c, bktID)
+	// Bucket database: use dataPath/<bktID>/
+	bktDirPath := filepath.Join(dataPath, fmt.Sprint(bktID))
+	db, err := GetWriteDB(bktDirPath, dbKey)
 	if err != nil {
 		// Fallback to old method if pool not available
-		db, err = GetDB(c, bktID)
+		// Bucket database: use dataPath/<bktID>/
+		bktDirPath := filepath.Join(dataPath, fmt.Sprint(bktID))
+		db, err = GetWriteDB(bktDirPath, dbKey)
 		if err != nil {
 			return fmt.Errorf("%w: %v", ERR_OPEN_DB, err)
 		}
@@ -820,15 +563,83 @@ func InitBucketDB(c Ctx, bktID int64) error {
 }
 
 // DefaultBaseMetadataAdapter implements BaseMetadataAdapter
-type DefaultBaseMetadataAdapter struct{}
+type DefaultBaseMetadataAdapter struct {
+	basePath string // Path for main database
+}
 
 func (dba *DefaultBaseMetadataAdapter) Close() {
 }
 
+// SetPath sets the base path for the adapter (for main database)
+func (dba *DefaultBaseMetadataAdapter) SetPath(basePath string) {
+	dba.basePath = basePath
+}
+
 // DefaultDataMetadataAdapter implements DataMetadataAdapter
-type DefaultDataMetadataAdapter struct{}
+type DefaultDataMetadataAdapter struct {
+	dataPath string // Path for data file storage and bucket databases
+}
 
 func (dda *DefaultDataMetadataAdapter) Close() {
+}
+
+// SetPath sets the data path for the adapter (for bucket databases and data files)
+func (dda *DefaultDataMetadataAdapter) SetPath(dataPath string) {
+	dda.dataPath = dataPath
+}
+
+func (dda *DefaultDataMetadataAdapter) ListAllBuckets(c Ctx) (o []*BucketInfo, err error) {
+	// Bucket info is now stored in bucket database, not main database
+	// Scan bucket databases to find all buckets in parallel
+	entries, err := os.ReadDir(dda.dataPath)
+	if err != nil {
+		// If data directory doesn't exist, return empty list
+		return []*BucketInfo{}, nil
+	}
+
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	results := make([]*BucketInfo, 0)
+
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		bktID, err := strconv.ParseInt(entry.Name(), 10, 64)
+		if err != nil {
+			continue
+		}
+
+		wg.Add(1)
+		go func(id int64) {
+			defer wg.Done()
+
+			// Try to read bucket info from bucket database
+			bktDirPath := filepath.Join(dda.dataPath, fmt.Sprint(id))
+			db, err := GetReadDB(bktDirPath, "")
+			if err != nil {
+				return
+			}
+			// Note: Don't close the connection, it's from the pool
+
+			var bucketInfo []*BucketInfo
+			if _, err = b.TableContext(c, db, BKT_TBL).Select(&bucketInfo); err != nil {
+				return
+			}
+			if len(bucketInfo) > 0 {
+				mu.Lock()
+				results = append(results, bucketInfo...)
+				mu.Unlock()
+			}
+		}(bktID)
+	}
+
+	wg.Wait()
+	// Sort results by ID to ensure consistent ordering
+	sort.Slice(results, func(i, j int) bool {
+		return results[i].ID < results[j].ID
+	})
+	return results, nil
 }
 
 // DefaultMetadataAdapter combines BaseMetadataAdapter and DataMetadataAdapter
@@ -849,13 +660,97 @@ func (dma *DefaultMetadataAdapter) Close() {
 	// Both adapters are embedded, no need to close separately
 }
 
+// PutBkt overrides DefaultBaseMetadataAdapter.PutBkt to access dataPath from DefaultDataMetadataAdapter
+func (dma *DefaultMetadataAdapter) PutBkt(c Ctx, o []*BucketInfo) error {
+	// Bucket info is now stored in bucket database, not main database
+	// CmprWay is now smart compression by default (checks file type)
+	// Note: ACL creation is now handled by Admin.PutBkt, not here
+
+	for _, bucket := range o {
+		if bucket != nil {
+			if bucket.ChunkSize <= 0 {
+				bucket.ChunkSize = DEFAULT_CHUNK_SIZE
+			}
+		}
+	}
+
+	// Initialize bucket database and write bucket info to it
+	for _, x := range o {
+		if err := InitBucketDB(dma.DefaultDataMetadataAdapter.dataPath, x.ID); err != nil {
+			return fmt.Errorf("%w: PutBkt InitBucketDB failed (bktID=%d): %v", ERR_EXEC_DB, x.ID, err)
+		}
+
+		// Use write connection for bucket database
+		bktDirPath := filepath.Join(dma.DefaultDataMetadataAdapter.dataPath, fmt.Sprint(x.ID))
+		db, err := GetWriteDB(bktDirPath, "")
+		if err != nil {
+			return fmt.Errorf("%w: PutBkt GetWriteDB failed (bktID=%d): %v", ERR_OPEN_DB, x.ID, err)
+		}
+		// Note: Don't close the connection, it's from the pool
+
+		// Write bucket info to bucket database
+		bktSlice := []*BucketInfo{x}
+		if _, err = b.TableContext(c, db, BKT_TBL).ReplaceInto(&bktSlice); err != nil {
+			return fmt.Errorf("%w: PutBkt failed (bktID=%d, count=%d): %v", ERR_EXEC_DB, x.ID, len(o), err)
+		}
+	}
+	return nil
+}
+
+// GetBkt overrides DefaultBaseMetadataAdapter.GetBkt to access dataPath from DefaultDataMetadataAdapter
+func (dma *DefaultMetadataAdapter) GetBkt(c Ctx, ids []int64) (o []*BucketInfo, err error) {
+	// Bucket info is now stored in bucket database, not main database
+	// Read from each bucket's database in parallel
+	if len(ids) == 0 {
+		return []*BucketInfo{}, nil
+	}
+
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	results := make([]*BucketInfo, 0, len(ids))
+
+	for _, bktID := range ids {
+		wg.Add(1)
+		go func(id int64) {
+			defer wg.Done()
+
+			// Use read connection for bucket database
+			bktDirPath := filepath.Join(dma.DefaultDataMetadataAdapter.dataPath, fmt.Sprint(id))
+			db, err := GetReadDB(bktDirPath, "")
+			if err != nil {
+				// If bucket database doesn't exist, skip it
+				return
+			}
+			// Note: Don't close the connection, it's from the pool
+
+			var bucketInfo []*BucketInfo
+			if _, err = b.TableContext(c, db, BKT_TBL).Select(&bucketInfo, b.Where(b.Eq("id", id))); err != nil {
+				// If query fails, skip this bucket
+				return
+			}
+			if len(bucketInfo) > 0 {
+				mu.Lock()
+				results = append(results, bucketInfo[0])
+				mu.Unlock()
+			}
+		}(bktID)
+	}
+
+	wg.Wait()
+	// Sort results by ID to ensure consistent ordering
+	sort.Slice(results, func(i, j int) bool {
+		return results[i].ID < results[j].ID
+	})
+	return results, nil
+}
+
 // BaseMetadataAdapter implementation (ACL, User, Bucket)
 
 // ACLMetadataManager implementation
 // ACL is stored in main database, not in bucket database
 func (dba *DefaultBaseMetadataAdapter) PutACL(c Ctx, bktID int64, uid int64, perm int) error {
 	// Use write connection for main database
-	db, err := GetWriteDB()
+	db, err := GetWriteDB(dba.basePath, "")
 	if err != nil {
 		return fmt.Errorf("%w: PutACL GetWriteDB failed (bktID=%d): %v", ERR_OPEN_DB, bktID, err)
 	}
@@ -877,7 +772,7 @@ func (dba *DefaultBaseMetadataAdapter) PutACL(c Ctx, bktID int64, uid int64, per
 
 func (dba *DefaultBaseMetadataAdapter) ListACL(c Ctx, bktID int64) ([]*BucketACL, error) {
 	// Use read connection for main database
-	db, err := GetReadDB()
+	db, err := GetReadDB(dba.basePath, "")
 	if err != nil {
 		return nil, fmt.Errorf("%w: ListACL GetReadDB failed (bktID=%d): %v", ERR_OPEN_DB, bktID, err)
 	}
@@ -892,7 +787,7 @@ func (dba *DefaultBaseMetadataAdapter) ListACL(c Ctx, bktID int64) ([]*BucketACL
 
 func (dba *DefaultBaseMetadataAdapter) DeleteACL(c Ctx, bktID int64, uid int64) error {
 	// Use write connection for main database
-	db, err := GetWriteDB()
+	db, err := GetWriteDB(dba.basePath, "")
 	if err != nil {
 		return fmt.Errorf("%w: DeleteACL GetWriteDB failed (bktID=%d, uid=%d): %v", ERR_OPEN_DB, bktID, uid, err)
 	}
@@ -906,7 +801,7 @@ func (dba *DefaultBaseMetadataAdapter) DeleteACL(c Ctx, bktID int64, uid int64) 
 
 func (dba *DefaultBaseMetadataAdapter) DeleteAllACL(c Ctx, bktID int64) error {
 	// Use write connection for main database
-	db, err := GetWriteDB()
+	db, err := GetWriteDB(dba.basePath, "")
 	if err != nil {
 		return fmt.Errorf("%w: DeleteAllACL GetWriteDB failed (bktID=%d): %v", ERR_OPEN_DB, bktID, err)
 	}
@@ -922,7 +817,7 @@ func (dba *DefaultBaseMetadataAdapter) DeleteAllACL(c Ctx, bktID int64) error {
 // Returns true if the user's ACL permission covers the required action
 func (dba *DefaultBaseMetadataAdapter) CheckPermission(c Ctx, bktID int64, uid int64, action int) (bool, error) {
 	// Use read connection for main database
-	db, err := GetReadDB()
+	db, err := GetReadDB(dba.basePath, "")
 	if err != nil {
 		return false, fmt.Errorf("%w: CheckPermission GetReadDB failed (bktID=%d): %v", ERR_OPEN_DB, bktID, err)
 	}
@@ -948,7 +843,7 @@ func (dba *DefaultBaseMetadataAdapter) CheckPermission(c Ctx, bktID int64, uid i
 
 func (dba *DefaultBaseMetadataAdapter) ListACLByUser(c Ctx, uid int64) ([]*BucketACL, error) {
 	// ACL is stored in main database, query directly
-	db, err := GetReadDB()
+	db, err := GetReadDB(dba.basePath, "")
 	if err != nil {
 		return nil, fmt.Errorf("%w: ListACLByUser GetReadDB failed (uid=%d): %v", ERR_OPEN_DB, uid, err)
 	}
@@ -968,7 +863,8 @@ func (dba *DefaultBaseMetadataAdapter) ListACLByUser(c Ctx, uid int64) ([]*Bucke
 func (dma *DefaultMetadataAdapter) RefData(c Ctx, bktID int64, d []*DataInfo) ([]int64, error) {
 	// Use write connection because we need to create temporary table
 	// Temporary tables require write access
-	db, err := GetWriteDB(c, bktID)
+	bktDirPath := filepath.Join(dma.DefaultDataMetadataAdapter.dataPath, fmt.Sprint(bktID))
+	db, err := GetWriteDB(bktDirPath, "")
 	if err != nil {
 		return nil, ERR_OPEN_DB
 	}
@@ -1053,7 +949,8 @@ func (dma *DefaultMetadataAdapter) RefData(c Ctx, bktID int64, d []*DataInfo) ([
 
 func (dma *DefaultMetadataAdapter) PutData(c Ctx, bktID int64, d []*DataInfo) error {
 	// Use write connection for data insertion
-	db, err := GetWriteDB(c, bktID)
+	bktDirPath := filepath.Join(dma.DefaultDataMetadataAdapter.dataPath, fmt.Sprint(bktID))
+	db, err := GetWriteDB(bktDirPath, "")
 	if err != nil {
 		return ERR_OPEN_DB
 	}
@@ -1104,7 +1001,8 @@ func (dma *DefaultMetadataAdapter) PutData(c Ctx, bktID int64, d []*DataInfo) er
 
 func (dma *DefaultMetadataAdapter) GetData(c Ctx, bktID, id int64) (d *DataInfo, err error) {
 	// Use read connection for data retrieval
-	db, err := GetReadDB(c, bktID)
+	bktDirPath := filepath.Join(dma.DefaultDataMetadataAdapter.dataPath, fmt.Sprint(bktID))
+	db, err := GetReadDB(bktDirPath, "")
 	if err != nil {
 		return nil, ERR_OPEN_DB
 	}
@@ -1153,7 +1051,8 @@ func (dma *DefaultMetadataAdapter) GetData(c Ctx, bktID, id int64) (d *DataInfo,
 
 func (dma *DefaultMetadataAdapter) ListAllData(c Ctx, bktID int64, offset, limit int) (d []*DataInfo, total int64, err error) {
 	// Use read connection for listing data
-	db, err := GetReadDB(c, bktID)
+	bktDirPath := filepath.Join(dma.DefaultDataMetadataAdapter.dataPath, fmt.Sprint(bktID))
+	db, err := GetReadDB(bktDirPath, "")
 	if err != nil {
 		return nil, 0, ERR_OPEN_DB
 	}
@@ -1222,7 +1121,8 @@ func (dma *DefaultMetadataAdapter) ListAllData(c Ctx, bktID int64, offset, limit
 
 func (dma *DefaultMetadataAdapter) FindDuplicateData(c Ctx, bktID int64, offset, limit int) (groups []DuplicateGroup, total int64, err error) {
 	// Use read connection for duplicate data search
-	db, err := GetReadDB(c, bktID)
+	bktDirPath := filepath.Join(dma.DefaultDataMetadataAdapter.dataPath, fmt.Sprint(bktID))
+	db, err := GetReadDB(bktDirPath, "")
 	if err != nil {
 		return nil, 0, ERR_OPEN_DB
 	}
@@ -1319,7 +1219,8 @@ func (dma *DefaultMetadataAdapter) FindDuplicateData(c Ctx, bktID int64, offset,
 
 func (dma *DefaultMetadataAdapter) UpdateObjDataID(c Ctx, bktID int64, oldDataID, newDataID int64) error {
 	// Use write connection for update operation
-	db, err := GetWriteDB(c, bktID)
+	bktDirPath := filepath.Join(dma.DefaultDataMetadataAdapter.dataPath, fmt.Sprint(bktID))
+	db, err := GetWriteDB(bktDirPath, "")
 	if err != nil {
 		return ERR_OPEN_DB
 	}
@@ -1343,7 +1244,8 @@ func (dma *DefaultMetadataAdapter) DeleteData(c Ctx, bktID int64, dataIDs []int6
 		return nil
 	}
 	// Use write connection for delete operation
-	db, err := GetWriteDB(c, bktID)
+	bktDirPath := filepath.Join(dma.DefaultDataMetadataAdapter.dataPath, fmt.Sprint(bktID))
+	db, err := GetWriteDB(bktDirPath, "")
 	if err != nil {
 		return ERR_OPEN_DB
 	}
@@ -1359,7 +1261,8 @@ func (dma *DefaultMetadataAdapter) DeleteData(c Ctx, bktID int64, dataIDs []int6
 
 func (dma *DefaultMetadataAdapter) FindSmallPackageData(c Ctx, bktID int64, maxSize int64, offset, limit int) (d []*DataInfo, total int64, err error) {
 	// Use read connection for query operation
-	db, err := GetReadDB(c, bktID)
+	bktDirPath := filepath.Join(dma.DefaultDataMetadataAdapter.dataPath, fmt.Sprint(bktID))
+	db, err := GetReadDB(bktDirPath, "")
 	if err != nil {
 		return nil, 0, ERR_OPEN_DB
 	}
@@ -1440,7 +1343,8 @@ func (dma *DefaultMetadataAdapter) FindSmallPackageData(c Ctx, bktID int64, maxS
 
 func (dma *DefaultMetadataAdapter) PutObj(c Ctx, bktID int64, o []*ObjectInfo) (ids []int64, err error) {
 	// Use write connection for object insertion
-	db, err := GetWriteDB(c, bktID)
+	bktDirPath := filepath.Join(dma.DefaultDataMetadataAdapter.dataPath, fmt.Sprint(bktID))
+	db, err := GetWriteDB(bktDirPath, "")
 	if err != nil {
 		return nil, ERR_OPEN_DB
 	}
@@ -1478,7 +1382,8 @@ func (dma *DefaultMetadataAdapter) PutObj(c Ctx, bktID int64, o []*ObjectInfo) (
 // This optimization reduces database round trips by combining two separate writes
 func (dma *DefaultMetadataAdapter) PutDataAndObj(c Ctx, bktID int64, d []*DataInfo, o []*ObjectInfo) error {
 	// Use write connection for combined write operation
-	db, err := GetWriteDB(c, bktID)
+	bktDirPath := filepath.Join(dma.DefaultDataMetadataAdapter.dataPath, fmt.Sprint(bktID))
+	db, err := GetWriteDB(bktDirPath, "")
 	if err != nil {
 		return ERR_OPEN_DB
 	}
@@ -1551,7 +1456,8 @@ func (dma *DefaultMetadataAdapter) PutDataAndObj(c Ctx, bktID int64, d []*DataIn
 
 func (dma *DefaultMetadataAdapter) GetObj(c Ctx, bktID int64, ids []int64) (o []*ObjectInfo, err error) {
 	// Use read connection for object retrieval
-	db, err := GetReadDB(c, bktID)
+	bktDirPath := filepath.Join(dma.DefaultDataMetadataAdapter.dataPath, fmt.Sprint(bktID))
+	db, err := GetReadDB(bktDirPath, "")
 	if err != nil {
 		return nil, ERR_OPEN_DB
 	}
@@ -1565,7 +1471,8 @@ func (dma *DefaultMetadataAdapter) GetObj(c Ctx, bktID int64, ids []int64) (o []
 
 func (dma *DefaultMetadataAdapter) SetObj(c Ctx, bktID int64, fields []string, o *ObjectInfo) error {
 	// Use write connection for update operation
-	db, err := GetWriteDB(c, bktID)
+	bktDirPath := filepath.Join(dma.DefaultDataMetadataAdapter.dataPath, fmt.Sprint(bktID))
+	db, err := GetWriteDB(bktDirPath, "")
 	if err != nil {
 		return ERR_OPEN_DB
 	}
@@ -1701,7 +1608,8 @@ func (dma *DefaultMetadataAdapter) ListObj(c Ctx, bktID, pid int64,
 	}
 
 	// Use read connection for listing objects
-	db, err := GetReadDB(c, bktID)
+	bktDirPath := filepath.Join(dma.DefaultDataMetadataAdapter.dataPath, fmt.Sprint(bktID))
+	db, err := GetReadDB(bktDirPath, "")
 	if err != nil {
 		return nil, 0, "", fmt.Errorf("%w: ListObj GetReadDB failed (bktID=%d): %v", ERR_OPEN_DB, bktID, err)
 	}
@@ -1737,7 +1645,7 @@ func (dma *DefaultMetadataAdapter) ListObj(c Ctx, bktID, pid int64,
 
 func (dba *DefaultBaseMetadataAdapter) PutUsr(c Ctx, u *UserInfo) error {
 	// Use write connection for user creation/update
-	db, err := GetWriteDB()
+	db, err := GetWriteDB(dba.basePath, "")
 	if err != nil {
 		return ERR_OPEN_DB
 	}
@@ -1751,7 +1659,7 @@ func (dba *DefaultBaseMetadataAdapter) PutUsr(c Ctx, u *UserInfo) error {
 
 func (dba *DefaultBaseMetadataAdapter) GetUsr(c Ctx, ids []int64) (o []*UserInfo, err error) {
 	// Use read connection for user retrieval
-	db, err := GetReadDB()
+	db, err := GetReadDB(dba.basePath, "")
 	if err != nil {
 		return nil, ERR_OPEN_DB
 	}
@@ -1765,7 +1673,7 @@ func (dba *DefaultBaseMetadataAdapter) GetUsr(c Ctx, ids []int64) (o []*UserInfo
 
 func (dba *DefaultBaseMetadataAdapter) GetUsr2(c Ctx, usr string) (o *UserInfo, err error) {
 	// Use read connection for user lookup
-	db, err := GetReadDB()
+	db, err := GetReadDB(dba.basePath, "")
 	if err != nil {
 		return nil, ERR_OPEN_DB
 	}
@@ -1780,7 +1688,7 @@ func (dba *DefaultBaseMetadataAdapter) GetUsr2(c Ctx, usr string) (o *UserInfo, 
 
 func (dba *DefaultBaseMetadataAdapter) SetUsr(c Ctx, fields []string, u *UserInfo) error {
 	// Use write connection for user update
-	db, err := GetWriteDB()
+	db, err := GetWriteDB(dba.basePath, "")
 	if err != nil {
 		return ERR_OPEN_DB
 	}
@@ -1795,7 +1703,7 @@ func (dba *DefaultBaseMetadataAdapter) SetUsr(c Ctx, fields []string, u *UserInf
 
 func (dba *DefaultBaseMetadataAdapter) ListUsers(c Ctx) (o []*UserInfo, err error) {
 	// Use read connection for listing users
-	db, err := GetReadDB()
+	db, err := GetReadDB(dba.basePath, "")
 	if err != nil {
 		return nil, ERR_OPEN_DB
 	}
@@ -1815,7 +1723,7 @@ func (dba *DefaultBaseMetadataAdapter) ListUsers(c Ctx) (o []*UserInfo, err erro
 
 func (dba *DefaultBaseMetadataAdapter) DeleteUser(c Ctx, userID int64) error {
 	// Use write connection for user deletion
-	db, err := GetWriteDB()
+	db, err := GetWriteDB(dba.basePath, "")
 	if err != nil {
 		return ERR_OPEN_DB
 	}
@@ -1828,171 +1736,30 @@ func (dba *DefaultBaseMetadataAdapter) DeleteUser(c Ctx, userID int64) error {
 }
 
 func (dba *DefaultBaseMetadataAdapter) PutBkt(c Ctx, o []*BucketInfo) error {
-	// Bucket info is now stored in bucket database, not main database
-	// CmprWay is now smart compression by default (checks file type)
-	uid := getUID(c) // Get UID from context for ACL creation
-
-	for _, bucket := range o {
-		if bucket != nil {
-			if bucket.ChunkSize <= 0 {
-				bucket.ChunkSize = DEFAULT_CHUNK_SIZE
-			}
-		}
-	}
-
-	// Initialize bucket database and write bucket info to it
-	for _, x := range o {
-		if err := InitBucketDB(c, x.ID); err != nil {
-			return fmt.Errorf("%w: PutBkt InitBucketDB failed (bktID=%d): %v", ERR_EXEC_DB, x.ID, err)
-		}
-
-		// Use write connection for bucket database
-		db, err := GetWriteDB(c, x.ID)
-		if err != nil {
-			return fmt.Errorf("%w: PutBkt GetWriteDB failed (bktID=%d): %v", ERR_OPEN_DB, x.ID, err)
-		}
-		// Note: Don't close the connection, it's from the pool
-
-		// Write bucket info to bucket database
-		bktSlice := []*BucketInfo{x}
-		if _, err = b.TableContext(c, db, BKT_TBL).ReplaceInto(&bktSlice); err != nil {
-			return fmt.Errorf("%w: PutBkt failed (bktID=%d, count=%d): %v", ERR_EXEC_DB, x.ID, len(o), err)
-		}
-
-		// Create ACL for the bucket (if uid is available)
-		if uid > 0 {
-			if err = dba.PutACL(c, x.ID, uid, ALL); err != nil {
-				return fmt.Errorf("%w: PutBkt PutACL failed (bktID=%d, uid=%d): %v", ERR_EXEC_DB, x.ID, uid, err)
-			}
-		}
-	}
-	return nil
+	// Note: PutBkt in DefaultBaseMetadataAdapter cannot access dataPath
+	// This method should be overridden in DefaultMetadataAdapter
+	// Return error to indicate this method should not be called directly
+	return fmt.Errorf("PutBkt requires dataPath, should be called on DefaultMetadataAdapter")
 }
 
 func (dba *DefaultBaseMetadataAdapter) GetBkt(c Ctx, ids []int64) (o []*BucketInfo, err error) {
-	// Bucket info is now stored in bucket database, not main database
-	// Read from each bucket's database in parallel
-	if len(ids) == 0 {
-		return []*BucketInfo{}, nil
-	}
-
-	var wg sync.WaitGroup
-	var mu sync.Mutex
-	results := make([]*BucketInfo, 0, len(ids))
-
-	for _, bktID := range ids {
-		wg.Add(1)
-		go func(id int64) {
-			defer wg.Done()
-
-			// Use read connection for bucket database
-			db, err := GetReadDB(c, id)
-			if err != nil {
-				// If bucket database doesn't exist, skip it
-				return
-			}
-			// Note: Don't close the connection, it's from the pool
-
-			var bucketInfo []*BucketInfo
-			if _, err = b.TableContext(c, db, BKT_TBL).Select(&bucketInfo, b.Where(b.Eq("id", id))); err != nil {
-				// If query fails, skip this bucket
-				return
-			}
-			if len(bucketInfo) > 0 {
-				mu.Lock()
-				results = append(results, bucketInfo[0])
-				mu.Unlock()
-			}
-		}(bktID)
-	}
-
-	wg.Wait()
-	// Sort results by ID to ensure consistent ordering
-	sort.Slice(results, func(i, j int) bool {
-		return results[i].ID < results[j].ID
-	})
-	return results, nil
-}
-
-func (dba *DefaultBaseMetadataAdapter) ListBkt(c Ctx, uid int64) (o []*BucketInfo, err error) {
-	// Bucket info is now stored in bucket database, not main database
-	// Use ACL to find buckets owned by this user
-	acls, err := dba.ListACLByUser(c, uid)
-	if err != nil {
-		return nil, err
-	}
-	if len(acls) == 0 {
-		return []*BucketInfo{}, nil
-	}
-
-	// Get bucket IDs from ACLs
-	bktIDs := make([]int64, 0, len(acls))
-	for _, acl := range acls {
-		bktIDs = append(bktIDs, acl.BktID)
-	}
-
-	// Get bucket info for these buckets
-	return dba.GetBkt(c, bktIDs)
-}
-
-func (dba *DefaultBaseMetadataAdapter) ListAllBuckets(c Ctx) (o []*BucketInfo, err error) {
-	// Bucket info is now stored in bucket database, not main database
-	// Scan bucket databases to find all buckets in parallel
-	dataDir := getDataPath(c)
-	entries, err := os.ReadDir(dataDir)
-	if err != nil {
-		// If data directory doesn't exist, return empty list
-		return []*BucketInfo{}, nil
-	}
-
-	var wg sync.WaitGroup
-	var mu sync.Mutex
-	results := make([]*BucketInfo, 0)
-
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
-		}
-		bktID, err := strconv.ParseInt(entry.Name(), 10, 64)
-		if err != nil {
-			continue
-		}
-
-		wg.Add(1)
-		go func(id int64) {
-			defer wg.Done()
-
-			// Try to read bucket info from bucket database
-			db, err := GetReadDB(c, id)
-			if err != nil {
-				return
-			}
-			// Note: Don't close the connection, it's from the pool
-
-			var bucketInfo []*BucketInfo
-			if _, err = b.TableContext(c, db, BKT_TBL).Select(&bucketInfo); err != nil {
-				return
-			}
-			if len(bucketInfo) > 0 {
-				mu.Lock()
-				results = append(results, bucketInfo...)
-				mu.Unlock()
-			}
-		}(bktID)
-	}
-
-	wg.Wait()
-	// Sort results by ID to ensure consistent ordering
-	sort.Slice(results, func(i, j int) bool {
-		return results[i].ID < results[j].ID
-	})
-	return results, nil
+	// Note: GetBkt in DefaultBaseMetadataAdapter cannot access dataPath
+	// This method should be overridden in DefaultMetadataAdapter
+	return []*BucketInfo{}, nil
 }
 
 func (dba *DefaultBaseMetadataAdapter) DeleteBkt(c Ctx, bktID int64) error {
+	// Note: DeleteBkt in DefaultBaseMetadataAdapter cannot access dataPath
+	// This method should be overridden in DefaultMetadataAdapter
+	return fmt.Errorf("DeleteBkt requires dataPath, should be called on DefaultMetadataAdapter")
+}
+
+// DeleteBkt overrides DefaultBaseMetadataAdapter.DeleteBkt to access dataPath from DefaultDataMetadataAdapter
+func (dma *DefaultMetadataAdapter) DeleteBkt(c Ctx, bktID int64) error {
 	// Bucket info is now stored in bucket database, not main database
 	// Use write connection for bucket database
-	db, err := GetWriteDB(c, bktID)
+	bktDirPath := filepath.Join(dma.DefaultDataMetadataAdapter.dataPath, fmt.Sprint(bktID))
+	db, err := GetWriteDB(bktDirPath, "")
 	if err != nil {
 		return fmt.Errorf("%w: DeleteBkt GetWriteDB failed (bktID=%d): %v", ERR_OPEN_DB, bktID, err)
 	}
@@ -2005,9 +1772,17 @@ func (dba *DefaultBaseMetadataAdapter) DeleteBkt(c Ctx, bktID int64) error {
 }
 
 func (dba *DefaultBaseMetadataAdapter) UpdateBktQuota(c Ctx, bktID int64, quota int64) error {
+	// Note: UpdateBktQuota in DefaultBaseMetadataAdapter cannot access dataPath
+	// This method should be overridden in DefaultMetadataAdapter
+	return fmt.Errorf("UpdateBktQuota requires dataPath, should be called on DefaultMetadataAdapter")
+}
+
+// UpdateBktQuota overrides DefaultBaseMetadataAdapter.UpdateBktQuota to access dataPath from DefaultDataMetadataAdapter
+func (dma *DefaultMetadataAdapter) UpdateBktQuota(c Ctx, bktID int64, quota int64) error {
 	// Bucket info is now stored in bucket database, not main database
 	// Use write connection for bucket database
-	db, err := GetWriteDB(c, bktID)
+	bktDirPath := filepath.Join(dma.DefaultDataMetadataAdapter.dataPath, fmt.Sprint(bktID))
+	db, err := GetWriteDB(bktDirPath, "")
 	if err != nil {
 		return fmt.Errorf("%w: UpdateBktQuota GetWriteDB failed (bktID=%d): %v", ERR_OPEN_DB, bktID, err)
 	}
@@ -2070,7 +1845,8 @@ func (dba *DefaultBaseMetadataAdapter) DecBktDedupSavings(c Ctx, bktID int64, si
 
 func (dma *DefaultMetadataAdapter) CountDataRefs(c Ctx, bktID int64, dataIDs []int64) (map[int64]int64, error) {
 	// Use read connection for counting references
-	db, err := GetReadDB(c, bktID)
+	bktDirPath := filepath.Join(dma.DefaultDataMetadataAdapter.dataPath, fmt.Sprint(bktID))
+	db, err := GetReadDB(bktDirPath, "")
 	if err != nil {
 		return nil, ERR_OPEN_DB
 	}
@@ -2110,7 +1886,8 @@ func (dma *DefaultMetadataAdapter) CountDataRefs(c Ctx, bktID int64, dataIDs []i
 
 func (dma *DefaultMetadataAdapter) ListObjsByType(c Ctx, bktID int64, objType int, offset, limit int) ([]*ObjectInfo, int64, error) {
 	// Use read connection for listing objects by type
-	db, err := GetReadDB(c, bktID)
+	bktDirPath := filepath.Join(dma.DefaultDataMetadataAdapter.dataPath, fmt.Sprint(bktID))
+	db, err := GetReadDB(bktDirPath, "")
 	if err != nil {
 		return nil, 0, ERR_OPEN_DB
 	}
@@ -2148,7 +1925,8 @@ func (dma *DefaultMetadataAdapter) ListObjsByType(c Ctx, bktID int64, objType in
 
 func (dma *DefaultMetadataAdapter) ListChildren(c Ctx, bktID int64, pid int64, offset, limit int) ([]*ObjectInfo, int64, error) {
 	// Use read connection for listing children
-	db, err := GetReadDB(c, bktID)
+	bktDirPath := filepath.Join(dma.DefaultDataMetadataAdapter.dataPath, fmt.Sprint(bktID))
+	db, err := GetReadDB(bktDirPath, "")
 	if err != nil {
 		return nil, 0, ERR_OPEN_DB
 	}
@@ -2187,7 +1965,8 @@ func (dma *DefaultMetadataAdapter) ListChildren(c Ctx, bktID int64, pid int64, o
 
 func (dma *DefaultMetadataAdapter) GetObjByDataID(c Ctx, bktID int64, dataID int64) ([]*ObjectInfo, error) {
 	// Use read connection for querying objects by DataID
-	db, err := GetReadDB(c, bktID)
+	bktDirPath := filepath.Join(dma.DefaultDataMetadataAdapter.dataPath, fmt.Sprint(bktID))
+	db, err := GetReadDB(bktDirPath, "")
 	if err != nil {
 		return nil, ERR_OPEN_DB
 	}
@@ -2204,7 +1983,8 @@ func (dma *DefaultMetadataAdapter) GetObjByDataID(c Ctx, bktID int64, dataID int
 
 func (dma *DefaultMetadataAdapter) ListVersions(c Ctx, bktID int64, fileID int64, excludeWriting bool) ([]*ObjectInfo, error) {
 	// Use read connection for listing versions
-	db, err := GetReadDB(c, bktID)
+	bktDirPath := filepath.Join(dma.DefaultDataMetadataAdapter.dataPath, fmt.Sprint(bktID))
+	db, err := GetReadDB(bktDirPath, "")
 	if err != nil {
 		return nil, ERR_QUERY_DB
 	}
@@ -2230,7 +2010,8 @@ func (dma *DefaultMetadataAdapter) ListVersions(c Ctx, bktID int64, fileID int64
 
 func (dma *DefaultMetadataAdapter) DeleteObj(c Ctx, bktID int64, id int64) error {
 	// Use write connection for delete operation
-	db, err := GetWriteDB(c, bktID)
+	bktDirPath := filepath.Join(dma.DefaultDataMetadataAdapter.dataPath, fmt.Sprint(bktID))
+	db, err := GetWriteDB(bktDirPath, "")
 	if err != nil {
 		return ERR_OPEN_DB
 	}
@@ -2283,7 +2064,8 @@ func (dma *DefaultMetadataAdapter) DeleteObj(c Ctx, bktID int64, id int64) error
 }
 
 func (dma *DefaultMetadataAdapter) ListDeletedObjs(c Ctx, bktID int64, beforeTime int64, limit int) ([]*ObjectInfo, error) {
-	db, err := GetDB(c, bktID)
+	bktDirPath := filepath.Join(dma.DefaultDataMetadataAdapter.dataPath, fmt.Sprint(bktID))
+	db, err := GetReadDB(bktDirPath, "")
 	if err != nil {
 		return nil, ERR_OPEN_DB
 	}
@@ -2314,7 +2096,8 @@ func (dma *DefaultMetadataAdapter) ListDeletedObjs(c Ctx, bktID int64, beforeTim
 }
 
 func (dma *DefaultMetadataAdapter) ListRecycleBin(c Ctx, bktID int64, opt ListOptions) (o []*ObjectInfo, cnt int64, d string, err error) {
-	db, err := GetDB(c, bktID)
+	bktDirPath := filepath.Join(dma.DefaultDataMetadataAdapter.dataPath, fmt.Sprint(bktID))
+	db, err := GetReadDB(bktDirPath, "")
 	if err != nil {
 		return nil, 0, "", ERR_OPEN_DB
 	}

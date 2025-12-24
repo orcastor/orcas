@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -20,7 +19,7 @@ import (
 
 // ensureTestUserForListObjects ensures test user exists for list objects tests
 func ensureTestUserForListObjects(t *testing.T) {
-	handler := core.NewLocalHandler()
+	handler := core.NewLocalHandler("", "")
 	ctx := context.Background()
 	_, _, _, err := handler.Login(ctx, "orcas", "orcas")
 	if err == nil {
@@ -29,7 +28,7 @@ func ensureTestUserForListObjects(t *testing.T) {
 	}
 	// Create user if doesn't exist using direct DB insert
 	hashedPwd := "1000:Zd54dfEjoftaY8NiAINGag==:q1yB510yT5tGIGNewItVSg=="
-	db, err := core.GetDB()
+	db, err := core.GetMainDBWithKey(".", "")
 	if err != nil {
 		t.Fatalf("Failed to get DB: %v", err)
 	}
@@ -46,39 +45,40 @@ func setupTestEnvironmentForListObjects(t *testing.T) (int64, *gin.Engine) {
 	// Enable batch write
 	os.Setenv("ORCAS_BATCH_WRITE_ENABLED", "true")
 
-	// Initialize environment variables
-	if core.ORCAS_BASE == "" {
-		tmpDir := filepath.Join(os.TempDir(), "orcas_s3_list_test")
-		os.MkdirAll(tmpDir, 0o755)
-		os.Setenv("ORCAS_BASE", tmpDir)
-		core.ORCAS_BASE = tmpDir
-	}
-	if core.ORCAS_DATA == "" {
-		tmpDir := filepath.Join(os.TempDir(), "orcas_s3_list_test_data")
-		os.MkdirAll(tmpDir, 0o755)
-		os.Setenv("ORCAS_DATA", tmpDir)
-		core.ORCAS_DATA = tmpDir
-	}
-
-	core.InitDB("")
+	// Initialize database (paths now managed via Handler)
+	core.InitDB(".", "")
 	ensureTestUserForListObjects(t)
 
 	// Create test bucket
 	ig := idgen.NewIDGen(nil, 0)
 	testBktID, _ := ig.New()
-	err := core.InitBucketDB(context.Background(), testBktID)
+	err := core.InitBucketDB(".", testBktID)
 	if err != nil {
 		t.Fatalf("InitBucketDB failed: %v", err)
 	}
 
 	// Login and create bucket
-	handler := core.NewLocalHandler()
-	ctx, _, _, err := handler.Login(context.Background(), "orcas", "orcas")
+	handler := core.NewLocalHandler(".", ".")
+	ctx, userInfo, _, err := handler.Login(context.Background(), "orcas", "orcas")
 	if err != nil {
 		t.Fatalf("Login failed: %v", err)
 	}
+	
+	// Ensure userInfo is in context for PutBkt (which needs uid for ACL creation)
+	if userInfo != nil {
+		ctx = core.UserInfo2Ctx(ctx, userInfo)
+	}
 
-	admin := core.NewLocalAdmin()
+	// Create admin with correct paths
+	dma := &core.DefaultMetadataAdapter{
+		DefaultBaseMetadataAdapter: &core.DefaultBaseMetadataAdapter{},
+		DefaultDataMetadataAdapter: &core.DefaultDataMetadataAdapter{},
+	}
+	dma.DefaultBaseMetadataAdapter.SetPath(".")
+	dma.DefaultDataMetadataAdapter.SetPath(".")
+	acm := &core.DefaultAccessCtrlMgr{}
+	acm.SetAdapter(dma)
+	admin := core.NewAdminWithAdapters(dma, &core.DefaultDataAdapter{}, acm)
 	bkt := &core.BucketInfo{
 		ID:    testBktID,
 		Name:  "test-bucket",
@@ -97,10 +97,14 @@ func setupTestEnvironmentForListObjects(t *testing.T) (int64, *gin.Engine) {
 		// Mock JWT authentication, set UID
 		c.Set("uid", int64(1))
 		c.Request = c.Request.WithContext(core.UserInfo2Ctx(c.Request.Context(), &core.UserInfo{
-			ID: 1,
+			ID:   1,
+			Role: core.ADMIN,
 		}))
 		c.Next()
 	})
+
+	// Set handler paths for S3 handler (must be done before registering routes)
+	s3.SetHandlerPaths(".", ".")
 
 	// Register routes
 	router.GET("/", s3.ListBuckets)

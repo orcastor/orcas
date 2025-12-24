@@ -3,7 +3,6 @@ package vfs
 import (
 	"crypto/rand"
 	"fmt"
-	"os"
 	"runtime"
 	"testing"
 	"time"
@@ -23,14 +22,14 @@ func TestTempFileWriterLargeFileWithEncryption(t *testing.T) {
 	Convey("TempFileWriter large file write with encryption", t, func() {
 		ig := idgen.NewIDGen(nil, 0)
 		testBktID, _ := ig.New()
-		err := core.InitBucketDB(c, testBktID)
+		err := core.InitBucketDB(".", testBktID)
 		So(err, ShouldBeNil)
 
 		dma := &core.DefaultMetadataAdapter{}
 		dda := &core.DefaultDataAdapter{}
 		dda.SetOptions(core.Options{})
 
-		lh := core.NewLocalHandler().(*core.LocalHandler)
+		lh := core.NewLocalHandler("", "").(*core.LocalHandler)
 		lh.SetAdapter(dma, dda)
 
 		testCtx, _, _, err := lh.Login(c, "orcas", "orcas")
@@ -57,12 +56,6 @@ func TestTempFileWriterLargeFileWithEncryption(t *testing.T) {
 			EndecKey: encryptionKey,
 		}
 		ofs := NewOrcasFSWithConfig(lh, testCtx, testBktID, cfg)
-
-		// Cleanup
-		defer func() {
-			os.RemoveAll(core.ORCAS_BASE)
-			os.RemoveAll(core.ORCAS_DATA)
-		}()
 
 		Convey("test 70MB+ file write with encryption and memory monitoring", func() {
 			fileID, _ := ig.New()
@@ -100,7 +93,7 @@ func TestTempFileWriterLargeFileWithEncryption(t *testing.T) {
 				go func(goroutineID int) {
 					// Each goroutine writes to different starting offset, then interleaves
 					offset := int64(goroutineID) * int64(writeSize)
-					
+
 					for offset < totalSize {
 						// Calculate actual write size (may be less at the end)
 						remaining := totalSize - offset
@@ -108,21 +101,21 @@ func TestTempFileWriterLargeFileWithEncryption(t *testing.T) {
 						if remaining < int64(writeSize) {
 							currentWriteSize = int(remaining)
 						}
-						
+
 						// Generate random data for this write
 						data := make([]byte, currentWriteSize)
 						rand.Read(data)
-						
+
 						// Write data
 						err := ra.Write(offset, data)
 						if err != nil {
 							writeErrors <- fmt.Errorf("goroutine %d write error at offset %d: %v", goroutineID, offset, err)
 							return
 						}
-						
+
 						// Move to next write position (interleaved by numConcurrent)
 						offset += int64(numConcurrent) * int64(writeSize)
-						
+
 						// Monitor memory during write
 						var currentMem runtime.MemStats
 						runtime.ReadMemStats(&currentMem)
@@ -130,7 +123,7 @@ func TestTempFileWriterLargeFileWithEncryption(t *testing.T) {
 							memStatsPeak = currentMem
 						}
 					}
-					
+
 					writeErrors <- nil
 				}(i)
 			}
@@ -332,7 +325,7 @@ func TestTempFileWriterLargeFileWithEncryption(t *testing.T) {
 
 			// Write 5 chunks (50MB), then flush, then continue
 			chunkSize := int64(10 * 1024 * 1024) // 10MB
-			writeSize := 64 * 1024                // 64KB
+			writeSize := 64 * 1024               // 64KB
 			numChunks := 7                       // 7 chunks = 70MB
 
 			var memStatsBefore, memStatsPeak runtime.MemStats
@@ -444,14 +437,14 @@ func TestTempFileWriterMemoryEfficiency(t *testing.T) {
 	Convey("TempFileWriter memory efficiency", t, func() {
 		ig := idgen.NewIDGen(nil, 0)
 		testBktID, _ := ig.New()
-		err := core.InitBucketDB(c, testBktID)
+		err := core.InitBucketDB(".", testBktID)
 		So(err, ShouldBeNil)
 
 		dma := &core.DefaultMetadataAdapter{}
 		dda := &core.DefaultDataAdapter{}
 		dda.SetOptions(core.Options{})
 
-		lh := core.NewLocalHandler().(*core.LocalHandler)
+		lh := core.NewLocalHandler("", "").(*core.LocalHandler)
 		lh.SetAdapter(dma, dda)
 
 		testCtx, _, _, err := lh.Login(c, "orcas", "orcas")
@@ -477,11 +470,6 @@ func TestTempFileWriterMemoryEfficiency(t *testing.T) {
 		}
 		ofs := NewOrcasFSWithConfig(lh, testCtx, testBktID, cfg)
 
-		defer func() {
-			os.RemoveAll(core.ORCAS_BASE)
-			os.RemoveAll(core.ORCAS_DATA)
-		}()
-
 		Convey("test memory usage stays bounded during large file write", func() {
 			fileID, _ := ig.New()
 			fileObj := &core.ObjectInfo{
@@ -500,7 +488,7 @@ func TestTempFileWriterMemoryEfficiency(t *testing.T) {
 			defer ra.Close()
 
 			totalSize := int64(20 * 1024 * 1024) // 精简: 100MB -> 20MB
-			writeSize := 64 * 1024                // 64KB
+			writeSize := 64 * 1024               // 64KB
 
 			var memStatsBefore runtime.MemStats
 			runtime.GC()
@@ -555,4 +543,3 @@ func TestTempFileWriterMemoryEfficiency(t *testing.T) {
 		})
 	})
 }
-

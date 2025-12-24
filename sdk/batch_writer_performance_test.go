@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"path/filepath"
 	"runtime"
 	"sync"
 	"testing"
@@ -40,34 +39,21 @@ func setupTestEnvironmentForBatchWrite(t *testing.T, batchWriteEnabled bool) (in
 		os.Setenv("ORCAS_BATCH_WRITE_ENABLED", "false")
 	}
 
-	// 初始化环境变量
-	if core.ORCAS_BASE == "" {
-		tmpDir := filepath.Join(os.TempDir(), fmt.Sprintf("orcas_sdk_batch_test_%d", time.Now().UnixNano()))
-		os.MkdirAll(tmpDir, 0o755)
-		os.Setenv("ORCAS_BASE", tmpDir)
-		core.ORCAS_BASE = tmpDir
-	}
-	if core.ORCAS_DATA == "" {
-		tmpDir := filepath.Join(os.TempDir(), fmt.Sprintf("orcas_sdk_batch_test_data_%d", time.Now().UnixNano()))
-		os.MkdirAll(tmpDir, 0o755)
-		os.Setenv("ORCAS_DATA", tmpDir)
-		core.ORCAS_DATA = tmpDir
-	}
-
-	core.InitDB("")
+	// 初始化数据库（路径现在通过 Handler 管理）
+	core.InitDB(".", "")
 	ensureTestUserForBatchWrite(t)
 
 	// 创建测试bucket
 	ig := idgen.NewIDGen(nil, 0)
 	testBktID, _ := ig.New()
 	ctx := context.Background()
-	err := core.InitBucketDB(ctx, testBktID)
+	err := core.InitBucketDB(".", testBktID)
 	if err != nil {
 		t.Fatalf("InitBucketDB failed: %v", err)
 	}
 
 	// 登录并创建bucket
-	handler := core.NewLocalHandler()
+	handler := core.NewLocalHandler("", "")
 	ctx, userInfo, _, err := handler.Login(ctx, "orcas", "orcas")
 	if err != nil {
 		t.Fatalf("Login failed: %v", err)
@@ -97,7 +83,7 @@ func setupTestEnvironmentForBatchWrite(t *testing.T, batchWriteEnabled bool) (in
 
 // ensureTestUserForBatchWrite 确保测试用户存在
 func ensureTestUserForBatchWrite(t *testing.T) {
-	handler := core.NewLocalHandler()
+	handler := core.NewLocalHandler("", "")
 	ctx := context.Background()
 	_, _, _, err := handler.Login(ctx, "orcas", "orcas")
 	if err == nil {
@@ -106,7 +92,7 @@ func ensureTestUserForBatchWrite(t *testing.T) {
 
 	// 如果登录失败，尝试创建用户
 	hashedPwd := "1000:Zd54dfEjoftaY8NiAINGag==:q1yB510yT5tGIGNewItVSg=="
-	db, err := core.GetDB()
+	db, err := core.GetMainDBWithKey(".", "")
 	if err != nil {
 		t.Logf("Warning: Failed to get DB: %v", err)
 		return

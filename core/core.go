@@ -106,6 +106,8 @@ type Handler interface {
 	SetOptions(opt Options)
 	// 设置自定义的存储适配器
 	SetAdapter(ma MetadataAdapter, da DataAdapter)
+	// 设置路径：basePath 用于主数据库和bucket数据库，dataPath 用于数据文件存储
+	SetPaths(basePath, dataPath string)
 
 	// 登录用户
 	Login(c Ctx, usr, pwd string) (Ctx, *UserInfo, []*BucketInfo, error)
@@ -176,6 +178,18 @@ type Admin interface {
 	UpdateUser(c Ctx, userID int64, username, password, name string, role *uint32) error
 	DeleteUser(c Ctx, userID int64) error
 	ListUsers(c Ctx) ([]*UserInfo, error)
+
+	// PutACL adds or updates an ACL entry (bktID, uid pair) with permission
+	// perm: permission flags (DR, DW, DD, MDR, MDW, MDD, or ALL)
+	PutACL(c Ctx, bktID int64, uid int64, perm int) error
+	// ListACL lists all ACL entries for a bucket
+	ListACL(c Ctx, bktID int64) ([]*BucketACL, error)
+	// DeleteACL deletes a specific ACL entry (bktID, uid pair)
+	DeleteACL(c Ctx, bktID int64, uid int64) error
+	// DeleteAllACL deletes all ACL entries for a bucket
+	DeleteAllACL(c Ctx, bktID int64) error
+	// ListACLByUser lists all buckets accessible by a user
+	ListACLByUser(c Ctx, uid int64) ([]*BucketACL, error)
 }
 
 type LocalHandler struct {
@@ -187,15 +201,29 @@ type LocalHandler struct {
 	// This allows access to bucket configuration for compression/encryption
 	// Cache expires after 5 minutes to ensure bucket config changes are reflected
 	bucketConfigs *ecache2.Cache[int64]
+	// Paths for database and data storage
+	basePath string // Path for main database and bucket databases
+	dataPath string // Path for data file storage
 }
 
-func NewLocalHandler() Handler {
-	dma := &DefaultMetadataAdapter{}
+// NewLocalHandler creates a new LocalHandler
+// basePath: path for main database and bucket databases (empty string for default)
+// dataPath: path for data file storage (empty string for default)
+func NewLocalHandler(basePath, dataPath string) Handler {
+	dma := &DefaultMetadataAdapter{
+		DefaultBaseMetadataAdapter: &DefaultBaseMetadataAdapter{},
+		DefaultDataMetadataAdapter: &DefaultDataMetadataAdapter{},
+	}
+	// Set paths in metadata adapter
+	dma.DefaultBaseMetadataAdapter.SetPath(basePath)
+	dma.DefaultDataMetadataAdapter.SetPath(dataPath)
 	return &LocalHandler{
 		ma:            dma,
 		da:            &DefaultDataAdapter{},
 		acm:           &DefaultAccessCtrlMgr{ma: dma},
 		bucketConfigs: ecache2.NewLRUCache[int64](16, 256, 5*time.Minute),
+		basePath:      basePath,
+		dataPath:      dataPath,
 	}
 }
 
@@ -204,50 +232,23 @@ func NewLocalHandler() Handler {
 // but bucket database operations (data and object metadata) are still performed normally.
 // This is useful for testing, internal operations, or when authentication is handled externally.
 // The handler uses NoAuthAccessCtrlMgr which always allows all operations without querying the main database.
-func NewNoAuthHandler() Handler {
-	dma := &DefaultMetadataAdapter{}
+// basePath: path for main database and bucket databases (empty string for default)
+// dataPath: path for data file storage (empty string for default)
+func NewNoAuthHandler(basePath, dataPath string) Handler {
+	dma := &DefaultMetadataAdapter{
+		DefaultBaseMetadataAdapter: &DefaultBaseMetadataAdapter{},
+		DefaultDataMetadataAdapter: &DefaultDataMetadataAdapter{},
+	}
+	// Set paths in metadata adapter
+	dma.DefaultBaseMetadataAdapter.SetPath(basePath)
+	dma.DefaultDataMetadataAdapter.SetPath(dataPath)
 	return &LocalHandler{
 		ma:            dma,
 		da:            &DefaultDataAdapter{},
 		acm:           &NoAuthAccessCtrlMgr{},
 		bucketConfigs: ecache2.NewLRUCache[int64](16, 256, 5*time.Minute),
-	}
-}
-
-// NewHandlerWithAccessCtrl creates a Handler with a custom AccessCtrlMgr
-// This allows injecting a custom access control manager for testing or special use cases
-func NewHandlerWithAccessCtrl(acm AccessCtrlMgr) Handler {
-	dma := &DefaultMetadataAdapter{}
-	if acm == nil {
-		acm = &DefaultAccessCtrlMgr{ma: dma}
-	}
-	acm.SetAdapter(dma)
-	return &LocalHandler{
-		ma:            dma,
-		da:            &DefaultDataAdapter{},
-		acm:           acm,
-		bucketConfigs: ecache2.NewLRUCache[int64](16, 256, 5*time.Minute),
-	}
-}
-
-// NewHandlerWithAdapters creates a Handler with custom MetadataAdapter, DataAdapter, and AccessCtrlMgr
-// This provides maximum flexibility for testing or custom implementations
-func NewHandlerWithAdapters(ma MetadataAdapter, da DataAdapter, acm AccessCtrlMgr) Handler {
-	if ma == nil {
-		ma = &DefaultMetadataAdapter{}
-	}
-	if da == nil {
-		da = &DefaultDataAdapter{}
-	}
-	if acm == nil {
-		acm = &DefaultAccessCtrlMgr{ma: ma}
-	}
-	acm.SetAdapter(ma)
-	return &LocalHandler{
-		ma:            ma,
-		da:            da,
-		acm:           acm,
-		bucketConfigs: ecache2.NewLRUCache[int64](16, 256, 5*time.Minute),
+		basePath:      basePath,
+		dataPath:      dataPath,
 	}
 }
 
@@ -271,6 +272,19 @@ func (lh *LocalHandler) SetAdapter(ma MetadataAdapter, da DataAdapter) {
 	lh.ma = ma
 	lh.da = da
 	lh.acm.SetAdapter(ma)
+}
+
+// SetPaths sets the base path and data path for the handler
+// basePath: path for main database and bucket databases
+// dataPath: path for data file storage
+func (lh *LocalHandler) SetPaths(basePath, dataPath string) {
+	lh.basePath = basePath
+	lh.dataPath = dataPath
+	// Also set paths in metadata adapter
+	if dma, ok := lh.ma.(*DefaultMetadataAdapter); ok {
+		dma.DefaultBaseMetadataAdapter.SetPath(basePath)
+		dma.DefaultDataMetadataAdapter.SetPath(dataPath)
+	}
 }
 
 // GetDataAdapter returns the DataAdapter instance
@@ -316,7 +330,16 @@ func (lh *LocalHandler) Login(c Ctx, usr, pwd string) (Ctx, *UserInfo, []*Bucket
 	}
 
 	// list buckets
-	b, _ := lh.ma.ListBkt(c, u.ID)
+	// Get buckets using ACL + GetBkt combination
+	var b []*BucketInfo
+	acls, err := lh.ma.ListACLByUser(c, u.ID)
+	if err == nil && len(acls) > 0 {
+		bktIDs := make([]int64, 0, len(acls))
+		for _, acl := range acls {
+			bktIDs = append(bktIDs, acl.BktID)
+		}
+		b, _ = lh.ma.GetBkt(c, bktIDs)
+	}
 
 	// Note: CmprWay, CmprQlty, EndecWay, EndecKey are no longer stored in bucket config
 	// They should be provided via core.Config in business layer (cmd/vfs)
@@ -324,6 +347,11 @@ func (lh *LocalHandler) Login(c Ctx, usr, pwd string) (Ctx, *UserInfo, []*Bucket
 
 	// set uid to ctx
 	c, u.Pwd = UserInfo2Ctx(c, u), ""
+
+	// Paths are now managed via Handler, not context
+	// If handler has paths set, they will be used by getBasePath/getDataPath via Handler reference
+	// For now, paths are stored in Handler and accessed directly when needed
+
 	return c, u, b, nil
 }
 
@@ -1071,7 +1099,13 @@ type LocalAdmin struct {
 }
 
 func NewLocalAdmin() Admin {
-	dma := &DefaultMetadataAdapter{}
+	dma := &DefaultMetadataAdapter{
+		DefaultBaseMetadataAdapter: &DefaultBaseMetadataAdapter{},
+		DefaultDataMetadataAdapter: &DefaultDataMetadataAdapter{},
+	}
+	// Set default paths to current directory
+	dma.DefaultBaseMetadataAdapter.SetPath(".")
+	dma.DefaultDataMetadataAdapter.SetPath(".")
 	return &LocalAdmin{
 		ma:  dma,
 		da:  &DefaultDataAdapter{},
@@ -1085,7 +1119,13 @@ func NewLocalAdmin() Admin {
 // This is useful for testing, internal operations, or when authentication is handled externally.
 // The admin uses NoAuthAccessCtrlMgr which always allows all operations without querying the main database.
 func NewNoAuthAdmin() Admin {
-	dma := &DefaultMetadataAdapter{}
+	dma := &DefaultMetadataAdapter{
+		DefaultBaseMetadataAdapter: &DefaultBaseMetadataAdapter{},
+		DefaultDataMetadataAdapter: &DefaultDataMetadataAdapter{},
+	}
+	// Set default paths to current directory
+	dma.DefaultBaseMetadataAdapter.SetPath(".")
+	dma.DefaultDataMetadataAdapter.SetPath(".")
 	return &LocalAdmin{
 		ma:  dma,
 		da:  &DefaultDataAdapter{},
@@ -1096,7 +1136,13 @@ func NewNoAuthAdmin() Admin {
 // NewAdminWithAccessCtrl creates an Admin with a custom AccessCtrlMgr
 // This allows injecting a custom access control manager for testing or special use cases
 func NewAdminWithAccessCtrl(acm AccessCtrlMgr) Admin {
-	dma := &DefaultMetadataAdapter{}
+	dma := &DefaultMetadataAdapter{
+		DefaultBaseMetadataAdapter: &DefaultBaseMetadataAdapter{},
+		DefaultDataMetadataAdapter: &DefaultDataMetadataAdapter{},
+	}
+	// Set default paths to current directory
+	dma.DefaultBaseMetadataAdapter.SetPath(".")
+	dma.DefaultDataMetadataAdapter.SetPath(".")
 	if acm == nil {
 		acm = &DefaultAccessCtrlMgr{ma: dma}
 	}
@@ -1112,7 +1158,14 @@ func NewAdminWithAccessCtrl(acm AccessCtrlMgr) Admin {
 // This provides maximum flexibility for testing or custom implementations
 func NewAdminWithAdapters(ma MetadataAdapter, da DataAdapter, acm AccessCtrlMgr) Admin {
 	if ma == nil {
-		ma = &DefaultMetadataAdapter{}
+		dma := &DefaultMetadataAdapter{
+			DefaultBaseMetadataAdapter: &DefaultBaseMetadataAdapter{},
+			DefaultDataMetadataAdapter: &DefaultDataMetadataAdapter{},
+		}
+		// Set default paths to current directory
+		dma.DefaultBaseMetadataAdapter.SetPath(".")
+		dma.DefaultDataMetadataAdapter.SetPath(".")
+		ma = dma
 	}
 	if da == nil {
 		da = &DefaultDataAdapter{}
@@ -1141,7 +1194,22 @@ func (la *LocalAdmin) PutBkt(c Ctx, o []*BucketInfo) error {
 	if err := la.acm.CheckRole(c, ADMIN); err != nil {
 		return err
 	}
-	return la.ma.PutBkt(c, o)
+	// Put bucket info first
+	if err := la.ma.PutBkt(c, o); err != nil {
+		return err
+	}
+	// Create ACL for each bucket (if uid is available)
+	uid := getUID(c)
+	if uid > 0 {
+		for _, bkt := range o {
+			if bkt != nil {
+				if err := la.PutACL(c, bkt.ID, uid, ALL); err != nil {
+					return fmt.Errorf("failed to create ACL for bucket %d: %w", bkt.ID, err)
+				}
+			}
+		}
+	}
+	return nil
 }
 
 func (la *LocalAdmin) DeleteBkt(c Ctx, bktID int64) error {
@@ -1284,4 +1352,56 @@ func (la *LocalAdmin) ListUsers(c Ctx) ([]*UserInfo, error) {
 		return nil, err
 	}
 	return la.ma.ListUsers(c)
+}
+
+// ACL management methods (delegate to ACLMetadataAdapter with permission check)
+func (la *LocalAdmin) PutACL(c Ctx, bktID int64, uid int64, perm int) error {
+	if err := la.acm.CheckRole(c, ADMIN); err != nil {
+		return err
+	}
+	// Use the metadata adapter's ACLMetadataAdapter interface
+	if aclAdapter, ok := la.ma.(ACLMetadataAdapter); ok {
+		return aclAdapter.PutACL(c, bktID, uid, perm)
+	}
+	return fmt.Errorf("metadata adapter does not support ACL operations")
+}
+
+func (la *LocalAdmin) ListACL(c Ctx, bktID int64) ([]*BucketACL, error) {
+	if err := la.acm.CheckRole(c, ADMIN); err != nil {
+		return nil, err
+	}
+	if aclAdapter, ok := la.ma.(ACLMetadataAdapter); ok {
+		return aclAdapter.ListACL(c, bktID)
+	}
+	return nil, fmt.Errorf("metadata adapter does not support ACL operations")
+}
+
+func (la *LocalAdmin) DeleteACL(c Ctx, bktID int64, uid int64) error {
+	if err := la.acm.CheckRole(c, ADMIN); err != nil {
+		return err
+	}
+	if aclAdapter, ok := la.ma.(ACLMetadataAdapter); ok {
+		return aclAdapter.DeleteACL(c, bktID, uid)
+	}
+	return fmt.Errorf("metadata adapter does not support ACL operations")
+}
+
+func (la *LocalAdmin) DeleteAllACL(c Ctx, bktID int64) error {
+	if err := la.acm.CheckRole(c, ADMIN); err != nil {
+		return err
+	}
+	if aclAdapter, ok := la.ma.(ACLMetadataAdapter); ok {
+		return aclAdapter.DeleteAllACL(c, bktID)
+	}
+	return fmt.Errorf("metadata adapter does not support ACL operations")
+}
+
+func (la *LocalAdmin) ListACLByUser(c Ctx, uid int64) ([]*BucketACL, error) {
+	if err := la.acm.CheckRole(c, ADMIN); err != nil {
+		return nil, err
+	}
+	if aclAdapter, ok := la.ma.(ACLMetadataAdapter); ok {
+		return aclAdapter.ListACLByUser(c, uid)
+	}
+	return nil, fmt.Errorf("metadata adapter does not support ACL operations")
 }

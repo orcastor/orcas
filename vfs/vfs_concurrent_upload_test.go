@@ -31,14 +31,14 @@ func TestVFSConcurrentChunkUpload(t *testing.T) {
 	t.Skip("Skipping TestVFSConcurrentChunkUpload - may need adjustment after batchwriter removal")
 	Convey("Test VFS concurrent chunk upload with encryption", t, func() {
 		ensureTestUser(t)
-		handler := core.NewLocalHandler()
+		handler := core.NewLocalHandler("", "")
 		ctx := context.Background()
 		ctx, _, _, err := handler.Login(ctx, "orcas", "orcas")
 		So(err, ShouldBeNil)
 
 		ig := idgen.NewIDGen(nil, 0)
 		testBktID, _ := ig.New()
-		err = core.InitBucketDB(ctx, testBktID)
+		err = core.InitBucketDB(".", testBktID)
 		So(err, ShouldBeNil)
 
 		// Get user info for bucket creation
@@ -279,14 +279,14 @@ func TestVFSRepeatedChunkWrite(t *testing.T) {
 	t.Skip("Skipping TestVFSRepeatedChunkWrite - may need adjustment after batchwriter removal")
 	Convey("Test VFS repeated chunk write (delete and rewrite)", t, func() {
 		ensureTestUser(t)
-		handler := core.NewLocalHandler()
+		handler := core.NewLocalHandler("", "")
 		ctx := context.Background()
 		ctx, _, _, err := handler.Login(ctx, "orcas", "orcas")
 		So(err, ShouldBeNil)
 
 		ig := idgen.NewIDGen(nil, 0)
 		testBktID, _ := ig.New()
-		err = core.InitBucketDB(ctx, testBktID)
+		err = core.InitBucketDB(".", testBktID)
 		So(err, ShouldBeNil)
 
 		// Get user info for bucket creation
@@ -487,14 +487,14 @@ func TestVFSConcurrentChunkUploadWithWait(t *testing.T) {
 	t.Skip("Skipping TestVFSConcurrentChunkUploadWithWait - may need adjustment after batchwriter removal")
 	Convey("Test VFS concurrent chunk upload with wait", t, func() {
 		ensureTestUser(t)
-		handler := core.NewLocalHandler()
+		handler := core.NewLocalHandler("", "")
 		ctx := context.Background()
 		ctx, _, _, err := handler.Login(ctx, "orcas", "orcas")
 		So(err, ShouldBeNil)
 
 		ig := idgen.NewIDGen(nil, 0)
 		testBktID, _ := ig.New()
-		err = core.InitBucketDB(ctx, testBktID)
+		err = core.InitBucketDB(".", testBktID)
 		So(err, ShouldBeNil)
 
 		// Get user info for bucket creation

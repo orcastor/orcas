@@ -37,7 +37,7 @@ func TestDokanyInitialization(t *testing.T) {
 func TestDokanyMountOptions(t *testing.T) {
 	// Setup test environment
 	ensureTestUser(t)
-	handler := core.NewLocalHandler()
+	handler := core.NewLocalHandler("", "")
 	ctx := context.Background()
 	ctx, _, _, err := handler.Login(ctx, "orcas", "orcas")
 	if err != nil {
@@ -46,7 +46,7 @@ func TestDokanyMountOptions(t *testing.T) {
 
 	ig := idgen.NewIDGen(nil, 0)
 	testBktID, _ := ig.New()
-	err = core.InitBucketDB(ctx, testBktID)
+	err = core.InitBucketDB(".", testBktID)
 	if err != nil {
 		t.Fatalf("InitBucketDB failed: %v", err)
 	}
@@ -106,7 +106,7 @@ func TestDokanyMountOptions(t *testing.T) {
 func TestDokanyOperations(t *testing.T) {
 	// Setup test environment
 	ensureTestUser(t)
-	handler := core.NewLocalHandler()
+	handler := core.NewLocalHandler("", "")
 	ctx := context.Background()
 	ctx, _, _, err := handler.Login(ctx, "orcas", "orcas")
 	if err != nil {
@@ -115,7 +115,7 @@ func TestDokanyOperations(t *testing.T) {
 
 	ig := idgen.NewIDGen(nil, 0)
 	testBktID, _ := ig.New()
-	err = core.InitBucketDB(ctx, testBktID)
+	err = core.InitBucketDB(".", testBktID)
 	if err != nil {
 		t.Fatalf("InitBucketDB failed: %v", err)
 	}
@@ -219,7 +219,7 @@ func TestDokanyOperations(t *testing.T) {
 func TestDokanyDirectoryOperations(t *testing.T) {
 	// Setup test environment
 	ensureTestUser(t)
-	handler := core.NewLocalHandler()
+	handler := core.NewLocalHandler("", "")
 	ctx := context.Background()
 	ctx, _, _, err := handler.Login(ctx, "orcas", "orcas")
 	if err != nil {
@@ -228,7 +228,7 @@ func TestDokanyDirectoryOperations(t *testing.T) {
 
 	ig := idgen.NewIDGen(nil, 0)
 	testBktID, _ := ig.New()
-	err = core.InitBucketDB(ctx, testBktID)
+	err = core.InitBucketDB(".", testBktID)
 	if err != nil {
 		t.Fatalf("InitBucketDB failed: %v", err)
 	}
@@ -360,7 +360,7 @@ func TestDokanyTimeConversion(t *testing.T) {
 func TestDokanyCreateFile(t *testing.T) {
 	// Setup test environment
 	ensureTestUser(t)
-	handler := core.NewLocalHandler()
+	handler := core.NewLocalHandler("", "")
 	ctx := context.Background()
 	ctx, _, _, err := handler.Login(ctx, "orcas", "orcas")
 	if err != nil {
@@ -369,7 +369,7 @@ func TestDokanyCreateFile(t *testing.T) {
 
 	ig := idgen.NewIDGen(nil, 0)
 	testBktID, _ := ig.New()
-	err = core.InitBucketDB(ctx, testBktID)
+	err = core.InitBucketDB(".", testBktID)
 	if err != nil {
 		t.Fatalf("InitBucketDB failed: %v", err)
 	}
@@ -427,7 +427,7 @@ func TestDokanyCreateFile(t *testing.T) {
 func TestDokanyWriteAndRead(t *testing.T) {
 	// Setup test environment
 	ensureTestUser(t)
-	handler := core.NewLocalHandler()
+	handler := core.NewLocalHandler("", "")
 	ctx := context.Background()
 	ctx, _, _, err := handler.Login(ctx, "orcas", "orcas")
 	if err != nil {
@@ -436,7 +436,7 @@ func TestDokanyWriteAndRead(t *testing.T) {
 
 	ig := idgen.NewIDGen(nil, 0)
 	testBktID, _ := ig.New()
-	err = core.InitBucketDB(ctx, testBktID)
+	err = core.InitBucketDB(".", testBktID)
 	if err != nil {
 		t.Fatalf("InitBucketDB failed: %v", err)
 	}
@@ -677,7 +677,7 @@ func TestDokanyWriteAndRead(t *testing.T) {
 func TestTmpFileRenameCacheUpdate(t *testing.T) {
 	// Setup test environment
 	ensureTestUser(t)
-	handler := core.NewLocalHandler()
+	handler := core.NewLocalHandler("", "")
 	ctx := context.Background()
 	ctx, _, _, err := handler.Login(ctx, "orcas", "orcas")
 	if err != nil {
@@ -686,7 +686,7 @@ func TestTmpFileRenameCacheUpdate(t *testing.T) {
 
 	ig := idgen.NewIDGen(nil, 0)
 	testBktID, _ := ig.New()
-	err = core.InitBucketDB(ctx, testBktID)
+	err = core.InitBucketDB(".", testBktID)
 	if err != nil {
 		t.Fatalf("InitBucketDB failed: %v", err)
 	}
@@ -831,7 +831,7 @@ func TestTmpFileRenameCacheUpdate(t *testing.T) {
 func TestRenameBeforeFlush(t *testing.T) {
 	// Setup test environment
 	ensureTestUser(t)
-	handler := core.NewLocalHandler()
+	handler := core.NewLocalHandler("", "")
 	ctx := context.Background()
 	ctx, _, _, err := handler.Login(ctx, "orcas", "orcas")
 	if err != nil {
@@ -840,7 +840,7 @@ func TestRenameBeforeFlush(t *testing.T) {
 
 	ig := idgen.NewIDGen(nil, 0)
 	testBktID, _ := ig.New()
-	err = core.InitBucketDB(ctx, testBktID)
+	err = core.InitBucketDB(".", testBktID)
 	if err != nil {
 		t.Fatalf("InitBucketDB failed: %v", err)
 	}

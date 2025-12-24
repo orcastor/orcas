@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"github.com/zeebo/xxh3"
 	"os"
-	"path/filepath"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -20,39 +19,12 @@ import (
 var c = context.Background()
 
 func init() {
-	// 为Windows测试设置环境变量
-	if core.ORCAS_BASE == "" {
-		// 使用临时目录
-		tmpDir := filepath.Join(os.TempDir(), "orcas_test")
-		// Remove if exists (could be a file from previous test)
-		if info, err := os.Stat(tmpDir); err == nil {
-			if !info.IsDir() {
-				os.Remove(tmpDir)
-			}
-		}
-		os.MkdirAll(tmpDir, 0o755)
-		os.Setenv("ORCAS_BASE", tmpDir)
-		core.ORCAS_BASE = tmpDir
-	}
-	if core.ORCAS_DATA == "" {
-		// 使用临时目录
-		tmpDir := filepath.Join(os.TempDir(), "orcas_test_data")
-		// Remove if exists (could be a file from previous test)
-		if info, err := os.Stat(tmpDir); err == nil {
-			if !info.IsDir() {
-				os.Remove(tmpDir)
-			}
-		}
-		os.MkdirAll(tmpDir, 0o755)
-		os.Setenv("ORCAS_DATA", tmpDir)
-		core.ORCAS_DATA = tmpDir
-	}
 	// Disable batch write optimization for tests to ensure immediate flush after each write
 	// This makes tests more predictable and easier to understand
 	os.Setenv("ORCAS_BATCH_WRITE_ENABLED", "false")
 	// 初始化主数据库
-	// IMPORTANT: Ensure ORCAS_BASE and ORCAS_DATA are set before calling InitDB
-	if err := core.InitDB(""); err != nil {
+	// Paths are now managed via Handler, not global variables
+	if err := core.InitDB(".", ""); err != nil {
 		// If InitDB fails, log the error but don't fail the test setup
 		// The actual test will handle the error
 		fmt.Printf("Warning: InitDB failed in init(): %v\n", err)
@@ -63,7 +35,7 @@ func TestVFSRandomAccessor(t *testing.T) {
 	Convey("VFS RandomAccessor", t, func() {
 		ig := idgen.NewIDGen(nil, 0)
 		testBktID, _ := ig.New()
-		err := core.InitBucketDB(c, testBktID)
+		err := core.InitBucketDB(".", testBktID)
 		if err != nil {
 			fmt.Printf("InitBucketDB error details: %+v\n", err)
 			t.Fatalf("InitBucketDB failed: %+v", err)
@@ -74,7 +46,7 @@ func TestVFSRandomAccessor(t *testing.T) {
 		dda.SetOptions(core.Options{})
 
 		// 创建LocalHandler
-		lh := core.NewLocalHandler().(*core.LocalHandler)
+		lh := core.NewLocalHandler("", "").(*core.LocalHandler)
 		lh.SetAdapter(dma, dda)
 
 		// 登录以获取上下文
@@ -260,7 +232,7 @@ func TestVFSRandomAccessorWithSDK(t *testing.T) {
 	Convey("VFS RandomAccessor with SDK (compression and encryption)", t, func() {
 		ig := idgen.NewIDGen(nil, 0)
 		testBktID, _ := ig.New()
-		err := core.InitBucketDB(c, testBktID)
+		err := core.InitBucketDB(".", testBktID)
 		So(err, ShouldBeNil)
 
 		dma := &core.DefaultMetadataAdapter{}
@@ -268,7 +240,7 @@ func TestVFSRandomAccessorWithSDK(t *testing.T) {
 		dda.SetOptions(core.Options{})
 
 		// 创建LocalHandler
-		lh := core.NewLocalHandler().(*core.LocalHandler)
+		lh := core.NewLocalHandler("", "").(*core.LocalHandler)
 		lh.SetAdapter(dma, dda)
 
 		// 登录以获取上下文
@@ -733,7 +705,7 @@ func TestRandomAccessorReadWithEncryption(t *testing.T) {
 	Convey("RandomAccessor Read with Encryption", t, func() {
 		ig := idgen.NewIDGen(nil, 0)
 		testBktID, _ := ig.New()
-		err := core.InitBucketDB(c, testBktID)
+		err := core.InitBucketDB(".", testBktID)
 		So(err, ShouldBeNil)
 
 		dma := &core.DefaultMetadataAdapter{}
@@ -741,7 +713,7 @@ func TestRandomAccessorReadWithEncryption(t *testing.T) {
 		dda.SetOptions(core.Options{})
 
 		// 创建LocalHandler
-		lh := core.NewLocalHandler().(*core.LocalHandler)
+		lh := core.NewLocalHandler("", "").(*core.LocalHandler)
 		lh.SetAdapter(dma, dda)
 
 		// 登录以获取上下文
@@ -820,7 +792,7 @@ func TestRandomAccessorReadOptimization(t *testing.T) {
 	Convey("RandomAccessor Read Optimization Tests", t, func() {
 		ig := idgen.NewIDGen(nil, 0)
 		testBktID, _ := ig.New()
-		err := core.InitBucketDB(c, testBktID)
+		err := core.InitBucketDB(".", testBktID)
 		So(err, ShouldBeNil)
 
 		dma := &core.DefaultMetadataAdapter{}
@@ -828,7 +800,7 @@ func TestRandomAccessorReadOptimization(t *testing.T) {
 		dda.SetOptions(core.Options{})
 
 		// 创建LocalHandler
-		lh := core.NewLocalHandler().(*core.LocalHandler)
+		lh := core.NewLocalHandler("", "").(*core.LocalHandler)
 		lh.SetAdapter(dma, dda)
 
 		// 登录以获取上下文
@@ -1140,14 +1112,14 @@ func TestSequentialWriteFallbackToRandom(t *testing.T) {
 	Convey("Sequential write fallback to random write", t, func() {
 		ig := idgen.NewIDGen(nil, 0)
 		testBktID, _ := ig.New()
-		err := core.InitBucketDB(c, testBktID)
+		err := core.InitBucketDB(".", testBktID)
 		So(err, ShouldBeNil)
 
 		dma := &core.DefaultMetadataAdapter{}
 		dda := &core.DefaultDataAdapter{}
 		dda.SetOptions(core.Options{})
 
-		lh := core.NewLocalHandler().(*core.LocalHandler)
+		lh := core.NewLocalHandler("", "").(*core.LocalHandler)
 		lh.SetAdapter(dma, dda)
 
 		testCtx, _, _, err := lh.Login(c, "orcas", "orcas")
@@ -1241,14 +1213,14 @@ func TestMultipleFlush(t *testing.T) {
 	Convey("Multiple flush operations", t, func() {
 		ig := idgen.NewIDGen(nil, 0)
 		testBktID, _ := ig.New()
-		err := core.InitBucketDB(c, testBktID)
+		err := core.InitBucketDB(".", testBktID)
 		So(err, ShouldBeNil)
 
 		dma := &core.DefaultMetadataAdapter{}
 		dda := &core.DefaultDataAdapter{}
 		dda.SetOptions(core.Options{})
 
-		lh := core.NewLocalHandler().(*core.LocalHandler)
+		lh := core.NewLocalHandler("", "").(*core.LocalHandler)
 		lh.SetAdapter(dma, dda)
 
 		testCtx, _, _, err := lh.Login(c, "orcas", "orcas")
@@ -1315,14 +1287,14 @@ func TestWriteToExistingFile(t *testing.T) {
 	Convey("Write to existing file", t, func() {
 		ig := idgen.NewIDGen(nil, 0)
 		testBktID, _ := ig.New()
-		err := core.InitBucketDB(c, testBktID)
+		err := core.InitBucketDB(".", testBktID)
 		So(err, ShouldBeNil)
 
 		dma := &core.DefaultMetadataAdapter{}
 		dda := &core.DefaultDataAdapter{}
 		dda.SetOptions(core.Options{})
 
-		lh := core.NewLocalHandler().(*core.LocalHandler)
+		lh := core.NewLocalHandler("", "").(*core.LocalHandler)
 		lh.SetAdapter(dma, dda)
 
 		testCtx, _, _, err := lh.Login(c, "orcas", "orcas")
@@ -1433,14 +1405,14 @@ func TestDifferentCompressionAlgorithms(t *testing.T) {
 	Convey("Different compression algorithms", t, func() {
 		ig := idgen.NewIDGen(nil, 0)
 		testBktID, _ := ig.New()
-		err := core.InitBucketDB(c, testBktID)
+		err := core.InitBucketDB(".", testBktID)
 		So(err, ShouldBeNil)
 
 		dma := &core.DefaultMetadataAdapter{}
 		dda := &core.DefaultDataAdapter{}
 		dda.SetOptions(core.Options{})
 
-		lh := core.NewLocalHandler().(*core.LocalHandler)
+		lh := core.NewLocalHandler("", "").(*core.LocalHandler)
 		lh.SetAdapter(dma, dda)
 
 		testCtx, _, _, err := lh.Login(c, "orcas", "orcas")
@@ -1511,14 +1483,14 @@ func TestDifferentEncryptionMethods(t *testing.T) {
 	Convey("Different encryption methods", t, func() {
 		ig := idgen.NewIDGen(nil, 0)
 		testBktID, _ := ig.New()
-		err := core.InitBucketDB(c, testBktID)
+		err := core.InitBucketDB(".", testBktID)
 		So(err, ShouldBeNil)
 
 		dma := &core.DefaultMetadataAdapter{}
 		dda := &core.DefaultDataAdapter{}
 		dda.SetOptions(core.Options{})
 
-		lh := core.NewLocalHandler().(*core.LocalHandler)
+		lh := core.NewLocalHandler("", "").(*core.LocalHandler)
 		lh.SetAdapter(dma, dda)
 
 		testCtx, _, _, err := lh.Login(c, "orcas", "orcas")
@@ -1587,14 +1559,14 @@ func TestLargeFileOperations(t *testing.T) {
 	Convey("Large file operations", t, func() {
 		ig := idgen.NewIDGen(nil, 0)
 		testBktID, _ := ig.New()
-		err := core.InitBucketDB(c, testBktID)
+		err := core.InitBucketDB(".", testBktID)
 		So(err, ShouldBeNil)
 
 		dma := &core.DefaultMetadataAdapter{}
 		dda := &core.DefaultDataAdapter{}
 		dda.SetOptions(core.Options{})
 
-		lh := core.NewLocalHandler().(*core.LocalHandler)
+		lh := core.NewLocalHandler("", "").(*core.LocalHandler)
 		lh.SetAdapter(dma, dda)
 
 		testCtx, _, _, err := lh.Login(c, "orcas", "orcas")
@@ -1624,11 +1596,7 @@ func TestLargeFileOperations(t *testing.T) {
 
 		ofs := NewOrcasFS(lh, testCtx, testBktID)
 
-		// 添加清理逻辑
-		defer func() {
-			os.RemoveAll(core.ORCAS_BASE)
-			os.RemoveAll(core.ORCAS_DATA)
-		}()
+		// 清理逻辑已移除，路径现在通过 Handler 管理
 
 		Convey("test write large file in chunks", func() {
 			ra, err := NewRandomAccessor(ofs, fileID)
@@ -1676,14 +1644,14 @@ func TestConcurrentReadWrite(t *testing.T) {
 	Convey("Concurrent read and write", t, func() {
 		ig := idgen.NewIDGen(nil, 0)
 		testBktID, _ := ig.New()
-		err := core.InitBucketDB(c, testBktID)
+		err := core.InitBucketDB(".", testBktID)
 		So(err, ShouldBeNil)
 
 		dma := &core.DefaultMetadataAdapter{}
 		dda := &core.DefaultDataAdapter{}
 		dda.SetOptions(core.Options{})
 
-		lh := core.NewLocalHandler().(*core.LocalHandler)
+		lh := core.NewLocalHandler("", "").(*core.LocalHandler)
 		lh.SetAdapter(dma, dda)
 
 		testCtx, _, _, err := lh.Login(c, "orcas", "orcas")
@@ -1765,14 +1733,14 @@ func TestEmptyWrite(t *testing.T) {
 	Convey("Empty write operations", t, func() {
 		ig := idgen.NewIDGen(nil, 0)
 		testBktID, _ := ig.New()
-		err := core.InitBucketDB(c, testBktID)
+		err := core.InitBucketDB(".", testBktID)
 		So(err, ShouldBeNil)
 
 		dma := &core.DefaultMetadataAdapter{}
 		dda := &core.DefaultDataAdapter{}
 		dda.SetOptions(core.Options{})
 
-		lh := core.NewLocalHandler().(*core.LocalHandler)
+		lh := core.NewLocalHandler("", "").(*core.LocalHandler)
 		lh.SetAdapter(dma, dda)
 
 		testCtx, _, _, err := lh.Login(c, "orcas", "orcas")
@@ -1833,14 +1801,14 @@ func TestReadAfterClose(t *testing.T) {
 	Convey("Read after close", t, func() {
 		ig := idgen.NewIDGen(nil, 0)
 		testBktID, _ := ig.New()
-		err := core.InitBucketDB(c, testBktID)
+		err := core.InitBucketDB(".", testBktID)
 		So(err, ShouldBeNil)
 
 		dma := &core.DefaultMetadataAdapter{}
 		dda := &core.DefaultDataAdapter{}
 		dda.SetOptions(core.Options{})
 
-		lh := core.NewLocalHandler().(*core.LocalHandler)
+		lh := core.NewLocalHandler("", "").(*core.LocalHandler)
 		lh.SetAdapter(dma, dda)
 
 		testCtx, _, _, err := lh.Login(c, "orcas", "orcas")
@@ -1901,14 +1869,14 @@ func TestTruncate(t *testing.T) {
 	Convey("Truncate file operations", t, func() {
 		ig := idgen.NewIDGen(nil, 0)
 		testBktID, _ := ig.New()
-		err := core.InitBucketDB(c, testBktID)
+		err := core.InitBucketDB(".", testBktID)
 		So(err, ShouldBeNil)
 
 		dma := &core.DefaultMetadataAdapter{}
 		dda := &core.DefaultDataAdapter{}
 		dda.SetOptions(core.Options{})
 
-		lh := core.NewLocalHandler().(*core.LocalHandler)
+		lh := core.NewLocalHandler("", "").(*core.LocalHandler)
 		lh.SetAdapter(dma, dda)
 
 		testCtx, _, _, err := lh.Login(c, "orcas", "orcas")
@@ -2118,14 +2086,14 @@ func TestTruncateAndWrite(t *testing.T) {
 	Convey("Truncate and write operations", t, func() {
 		ig := idgen.NewIDGen(nil, 0)
 		testBktID, _ := ig.New()
-		err := core.InitBucketDB(c, testBktID)
+		err := core.InitBucketDB(".", testBktID)
 		So(err, ShouldBeNil)
 
 		dma := &core.DefaultMetadataAdapter{}
 		dda := &core.DefaultDataAdapter{}
 		dda.SetOptions(core.Options{})
 
-		lh := core.NewLocalHandler().(*core.LocalHandler)
+		lh := core.NewLocalHandler("", "").(*core.LocalHandler)
 		lh.SetAdapter(dma, dda)
 
 		testCtx, _, _, err := lh.Login(c, "orcas", "orcas")
@@ -2189,14 +2157,14 @@ func TestTruncateWithCompression(t *testing.T) {
 	Convey("Truncate with compression", t, func() {
 		ig := idgen.NewIDGen(nil, 0)
 		testBktID, _ := ig.New()
-		err := core.InitBucketDB(c, testBktID)
+		err := core.InitBucketDB(".", testBktID)
 		So(err, ShouldBeNil)
 
 		dma := &core.DefaultMetadataAdapter{}
 		dda := &core.DefaultDataAdapter{}
 		dda.SetOptions(core.Options{})
 
-		lh := core.NewLocalHandler().(*core.LocalHandler)
+		lh := core.NewLocalHandler("", "").(*core.LocalHandler)
 		lh.SetAdapter(dma, dda)
 
 		testCtx, _, _, err := lh.Login(c, "orcas", "orcas")
@@ -2264,14 +2232,14 @@ func TestBatchWriteManagerSmallFile(t *testing.T) {
 	Convey("Small file operations", t, func() {
 		ig := idgen.NewIDGen(nil, 0)
 		testBktID, _ := ig.New()
-		err := core.InitBucketDB(c, testBktID)
+		err := core.InitBucketDB(".", testBktID)
 		So(err, ShouldBeNil)
 
 		dma := &core.DefaultMetadataAdapter{}
 		dda := &core.DefaultDataAdapter{}
 		dda.SetOptions(core.Options{})
 
-		lh := core.NewLocalHandler().(*core.LocalHandler)
+		lh := core.NewLocalHandler("", "").(*core.LocalHandler)
 		lh.SetAdapter(dma, dda)
 
 		testCtx, _, _, err := lh.Login(c, "orcas", "orcas")
@@ -2352,14 +2320,14 @@ func TestSequentialWriteLargeFile(t *testing.T) {
 	Convey("Sequential write large file", t, func() {
 		ig := idgen.NewIDGen(nil, 0)
 		testBktID, _ := ig.New()
-		err := core.InitBucketDB(c, testBktID)
+		err := core.InitBucketDB(".", testBktID)
 		So(err, ShouldBeNil)
 
 		dma := &core.DefaultMetadataAdapter{}
 		dda := &core.DefaultDataAdapter{}
 		dda.SetOptions(core.Options{})
 
-		lh := core.NewLocalHandler().(*core.LocalHandler)
+		lh := core.NewLocalHandler("", "").(*core.LocalHandler)
 		lh.SetAdapter(dma, dda)
 
 		testCtx, _, _, err := lh.Login(c, "orcas", "orcas")
@@ -2434,14 +2402,14 @@ func TestTruncateReferenceDataBlock(t *testing.T) {
 	Convey("Truncate with data block reference", t, func() {
 		ig := idgen.NewIDGen(nil, 0)
 		testBktID, _ := ig.New()
-		err := core.InitBucketDB(c, testBktID)
+		err := core.InitBucketDB(".", testBktID)
 		So(err, ShouldBeNil)
 
 		dma := &core.DefaultMetadataAdapter{}
 		dda := &core.DefaultDataAdapter{}
 		dda.SetOptions(core.Options{})
 
-		lh := core.NewLocalHandler().(*core.LocalHandler)
+		lh := core.NewLocalHandler("", "").(*core.LocalHandler)
 		lh.SetAdapter(dma, dda)
 
 		testCtx, _, _, err := lh.Login(c, "orcas", "orcas")

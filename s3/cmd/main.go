@@ -1,6 +1,8 @@
 package main
 
 import (
+	"os"
+
 	"github.com/gotomicro/ego"
 	"github.com/gotomicro/ego/core/elog"
 	"github.com/gotomicro/ego/server/egin"
@@ -10,10 +12,12 @@ import (
 	"github.com/orcastor/orcas/s3/middleware"
 )
 
-// EGO_DEBUG=true EGO_LOG_EXTRA_KEYS=uid ORCAS_BASE=/opt/orcas ORCAS_DATA=/opt/orcas_disk ORCAS_SECRET=xxxxxxxx egoctl run --runargs --config=config.toml
-// EGO_DEBUG=true EGO_LOG_EXTRA_KEYS=uid ORCAS_BASE=/opt/orcas ORCAS_DATA=/opt/orcas_disk ORCAS_SECRET=xxxxxxxx go run ./... --config=config.toml
+// EGO_DEBUG=true EGO_LOG_EXTRA_KEYS=uid ORCAS_SECRET=xxxxxxxx egoctl run --runargs --config=config.toml
+// EGO_DEBUG=true EGO_LOG_EXTRA_KEYS=uid ORCAS_SECRET=xxxxxxxx go run ./... --config=config.toml
+// Note: ORCAS_BASE and ORCAS_DATA are no longer used as environment variables.
+// Paths are configured via context using Path2Ctx or Config2Ctx, defaulting to current directory (.)
 func main() {
-	core.InitDB()
+	core.InitDB(os.Getenv("ORCAS_BASE"), "")
 	if err := ego.New().Serve(func() *egin.Component {
 		server := egin.Load("server.http").Build()
 

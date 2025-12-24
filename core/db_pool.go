@@ -1,7 +1,6 @@
 package core
 
 import (
-	"context"
 	"database/sql"
 	"fmt"
 	"os"
@@ -225,7 +224,7 @@ func (dp *DBPool) Close() {
 // regardless of the encryption key.
 func (dp *DBPool) CloseDBForPath(dbPath string) {
 	var keysToDelete []interface{}
-	
+
 	dp.pools.Range(func(key, value interface{}) bool {
 		if dbPool, ok := value.(*DatabasePool); ok {
 			// Check if this pool matches the database path
@@ -240,7 +239,7 @@ func (dp *DBPool) CloseDBForPath(dbPath string) {
 		}
 		return true
 	})
-	
+
 	// Delete all matching pools
 	for _, key := range keysToDelete {
 		dp.pools.Delete(key)
@@ -278,65 +277,30 @@ func (dp *DBPool) GetDBStats() map[string]interface{} {
 	return stats
 }
 
-// GetDBWithType is a convenience function that gets a database connection
-// with automatic path and key resolution (similar to original GetDB)
-func GetDBWithType(connType DBConnectionType, c ...interface{}) (*sql.DB, error) {
+// GetDBWithType gets a database connection from the pool with specified connection type
+// dirPath: path for database directory (empty string defaults to current directory ".")
+// key: encryption key (optional, empty string means unencrypted)
+func GetDBWithType(connType DBConnectionType, dirPath, key string) (*sql.DB, error) {
 	pool := GetDBPool()
-	var dirPath string
-	var dbKey string
-	var ctx Ctx
 
-	// Parse parameters (same logic as original GetDB)
-	if len(c) > 0 {
-		if keyStr, ok := c[0].(string); ok {
-			dbKey = keyStr
-			c = c[1:]
-		} else if ctx, ok := c[0].(Ctx); ok {
-			if key := getKey(ctx); key != "" {
-				dbKey = key
-			}
-			c = c[1:]
-		} else if _, ok := c[0].(context.Context); ok {
-			if key := getKey(Ctx(c[0].(context.Context))); key != "" {
-				dbKey = key
-			}
-			c = c[1:]
-		}
+	// Default path
+	if dirPath == "" {
+		dirPath = "."
 	}
 
-	if len(c) > 0 {
-		if bktID, ok := c[0].(int64); ok {
-			// Bucket database: get data path from context or use global variable
-			dataPath := getDataPath(ctx)
-			dirPath = filepath.Join(dataPath, fmt.Sprint(bktID))
-		}
-		if len(c) > 1 {
-			if ctxVal, ok := c[1].(Ctx); ok {
-				ctx = ctxVal
-				if key := getKey(ctx); key != "" {
-					dbKey = key
-				}
-			}
-		}
-	} else {
-		// Main database: get base path from context or use global variable
-		if dirPath == "" {
-			dirPath = getBasePath(ctx)
-		}
-		if dirPath == "" {
-			return nil, fmt.Errorf("ORCAS_BASE is not set, main database is not available")
-		}
-	}
-
-	return pool.GetDB(connType, dirPath, dbKey)
+	return pool.GetDB(connType, dirPath, key)
 }
 
 // GetReadDB gets a read-only database connection
-func GetReadDB(c ...interface{}) (*sql.DB, error) {
-	return GetDBWithType(DBRead, c...)
+// dirPath: path for database directory (empty string defaults to current directory ".")
+// key: encryption key (optional, empty string means unencrypted)
+func GetReadDB(dirPath, key string) (*sql.DB, error) {
+	return GetDBWithType(DBRead, dirPath, key)
 }
 
 // GetWriteDB gets a write database connection
-func GetWriteDB(c ...interface{}) (*sql.DB, error) {
-	return GetDBWithType(DBWrite, c...)
+// dirPath: path for database directory (empty string defaults to current directory ".")
+// key: encryption key (optional, empty string means unencrypted)
+func GetWriteDB(dirPath, key string) (*sql.DB, error) {
+	return GetDBWithType(DBWrite, dirPath, key)
 }

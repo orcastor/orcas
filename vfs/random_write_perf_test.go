@@ -15,12 +15,12 @@ import (
 func BenchmarkRandomWriteSparseFile(b *testing.B) {
 	ig := idgen.NewIDGen(nil, 0)
 	testBktID, _ := ig.New()
-	core.InitBucketDB(context.TODO(), testBktID)
+	core.InitBucketDB(".", testBktID)
 
 	dma := &core.DefaultMetadataAdapter{}
 	dda := &core.DefaultDataAdapter{}
 	dda.SetOptions(core.Options{}) // Use default options
-	lh := core.NewLocalHandler()
+	lh := core.NewLocalHandler("", "")
 	lh.SetAdapter(dma, dda)
 
 	// Create test file system
@@ -166,7 +166,7 @@ func BenchmarkRandomWriteSparseFile(b *testing.B) {
 // TestRandomWriteSparseFile tests random writes for sparse files
 func TestRandomWriteSparseFile(t *testing.T) {
 	Convey("Random write sparse file (qBittorrent scenario)", t, func() {
-		core.InitDB("")
+		core.InitDB(".", "")
 		ensureTestUser(t)
 
 		ig := idgen.NewIDGen(nil, 0)
@@ -176,7 +176,7 @@ func TestRandomWriteSparseFile(t *testing.T) {
 		dda := &core.DefaultDataAdapter{}
 		dda.SetOptions(core.Options{})
 
-		lh := core.NewLocalHandler().(*core.LocalHandler)
+		lh := core.NewLocalHandler("", "").(*core.LocalHandler)
 		lh.SetAdapter(dma, dda)
 
 		testCtx, _, _, err := lh.Login(context.Background(), "orcas", "orcas")
@@ -308,12 +308,12 @@ func TestRandomWriteSparseFile(t *testing.T) {
 func BenchmarkRandomWriteDeduplication(b *testing.B) {
 	ig := idgen.NewIDGen(nil, 0)
 	testBktID, _ := ig.New()
-	core.InitBucketDB(context.TODO(), testBktID)
+	core.InitBucketDB(".", testBktID)
 
 	dma := &core.DefaultMetadataAdapter{}
 	dda := &core.DefaultDataAdapter{}
 	dda.SetOptions(core.Options{})
-	lh := core.NewLocalHandler()
+	lh := core.NewLocalHandler("", "")
 	lh.SetAdapter(dma, dda)
 
 	// Get LocalHandler for writing version operations

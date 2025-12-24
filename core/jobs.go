@@ -195,7 +195,7 @@ func delayedDelete(c Ctx, bktID, dataID int64, ma MetadataAdapter, da DataAdapte
 						return
 					}
 
-					dataPath := getDataPath(c)
+					dataPath := getDataPathFromAdapter(ma)
 					dataSize := calculateDataSize(dataPath, bktID, dataID)
 					if dataSize > 0 {
 						ma.DecBktRealUsed(c, bktID, dataSize)
@@ -882,7 +882,7 @@ func PermanentlyDeleteObject(c Ctx, bktID, id int64, h Handler, ma MetadataAdapt
 				// Defragmentation will clean up data blocks with same pkgID and pkgOffset
 			} else {
 				// Non-packaged data, calculate total data file size and decrease actual usage
-				dataPath := getDataPath(c)
+				dataPath := getDataPathFromAdapter(ma)
 				dataSize := calculateDataSize(dataPath, bktID, obj.DataID)
 				if dataSize > 0 {
 					// Decrease bucket's actual usage
@@ -899,7 +899,7 @@ func PermanentlyDeleteObject(c Ctx, bktID, id int64, h Handler, ma MetadataAdapt
 	}
 
 	// Physically delete object from database
-	return deleteObjFromDB(c, bktID, id)
+	return deleteObjFromDB(c, bktID, id, ma)
 }
 
 // CleanRecycleBin cleans up objects marked as deleted in recycle bin (physically delete unreferenced data files and metadata)
@@ -998,7 +998,7 @@ func CleanRecycleBin(c Ctx, bktID int64, h Handler, ma MetadataAdapter, da DataA
 					// Defragmentation will clean up data blocks with same pkgID and pkgOffset
 				} else {
 					// Non-packaged data, calculate total data file size and decrease actual usage
-					dataPath := getDataPath(c)
+					dataPath := getDataPathFromAdapter(ma)
 					dataSize := calculateDataSize(dataPath, bktID, dataID)
 					if dataSize > 0 {
 						// Decrease bucket's actual usage
@@ -1015,7 +1015,7 @@ func CleanRecycleBin(c Ctx, bktID int64, h Handler, ma MetadataAdapter, da DataA
 		// Delete recycled object metadata from database
 		// Batch delete
 		for _, objID := range objIDsToDelete {
-			if err := deleteObjFromDB(c, bktID, objID); err != nil {
+			if err := deleteObjFromDB(c, bktID, objID, ma); err != nil {
 				// Record error but continue processing other objects
 				continue
 			}
@@ -1057,7 +1057,7 @@ func CleanRecycleBin(c Ctx, bktID int64, h Handler, ma MetadataAdapter, da DataA
 	for _, dataID := range dataIDList {
 		if refCounts[dataID] == 0 {
 			// Calculate total data file size and decrease actual usage
-			dataPath := getDataPath(c)
+			dataPath := getDataPathFromAdapter(ma)
 			dataSize := calculateDataSize(dataPath, bktID, dataID)
 			if dataSize > 0 {
 				// Decrease bucket's actual usage
@@ -1073,7 +1073,7 @@ func CleanRecycleBin(c Ctx, bktID int64, h Handler, ma MetadataAdapter, da DataA
 	// Delete recycled object metadata from database
 	// Can batch delete here, but for simplicity, delete one by one for now
 	for _, obj := range deletedObjs {
-		if err := deleteObjFromDB(c, bktID, obj.ID); err != nil {
+		if err := deleteObjFromDB(c, bktID, obj.ID, ma); err != nil {
 			// Record error but continue processing other objects
 			continue
 		}
@@ -1082,10 +1082,21 @@ func CleanRecycleBin(c Ctx, bktID int64, h Handler, ma MetadataAdapter, da DataA
 	return nil
 }
 
+// getDataPathFromAdapter gets dataPath from MetadataAdapter if it's DefaultMetadataAdapter
+func getDataPathFromAdapter(ma MetadataAdapter) string {
+	if dma, ok := ma.(*DefaultMetadataAdapter); ok {
+		return dma.DefaultDataMetadataAdapter.dataPath
+	}
+	return "."
+}
+
 // listChildrenDirectly directly queries child objects (including deleted ones)
 func listChildrenDirectly(c Ctx, bktID, pid int64, ma MetadataAdapter) ([]*ObjectInfo, error) {
+	// Get dataPath from adapter
+	dataPath := getDataPathFromAdapter(ma)
 	// Use read connection for query operations
-	db, err := GetReadDB(c, bktID)
+	bktDirPath := filepath.Join(dataPath, fmt.Sprint(bktID))
+	db, err := GetReadDB(bktDirPath, "")
 	if err != nil {
 		return nil, ERR_OPEN_DB
 	}
@@ -1112,9 +1123,12 @@ func listChildrenDirectly(c Ctx, bktID, pid int64, ma MetadataAdapter) ([]*Objec
 }
 
 // deleteObjFromDB deletes object from database (physical deletion)
-func deleteObjFromDB(c Ctx, bktID, id int64) error {
+func deleteObjFromDB(c Ctx, bktID, id int64, ma MetadataAdapter) error {
+	// Get dataPath from adapter
+	dataPath := getDataPathFromAdapter(ma)
 	// Use write connection for delete operation
-	db, err := GetWriteDB(c, bktID)
+	bktDirPath := filepath.Join(dataPath, fmt.Sprint(bktID))
+	db, err := GetWriteDB(bktDirPath, "")
 	if err != nil {
 		return ERR_OPEN_DB
 	}
@@ -1226,7 +1240,7 @@ func ScrubData(c Ctx, bktID int64, ma MetadataAdapter, da DataAdapter) (*ScrubRe
 			// If it's packaged data, check package file
 			if dataInfo.PkgID > 0 {
 				// Check if package file exists
-				dataPath := getDataPath(c)
+				dataPath := getDataPathFromAdapter(ma)
 				if !dataFileExists(dataPath, bktID, dataInfo.PkgID, 0) {
 					result.CorruptedData = append(result.CorruptedData, dataInfo.ID)
 					continue
@@ -1236,7 +1250,7 @@ func ScrubData(c Ctx, bktID int64, ma MetadataAdapter, da DataAdapter) (*ScrubRe
 				// Get bucket's chunk size configuration
 				chunkSize := getChunkSize(c, bktID, ma)
 				// Collect all existing chunks (pass Size and chunkSize to calculate expected max sn)
-				dataPath := getDataPath(c)
+				dataPath := getDataPathFromAdapter(ma)
 				chunks := scanChunks(dataPath, bktID, dataInfo.ID, dataInfo.Size, chunkSize)
 
 				if len(chunks) == 0 {
@@ -1406,7 +1420,7 @@ func ScanDirtyData(c Ctx, bktID int64, ma MetadataAdapter, da DataAdapter) (*Dir
 
 			// If it's packaged data, check if package file is readable
 			if dataInfo.PkgID > 0 {
-				dataPath := getDataPath(c)
+				dataPath := getDataPathFromAdapter(ma)
 				if !dataFileExists(dataPath, bktID, dataInfo.PkgID, 0) {
 					result.UnreadableData = append(result.UnreadableData, dataInfo.ID)
 					continue
@@ -1422,7 +1436,7 @@ func ScanDirtyData(c Ctx, bktID int64, ma MetadataAdapter, da DataAdapter) (*Dir
 				// Get bucket's chunk size configuration
 				chunkSize := getChunkSize(c, bktID, ma)
 				// Scan all chunks (pass Size and chunkSize to calculate expected max sn)
-				dataPath := getDataPath(c)
+				dataPath := getDataPathFromAdapter(ma)
 				chunks := scanChunks(dataPath, bktID, dataInfo.ID, dataInfo.Size, chunkSize)
 
 				if len(chunks) == 0 {
@@ -1553,7 +1567,7 @@ func FixScrubIssues(c Ctx, bktID int64, result *ScrubResult, ma MetadataAdapter,
 	if options.FixOrphaned && len(result.OrphanedData) > 0 {
 		for _, dataID := range result.OrphanedData {
 			// Orphaned data has no metadata references, can directly delete files
-			dataPath := getDataPath(c)
+			dataPath := getDataPathFromAdapter(ma)
 			dataSize := calculateDataSize(dataPath, bktID, dataID)
 			if dataSize > 0 {
 				// Decrease actual usage
@@ -1598,7 +1612,7 @@ func FixScrubIssues(c Ctx, bktID int64, result *ScrubResult, ma MetadataAdapter,
 						continue // Metadata deletion failed, don't continue deleting files
 					}
 
-					dataPath := getDataPath(c)
+					dataPath := getDataPathFromAdapter(ma)
 					dataSize := calculateDataSize(dataPath, bktID, dataID)
 					if dataSize > 0 {
 						if err := ma.DecBktRealUsed(c, bktID, dataSize); err != nil {
@@ -1786,7 +1800,7 @@ func MergeDuplicateData(c Ctx, bktID int64, ma MetadataAdapter, da DataAdapter) 
 			}
 
 			// Check if master data file exists
-			dataPath := getDataPath(c)
+			dataPath := getDataPathFromAdapter(ma)
 			if !dataFileExists(dataPath, bktID, masterDataID, 0) && masterData.PkgID == 0 {
 				// Master data file doesn't exist, try to find another existing one as master
 				found := false
@@ -1836,7 +1850,7 @@ func MergeDuplicateData(c Ctx, bktID int64, ma MetadataAdapter, da DataAdapter) 
 				}
 
 				// Calculate data size (for calculating freed space)
-				dataPath := getDataPath(c)
+				dataPath := getDataPathFromAdapter(ma)
 				dataSize := calculateDataSize(dataPath, bktID, dataID)
 				if dataSize > 0 {
 					totalFreedSize += dataSize
@@ -2622,7 +2636,7 @@ func Defragment(c Ctx, bktID int64, a Admin, ma MetadataAdapter, da DataAdapter)
 				var dataBytes []byte
 				if dataInfo.PkgID > 0 {
 					// If already packaged, read from package file
-					dataPath := getDataPath(c)
+					dataPath := getDataPathFromAdapter(ma)
 				pkgReader, _, err := createPkgDataReader(dataPath, bktID, dataInfo.PkgID, int(dataInfo.PkgOffset), int(dataInfo.Size))
 					if err != nil {
 						continue // Read failed, skip
@@ -2682,7 +2696,7 @@ func Defragment(c Ctx, bktID int64, a Admin, ma MetadataAdapter, da DataAdapter)
 					// Simplified: only count non-packaged data size
 				} else {
 					// Calculate total size of chunk data
-					dataPath := getDataPath(c)
+					dataPath := getDataPathFromAdapter(ma)
 					oldSize := calculateDataSize(dataPath, bktID, dataInfo.ID)
 					freedSize += oldSize - dataInfo.Size // Subtract new packaged data size
 					// Delete old data files
@@ -2790,8 +2804,8 @@ func Defragment(c Ctx, bktID int64, a Admin, ma MetadataAdapter, da DataAdapter)
 				}
 			}
 			// Pass nil to indicate not packaged data, but package file itself, need to delete entire file
-			// Note: c may be nil here, use global ORCAS_DATA as fallback
-			dataPath := getDataPath(c)
+			// Note: c may be nil here, use current directory as fallback
+			dataPath := getDataPathFromAdapter(ma)
 			deleteDataFiles(dataPath, bktID, pkgID, nil, nil)
 			result.CompactedPkgs++
 			continue

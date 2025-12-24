@@ -11,19 +11,13 @@ import (
 var (
 	testBaseDir  string
 	testDataDir  string
-	originalBase string
-	originalData string
 	testInitOnce sync.Once
 )
 
 // InitTestEnv initializes test environment with in-memory filesystem (tmpfs)
-// This sets up ORCAS_BASE and ORCAS_DATA to use /dev/shm (shared memory) for faster tests
+// This sets up test directories to use /dev/shm (shared memory) for faster tests
 func InitTestEnv() {
 	testInitOnce.Do(func() {
-		// Save original values
-		originalBase = ORCAS_BASE
-		originalData = ORCAS_DATA
-
 		// Use /dev/shm (shared memory) if available, otherwise use /tmp
 		shmPath := "/dev/shm"
 		if _, err := os.Stat(shmPath); os.IsNotExist(err) {
@@ -33,10 +27,6 @@ func InitTestEnv() {
 		// Create unique test directories
 		testBaseDir = filepath.Join(shmPath, "orcas_test_base")
 		testDataDir = filepath.Join(shmPath, "orcas_test_data")
-
-		// Set environment variables
-		ORCAS_BASE = testBaseDir
-		ORCAS_DATA = testDataDir
 
 		// Clean up any existing test directories
 		os.RemoveAll(testBaseDir)
@@ -48,7 +38,7 @@ func InitTestEnv() {
 	})
 }
 
-// CleanupTestEnv cleans up test environment and restores original values
+// CleanupTestEnv cleans up test environment
 func CleanupTestEnv() {
 	if testBaseDir != "" {
 		os.RemoveAll(testBaseDir)
@@ -56,8 +46,6 @@ func CleanupTestEnv() {
 	if testDataDir != "" {
 		os.RemoveAll(testDataDir)
 	}
-	ORCAS_BASE = originalBase
-	ORCAS_DATA = originalData
 }
 
 // CleanTestDB cleans up database files for a specific bucket
@@ -67,7 +55,7 @@ func CleanTestDB(bktID int64) error {
 	// This ensures that database files can be safely deleted
 	pool := GetDBPool()
 	pool.Close() // Close all pools to release all connections
-	
+
 	// Clean main database
 	if testBaseDir != "" {
 		dbPath := filepath.Join(testBaseDir, "meta.db")
@@ -120,4 +108,3 @@ func CleanAllTestData() error {
 	}
 	return nil
 }
-

@@ -34,8 +34,13 @@ type PerformanceMetrics struct {
 
 // ensureTestUser ensures test user exists, creates it if not
 func ensureTestUser(t *testing.T) {
+	ensureTestUserInPath(t, ".")
+}
+
+// ensureTestUserInPath ensures test user exists in the specified base path
+func ensureTestUserInPath(t *testing.T, basePath string) {
 	// Try to login first, if successful, user already exists
-	handler := core.NewLocalHandler()
+	handler := core.NewLocalHandler(basePath, "")
 	ctx := context.Background()
 	_, _, _, err := handler.Login(ctx, "orcas", "orcas")
 	if err == nil {
@@ -46,7 +51,7 @@ func ensureTestUser(t *testing.T) {
 	// User doesn't exist, need to create. Since creating user requires admin permission, we create directly via database
 	// Use the same password hash as the original default user
 	hashedPwd := "1000:Zd54dfEjoftaY8NiAINGag==:q1yB510yT5tGIGNewItVSg=="
-	db, err := core.GetDB()
+	db, err := core.GetMainDBWithKey(basePath, "")
 	if err != nil {
 		t.Logf("Warning: Failed to get DB: %v", err)
 		return
@@ -62,39 +67,43 @@ func ensureTestUser(t *testing.T) {
 
 // runPerformanceTest runs performance test and returns metrics
 func runPerformanceTest(t *testing.T, name string, dataSize, chunkSize int64, writeOps, concurrency int, cfg *core.Config) PerformanceMetrics {
-	// Initialize
-	if core.ORCAS_BASE == "" {
-		tmpDir := filepath.Join(os.TempDir(), "orcas_perf_test")
-		os.MkdirAll(tmpDir, 0o755)
-		os.Setenv("ORCAS_BASE", tmpDir)
-		core.ORCAS_BASE = tmpDir
-	}
-	if core.ORCAS_DATA == "" {
-		tmpDir := filepath.Join(os.TempDir(), "orcas_perf_test_data")
-		os.MkdirAll(tmpDir, 0o755)
-		os.Setenv("ORCAS_DATA", tmpDir)
-		core.ORCAS_DATA = tmpDir
-	}
-	core.InitDB("")
+	// Initialize with temporary directories
+	tmpBaseDir := filepath.Join(os.TempDir(), "orcas_perf_test")
+	os.MkdirAll(tmpBaseDir, 0o755)
+	tmpDataDir := filepath.Join(os.TempDir(), "orcas_perf_test_data")
+	os.MkdirAll(tmpDataDir, 0o755)
 
-	// Ensure test user exists
-	ensureTestUser(t)
+	// Create Handler with paths
+	ctx := context.Background()
+	// Initialize main database in tmpBaseDir
+	err := core.InitDB(tmpBaseDir, "")
+	if err != nil {
+		t.Fatalf("InitDB failed: %v", err)
+	}
+
+	// Ensure test user exists in tmpBaseDir
+	ensureTestUserInPath(t, tmpBaseDir)
 
 	ig := idgen.NewIDGen(nil, 0)
 	testBktID, _ := ig.New()
-	err := core.InitBucketDB(context.Background(), testBktID)
+	err = core.InitBucketDB(tmpDataDir, testBktID)
 	if err != nil {
 		t.Fatalf("InitBucketDB failed: %v", err)
 	}
 
-	dma := &core.DefaultMetadataAdapter{}
+	dma := &core.DefaultMetadataAdapter{
+		DefaultBaseMetadataAdapter: &core.DefaultBaseMetadataAdapter{},
+		DefaultDataMetadataAdapter: &core.DefaultDataMetadataAdapter{},
+	}
+	dma.DefaultBaseMetadataAdapter.SetPath(tmpBaseDir)
+	dma.DefaultDataMetadataAdapter.SetPath(tmpDataDir)
 	dda := &core.DefaultDataAdapter{}
 	dda.SetOptions(core.Options{})
 
-	lh := core.NewLocalHandler().(*core.LocalHandler)
+	lh := core.NewLocalHandler(tmpBaseDir, tmpDataDir).(*core.LocalHandler)
 	lh.SetAdapter(dma, dda)
 
-	testCtx, _, _, err := lh.Login(context.Background(), "orcas", "orcas")
+	testCtx, _, _, err := lh.Login(ctx, "orcas", "orcas")
 	if err != nil {
 		t.Fatalf("Login failed: %v", err)
 	}
@@ -413,41 +422,41 @@ func TestPerformanceComprehensive(t *testing.T) {
 
 // runSequentialWriteTest runs sequential write performance test (test sequential write optimization)
 func runSequentialWriteTest(t *testing.T, name string, totalSize, chunkSize int64, cfg *core.Config) PerformanceMetrics {
-	// Initialize
-	if core.ORCAS_BASE == "" {
-		tmpDir := filepath.Join(os.TempDir(), "orcas_perf_test")
-		os.MkdirAll(tmpDir, 0o755)
-		os.Setenv("ORCAS_BASE", tmpDir)
-		core.ORCAS_BASE = tmpDir
-	}
-	if core.ORCAS_DATA == "" {
-		tmpDir := filepath.Join(os.TempDir(), "orcas_perf_test_data")
-		os.MkdirAll(tmpDir, 0o755)
-		os.Setenv("ORCAS_DATA", tmpDir)
-		core.ORCAS_DATA = tmpDir
-	}
+	// Initialize with temporary directories
+	tmpBaseDir := filepath.Join(os.TempDir(), "orcas_perf_test")
+	os.MkdirAll(tmpBaseDir, 0o755)
+	tmpDataDir := filepath.Join(os.TempDir(), "orcas_perf_test_data")
+	os.MkdirAll(tmpDataDir, 0o755)
+
+	// Create context
+	ctx := context.Background()
 	// Performance test configuration
 	// Note: Batch write is disabled for VFS, but delayed flush is still used
-	core.InitDB("")
+	core.InitDB(".", "")
 
 	// Ensure test user exists
 	ensureTestUser(t)
 
 	ig := idgen.NewIDGen(nil, 0)
 	testBktID, _ := ig.New()
-	err := core.InitBucketDB(context.Background(), testBktID)
+	err := core.InitBucketDB(".", testBktID)
 	if err != nil {
 		t.Fatalf("InitBucketDB failed: %v", err)
 	}
 
-	dma := &core.DefaultMetadataAdapter{}
+	dma := &core.DefaultMetadataAdapter{
+		DefaultBaseMetadataAdapter: &core.DefaultBaseMetadataAdapter{},
+		DefaultDataMetadataAdapter: &core.DefaultDataMetadataAdapter{},
+	}
+	dma.DefaultBaseMetadataAdapter.SetPath(tmpBaseDir)
+	dma.DefaultDataMetadataAdapter.SetPath(tmpDataDir)
 	dda := &core.DefaultDataAdapter{}
 	dda.SetOptions(core.Options{})
 
-	lh := core.NewLocalHandler().(*core.LocalHandler)
+	lh := core.NewLocalHandler(tmpBaseDir, tmpDataDir).(*core.LocalHandler)
 	lh.SetAdapter(dma, dda)
 
-	testCtx, _, _, err := lh.Login(context.Background(), "orcas", "orcas")
+	testCtx, _, _, err := lh.Login(ctx, "orcas", "orcas")
 	if err != nil {
 		t.Fatalf("Login failed: %v", err)
 	}
@@ -561,41 +570,41 @@ func runSequentialWriteTest(t *testing.T, name string, totalSize, chunkSize int6
 
 // runRandomWriteTest runs random write performance test (different offsets, non-contiguous)
 func runRandomWriteTest(t *testing.T, name string, totalSize, chunkSize int64, cfg *core.Config) PerformanceMetrics {
-	// Initialize (same as runSequentialWriteTest)
-	if core.ORCAS_BASE == "" {
-		tmpDir := filepath.Join(os.TempDir(), "orcas_perf_test")
-		os.MkdirAll(tmpDir, 0o755)
-		os.Setenv("ORCAS_BASE", tmpDir)
-		core.ORCAS_BASE = tmpDir
-	}
-	if core.ORCAS_DATA == "" {
-		tmpDir := filepath.Join(os.TempDir(), "orcas_perf_test_data")
-		os.MkdirAll(tmpDir, 0o755)
-		os.Setenv("ORCAS_DATA", tmpDir)
-		core.ORCAS_DATA = tmpDir
-	}
+	// Initialize with temporary directories
+	tmpBaseDir := filepath.Join(os.TempDir(), "orcas_perf_test")
+	os.MkdirAll(tmpBaseDir, 0o755)
+	tmpDataDir := filepath.Join(os.TempDir(), "orcas_perf_test_data")
+	os.MkdirAll(tmpDataDir, 0o755)
+
+	// Create context
+	ctx := context.Background()
 	// Performance test configuration
 	// Note: Batch write is disabled for VFS, but delayed flush is still used
-	core.InitDB("")
+	core.InitDB(".", "")
 
 	// Ensure test user exists
 	ensureTestUser(t)
 
 	ig := idgen.NewIDGen(nil, 0)
 	testBktID, _ := ig.New()
-	err := core.InitBucketDB(context.Background(), testBktID)
+	err := core.InitBucketDB(".", testBktID)
 	if err != nil {
 		t.Fatalf("InitBucketDB failed: %v", err)
 	}
 
-	dma := &core.DefaultMetadataAdapter{}
+	dma := &core.DefaultMetadataAdapter{
+		DefaultBaseMetadataAdapter: &core.DefaultBaseMetadataAdapter{},
+		DefaultDataMetadataAdapter: &core.DefaultDataMetadataAdapter{},
+	}
+	dma.DefaultBaseMetadataAdapter.SetPath(tmpBaseDir)
+	dma.DefaultDataMetadataAdapter.SetPath(tmpDataDir)
 	dda := &core.DefaultDataAdapter{}
 	dda.SetOptions(core.Options{})
 
-	lh := core.NewLocalHandler().(*core.LocalHandler)
+	lh := core.NewLocalHandler(tmpBaseDir, tmpDataDir).(*core.LocalHandler)
 	lh.SetAdapter(dma, dda)
 
-	testCtx, _, _, err := lh.Login(context.Background(), "orcas", "orcas")
+	testCtx, _, _, err := lh.Login(ctx, "orcas", "orcas")
 	if err != nil {
 		t.Fatalf("Login failed: %v", err)
 	}
@@ -733,39 +742,39 @@ func runRandomWriteTest(t *testing.T, name string, totalSize, chunkSize int64, c
 
 // runRandomWriteOverlappingTest runs random write performance test (overlapping writes)
 func runRandomWriteOverlappingTest(t *testing.T, name string, totalSize, chunkSize int64, cfg *core.Config) PerformanceMetrics {
-	// Initialize (same as runSequentialWriteTest)
-	if core.ORCAS_BASE == "" {
-		tmpDir := filepath.Join(os.TempDir(), "orcas_perf_test")
-		os.MkdirAll(tmpDir, 0o755)
-		os.Setenv("ORCAS_BASE", tmpDir)
-		core.ORCAS_BASE = tmpDir
-	}
-	if core.ORCAS_DATA == "" {
-		tmpDir := filepath.Join(os.TempDir(), "orcas_perf_test_data")
-		os.MkdirAll(tmpDir, 0o755)
-		os.Setenv("ORCAS_DATA", tmpDir)
-		core.ORCAS_DATA = tmpDir
-	}
-	core.InitDB("")
+	// Initialize with temporary directories
+	tmpBaseDir := filepath.Join(os.TempDir(), "orcas_perf_test")
+	os.MkdirAll(tmpBaseDir, 0o755)
+	tmpDataDir := filepath.Join(os.TempDir(), "orcas_perf_test_data")
+	os.MkdirAll(tmpDataDir, 0o755)
+
+	// Create context
+	ctx := context.Background()
+	core.InitDB(".", "")
 
 	// Ensure test user exists
 	ensureTestUser(t)
 
 	ig := idgen.NewIDGen(nil, 0)
 	testBktID, _ := ig.New()
-	err := core.InitBucketDB(context.Background(), testBktID)
+	err := core.InitBucketDB(".", testBktID)
 	if err != nil {
 		t.Fatalf("InitBucketDB failed: %v", err)
 	}
 
-	dma := &core.DefaultMetadataAdapter{}
+	dma := &core.DefaultMetadataAdapter{
+		DefaultBaseMetadataAdapter: &core.DefaultBaseMetadataAdapter{},
+		DefaultDataMetadataAdapter: &core.DefaultDataMetadataAdapter{},
+	}
+	dma.DefaultBaseMetadataAdapter.SetPath(tmpBaseDir)
+	dma.DefaultDataMetadataAdapter.SetPath(tmpDataDir)
 	dda := &core.DefaultDataAdapter{}
 	dda.SetOptions(core.Options{})
 
-	lh := core.NewLocalHandler().(*core.LocalHandler)
+	lh := core.NewLocalHandler(tmpBaseDir, tmpDataDir).(*core.LocalHandler)
 	lh.SetAdapter(dma, dda)
 
-	testCtx, _, _, err := lh.Login(context.Background(), "orcas", "orcas")
+	testCtx, _, _, err := lh.Login(ctx, "orcas", "orcas")
 	if err != nil {
 		t.Fatalf("Login failed: %v", err)
 	}
@@ -800,9 +809,9 @@ func runRandomWriteOverlappingTest(t *testing.T, name string, totalSize, chunkSi
 	ofs := NewOrcasFS(lh, testCtx, testBktID)
 
 	// Prepare test data: overlapping writes (精简规模)
-	writeChunkSize := int64(512 * 1024)  // 精简: 1MB -> 512KB per write
-	writeCount := 8                      // 精简: 15 -> 8 times
-	overlapSize := int64(128 * 1024)     // 精简: 256KB -> 128KB overlap each time
+	writeChunkSize := int64(512 * 1024) // 精简: 1MB -> 512KB per write
+	writeCount := 8                     // 精简: 15 -> 8 times
+	overlapSize := int64(128 * 1024)    // 精简: 256KB -> 128KB overlap each time
 
 	hasCompression := cfg != nil && cfg.CmprWay > 0
 	hasEncryption := cfg != nil && cfg.EndecWay > 0
@@ -872,39 +881,39 @@ func runRandomWriteOverlappingTest(t *testing.T, name string, totalSize, chunkSi
 
 // runRandomWriteSmallChunksTest runs random write performance test (small data chunks, multiple writes)
 func runRandomWriteSmallChunksTest(t *testing.T, name string, totalSize, chunkSize int64, cfg *core.Config) PerformanceMetrics {
-	// Initialize (same as runSequentialWriteTest)
-	if core.ORCAS_BASE == "" {
-		tmpDir := filepath.Join(os.TempDir(), "orcas_perf_test")
-		os.MkdirAll(tmpDir, 0o755)
-		os.Setenv("ORCAS_BASE", tmpDir)
-		core.ORCAS_BASE = tmpDir
-	}
-	if core.ORCAS_DATA == "" {
-		tmpDir := filepath.Join(os.TempDir(), "orcas_perf_test_data")
-		os.MkdirAll(tmpDir, 0o755)
-		os.Setenv("ORCAS_DATA", tmpDir)
-		core.ORCAS_DATA = tmpDir
-	}
-	core.InitDB("")
+	// Initialize with temporary directories
+	tmpBaseDir := filepath.Join(os.TempDir(), "orcas_perf_test")
+	os.MkdirAll(tmpBaseDir, 0o755)
+	tmpDataDir := filepath.Join(os.TempDir(), "orcas_perf_test_data")
+	os.MkdirAll(tmpDataDir, 0o755)
+
+	// Create context
+	ctx := context.Background()
+	core.InitDB(".", "")
 
 	// Ensure test user exists
 	ensureTestUser(t)
 
 	ig := idgen.NewIDGen(nil, 0)
 	testBktID, _ := ig.New()
-	err := core.InitBucketDB(context.Background(), testBktID)
+	err := core.InitBucketDB(".", testBktID)
 	if err != nil {
 		t.Fatalf("InitBucketDB failed: %v", err)
 	}
 
-	dma := &core.DefaultMetadataAdapter{}
+	dma := &core.DefaultMetadataAdapter{
+		DefaultBaseMetadataAdapter: &core.DefaultBaseMetadataAdapter{},
+		DefaultDataMetadataAdapter: &core.DefaultDataMetadataAdapter{},
+	}
+	dma.DefaultBaseMetadataAdapter.SetPath(tmpBaseDir)
+	dma.DefaultDataMetadataAdapter.SetPath(tmpDataDir)
 	dda := &core.DefaultDataAdapter{}
 	dda.SetOptions(core.Options{})
 
-	lh := core.NewLocalHandler().(*core.LocalHandler)
+	lh := core.NewLocalHandler(tmpBaseDir, tmpDataDir).(*core.LocalHandler)
 	lh.SetAdapter(dma, dda)
 
-	testCtx, _, _, err := lh.Login(context.Background(), "orcas", "orcas")
+	testCtx, _, _, err := lh.Login(ctx, "orcas", "orcas")
 	if err != nil {
 		t.Fatalf("Login failed: %v", err)
 	}
@@ -1126,39 +1135,39 @@ func printAnalysis(results []PerformanceMetrics) {
 
 // runInstantUploadPerformanceTest runs instant upload performance test
 func runInstantUploadPerformanceTest(t *testing.T) {
-	// Initialize
-	if core.ORCAS_BASE == "" {
-		tmpDir := filepath.Join(os.TempDir(), "orcas_instant_upload_perf_test")
-		os.MkdirAll(tmpDir, 0o755)
-		os.Setenv("ORCAS_BASE", tmpDir)
-		core.ORCAS_BASE = tmpDir
-	}
-	if core.ORCAS_DATA == "" {
-		tmpDir := filepath.Join(os.TempDir(), "orcas_instant_upload_perf_test_data")
-		os.MkdirAll(tmpDir, 0o755)
-		os.Setenv("ORCAS_DATA", tmpDir)
-		core.ORCAS_DATA = tmpDir
-	}
-	core.InitDB("")
+	// Initialize with temporary directories
+	tmpBaseDir := filepath.Join(os.TempDir(), "orcas_instant_upload_perf_test")
+	os.MkdirAll(tmpBaseDir, 0o755)
+	tmpDataDir := filepath.Join(os.TempDir(), "orcas_instant_upload_perf_test_data")
+	os.MkdirAll(tmpDataDir, 0o755)
+
+	// Create context
+	ctx := context.Background()
+	core.InitDB(".", "")
 
 	// Ensure test user exists
 	ensureTestUser(t)
 
 	ig := idgen.NewIDGen(nil, 0)
 	testBktID, _ := ig.New()
-	err := core.InitBucketDB(context.Background(), testBktID)
+	err := core.InitBucketDB(".", testBktID)
 	if err != nil {
 		t.Fatalf("InitBucketDB failed: %v", err)
 	}
 
-	dma := &core.DefaultMetadataAdapter{}
+	dma := &core.DefaultMetadataAdapter{
+		DefaultBaseMetadataAdapter: &core.DefaultBaseMetadataAdapter{},
+		DefaultDataMetadataAdapter: &core.DefaultDataMetadataAdapter{},
+	}
+	dma.DefaultBaseMetadataAdapter.SetPath(tmpBaseDir)
+	dma.DefaultDataMetadataAdapter.SetPath(tmpDataDir)
 	dda := &core.DefaultDataAdapter{}
 	dda.SetOptions(core.Options{})
 
-	lh := core.NewLocalHandler().(*core.LocalHandler)
+	lh := core.NewLocalHandler(tmpBaseDir, tmpDataDir).(*core.LocalHandler)
 	lh.SetAdapter(dma, dda)
 
-	testCtx, _, _, err := lh.Login(context.Background(), "orcas", "orcas")
+	testCtx, _, _, err := lh.Login(ctx, "orcas", "orcas")
 	if err != nil {
 		t.Fatalf("Login failed: %v", err)
 	}
@@ -1179,10 +1188,10 @@ func runInstantUploadPerformanceTest(t *testing.T) {
 		numTests int
 		name     string
 	}{
-		{1 * 1024, 10, "1KB"},      // 精简: 50 -> 10
-		{10 * 1024, 10, "10KB"},   // 精简: 50 -> 10
-		{100 * 1024, 5, "100KB"},  // 精简: 30 -> 5
-		{1024 * 1024, 5, "1MB"},   // 精简: 20 -> 5
+		{1 * 1024, 10, "1KB"},         // 精简: 50 -> 10
+		{10 * 1024, 10, "10KB"},       // 精简: 50 -> 10
+		{100 * 1024, 5, "100KB"},      // 精简: 30 -> 5
+		{1024 * 1024, 5, "1MB"},       // 精简: 20 -> 5
 		{10 * 1024 * 1024, 3, "10MB"}, // 精简: 10 -> 3
 	}
 

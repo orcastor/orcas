@@ -10,10 +10,10 @@ import (
 
 func init() {
 	// Initialize main database
-	InitDB("")
+	InitDB(".", "")
 	bktID, _ = idgen.NewIDGen(nil, 0).New()
 	// Initialize bucket database
-	InitBucketDB(c, bktID)
+	InitBucketDB(".", bktID)
 }
 
 func TestWrite(t *testing.T) {
@@ -101,7 +101,7 @@ func TestWriteSyncConcurrent(t *testing.T) {
 			dda.SetOptions(Options{})
 			bid, _ := ig.New()
 			// Initialize bucket database
-			if err := InitBucketDB(c, bid); err != nil {
+			if err := InitBucketDB(".", bid); err != nil {
 				t.Fatalf("InitBucketDB failed: %v", err)
 			}
 			// Reduce iterations to avoid timeout (original: 20000)
@@ -123,7 +123,7 @@ func TestWriteAsyncConcurrent(t *testing.T) {
 			dda := &DefaultDataAdapter{}
 			bid, _ := ig.New()
 			// Initialize bucket database
-			if err := InitBucketDB(c, bid); err != nil {
+			if err := InitBucketDB(".", bid); err != nil {
 				t.Fatalf("InitBucketDB failed: %v", err)
 			}
 			// Reduce iterations to avoid timeout (original: 20000)

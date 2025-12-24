@@ -193,15 +193,6 @@ pass orcas | orcas-cli -action upload -local /path/to/file -remote /file -user o
 cat password.txt | orcas-cli -action upload -local /path/to/file -remote /file -user orcas
 ```
 
-## 环境变量
-
-工具会使用 ORCAS 系统的环境变量配置，主要包括：
-
-- `ORCAS_BASE`: 基础路径，用于存储元数据等基础文件
-- `ORCAS_DATA`: 数据路径，用于存储数据文件
-
-详细说明请参考 `core/const.go`。
-
 ## 默认管理员账户
 
 系统初始化时会自动创建默认管理员账户：

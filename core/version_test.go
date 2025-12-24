@@ -4,18 +4,20 @@ import (
 	"bytes"
 	"strconv"
 	"testing"
+	"time"
 
+	"github.com/orca-zhang/ecache2"
 	"github.com/orca-zhang/idgen"
 	. "github.com/smartystreets/goconvey/convey"
 )
 
 func TestGetOrCreateWritingVersion(t *testing.T) {
 	Convey("GetOrCreateWritingVersion", t, func() {
-		InitDB() // Initialize main database first
+		InitDB(".", "") // Initialize main database first
 		ig := idgen.NewIDGen(nil, 0)
 		testBktID, _ := ig.New()
 		testUID, _ := ig.New()
-		InitBucketDB(c, testBktID)
+		InitBucketDB(".", testBktID)
 
 		dma := &DefaultMetadataAdapter{}
 		dda := &DefaultDataAdapter{}
@@ -99,11 +101,11 @@ func TestGetOrCreateWritingVersion(t *testing.T) {
 
 func TestListVersionsExcludeWriting(t *testing.T) {
 	Convey("ListVersions excludeWriting", t, func() {
-		InitDB() // Initialize main database first
+		InitDB(".", "") // Initialize main database first
 		ig := idgen.NewIDGen(nil, 0)
 		testBktID, _ := ig.New()
 		testUID, _ := ig.New()
-		InitBucketDB(c, testBktID)
+		InitBucketDB(".", testBktID)
 
 		dma := &DefaultMetadataAdapter{}
 		dda := &DefaultDataAdapter{}
@@ -179,11 +181,11 @@ func TestListVersionsExcludeWriting(t *testing.T) {
 
 func TestUpdateData(t *testing.T) {
 	Convey("UpdateData", t, func() {
-		InitDB() // Initialize main database first
+		InitDB(".", "") // Initialize main database first
 		ig := idgen.NewIDGen(nil, 0)
 		testBktID, _ := ig.New()
 		testUID, _ := ig.New()
-		InitBucketDB(c, testBktID)
+		InitBucketDB(".", testBktID)
 
 		dma := &DefaultMetadataAdapter{}
 		dda := &DefaultDataAdapter{}
@@ -268,19 +270,26 @@ func TestUpdateData(t *testing.T) {
 
 func TestSparseFileSupport(t *testing.T) {
 	Convey("Sparse file support", t, func() {
-		InitDB() // Initialize main database first
+		InitDB(".", "") // Initialize main database first
 		ig := idgen.NewIDGen(nil, 0)
 		testBktID, _ := ig.New()
 		testUID, _ := ig.New()
-		InitBucketDB(c, testBktID)
+		InitBucketDB(".", testBktID)
 
-		dma := &DefaultMetadataAdapter{}
+		dma := &DefaultMetadataAdapter{
+			DefaultBaseMetadataAdapter: &DefaultBaseMetadataAdapter{},
+			DefaultDataMetadataAdapter: &DefaultDataMetadataAdapter{},
+		}
+		// Set paths for metadata adapter
+		dma.DefaultBaseMetadataAdapter.SetPath(".")
+		dma.DefaultDataMetadataAdapter.SetPath(".")
 		dda := &DefaultDataAdapter{}
 		dda.SetOptions(Options{})
 		lh := &LocalHandler{
-			ma:  dma,
-			da:  dda,
-			acm: &DefaultAccessCtrlMgr{ma: dma},
+			ma:            dma,
+			da:            dda,
+			acm:           &DefaultAccessCtrlMgr{ma: dma},
+			bucketConfigs: ecache2.NewLRUCache[int64](16, 256, 5*time.Minute),
 		}
 
 		// Create user context for permission checks

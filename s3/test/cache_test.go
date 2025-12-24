@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -21,37 +20,41 @@ import (
 
 // setupTestEnvironment 设置测试环境
 func setupTestEnvironmentForCache(t *testing.T) (int64, *gin.Engine) {
+	// 创建临时目录
+	tmpBaseDir, err := os.MkdirTemp("", "orcas_s3_cache_test_*")
+	if err != nil {
+		t.Fatalf("Failed to create temp base dir: %v", err)
+	}
+	tmpDataDir, err := os.MkdirTemp("", "orcas_s3_cache_test_data_*")
+	if err != nil {
+		t.Fatalf("Failed to create temp data dir: %v", err)
+	}
+	defer func() {
+		os.RemoveAll(tmpBaseDir)
+		os.RemoveAll(tmpDataDir)
+	}()
+
 	// 启用批量写入以测试批量写入和缓存的协同工作
 	os.Setenv("ORCAS_BATCH_WRITE_ENABLED", "true")
 
-	// 初始化环境变量
-	if core.ORCAS_BASE == "" {
-		tmpDir := filepath.Join(os.TempDir(), "orcas_s3_cache_test")
-		os.MkdirAll(tmpDir, 0o755)
-		os.Setenv("ORCAS_BASE", tmpDir)
-		core.ORCAS_BASE = tmpDir
-	}
-	if core.ORCAS_DATA == "" {
-		tmpDir := filepath.Join(os.TempDir(), "orcas_s3_cache_test_data")
-		os.MkdirAll(tmpDir, 0o755)
-		os.Setenv("ORCAS_DATA", tmpDir)
-		core.ORCAS_DATA = tmpDir
-	}
+	// 使用临时目录创建 Handler
+	handler := core.NewLocalHandler(tmpBaseDir, tmpDataDir)
+	ctx := context.Background()
 
-	core.InitDB("")
+	// 初始化数据库
+	core.InitDB(".", "")
 	ensureTestUserForCache(t)
 
 	// 创建测试bucket
 	ig := idgen.NewIDGen(nil, 0)
 	testBktID, _ := ig.New()
-	err := core.InitBucketDB(context.Background(), testBktID)
+	err = core.InitBucketDB(".", testBktID)
 	if err != nil {
 		t.Fatalf("InitBucketDB failed: %v", err)
 	}
 
 	// 登录并创建bucket
-	handler := core.NewLocalHandler()
-	ctx, _, _, err := handler.Login(context.Background(), "orcas", "orcas")
+	ctx, _, _, err = handler.Login(ctx, "orcas", "orcas")
 	if err != nil {
 		t.Fatalf("Login failed: %v", err)
 	}
@@ -97,7 +100,7 @@ func setupTestEnvironmentForCache(t *testing.T) (int64, *gin.Engine) {
 
 // ensureTestUserForCache 确保测试用户存在
 func ensureTestUserForCache(t *testing.T) {
-	handler := core.NewLocalHandler()
+	handler := core.NewLocalHandler("", "")
 	ctx := context.Background()
 	_, _, _, err := handler.Login(ctx, "orcas", "orcas")
 	if err == nil {
@@ -106,7 +109,7 @@ func ensureTestUserForCache(t *testing.T) {
 
 	// 如果登录失败，尝试创建用户（使用与performance_test.go相同的方式）
 	hashedPwd := "1000:Zd54dfEjoftaY8NiAINGag==:q1yB510yT5tGIGNewItVSg=="
-	db, err := core.GetDB()
+	db, err := core.GetMainDBWithKey(".", "")
 	if err != nil {
 		t.Logf("Warning: Failed to get DB: %v", err)
 		return

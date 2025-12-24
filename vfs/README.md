@@ -184,8 +184,8 @@ Benchmark test file `random_access_bench_test.go` includes the following tests:
 
 ### Environment Variables
 
-- `ORCAS_BASE`: ORCAS base directory (database storage location)
-- `ORCAS_DATA`: ORCAS data directory (file data storage location)
+- `BasePath`: Base path for metadata (database storage location), defaults to current directory (.)
+- `DataPath`: Data path for file data storage location, defaults to current directory (.)
 
 If not set, temporary directories are automatically used during testing.
 

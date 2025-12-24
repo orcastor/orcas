@@ -32,12 +32,6 @@ type MountOptions struct {
 	Debug bool
 	// RequireKey: if true, return EPERM error when KEY is not provided in context
 	RequireKey bool
-	// BasePath: Base path for metadata (database storage location)
-	// If empty, uses global ORCAS_BASE environment variable
-	BasePath string
-	// DataPath: Data path for file data storage location
-	// If empty, uses global ORCAS_DATA environment variable
-	DataPath string
 	// EndecKey: Encryption key for data encryption/decryption
 	// If empty, encryption key will not be used (data will not be encrypted/decrypted)
 	// This overrides bucket config EndecKey
@@ -66,49 +60,23 @@ func Mount(h core.Handler, c core.Ctx, bktID int64, opts *MountOptions) (*fuse.S
 	var cfg *core.Config
 	if opts.Config != nil {
 		cfg = opts.Config
-		// Override with explicit paths and EndecKey if provided (for backward compatibility)
-		if opts.BasePath != "" || opts.DataPath != "" || opts.EndecKey != "" {
+		// Override with explicit EndecKey if provided (for backward compatibility)
+		if opts.EndecKey != "" {
 			newCfg := *cfg
-			if opts.BasePath != "" {
-				newCfg.BasePath = opts.BasePath
-			}
-			if opts.DataPath != "" {
-				newCfg.DataPath = opts.DataPath
-			}
-			if opts.EndecKey != "" {
-				newCfg.EndecKey = opts.EndecKey
-			}
+			newCfg.EndecKey = opts.EndecKey
 			cfg = &newCfg
 		}
-	} else if opts.BasePath != "" || opts.DataPath != "" || opts.EndecKey != "" {
-		// For backward compatibility: if only paths or EndecKey is provided, create config
+	} else if opts.EndecKey != "" {
+		// For backward compatibility: if only EndecKey is provided, create config
 		cfg = &core.Config{
-			BasePath: opts.BasePath,
-			DataPath: opts.DataPath,
 			EndecKey: opts.EndecKey,
 		}
 	}
 
-	// Get ORCAS_BASE and ORCAS_DATA paths
-	basePath := core.ORCAS_BASE
-	dataPath := core.ORCAS_DATA
-	if cfg != nil {
-		if cfg.BasePath != "" {
-			basePath = cfg.BasePath
-		}
-		if cfg.DataPath != "" {
-			dataPath = cfg.DataPath
-		}
-	}
-	if opts.BasePath != "" {
-		basePath = opts.BasePath
-	}
-	if opts.DataPath != "" {
-		dataPath = opts.DataPath
-	}
-	// If dataPath is empty, use basePath as fallback
-	if dataPath == "" {
-		dataPath = basePath
+	// If config has paths, set them in Handler
+	// Paths are now managed via Handler, not context
+	if cfg != nil && (cfg.BasePath != "" || cfg.DataPath != "") {
+		h.SetPaths(cfg.BasePath, cfg.DataPath)
 	}
 
 	// Check if mount point exists

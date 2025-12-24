@@ -175,51 +175,8 @@ func getKey(c Ctx) string {
 	return ""
 }
 
-// Config2Ctx sets configuration paths (BasePath and DataPath) to context
-// This allows different paths to be used in the same process
-func Config2Ctx(c Ctx, cfg *Config) Ctx {
-	if cfg == nil {
-		return c
-	}
-	// Get existing context values
-	o := make(map[string]interface{})
-	if v, ok := c.Value("o").(map[string]interface{}); ok {
-		for k, val := range v {
-			o[k] = val
-		}
-	}
-	// Set paths if provided in config
-	if cfg.BasePath != "" {
-		o["basePath"] = cfg.BasePath
-	}
-	if cfg.DataPath != "" {
-		o["dataPath"] = cfg.DataPath
-	}
-	return context.WithValue(c, "o", o)
-}
 
-// Path2Ctx sets BasePath and DataPath to context
-// This allows different paths to be used in the same process
-// If basePath or dataPath is empty string, it will not override existing values in context
-func Path2Ctx(c Ctx, basePath, dataPath string) Ctx {
-	// Get existing context values
-	o := make(map[string]interface{})
-	if v, ok := c.Value("o").(map[string]interface{}); ok {
-		for k, val := range v {
-			o[k] = val
-		}
-	}
-	// Set paths if provided
-	if basePath != "" {
-		o["basePath"] = basePath
-	}
-	if dataPath != "" {
-		o["dataPath"] = dataPath
-	}
-	return context.WithValue(c, "o", o)
-}
-
-// getBasePath returns the base path from context, or falls back to global ORCAS_BASE
+// getBasePath returns the base path from context, or falls back to current directory "."
 func getBasePath(c Ctx) string {
 	if c != nil {
 		if v, ok := c.Value("o").(map[string]interface{}); ok {
@@ -228,10 +185,10 @@ func getBasePath(c Ctx) string {
 			}
 		}
 	}
-	return ORCAS_BASE
+	return "."
 }
 
-// getDataPath returns the data path from context, or falls back to global ORCAS_DATA
+// getDataPath returns the data path from context, or falls back to current directory "."
 func getDataPath(c Ctx) string {
 	if c != nil {
 		if v, ok := c.Value("o").(map[string]interface{}); ok {
@@ -240,7 +197,7 @@ func getDataPath(c Ctx) string {
 			}
 		}
 	}
-	return ORCAS_DATA
+	return "."
 }
 
 // NoAuthAccessCtrlMgr is an AccessCtrlMgr that bypasses all permission checks

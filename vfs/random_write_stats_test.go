@@ -13,7 +13,7 @@ import (
 
 // TestRandomWriteRedundancy tests random write redundancy for sparse files
 func TestRandomWriteRedundancy(t *testing.T) {
-	core.InitDB("")
+	core.InitDB(".", "")
 	ensureTestUser(t)
 
 	ig := idgen.NewIDGen(nil, 0)
@@ -22,7 +22,7 @@ func TestRandomWriteRedundancy(t *testing.T) {
 	dma := &core.DefaultMetadataAdapter{}
 	dda := &core.DefaultDataAdapter{}
 	dda.SetOptions(core.Options{}) // Use default options
-	lh := core.NewLocalHandler().(*core.LocalHandler)
+	lh := core.NewLocalHandler("", "").(*core.LocalHandler)
 	lh.SetAdapter(dma, dda)
 
 	ctx, _, _, err := lh.Login(context.Background(), "orcas", "orcas")

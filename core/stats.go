@@ -1,6 +1,8 @@
 package core
 
 import (
+	"fmt"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -101,7 +103,9 @@ func flushBucketStats(bktID int64, delta *BucketStatsDelta) {
 
 	// Batch update database
 	// Use write connection for bucket database (bucket info is now stored in bucket database)
-	db, err := GetWriteDB(nil, bktID)
+	// Note: flushBucketStats doesn't have access to dataPath, use default "."
+	bktDirPath := filepath.Join(".", fmt.Sprint(bktID))
+	db, err := GetWriteDB(bktDirPath, "")
 	if err != nil {
 		return
 	}

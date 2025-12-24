@@ -30,21 +30,14 @@ func main() {
 	}
 
 	// Setup directories
-	baseDir := os.Getenv("ORCAS_BASE")
-	if baseDir == "" {
-		baseDir = filepath.Join(os.TempDir(), "orcas_benchmark")
-		os.MkdirAll(baseDir, 0o755)
-		os.Setenv("ORCAS_BASE", baseDir)
-		core.ORCAS_BASE = baseDir
-	}
+	baseDir := filepath.Join(os.TempDir(), "orcas_benchmark")
+	os.MkdirAll(baseDir, 0o755)
 
-	dataDir := os.Getenv("ORCAS_DATA")
-	if dataDir == "" {
-		dataDir = filepath.Join(os.TempDir(), "orcas_benchmark_data")
-		os.MkdirAll(dataDir, 0o755)
-		os.Setenv("ORCAS_DATA", dataDir)
-		core.ORCAS_DATA = dataDir
-	}
+	dataDir := filepath.Join(os.TempDir(), "orcas_benchmark_data")
+	os.MkdirAll(dataDir, 0o755)
+
+	// Set paths in global handler (paths now managed via Handler)
+	s3.SetHandlerPaths(baseDir, dataDir)
 
 	// Initialize database
 	core.InitDB("")
@@ -52,7 +45,8 @@ func main() {
 	// Ensure test user exists with ADMIN role (role=1 is ADMIN)
 	hashedPwd := "1000:Zd54dfEjoftaY8NiAINGag==:q1yB510yT5tGIGNewItVSg=="
 	var testUserID int64 = 1
-	db, err := core.GetDB()
+	ctx := context.Background()
+	db, err := core.GetMainDBWithKey(".", "")
 	if err == nil {
 		// role=1 is ADMIN, which is required for PutBkt
 		db.Exec(`INSERT OR IGNORE INTO usr (id, role, usr, pwd, name, avatar) VALUES (1, 1, 'orcas', ?, 'orcas', '')`, hashedPwd)

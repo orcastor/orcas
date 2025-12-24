@@ -184,8 +184,8 @@ go test -bench=BenchmarkRandomAccessor -benchmem -cpuprofile=cpu.prof -memprofil
 
 ### 环境变量
 
-- `ORCAS_BASE`：ORCAS 基础目录（数据库存储位置）
-- `ORCAS_DATA`：ORCAS 数据目录（文件数据存储位置）
+- `BasePath`：基础路径，用于存储元数据（数据库存储位置），默认为当前目录（.）
+- `DataPath`：数据路径，用于存储文件数据，默认为当前目录（.）
 
 如果未设置，测试时会自动使用临时目录。
 

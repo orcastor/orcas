@@ -21,14 +21,14 @@ func init() {
 func TestVFSEncryptionKeyMismatch(t *testing.T) {
 	Convey("Test VFS encryption key mismatch causes read zeros", t, func() {
 		ensureTestUser(t)
-		handler := core.NewLocalHandler()
+		handler := core.NewLocalHandler("", "")
 		ctx := context.Background()
 		ctx, _, _, err := handler.Login(ctx, "orcas", "orcas")
 		So(err, ShouldBeNil)
 
 		ig := idgen.NewIDGen(nil, 0)
 		testBktID, _ := ig.New()
-		err = core.InitBucketDB(ctx, testBktID)
+		err = core.InitBucketDB(".", testBktID)
 		So(err, ShouldBeNil)
 
 		// Get user info for bucket creation
@@ -154,14 +154,14 @@ func TestVFSEncryptionKeyMismatch(t *testing.T) {
 func TestVFSEncryptionKeyMismatchAfterReopen(t *testing.T) {
 	Convey("Test VFS encryption key mismatch after reopen", t, func() {
 		ensureTestUser(t)
-		handler := core.NewLocalHandler()
+		handler := core.NewLocalHandler("", "")
 		ctx := context.Background()
 		ctx, _, _, err := handler.Login(ctx, "orcas", "orcas")
 		So(err, ShouldBeNil)
 
 		ig := idgen.NewIDGen(nil, 0)
 		testBktID, _ := ig.New()
-		err = core.InitBucketDB(ctx, testBktID)
+		err = core.InitBucketDB(".", testBktID)
 		So(err, ShouldBeNil)
 
 		// Get user info for bucket creation

@@ -3,11 +3,14 @@ package core
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/orca-zhang/idgen"
 	. "github.com/smartystreets/goconvey/convey"
+	b "github.com/orca-zhang/borm"
 )
 
 var (
@@ -21,43 +24,11 @@ func init() {
 	bktID, _ = idgen.NewIDGen(nil, 0).New()
 }
 
-func TestListBkt(t *testing.T) {
-	Convey("normal", t, func() {
-		Convey("put bkt", func() {
-			InitDB()
-			dma := &DefaultMetadataAdapter{}
-			id1, _ := idgen.NewIDGen(nil, 0).New()
-			id2, _ := idgen.NewIDGen(nil, 0).New()
-			uid, _ := idgen.NewIDGen(nil, 0).New()
-			b1 := &BucketInfo{
-				ID:   id1,
-				Name: "zhangwei",
-				Type: 1,
-			}
-			b2 := &BucketInfo{
-				ID:   id2,
-				Name: "zhangwei2",
-				Type: 1,
-			}
-			// Set UID in context for PutBkt to create ACL
-			ctx := UserInfo2Ctx(c, &UserInfo{ID: uid})
-			So(dma.PutBkt(ctx, []*BucketInfo{b1, b2}), ShouldBeNil)
-
-			bs, err := dma.ListBkt(c, uid)
-			So(err, ShouldBeNil)
-			So(len(bs), ShouldEqual, 2)
-			So(bs[0].ID, ShouldEqual, b1.ID)
-			So(bs[0].Name, ShouldEqual, b1.Name)
-			So(bs[1].ID, ShouldEqual, b2.ID)
-			So(bs[1].Name, ShouldEqual, b2.Name)
-		})
-	})
-}
 
 func TestRefData(t *testing.T) {
 	Convey("normal", t, func() {
 		dma := &DefaultMetadataAdapter{}
-		InitBucketDB(context.TODO(), bktID)
+		InitBucketDB(".", bktID)
 
 		id, _ := idgen.NewIDGen(nil, 0).New()
 		So(dma.PutData(c, bktID, []*DataInfo{{
@@ -254,7 +225,7 @@ func TestRefData(t *testing.T) {
 func TestGetData(t *testing.T) {
 	Convey("normal", t, func() {
 		Convey("get data info", func() {
-			InitBucketDB(context.TODO(), bktID)
+			InitBucketDB(".", bktID)
 			dma := &DefaultMetadataAdapter{}
 			id, _ := idgen.NewIDGen(nil, 0).New()
 			d := &DataInfo{
@@ -274,7 +245,7 @@ func TestGetData(t *testing.T) {
 func TestPutObj(t *testing.T) {
 	Convey("normal", t, func() {
 		Convey("put same name obj", func() {
-			InitBucketDB(context.TODO(), bktID)
+			InitBucketDB(".", bktID)
 
 			dma := &DefaultMetadataAdapter{}
 			ig := idgen.NewIDGen(nil, 0)
@@ -321,7 +292,7 @@ func TestPutObj(t *testing.T) {
 func TestGetObj(t *testing.T) {
 	Convey("normal", t, func() {
 		Convey("get obj info", func() {
-			InitBucketDB(context.TODO(), bktID)
+			InitBucketDB(".", bktID)
 
 			dma := &DefaultMetadataAdapter{}
 			ig := idgen.NewIDGen(nil, 0)
@@ -353,7 +324,7 @@ func TestGetObj(t *testing.T) {
 
 func TestSetObj(t *testing.T) {
 	Convey("normal", t, func() {
-		InitBucketDB(context.TODO(), bktID)
+		InitBucketDB(".", bktID)
 
 		dma := &DefaultMetadataAdapter{}
 		ig := idgen.NewIDGen(nil, 0)
@@ -417,8 +388,8 @@ func TestListObj(t *testing.T) {
 		// Clean up before test
 		CleanTestDB(testBktID)
 		CleanTestBucketData(testBktID)
-		InitDB() // Initialize main database first
-		InitBucketDB(c, testBktID)
+		InitDB(".", "") // Initialize main database first
+		InitBucketDB(".", testBktID)
 
 		dma := &DefaultMetadataAdapter{}
 		pid, _ := ig.New()
@@ -642,8 +613,8 @@ func TestListObjsByType(t *testing.T) {
 		// Clean up before test
 		CleanTestDB(testBktID)
 		CleanTestBucketData(testBktID)
-		InitDB() // Initialize main database first
-		InitBucketDB(context.TODO(), testBktID)
+		InitDB(".", "") // Initialize main database first
+		InitBucketDB(".", testBktID)
 		dma := &DefaultMetadataAdapter{}
 		pid, _ := ig.New()
 
@@ -745,8 +716,8 @@ func TestListChildren(t *testing.T) {
 		// Clean up before test
 		CleanTestDB(testBktID)
 		CleanTestBucketData(testBktID)
-		InitDB() // Initialize main database first
-		InitBucketDB(context.TODO(), testBktID)
+		InitDB(".", "") // Initialize main database first
+		InitBucketDB(".", testBktID)
 		dma := &DefaultMetadataAdapter{}
 		parentID, _ := ig.New()
 
@@ -831,7 +802,7 @@ func TestListChildren(t *testing.T) {
 // TestListVersions tests ListVersions with excludeWriting parameter
 func TestListVersions(t *testing.T) {
 	Convey("ListVersions with excludeWriting", t, func() {
-		InitBucketDB(context.TODO(), bktID)
+		InitBucketDB(".", bktID)
 		dma := &DefaultMetadataAdapter{}
 		ig := idgen.NewIDGen(nil, 0)
 		fileID, _ := ig.New()
@@ -906,7 +877,7 @@ func TestListVersions(t *testing.T) {
 // TestGetObjByDataID tests GetObjByDataID
 func TestGetObjByDataID(t *testing.T) {
 	Convey("GetObjByDataID", t, func() {
-		InitBucketDB(context.TODO(), bktID)
+		InitBucketDB(".", bktID)
 		dma := &DefaultMetadataAdapter{}
 		ig := idgen.NewIDGen(nil, 0)
 		dataID, _ := ig.New()
@@ -951,7 +922,7 @@ func TestGetObjByDataID(t *testing.T) {
 // TestDeleteObj tests DeleteObj
 func TestDeleteObj(t *testing.T) {
 	Convey("DeleteObj", t, func() {
-		InitBucketDB(context.TODO(), bktID)
+		InitBucketDB(".", bktID)
 		dma := &DefaultMetadataAdapter{}
 		ig := idgen.NewIDGen(nil, 0)
 		pid, _ := ig.New()
@@ -1007,5 +978,382 @@ func TestDeleteObj(t *testing.T) {
 			So(len(objs), ShouldEqual, 1)
 			So(objs[0].PID, ShouldEqual, -1)
 		})
+	})
+}
+
+// TestPutBktWithCustomPath tests that PutBkt creates bucket database in custom path set via Handler
+func TestPutBktWithCustomPath(t *testing.T) {
+	Convey("PutBkt with custom path via Handler", t, func() {
+		// Create temporary directories for custom paths
+		tmpBaseDir, err := os.MkdirTemp("", "orcas_test_custom_base_")
+		So(err, ShouldBeNil)
+		defer os.RemoveAll(tmpBaseDir)
+
+		tmpDataDir, err := os.MkdirTemp("", "orcas_test_custom_data_")
+		So(err, ShouldBeNil)
+		defer os.RemoveAll(tmpDataDir)
+
+		// Remove any existing database files to ensure clean state
+		os.Remove(filepath.Join(tmpBaseDir, "meta.db"))
+		os.Remove(filepath.Join(tmpBaseDir, "meta.db-wal"))
+		os.Remove(filepath.Join(tmpBaseDir, "meta.db-shm"))
+
+		// Close connection pool to ensure clean state
+		pool := GetDBPool()
+		pool.Close()
+
+		// Create context with custom paths
+		ctx := context.Background()
+		ctx = context.Background()
+
+		// Initialize main database
+		err = InitDB(".", "")
+		So(err, ShouldBeNil)
+
+		// Create bucket using custom path context
+		ig := idgen.NewIDGen(nil, 0)
+		bktID, _ := ig.New()
+		uid, _ := ig.New()
+
+		// Create admin with custom paths
+		dma := &DefaultMetadataAdapter{
+			DefaultBaseMetadataAdapter: &DefaultBaseMetadataAdapter{},
+			DefaultDataMetadataAdapter: &DefaultDataMetadataAdapter{},
+		}
+		dma.DefaultBaseMetadataAdapter.SetPath(".")
+		dma.DefaultDataMetadataAdapter.SetPath(tmpDataDir)
+		acm := &DefaultAccessCtrlMgr{}
+		acm.SetAdapter(dma)
+		admin := NewAdminWithAdapters(dma, &DefaultDataAdapter{}, acm)
+		
+		bkt := &BucketInfo{
+			ID:   bktID,
+			Name: "test-bucket-custom-path",
+			Type: 1,
+		}
+
+		// Set UID and ADMIN role in context for PutBkt
+		ctx = UserInfo2Ctx(ctx, &UserInfo{ID: uid, Role: ADMIN})
+
+		// PutBkt should create database in custom data path
+		err = admin.PutBkt(ctx, []*BucketInfo{bkt})
+		So(err, ShouldBeNil)
+
+		// Verify bucket database was created in custom data path
+		expectedDBPath := filepath.Join(tmpDataDir, fmt.Sprint(bktID), "meta.db")
+		_, err = os.Stat(expectedDBPath)
+		So(err, ShouldBeNil)
+
+		// Verify bucket database is NOT in current directory (if different)
+		if tmpDataDir != "." {
+			currentDirDBPath := filepath.Join(".", fmt.Sprint(bktID), "meta.db")
+			_, err = os.Stat(currentDirDBPath)
+			So(err, ShouldNotBeNil) // Should not exist
+		}
+
+		// Verify we can read bucket info from the custom path database
+		// Create a new adapter with the same paths to read bucket info
+		readDma := &DefaultMetadataAdapter{
+			DefaultBaseMetadataAdapter: &DefaultBaseMetadataAdapter{},
+			DefaultDataMetadataAdapter: &DefaultDataMetadataAdapter{},
+		}
+		readDma.DefaultBaseMetadataAdapter.SetPath(".")
+		readDma.DefaultDataMetadataAdapter.SetPath(tmpDataDir)
+		bkts, err := readDma.GetBkt(ctx, []int64{bktID})
+		So(err, ShouldBeNil)
+		So(len(bkts), ShouldEqual, 1)
+		So(bkts[0].ID, ShouldEqual, bktID)
+		So(bkts[0].Name, ShouldEqual, "test-bucket-custom-path")
+	})
+}
+
+// TestPutBktWithConfig2Ctx tests that PutBkt creates bucket database in custom path set via Handler
+func TestPutBktWithConfig2Ctx(t *testing.T) {
+	Convey("PutBkt with custom path via Handler", t, func() {
+		// Create temporary directories for custom paths
+		tmpBaseDir, err := os.MkdirTemp("", "orcas_test_config_base_")
+		So(err, ShouldBeNil)
+		defer os.RemoveAll(tmpBaseDir)
+
+		tmpDataDir, err := os.MkdirTemp("", "orcas_test_config_data_")
+		So(err, ShouldBeNil)
+		defer os.RemoveAll(tmpDataDir)
+
+		// Remove any existing database files to ensure clean state
+		os.Remove(filepath.Join(tmpBaseDir, "meta.db"))
+		os.Remove(filepath.Join(tmpBaseDir, "meta.db-wal"))
+		os.Remove(filepath.Join(tmpBaseDir, "meta.db-shm"))
+
+		// Create context (paths now managed via Handler)
+		ctx := context.Background()
+
+		// Initialize main database
+		err = InitDB(".", "")
+		So(err, ShouldBeNil)
+
+		// Create bucket using config context
+		ig := idgen.NewIDGen(nil, 0)
+		bktID, _ := ig.New()
+		uid, _ := ig.New()
+
+		// Create admin with custom paths
+		dma := &DefaultMetadataAdapter{
+			DefaultBaseMetadataAdapter: &DefaultBaseMetadataAdapter{},
+			DefaultDataMetadataAdapter: &DefaultDataMetadataAdapter{},
+		}
+		dma.DefaultBaseMetadataAdapter.SetPath(".")
+		dma.DefaultDataMetadataAdapter.SetPath(tmpDataDir)
+		admin := NewAdminWithAdapters(dma, &DefaultDataAdapter{}, &DefaultAccessCtrlMgr{ma: dma})
+		
+		bkt := &BucketInfo{
+			ID:   bktID,
+			Name: "test-bucket-config-path",
+			Type: 1,
+		}
+
+		// Set UID and ADMIN role in context for PutBkt
+		ctx = UserInfo2Ctx(ctx, &UserInfo{ID: uid, Role: ADMIN})
+
+		// PutBkt should create database in custom data path
+		err = admin.PutBkt(ctx, []*BucketInfo{bkt})
+		So(err, ShouldBeNil)
+
+		// Verify bucket database was created in custom data path
+		expectedDBPath := filepath.Join(tmpDataDir, fmt.Sprint(bktID), "meta.db")
+		_, err = os.Stat(expectedDBPath)
+		So(err, ShouldBeNil)
+
+		// Verify bucket database is NOT in current directory (if different)
+		if tmpDataDir != "." {
+			currentDirDBPath := filepath.Join(".", fmt.Sprint(bktID), "meta.db")
+			_, err = os.Stat(currentDirDBPath)
+			So(err, ShouldNotBeNil) // Should not exist
+		}
+
+		// Verify we can read bucket info from the custom path database
+		// Create a new adapter with the same paths to read bucket info
+		readDma := &DefaultMetadataAdapter{
+			DefaultBaseMetadataAdapter: &DefaultBaseMetadataAdapter{},
+			DefaultDataMetadataAdapter: &DefaultDataMetadataAdapter{},
+		}
+		readDma.DefaultBaseMetadataAdapter.SetPath(".")
+		readDma.DefaultDataMetadataAdapter.SetPath(tmpDataDir)
+		bkts, err := readDma.GetBkt(ctx, []int64{bktID})
+		So(err, ShouldBeNil)
+		So(len(bkts), ShouldEqual, 1)
+		So(bkts[0].ID, ShouldEqual, bktID)
+		So(bkts[0].Name, ShouldEqual, "test-bucket-config-path")
+	})
+}
+
+// TestPutBktMultiplePaths tests that multiple buckets can use different paths in same process
+func TestPutBktMultiplePaths(t *testing.T) {
+	Convey("PutBkt with multiple different paths in same process", t, func() {
+		// Create two sets of temporary directories
+		tmpBaseDir1, err := os.MkdirTemp("", "orcas_test_multi1_base_")
+		So(err, ShouldBeNil)
+		defer os.RemoveAll(tmpBaseDir1)
+
+		tmpDataDir1, err := os.MkdirTemp("", "orcas_test_multi1_data_")
+		So(err, ShouldBeNil)
+		defer os.RemoveAll(tmpDataDir1)
+
+		tmpBaseDir2, err := os.MkdirTemp("", "orcas_test_multi2_base_")
+		So(err, ShouldBeNil)
+		defer os.RemoveAll(tmpBaseDir2)
+
+		tmpDataDir2, err := os.MkdirTemp("", "orcas_test_multi2_data_")
+		So(err, ShouldBeNil)
+		defer os.RemoveAll(tmpDataDir2)
+
+		ig := idgen.NewIDGen(nil, 0)
+		uid, _ := ig.New()
+		
+		// Create first admin with first path set
+		dma1 := &DefaultMetadataAdapter{
+			DefaultBaseMetadataAdapter: &DefaultBaseMetadataAdapter{},
+			DefaultDataMetadataAdapter: &DefaultDataMetadataAdapter{},
+		}
+		dma1.DefaultBaseMetadataAdapter.SetPath(".")
+		dma1.DefaultDataMetadataAdapter.SetPath(tmpDataDir1)
+		admin1 := NewAdminWithAdapters(dma1, &DefaultDataAdapter{}, &DefaultAccessCtrlMgr{ma: dma1})
+
+		// Create first bucket with first path set
+		ctx1 := context.Background()
+		err = InitDB(".", "")
+		So(err, ShouldBeNil)
+
+		bktID1, _ := ig.New()
+		ctx1 = UserInfo2Ctx(ctx1, &UserInfo{ID: uid, Role: ADMIN})
+
+		bkt1 := &BucketInfo{
+			ID:   bktID1,
+			Name: "bucket-path1",
+			Type: 1,
+		}
+		err = admin1.PutBkt(ctx1, []*BucketInfo{bkt1})
+		So(err, ShouldBeNil)
+
+		// Create second admin with second path set
+		dma2 := &DefaultMetadataAdapter{
+			DefaultBaseMetadataAdapter: &DefaultBaseMetadataAdapter{},
+			DefaultDataMetadataAdapter: &DefaultDataMetadataAdapter{},
+		}
+		dma2.DefaultBaseMetadataAdapter.SetPath(".")
+		dma2.DefaultDataMetadataAdapter.SetPath(tmpDataDir2)
+		admin2 := NewAdminWithAdapters(dma2, &DefaultDataAdapter{}, &DefaultAccessCtrlMgr{ma: dma2})
+
+		// Create second bucket with second path set
+		ctx2 := context.Background()
+		err = InitDB(".", "")
+		So(err, ShouldBeNil)
+
+		bktID2, _ := ig.New()
+		ctx2 = context.Background()
+		ctx2 = UserInfo2Ctx(ctx2, &UserInfo{ID: uid, Role: ADMIN})
+
+		bkt2 := &BucketInfo{
+			ID:   bktID2,
+			Name: "bucket-path2",
+			Type: 1,
+		}
+		err = admin2.PutBkt(ctx2, []*BucketInfo{bkt2})
+		So(err, ShouldBeNil)
+
+		// Verify both buckets exist in their respective paths
+		dbPath1 := filepath.Join(tmpDataDir1, fmt.Sprint(bktID1), "meta.db")
+		_, err = os.Stat(dbPath1)
+		So(err, ShouldBeNil)
+
+		dbPath2 := filepath.Join(tmpDataDir2, fmt.Sprint(bktID2), "meta.db")
+		_, err = os.Stat(dbPath2)
+		So(err, ShouldBeNil)
+
+		// Verify buckets are in correct locations (not swapped)
+		// Use admin1's adapter to read bucket1
+		bkts1, err := admin1.(*LocalAdmin).ma.GetBkt(ctx1, []int64{bktID1})
+		So(err, ShouldBeNil)
+		So(len(bkts1), ShouldEqual, 1)
+		So(bkts1[0].Name, ShouldEqual, "bucket-path1")
+
+		// Use admin2's adapter to read bucket2
+		bkts2, err := admin2.(*LocalAdmin).ma.GetBkt(ctx2, []int64{bktID2})
+		So(err, ShouldBeNil)
+		So(len(bkts2), ShouldEqual, 1)
+		So(bkts2[0].Name, ShouldEqual, "bucket-path2")
+
+		// Verify bucket1 is NOT in path2 and bucket2 is NOT in path1
+		wrongPath1 := filepath.Join(tmpDataDir2, fmt.Sprint(bktID1), "meta.db")
+		_, err = os.Stat(wrongPath1)
+		So(err, ShouldNotBeNil)
+
+		wrongPath2 := filepath.Join(tmpDataDir1, fmt.Sprint(bktID2), "meta.db")
+		_, err = os.Stat(wrongPath2)
+		So(err, ShouldNotBeNil)
+	})
+}
+
+// TestHandlerWithoutMainDB tests that handler can work without main database (usr, acl tables)
+// This verifies that bucket operations can work independently without requiring main database
+func TestHandlerWithoutMainDB(t *testing.T) {
+	Convey("Handler without main database", t, func() {
+		// Create temporary directories
+		tmpBaseDir, err := os.MkdirTemp("", "orcas_test_no_main_db_*")
+		So(err, ShouldBeNil)
+		defer os.RemoveAll(tmpBaseDir)
+
+		tmpDataDir, err := os.MkdirTemp("", "orcas_test_no_main_db_data_*")
+		So(err, ShouldBeNil)
+		defer os.RemoveAll(tmpDataDir)
+
+		// Verify main database does not exist
+		mainDBPath := filepath.Join(tmpBaseDir, "meta.db")
+		_, err = os.Stat(mainDBPath)
+		So(err, ShouldNotBeNil) // Should not exist
+
+		// Create NoAuthHandler without calling InitDB
+		// NoAuthHandler bypasses main database authentication and ACL checks
+		handler := NewNoAuthHandler(tmpBaseDir, tmpDataDir)
+		defer handler.Close()
+
+		ctx := context.Background()
+
+		// Create bucket ID
+		ig := idgen.NewIDGen(nil, 0)
+		bktID, _ := ig.New()
+
+		// Initialize bucket database first (this should work without main database)
+		err = InitBucketDB(tmpDataDir, bktID)
+		So(err, ShouldBeNil)
+
+		// Create bucket info directly in bucket database (without using PutBkt to avoid PutACL which needs main DB)
+		bkt := &BucketInfo{
+			ID:        bktID,
+			Name:      "test-bucket-no-main-db",
+			Type:      1,
+			Quota:     -1, // Unlimited
+			Used:      0,
+			RealUsed:  0,
+			ChunkSize: DEFAULT_CHUNK_SIZE,
+		}
+		// Write bucket info directly to bucket database
+		bktDirPath := filepath.Join(tmpDataDir, fmt.Sprint(bktID))
+		db, err := GetWriteDB(bktDirPath, "")
+		So(err, ShouldBeNil)
+		bktSlice := []*BucketInfo{bkt}
+		_, err = b.TableContext(ctx, db, BKT_TBL).ReplaceInto(&bktSlice)
+		So(err, ShouldBeNil)
+
+		// Verify bucket database exists
+		bktDBPath := filepath.Join(tmpDataDir, fmt.Sprint(bktID), "meta.db")
+		_, err = os.Stat(bktDBPath)
+		So(err, ShouldBeNil) // Should exist
+
+		// Verify main database still does not exist
+		_, err = os.Stat(mainDBPath)
+		So(err, ShouldNotBeNil) // Should still not exist
+
+		// Test PutData - should work without main database
+		testData := []byte("test data without main db")
+		dataID, err := handler.PutData(ctx, bktID, 0, 0, testData)
+		So(err, ShouldBeNil)
+		So(dataID, ShouldBeGreaterThan, 0)
+
+		// Test GetData - should work without main database
+		retrievedData, err := handler.GetData(ctx, bktID, dataID, 0)
+		So(err, ShouldBeNil)
+		So(retrievedData, ShouldResemble, testData)
+
+		// Test PutObj - should work without main database
+		fileID, _ := ig.New()
+		fileObj := &ObjectInfo{
+			ID:     fileID,
+			PID:    ROOT_OID,
+			Type:   OBJ_TYPE_FILE,
+			Name:   "test-file.txt",
+			Size:   int64(len(testData)),
+			MTime:  Now(),
+			DataID: dataID,
+		}
+		objIDs, err := handler.Put(ctx, bktID, []*ObjectInfo{fileObj})
+		So(err, ShouldBeNil)
+		So(len(objIDs), ShouldEqual, 1)
+		So(objIDs[0], ShouldEqual, fileID)
+
+		// Test GetObj - should work without main database
+		objs, err := handler.Get(ctx, bktID, []int64{fileID})
+		So(err, ShouldBeNil)
+		So(len(objs), ShouldEqual, 1)
+		So(objs[0].ID, ShouldEqual, fileID)
+		So(objs[0].Name, ShouldEqual, "test-file.txt")
+		So(objs[0].DataID, ShouldEqual, dataID)
+
+		// Verify main database still does not exist after operations
+		_, err = os.Stat(mainDBPath)
+		So(err, ShouldNotBeNil) // Should still not exist
+
+		// Verify bucket database still exists
+		_, err = os.Stat(bktDBPath)
+		So(err, ShouldBeNil) // Should still exist
 	})
 }

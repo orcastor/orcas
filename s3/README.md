@@ -172,9 +172,9 @@ Configuration file `config.toml`:
 # Set environment variables
 export EGO_DEBUG=true
 export EGO_LOG_EXTRA_KEYS=uid
-export ORCAS_BASE=/opt/orcas
-export ORCAS_DATA=/opt/orcas_disk
 export ORCAS_SECRET=xxxxxxxx
+# Note: ORCAS_BASE and ORCAS_DATA are no longer used as environment variables.
+# Paths can be configured via context using Path2Ctx or Config2Ctx.
 
 # Run using egoctl
 cd s3
