@@ -85,7 +85,7 @@ func TestUpload(t *testing.T) {
 			bktID = b[0].ID
 		}
 
-		So(sdk.Upload(c, bktID, core.ROOT_OID, tmpDir), ShouldBeNil)
+		So(sdk.Upload(c, bktID, bktID, tmpDir), ShouldBeNil)
 	})
 }
 
@@ -131,7 +131,7 @@ func TestDownload(t *testing.T) {
 		}
 
 		// Upload first
-		err = sdk.Upload(c, bktID, core.ROOT_OID, tmpDir)
+		err = sdk.Upload(c, bktID, bktID, tmpDir)
 		So(err, ShouldBeNil)
 
 		// Download to temporary directory
@@ -139,7 +139,7 @@ func TestDownload(t *testing.T) {
 		So(err, ShouldBeNil)
 		defer os.RemoveAll(downloadDir)
 
-		id, err := sdk.Path2ID(c, bktID, core.ROOT_OID, filepath.Base(tmpDir))
+		id, err := sdk.Path2ID(c, bktID, bktID, filepath.Base(tmpDir))
 		So(err, ShouldBeNil)
 		So(id, ShouldBeGreaterThan, 0)
 
@@ -246,7 +246,7 @@ func TestCheck(t *testing.T) {
 		}
 
 		// Upload
-		err = sdk.Upload(c, bktID, core.ROOT_OID, tmpDir)
+		err = sdk.Upload(c, bktID, bktID, tmpDir)
 		So(err, ShouldBeNil)
 
 		// Download to temporary directory
@@ -254,7 +254,7 @@ func TestCheck(t *testing.T) {
 		So(err, ShouldBeNil)
 		defer os.RemoveAll(downloadDir)
 
-		id, err := sdk.Path2ID(c, bktID, core.ROOT_OID, filepath.Base(tmpDir))
+		id, err := sdk.Path2ID(c, bktID, bktID, filepath.Base(tmpDir))
 		So(err, ShouldBeNil)
 		So(id, ShouldBeGreaterThan, 0)
 

@@ -59,7 +59,7 @@ func TestTempFileWriterLargeFileWithEncryption(t *testing.T) {
 			fileID, _ := ig.New()
 			fileObj := &core.ObjectInfo{
 				ID:    fileID,
-				PID:   core.ROOT_OID,
+				PID:   testBktID,
 				Type:  core.OBJ_TYPE_FILE,
 				Name:  "large_encrypted_file.tmp",
 				Size:  0,
@@ -218,7 +218,7 @@ func TestTempFileWriterLargeFileWithEncryption(t *testing.T) {
 			fileID, _ := ig.New()
 			fileObj := &core.ObjectInfo{
 				ID:    fileID,
-				PID:   core.ROOT_OID,
+				PID:   testBktID,
 				Type:  core.OBJ_TYPE_FILE,
 				Name:  "variable_write_encrypted.tmp",
 				Size:  0,
@@ -308,7 +308,7 @@ func TestTempFileWriterLargeFileWithEncryption(t *testing.T) {
 			fileID, _ := ig.New()
 			fileObj := &core.ObjectInfo{
 				ID:    fileID,
-				PID:   core.ROOT_OID,
+				PID:   testBktID,
 				Type:  core.OBJ_TYPE_FILE,
 				Name:  "chunk_flush_test.tmp",
 				Size:  0,
@@ -471,7 +471,7 @@ func TestTempFileWriterMemoryEfficiency(t *testing.T) {
 			fileID, _ := ig.New()
 			fileObj := &core.ObjectInfo{
 				ID:    fileID,
-				PID:   core.ROOT_OID,
+				PID:   testBktID,
 				Type:  core.OBJ_TYPE_FILE,
 				Name:  "memory_test.tmp",
 				Size:  0,

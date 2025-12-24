@@ -70,7 +70,7 @@ func TestVFSReadZeroData(t *testing.T) {
 		// Step 1: Upload - Create file and write data
 		fileObj := &core.ObjectInfo{
 			ID:    core.NewID(),
-			PID:   core.ROOT_OID,
+			PID:   testBktID,
 			Type:  core.OBJ_TYPE_FILE,
 			Name:  "test-read-zero-data.bin",
 			Size:  0,
@@ -210,7 +210,7 @@ func TestVFSReadZeroDataAfterReopen(t *testing.T) {
 		// Create file object
 		fileObj := &core.ObjectInfo{
 			ID:    core.NewID(),
-			PID:   core.ROOT_OID,
+			PID:   testBktID,
 			Type:  core.OBJ_TYPE_FILE,
 			Name:  "test-read-zero-data-reopen.bin",
 			Size:  0,
@@ -264,4 +264,3 @@ func TestVFSReadZeroDataAfterReopen(t *testing.T) {
 		t.Logf("Successfully verified Read does not return zeros after reopen: %d bytes", fileSize)
 	})
 }
-

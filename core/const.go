@@ -118,20 +118,14 @@ The following are all environment variable configuration items supported by the 
 Usage Example:
    // Paths default to current directory "." if not set
    // They can be set via Handler's SetPaths method or when creating Handler
-   export ORCAS_DELETE_DELAY=10
+   export ORCAS_DELETE_DELAY=5
    export ORCAS_BATCH_INTERVAL_MS=200
    export ORCAS_MIN_VERSION_INTERVAL_SEC=300
    export ORCAS_MAX_VERSIONS=10
 */
 
-const (
-	ROOT_OID    int64 = 0
-	DELETED_PID int64 = -1 // Marks parent ID of deleted objects
-
-	// DefaultListPageSize Default list page size
-	// Used for List operations and pagination, to avoid loading large amounts of data at once
-	DefaultListPageSize = 1000
-)
+// DefaultListPageSize Default list page size
+const DefaultListPageSize = 1000
 
 // DeleteDelaySeconds Delete delay time (seconds), wait for the specified time before deleting data files
 // Can be overridden via environment variable ORCAS_DELETE_DELAY, default is 5 seconds

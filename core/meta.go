@@ -2140,10 +2140,11 @@ func (dma *DefaultMetadataAdapter) DeleteObj(c Ctx, bktID int64, id int64) error
 
 	// Flip object's PID to negative to mark as deleted (so it disappears from original tree structure)
 	// Also update MTime to current timestamp
-	// Note: If original PID is 0 (ROOT_OID), use -1 as special marker
+	// Note: If original PID is 0 (legacy data from before bucketID-as-root change), use -1 as special marker
+	// For new data, root objects have PID = bucketID, so flipping gives -bucketID (no special handling needed)
 	newPID := -obj.PID
 	if newPID == 0 {
-		newPID = -1 // Negative of ROOT_OID is still 0, use -1 as special marker
+		newPID = -1 // Negative of 0 is still 0, use -1 as special marker for legacy data
 	}
 	currentTime := Now()
 

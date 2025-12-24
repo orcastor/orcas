@@ -37,10 +37,11 @@ func (ofs *OrcasFS) initRootNode() {
 // Mount mounts filesystem to specified path (Linux/Unix only)
 func (ofs *OrcasFS) Mount(mountPoint string, opts *fuse.MountOptions) (*fuse.Server, error) {
 	// Initialize root node (if not already initialized)
+	// Root node's objID is bucketID, not ROOT_OID
 	if ofs.root == nil {
 		ofs.root = &OrcasNode{
 			fs:     ofs,
-			objID:  core.ROOT_OID,
+			objID:  ofs.bktID,
 			isRoot: true,
 		}
 	}
@@ -129,10 +130,10 @@ func (n *OrcasNode) getObj() (*core.ObjectInfo, error) {
 		}
 	}
 
-	// If root node, return virtual object
+	// If root node, return virtual object with bucketID as ID
 	if n.isRoot {
 		return &core.ObjectInfo{
-			ID:   core.ROOT_OID,
+			ID:   n.fs.bktID,
 			PID:  0,
 			Type: core.OBJ_TYPE_DIR,
 			Name: "/",
@@ -312,7 +313,7 @@ func (n *OrcasNode) updateChildInDirCache(dirID int64, updatedChild *core.Object
 
 // Getattr gets file/directory attributes
 func (n *OrcasNode) Getattr(ctx context.Context, f fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
-	if n.objID != core.ROOT_OID {
+	if !n.isRoot {
 		if errno := n.fs.checkKey(); errno != 0 {
 			return errno
 		}
@@ -458,7 +459,7 @@ func (n *OrcasNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut)
 // Implements delayed cache refresh: marks cache as stale instead of immediately deleting
 func (n *OrcasNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
 	if errno := n.fs.checkKey(); errno != 0 {
-		if n.objID != core.ROOT_OID {
+		if !n.isRoot {
 			return nil, errno
 		}
 		return fs.NewListDirStream([]fuse.DirEntry{}), 0
@@ -508,15 +509,29 @@ func (n *OrcasNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
 	// Build directory stream
 	entries := make([]fuse.DirEntry, 0, len(children)+2)
 	// Add . and ..
+	// For root directory, both . and .. point to itself (bucketID)
+	var dotIno, dotDotIno uint64
+	if n.isRoot {
+		dotIno = uint64(n.fs.bktID)
+		dotDotIno = uint64(n.fs.bktID) // Root's .. points to itself
+	} else {
+		dotIno = uint64(obj.ID)
+		if obj.PID == n.fs.bktID {
+			// Parent is root (bucketID), use bucketID
+			dotDotIno = uint64(n.fs.bktID)
+		} else {
+			dotDotIno = uint64(obj.PID)
+		}
+	}
 	entries = append(entries, fuse.DirEntry{
 		Name: ".",
 		Mode: syscall.S_IFDIR,
-		Ino:  uint64(obj.ID),
+		Ino:  dotIno,
 	})
 	entries = append(entries, fuse.DirEntry{
 		Name: "..",
 		Mode: syscall.S_IFDIR,
-		Ino:  uint64(obj.PID),
+		Ino:  dotDotIno,
 	})
 
 	// Add child objects
@@ -544,15 +559,9 @@ func (n *OrcasNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
 }
 
 // getDirListCacheKey generates cache key for directory listing
-// When dirID is 0 (root), use bucketID to differentiate between buckets
-// Encoding: if dirID == 0, use -(bktID + 1); otherwise use dirID
+// Root directory's dirID is now bucketID, so no special encoding needed
 func (n *OrcasNode) getDirListCacheKey(dirID int64) int64 {
-	if dirID == 0 {
-		// Root directory: use negative value to encode bucketID
-		// Use -(bktID + 1) to ensure it's negative and avoid conflict with dirID 0
-		return -(n.fs.bktID + 1)
-	}
-	// Non-root directory: dirID is globally unique, use it directly
+	// dirID is globally unique (including root which is bucketID), use it directly
 	return dirID
 }
 
@@ -1021,7 +1030,7 @@ func (n *OrcasNode) Create(ctx context.Context, name string, flags uint32, mode 
 							if isTempFile(child) && (child.Name == tmpFileName || child.Name == name) {
 								// Found a .tmp file with matching name, delete it
 								DebugLog("[VFS Create] Found .tmp file in cache with same name, deleting it: fileID=%d, name=%s, targetName=%s", child.ID, child.Name, name)
-								
+
 								// Force flush before deletion (if RandomAccessor exists)
 								if n.fs != nil {
 									if targetRA := n.fs.getRandomAccessorByFileID(child.ID); targetRA != nil {
@@ -1031,14 +1040,14 @@ func (n *OrcasNode) Create(ctx context.Context, name string, flags uint32, mode 
 										n.fs.unregisterRandomAccessor(child.ID, targetRA)
 									}
 								}
-								
+
 								// Delete the .tmp file from database
 								if err := n.fs.h.Delete(n.fs.c, n.fs.bktID, child.ID); err != nil {
 									DebugLog("[VFS Create] WARNING: Failed to delete cached .tmp file: fileID=%d, error=%v", child.ID, err)
 								} else {
 									DebugLog("[VFS Create] Successfully deleted cached .tmp file: fileID=%d, name=%s", child.ID, child.Name)
 								}
-								
+
 								// Remove from file object cache
 								fileObjCache.Del(child.ID)
 								// Skip adding this .tmp file to updated children list
@@ -1046,7 +1055,7 @@ func (n *OrcasNode) Create(ctx context.Context, name string, flags uint32, mode 
 							}
 							updatedChildren = append(updatedChildren, child)
 						}
-						
+
 						// Update cache with filtered children (without .tmp files)
 						if len(updatedChildren) != len(cachedList) {
 							dirListCache.Put(parentCacheKey, updatedChildren)
@@ -1054,7 +1063,7 @@ func (n *OrcasNode) Create(ctx context.Context, name string, flags uint32, mode 
 						}
 					}
 				}
-				
+
 				// Create version before truncating
 				// This preserves file history for non-.tmp files
 				if lh, ok := n.fs.h.(*core.LocalHandler); ok {
@@ -1373,7 +1382,7 @@ func (n *OrcasNode) Create(ctx context.Context, name string, flags uint32, mode 
 							if isTempFile(child) && (child.Name == tmpFileName || child.Name == name) {
 								// Found a .tmp file with matching name, delete it
 								DebugLog("[VFS Create] Found .tmp file in cache with same name, deleting it: fileID=%d, name=%s, targetName=%s", child.ID, child.Name, name)
-								
+
 								// Force flush before deletion (if RandomAccessor exists)
 								if n.fs != nil {
 									if targetRA := n.fs.getRandomAccessorByFileID(child.ID); targetRA != nil {
@@ -1383,14 +1392,14 @@ func (n *OrcasNode) Create(ctx context.Context, name string, flags uint32, mode 
 										n.fs.unregisterRandomAccessor(child.ID, targetRA)
 									}
 								}
-								
+
 								// Delete the .tmp file from database
 								if err := n.fs.h.Delete(n.fs.c, n.fs.bktID, child.ID); err != nil {
 									DebugLog("[VFS Create] WARNING: Failed to delete cached .tmp file: fileID=%d, error=%v", child.ID, err)
 								} else {
 									DebugLog("[VFS Create] Successfully deleted cached .tmp file: fileID=%d, name=%s", child.ID, child.Name)
 								}
-								
+
 								// Remove from file object cache
 								fileObjCache.Del(child.ID)
 								// Skip adding this .tmp file to updated children list
@@ -1398,7 +1407,7 @@ func (n *OrcasNode) Create(ctx context.Context, name string, flags uint32, mode 
 							}
 							updatedChildren = append(updatedChildren, child)
 						}
-						
+
 						// Update cache with filtered children (without .tmp files)
 						if len(updatedChildren) != len(cachedList) {
 							dirListCache.Put(parentCacheKey, updatedChildren)
@@ -1406,7 +1415,7 @@ func (n *OrcasNode) Create(ctx context.Context, name string, flags uint32, mode 
 						}
 					}
 				}
-				
+
 				// Create version before truncating
 				// This preserves file history for non-.tmp files
 				if lh, ok := n.fs.h.(*core.LocalHandler); ok {
@@ -3896,7 +3905,7 @@ func (n *OrcasNode) forceFlushTempFileBeforeRename(fileID int64, oldName, newNam
 // Release releases file handle (closes file)
 // Optimization: use atomic operations, completely lock-free
 func (n *OrcasNode) Release(ctx context.Context) syscall.Errno {
-	if n.objID != core.ROOT_OID {
+	if !n.isRoot {
 		if errno := n.fs.checkKey(); errno != 0 {
 			return errno
 		}
@@ -4001,15 +4010,15 @@ func (n *OrcasNode) queryFileByNameDirectly(parentID int64, fileName string) (in
 	// Unique constraint is on (pid, name), so we need to check:
 	// 1. pid = parentID (non-deleted file)
 	// 2. pid = -parentID (deleted file, if parentID > 0)
-	// 3. pid = -1 (deleted file from root, if parentID == 0)
+	// 3. pid = -bktID (deleted file from root, if parentID == bktID)
 	var objs []core.ObjectInfo
 	var whereConds []interface{}
-	if parentID == 0 {
-		// Root directory: check pid = 0 and pid = -1
+	if parentID == n.fs.bktID {
+		// Root directory: check pid = bktID and pid = -bktID
 		whereConds = []interface{}{
 			b.Eq("name", fileName),
 			b.Eq("type", core.OBJ_TYPE_FILE),
-			b.Or(b.Eq("pid", 0), b.Eq("pid", -1)),
+			b.Or(b.Eq("pid", n.fs.bktID), b.Eq("pid", -n.fs.bktID)),
 		}
 	} else {
 		// Non-root: check pid = parentID and pid = -parentID

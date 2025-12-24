@@ -8,9 +8,9 @@ import (
 	"testing"
 	"time"
 
+	b "github.com/orca-zhang/borm"
 	"github.com/orca-zhang/idgen"
 	. "github.com/smartystreets/goconvey/convey"
-	b "github.com/orca-zhang/borm"
 )
 
 var (
@@ -23,7 +23,6 @@ func init() {
 	InitTestEnv()
 	bktID, _ = idgen.NewIDGen(nil, 0).New()
 }
-
 
 func TestRefData(t *testing.T) {
 	Convey("normal", t, func() {
@@ -1034,7 +1033,7 @@ func TestPutBktWithCustomPath(t *testing.T) {
 		acm := &DefaultAccessCtrlMgr{}
 		acm.SetAdapter(dma)
 		admin := NewAdminWithAdapters(dma, &DefaultDataAdapter{}, acm)
-		
+
 		bkt := &BucketInfo{
 			ID:   bktID,
 			Name: "test-bucket-custom-path",
@@ -1113,7 +1112,7 @@ func TestPutBktWithConfig2Ctx(t *testing.T) {
 		dma.DefaultBaseMetadataAdapter.SetPath(".")
 		dma.DefaultDataMetadataAdapter.SetPath(tmpDataDir)
 		admin := NewAdminWithAdapters(dma, &DefaultDataAdapter{}, &DefaultAccessCtrlMgr{ma: dma})
-		
+
 		bkt := &BucketInfo{
 			ID:   bktID,
 			Name: "test-bucket-config-path",
@@ -1177,7 +1176,7 @@ func TestPutBktMultiplePaths(t *testing.T) {
 
 		ig := idgen.NewIDGen(nil, 0)
 		uid, _ := ig.New()
-		
+
 		// Create first admin with first path set
 		dma1 := &DefaultMetadataAdapter{
 			DefaultBaseMetadataAdapter: &DefaultBaseMetadataAdapter{},
@@ -1337,7 +1336,7 @@ func TestHandlerWithoutMainDB(t *testing.T) {
 		fileID, _ := ig.New()
 		fileObj := &ObjectInfo{
 			ID:     fileID,
-			PID:    ROOT_OID,
+			PID:    bktID,
 			Type:   OBJ_TYPE_FILE,
 			Name:   "test-file.txt",
 			Size:   int64(len(testData)),

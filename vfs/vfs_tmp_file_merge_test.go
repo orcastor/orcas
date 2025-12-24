@@ -53,7 +53,7 @@ func TestTmpFileMergeAndDirectoryListing(t *testing.T) {
 		targetFileData := []byte("Original file content")
 		targetFileObj := &core.ObjectInfo{
 			ID:    core.NewID(),
-			PID:   core.ROOT_OID,
+			PID:   testBktID,
 			Type:  core.OBJ_TYPE_FILE,
 			Name:  targetFileName,
 			Size:  0,
@@ -83,7 +83,7 @@ func TestTmpFileMergeAndDirectoryListing(t *testing.T) {
 		tmpFileData := []byte("New content from tmp file")
 		tmpFileObj := &core.ObjectInfo{
 			ID:    core.NewID(),
-			PID:   core.ROOT_OID,
+			PID:   testBktID,
 			Type:  core.OBJ_TYPE_FILE,
 			Name:  tmpFileName,
 			Size:  0,
@@ -104,7 +104,7 @@ func TestTmpFileMergeAndDirectoryListing(t *testing.T) {
 		So(err, ShouldBeNil)
 
 		// Step 3: Verify directory listing before rename (should contain both files)
-		childrenBefore, _, _, err := handler.List(ctx, testBktID, core.ROOT_OID, core.ListOptions{
+		childrenBefore, _, _, err := handler.List(ctx, testBktID, testBktID, core.ListOptions{
 			Count: core.DefaultListPageSize,
 		})
 		So(err, ShouldBeNil)
@@ -129,7 +129,7 @@ func TestTmpFileMergeAndDirectoryListing(t *testing.T) {
 		if ofs.root == nil {
 			ofs.root = &OrcasNode{
 				fs:     ofs,
-				objID:  core.ROOT_OID,
+				objID:  testBktID,
 				isRoot: true,
 			}
 		}
@@ -148,7 +148,7 @@ func TestTmpFileMergeAndDirectoryListing(t *testing.T) {
 		time.Sleep(300 * time.Millisecond)
 
 		// List directory contents
-		childrenAfter, _, _, err := handler.List(ctx, testBktID, core.ROOT_OID, core.ListOptions{
+		childrenAfter, _, _, err := handler.List(ctx, testBktID, testBktID, core.ListOptions{
 			Count: core.DefaultListPageSize,
 		})
 		So(err, ShouldBeNil)

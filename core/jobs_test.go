@@ -290,7 +290,7 @@ func TestDeleteAndRecycle(t *testing.T) {
 
 			obj := &ObjectInfo{
 				ID:     objID,
-				PID:    ROOT_OID,
+				PID:    testBktID,
 				DataID: dataID,
 				Type:   OBJ_TYPE_FILE,
 				Name:   "test_file.txt",
@@ -310,9 +310,9 @@ func TestDeleteAndRecycle(t *testing.T) {
 			// PID 应该是负数（或-1，如果原PID是0）
 			So(objs[0].PID, ShouldBeLessThan, 1)
 			if objs[0].PID == -1 {
-				So(ROOT_OID, ShouldEqual, 0) // 验证是根目录的情况
+				So(testBktID, ShouldEqual, 0) // 验证是根目录的情况
 			} else {
-				So(-objs[0].PID, ShouldEqual, ROOT_OID)
+				So(-objs[0].PID, ShouldEqual, testBktID)
 			}
 		})
 
@@ -321,7 +321,7 @@ func TestDeleteAndRecycle(t *testing.T) {
 			dirID, _ := ig.New()
 			dir := &ObjectInfo{
 				ID:    dirID,
-				PID:   ROOT_OID,
+				PID:   testBktID,
 				Type:  OBJ_TYPE_DIR,
 				Name:  "test_dir",
 				Size:  0,
@@ -380,7 +380,7 @@ func TestDeleteAndRecycle(t *testing.T) {
 				objID, _ := ig.New()
 				obj := &ObjectInfo{
 					ID:    objID,
-					PID:   ROOT_OID,
+					PID:   testBktID,
 					Type:  OBJ_TYPE_FILE,
 					Name:  fmt.Sprintf("file_%d.txt", i),
 					Size:  100,
@@ -415,7 +415,7 @@ func TestDeleteAndRecycle(t *testing.T) {
 
 			obj := &ObjectInfo{
 				ID:     objID,
-				PID:    ROOT_OID,
+				PID:    testBktID,
 				DataID: dataID,
 				Type:   OBJ_TYPE_FILE,
 				Name:   "to_clean.txt",
@@ -455,7 +455,7 @@ func TestDeleteAndRecycle(t *testing.T) {
 			obj1ID, _ := ig.New()
 			obj1 := &ObjectInfo{
 				ID:     obj1ID,
-				PID:    ROOT_OID,
+				PID:    testBktID,
 				DataID: dataID,
 				Type:   OBJ_TYPE_FILE,
 				Name:   "file1.txt",
@@ -468,7 +468,7 @@ func TestDeleteAndRecycle(t *testing.T) {
 			obj2ID, _ := ig.New()
 			obj2 := &ObjectInfo{
 				ID:     obj2ID,
-				PID:    ROOT_OID,
+				PID:    testBktID,
 				DataID: dataID,
 				Type:   OBJ_TYPE_FILE,
 				Name:   "file2.txt",
@@ -509,7 +509,7 @@ func TestDeleteAndRecycle(t *testing.T) {
 			dirID, _ := ig.New()
 			dir := &ObjectInfo{
 				ID:    dirID,
-				PID:   ROOT_OID,
+				PID:   testBktID,
 				Type:  OBJ_TYPE_DIR,
 				Name:  "conflict_dir",
 				Size:  0,
@@ -587,7 +587,7 @@ func TestDeleteAndRecycle(t *testing.T) {
 			dir1ID, _ := ig.New()
 			dir1 := &ObjectInfo{
 				ID:    dir1ID,
-				PID:   ROOT_OID,
+				PID:   testBktID,
 				Type:  OBJ_TYPE_DIR,
 				Name:  "dir1",
 				Size:  0,
@@ -669,7 +669,7 @@ func TestDeleteAndRecycle(t *testing.T) {
 
 				obj := &ObjectInfo{
 					ID:     objID,
-					PID:    ROOT_OID,
+					PID:    testBktID,
 					DataID: dataID,
 					Type:   OBJ_TYPE_FILE,
 					Name:   fmt.Sprintf("file_%d.txt", i),
@@ -707,7 +707,7 @@ func TestDeleteAndRecycle(t *testing.T) {
 
 			obj := &ObjectInfo{
 				ID:     objID,
-				PID:    ROOT_OID,
+				PID:    testBktID,
 				DataID: dataID,
 				Type:   OBJ_TYPE_FILE,
 				Name:   "time_test.txt",
@@ -755,7 +755,7 @@ func TestDeleteAndRecycle(t *testing.T) {
 				objID, _ := ig.New()
 				obj := &ObjectInfo{
 					ID:    objID,
-					PID:   ROOT_OID,
+					PID:   testBktID,
 					Type:  OBJ_TYPE_FILE,
 					Name:  fmt.Sprintf("filter_%d.txt", i),
 					Size:  100,
@@ -971,7 +971,7 @@ func TestPermanentlyDelete(t *testing.T) {
 
 			obj := &ObjectInfo{
 				ID:     objID,
-				PID:    ROOT_OID,
+				PID:    testBktID,
 				DataID: dataID,
 				Type:   OBJ_TYPE_FILE,
 				Name:   "permanent_delete.txt",
@@ -1012,7 +1012,7 @@ func TestPermanentlyDelete(t *testing.T) {
 			dirID, _ := ig.New()
 			dir := &ObjectInfo{
 				ID:    dirID,
-				PID:   ROOT_OID,
+				PID:   testBktID,
 				Type:  OBJ_TYPE_DIR,
 				Name:  "permanent_dir",
 				Size:  0,
@@ -1069,7 +1069,7 @@ func TestPermanentlyDelete(t *testing.T) {
 			obj1ID, _ := ig.New()
 			obj1 := &ObjectInfo{
 				ID:     obj1ID,
-				PID:    ROOT_OID,
+				PID:    testBktID,
 				DataID: dataID,
 				Type:   OBJ_TYPE_FILE,
 				Name:   "file1.txt",
@@ -1082,7 +1082,7 @@ func TestPermanentlyDelete(t *testing.T) {
 			obj2ID, _ := ig.New()
 			obj2 := &ObjectInfo{
 				ID:     obj2ID,
-				PID:    ROOT_OID,
+				PID:    testBktID,
 				DataID: dataID,
 				Type:   OBJ_TYPE_FILE,
 				Name:   "file2.txt",
@@ -1190,7 +1190,7 @@ func TestQuotaAndUsed(t *testing.T) {
 			objID, _ := ig.New()
 			obj := &ObjectInfo{
 				ID:     objID,
-				PID:    ROOT_OID,
+				PID:    testBktID,
 				DataID: dataID,
 				Type:   OBJ_TYPE_FILE,
 				Name:   "test_file.txt",
@@ -1308,7 +1308,7 @@ func TestQuotaAndUsed(t *testing.T) {
 			obj1ID, _ := ig.New()
 			obj1 := &ObjectInfo{
 				ID:     obj1ID,
-				PID:    ROOT_OID,
+				PID:    testBktID,
 				DataID: dataID,
 				Type:   OBJ_TYPE_FILE,
 				Name:   "file1.txt",
@@ -1331,7 +1331,7 @@ func TestQuotaAndUsed(t *testing.T) {
 			obj2ID, _ := ig.New()
 			obj2 := &ObjectInfo{
 				ID:     obj2ID,
-				PID:    ROOT_OID,
+				PID:    testBktID,
 				DataID: dataID, // 引用相同的数据
 				Type:   OBJ_TYPE_FILE,
 				Name:   "file2.txt",
@@ -1367,7 +1367,7 @@ func TestQuotaAndUsed(t *testing.T) {
 			objID, _ := ig.New()
 			obj := &ObjectInfo{
 				ID:     objID,
-				PID:    ROOT_OID,
+				PID:    testBktID,
 				DataID: dataID,
 				Type:   OBJ_TYPE_FILE,
 				Name:   "file_to_delete.txt",
@@ -1459,7 +1459,7 @@ func TestQuotaAndUsed(t *testing.T) {
 			dirID, _ := ig.New()
 			dir := &ObjectInfo{
 				ID:    dirID,
-				PID:   ROOT_OID,
+				PID:   testBktID,
 				Type:  OBJ_TYPE_DIR,
 				Name:  "test_dir",
 				Size:  0,
@@ -1541,7 +1541,7 @@ func TestDefragment(t *testing.T) {
 				objID, _ := ig.New()
 				obj := &ObjectInfo{
 					ID:     objID,
-					PID:    ROOT_OID,
+					PID:    testBktID,
 					DataID: dataID,
 					Type:   OBJ_TYPE_FILE,
 					Name:   fmt.Sprintf("file_%d.txt", i),
@@ -1607,7 +1607,7 @@ func TestDefragment(t *testing.T) {
 			objID, _ := ig.New()
 			obj := &ObjectInfo{
 				ID:     objID,
-				PID:    ROOT_OID,
+				PID:    testBktID,
 				DataID: dataID,
 				Type:   OBJ_TYPE_FILE,
 				Name:   "large_file.txt",
@@ -1671,7 +1671,7 @@ func TestDefragment(t *testing.T) {
 			obj1ID, _ := ig.New()
 			obj1 := &ObjectInfo{
 				ID:     obj1ID,
-				PID:    ROOT_OID,
+				PID:    testBktID,
 				DataID: dataID1,
 				Type:   OBJ_TYPE_FILE,
 				Name:   "file1.txt",
@@ -1681,7 +1681,7 @@ func TestDefragment(t *testing.T) {
 			obj2ID, _ := ig.New()
 			obj2 := &ObjectInfo{
 				ID:     obj2ID,
-				PID:    ROOT_OID,
+				PID:    testBktID,
 				DataID: dataID2,
 				Type:   OBJ_TYPE_FILE,
 				Name:   "file2.txt",
@@ -1710,7 +1710,7 @@ func TestDefragment(t *testing.T) {
 			obj3ID, _ := ig.New()
 			obj3 := &ObjectInfo{
 				ID:     obj3ID,
-				PID:    ROOT_OID,
+				PID:    testBktID,
 				DataID: holeFillerID,
 				Type:   OBJ_TYPE_FILE,
 				Name:   "hole_filler.txt",
@@ -1790,7 +1790,7 @@ func TestDefragment(t *testing.T) {
 			obj1ID, _ := ig.New()
 			obj1 := &ObjectInfo{
 				ID:     obj1ID,
-				PID:    ROOT_OID,
+				PID:    testBktID,
 				DataID: dataID1,
 				Type:   OBJ_TYPE_FILE,
 				Name:   "file1.txt",
@@ -1800,7 +1800,7 @@ func TestDefragment(t *testing.T) {
 			obj2ID, _ := ig.New()
 			obj2 := &ObjectInfo{
 				ID:     obj2ID,
-				PID:    ROOT_OID,
+				PID:    testBktID,
 				DataID: dataID2,
 				Type:   OBJ_TYPE_FILE,
 				Name:   "file2.txt",
@@ -1837,7 +1837,7 @@ func TestDefragment(t *testing.T) {
 				objID, _ := ig.New()
 				obj := &ObjectInfo{
 					ID:     objID,
-					PID:    ROOT_OID,
+					PID:    testBktID,
 					DataID: dataID,
 					Type:   OBJ_TYPE_FILE,
 					Name:   fmt.Sprintf("small_%d.txt", i),
@@ -1970,7 +1970,7 @@ func TestDefragment(t *testing.T) {
 			obj1ID, _ := ig.New()
 			obj1 := &ObjectInfo{
 				ID:     obj1ID,
-				PID:    ROOT_OID,
+				PID:    testBktID,
 				DataID: dataID1,
 				Type:   OBJ_TYPE_FILE,
 				Name:   "file1.txt",
@@ -1980,7 +1980,7 @@ func TestDefragment(t *testing.T) {
 			obj3ID, _ := ig.New()
 			obj3 := &ObjectInfo{
 				ID:     obj3ID,
-				PID:    ROOT_OID,
+				PID:    testBktID,
 				DataID: dataID3,
 				Type:   OBJ_TYPE_FILE,
 				Name:   "file3.txt",
@@ -2124,7 +2124,7 @@ func TestDefragment(t *testing.T) {
 				objID, _ := ig.New()
 				obj := &ObjectInfo{
 					ID:     objID,
-					PID:    ROOT_OID,
+					PID:    testBktID,
 					DataID: dataID,
 					Type:   OBJ_TYPE_FILE,
 					Name:   fmt.Sprintf("small_%d.txt", i),
@@ -2157,7 +2157,7 @@ func TestDefragment(t *testing.T) {
 				objID, _ := ig.New()
 				obj := &ObjectInfo{
 					ID:     objID,
-					PID:    ROOT_OID,
+					PID:    testBktID,
 					DataID: dataID,
 					Type:   OBJ_TYPE_FILE,
 					Name:   fmt.Sprintf("large_%d.txt", i),
@@ -2227,7 +2227,7 @@ func TestDefragment(t *testing.T) {
 				objID, _ := ig.New()
 				obj := &ObjectInfo{
 					ID:     objID,
-					PID:    ROOT_OID,
+					PID:    testBktID,
 					DataID: dataID,
 					Type:   OBJ_TYPE_FILE,
 					Name:   fmt.Sprintf("file_%d.txt", i),

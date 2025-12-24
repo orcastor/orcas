@@ -74,7 +74,7 @@ func TestVFSEncryptionKeyMismatch(t *testing.T) {
 		// Step 1: Upload - Create file and write data with encryption
 		fileObj := &core.ObjectInfo{
 			ID:    core.NewID(),
-			PID:   core.ROOT_OID,
+			PID:   testBktID,
 			Type:  core.OBJ_TYPE_FILE,
 			Name:  "test-encryption-key.bin",
 			Size:  0,
@@ -194,7 +194,7 @@ func TestVFSEncryptionKeyMismatchAfterReopen(t *testing.T) {
 		// Create file object
 		fileObj := &core.ObjectInfo{
 			ID:    core.NewID(),
-			PID:   core.ROOT_OID,
+			PID:   testBktID,
 			Type:  core.OBJ_TYPE_FILE,
 			Name:  "test-encryption-key-reopen.bin",
 			Size:  0,

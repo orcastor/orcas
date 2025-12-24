@@ -124,7 +124,7 @@ func runPerformanceTest(t *testing.T, name string, dataSize, chunkSize int64, wr
 	fileID, _ := ig.New()
 	fileObj := &core.ObjectInfo{
 		ID:    fileID,
-		PID:   core.ROOT_OID,
+		PID:   testBktID,
 		Type:  core.OBJ_TYPE_FILE,
 		Name:  fmt.Sprintf("perf_%s.txt", name),
 		Size:  0,
@@ -480,7 +480,7 @@ func runSequentialWriteTest(t *testing.T, name string, totalSize, chunkSize int6
 	fileID, _ := ig.New()
 	fileObj := &core.ObjectInfo{
 		ID:    fileID,
-		PID:   core.ROOT_OID,
+		PID:   testBktID,
 		Type:  core.OBJ_TYPE_FILE,
 		Name:  fmt.Sprintf("perf_%s.txt", name),
 		Size:  0,
@@ -628,7 +628,7 @@ func runRandomWriteTest(t *testing.T, name string, totalSize, chunkSize int64, c
 	fileID, _ := ig.New()
 	fileObj := &core.ObjectInfo{
 		ID:    fileID,
-		PID:   core.ROOT_OID,
+		PID:   testBktID,
 		Type:  core.OBJ_TYPE_FILE,
 		Name:  fmt.Sprintf("perf_%s.txt", name),
 		Size:  0,
@@ -798,7 +798,7 @@ func runRandomWriteOverlappingTest(t *testing.T, name string, totalSize, chunkSi
 	fileID, _ := ig.New()
 	fileObj := &core.ObjectInfo{
 		ID:    fileID,
-		PID:   core.ROOT_OID,
+		PID:   testBktID,
 		Type:  core.OBJ_TYPE_FILE,
 		Name:  fmt.Sprintf("perf_%s.txt", name),
 		Size:  0,
@@ -937,7 +937,7 @@ func runRandomWriteSmallChunksTest(t *testing.T, name string, totalSize, chunkSi
 	fileID, _ := ig.New()
 	fileObj := &core.ObjectInfo{
 		ID:    fileID,
-		PID:   core.ROOT_OID,
+		PID:   testBktID,
 		Type:  core.OBJ_TYPE_FILE,
 		Name:  fmt.Sprintf("perf_%s.txt", name),
 		Size:  0,

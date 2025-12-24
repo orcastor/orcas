@@ -74,7 +74,7 @@ func TestVFSConcurrentChunkUpload(t *testing.T) {
 		// Step 1: Create file object (use .tmp suffix to match business layer behavior)
 		fileObj := &core.ObjectInfo{
 			ID:    core.NewID(),
-			PID:   core.ROOT_OID,
+			PID:   testBktID,
 			Type:  core.OBJ_TYPE_FILE,
 			Name:  "test-concurrent-upload-100mb.bin.tmp",
 			Size:  0,
@@ -319,7 +319,7 @@ func TestVFSRepeatedChunkWrite(t *testing.T) {
 		// Step 1: Create file object (use .tmp suffix to match business layer behavior)
 		fileObj := &core.ObjectInfo{
 			ID:    core.NewID(),
-			PID:   core.ROOT_OID,
+			PID:   testBktID,
 			Type:  core.OBJ_TYPE_FILE,
 			Name:  "test-repeated-write-50mb.bin.tmp",
 			Size:  0,
@@ -524,7 +524,7 @@ func TestVFSConcurrentChunkUploadWithWait(t *testing.T) {
 		// Step 1: Create file object (use .tmp suffix to match business layer behavior)
 		fileObj := &core.ObjectInfo{
 			ID:    core.NewID(),
-			PID:   core.ROOT_OID,
+			PID:   testBktID,
 			Type:  core.OBJ_TYPE_FILE,
 			Name:  "test-concurrent-wait-100mb.bin.tmp",
 			Size:  0,

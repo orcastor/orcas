@@ -150,7 +150,7 @@ func TestDokanyOperations(t *testing.T) {
 	// Create file object
 	fileObj := &core.ObjectInfo{
 		ID:    core.NewID(),
-		PID:   core.ROOT_OID,
+		PID:   testBktID,
 		Type:  core.OBJ_TYPE_FILE,
 		Name:  "test-file.txt",
 		Size:  int64(len(testData)),
@@ -259,7 +259,7 @@ func TestDokanyDirectoryOperations(t *testing.T) {
 	// Create test directory
 	dirObj := &core.ObjectInfo{
 		ID:    core.NewID(),
-		PID:   core.ROOT_OID,
+		PID:   testBktID,
 		Type:  core.OBJ_TYPE_DIR,
 		Name:  "test-dir",
 		Size:  0,
@@ -474,7 +474,7 @@ func TestDokanyWriteAndRead(t *testing.T) {
 	fileName := "/write-test.txt"
 	fileObj := &core.ObjectInfo{
 		ID:     core.NewID(),
-		PID:    core.ROOT_OID,
+		PID:    testBktID,
 		Type:   core.OBJ_TYPE_FILE,
 		Name:   "write-test.txt",
 		Size:   int64(len(testData)),
@@ -721,7 +721,7 @@ func TestTmpFileRenameCacheUpdate(t *testing.T) {
 	// Create file object with .tmp extension
 	tmpFileObj := &core.ObjectInfo{
 		ID:    core.NewID(),
-		PID:   core.ROOT_OID,
+		PID:   testBktID,
 		Type:  core.OBJ_TYPE_FILE,
 		Name:  "test-file.tmp",
 		Size:  0,
@@ -875,7 +875,7 @@ func TestRenameBeforeFlush(t *testing.T) {
 	// Create file object
 	newFileObj := &core.ObjectInfo{
 		ID:    core.NewID(),
-		PID:   core.ROOT_OID,
+		PID:   testBktID,
 		Type:  core.OBJ_TYPE_FILE,
 		Name:  "new-file.tmp",
 		Size:  0,

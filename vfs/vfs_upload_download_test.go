@@ -61,7 +61,7 @@ func TestVFSUploadDownload(t *testing.T) {
 		// Step 1: Upload - Create file and write data
 		fileObj := &core.ObjectInfo{
 			ID:    core.NewID(),
-			PID:   core.ROOT_OID,
+			PID:   testBktID,
 			Type:  core.OBJ_TYPE_FILE,
 			Name:  "test-upload-download.txt",
 			Size:  0,
@@ -159,7 +159,7 @@ func TestVFSLargeFileUploadDownload(t *testing.T) {
 		// Step 1: Upload - Create file and write data in chunks
 		fileObj := &core.ObjectInfo{
 			ID:    core.NewID(),
-			PID:   core.ROOT_OID,
+			PID:   testBktID,
 			Type:  core.OBJ_TYPE_FILE,
 			Name:  "test-large-file-upload-download.bin",
 			Size:  0,
@@ -284,7 +284,7 @@ func TestVFSRandomAccessUploadDownload(t *testing.T) {
 		// Step 1: Upload - Create file
 		fileObj := &core.ObjectInfo{
 			ID:    core.NewID(),
-			PID:   core.ROOT_OID,
+			PID:   testBktID,
 			Type:  core.OBJ_TYPE_FILE,
 			Name:  "test-random-access-upload-download.bin",
 			Size:  0,
@@ -456,7 +456,7 @@ func TestVFSMultipleFileUploadDownload(t *testing.T) {
 			// Create file object
 			fileObj := &core.ObjectInfo{
 				ID:    core.NewID(),
-				PID:   core.ROOT_OID,
+				PID:   testBktID,
 				Type:  core.OBJ_TYPE_FILE,
 				Name:  filepath.Join("test", "file-"+string(rune(i+'0'))+".bin"),
 				Size:  0,
@@ -548,7 +548,7 @@ func TestVFSAppendUploadDownload(t *testing.T) {
 		initialData := []byte("Initial data. ")
 		fileObj := &core.ObjectInfo{
 			ID:    core.NewID(),
-			PID:   core.ROOT_OID,
+			PID:   testBktID,
 			Type:  core.OBJ_TYPE_FILE,
 			Name:  "test-append-upload-download.txt",
 			Size:  0,
@@ -672,7 +672,7 @@ func TestVFSOverwriteUploadDownload(t *testing.T) {
 
 		fileObj := &core.ObjectInfo{
 			ID:    core.NewID(),
-			PID:   core.ROOT_OID,
+			PID:   testBktID,
 			Type:  core.OBJ_TYPE_FILE,
 			Name:  "test-overwrite-upload-download.bin",
 			Size:  0,
@@ -774,7 +774,7 @@ func TestVFSPartialDownload(t *testing.T) {
 		// Upload file
 		fileObj := &core.ObjectInfo{
 			ID:    core.NewID(),
-			PID:   core.ROOT_OID,
+			PID:   testBktID,
 			Type:  core.OBJ_TYPE_FILE,
 			Name:  "test-partial-download.bin",
 			Size:  0,

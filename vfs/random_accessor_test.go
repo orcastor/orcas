@@ -69,7 +69,7 @@ func TestVFSRandomAccessor(t *testing.T) {
 		fileID, _ := ig.New()
 		fileObj := &core.ObjectInfo{
 			ID:    fileID,
-			PID:   core.ROOT_OID,
+			PID:   testBktID,
 			Type:  core.OBJ_TYPE_FILE,
 			Name:  "test_file.txt",
 			Size:  0,
@@ -263,7 +263,7 @@ func TestVFSRandomAccessorWithSDK(t *testing.T) {
 		fileID, _ := ig.New()
 		fileObj := &core.ObjectInfo{
 			ID:    fileID,
-			PID:   core.ROOT_OID,
+			PID:   testBktID,
 			Type:  core.OBJ_TYPE_FILE,
 			Name:  "test_file.txt",
 			Size:  0,
@@ -430,7 +430,7 @@ func TestVFSRandomAccessorWithSDK(t *testing.T) {
 			fileID2, _ := ig.New()
 			fileObj2 := &core.ObjectInfo{
 				ID:    fileID2,
-				PID:   core.ROOT_OID,
+				PID:   testBktID,
 				Type:  core.OBJ_TYPE_FILE,
 				Name:  "random_test_file.txt",
 				Size:  0,
@@ -539,7 +539,7 @@ func TestVFSRandomAccessorWithSDK(t *testing.T) {
 			fileID3, _ := ig.New()
 			fileObj3 := &core.ObjectInfo{
 				ID:    fileID3,
-				PID:   core.ROOT_OID,
+				PID:   testBktID,
 				Type:  core.OBJ_TYPE_FILE,
 				Name:  "overlap_test_file.txt",
 				Size:  0,
@@ -755,7 +755,7 @@ func TestRandomAccessorReadWithEncryption(t *testing.T) {
 		fileID, _ := ig.New()
 		fileObj := &core.ObjectInfo{
 			ID:     fileID,
-			PID:    core.ROOT_OID,
+			PID:    testBktID,
 			Type:   core.OBJ_TYPE_FILE,
 			Name:   "encrypted_file.txt",
 			DataID: dataID,
@@ -816,7 +816,7 @@ func TestRandomAccessorReadOptimization(t *testing.T) {
 			fileID, _ := ig.New()
 			fileObj := &core.ObjectInfo{
 				ID:    fileID,
-				PID:   core.ROOT_OID,
+				PID:   testBktID,
 				Type:  core.OBJ_TYPE_FILE,
 				Name:  "exact_size_test.txt",
 				Size:  0,
@@ -868,7 +868,7 @@ func TestRandomAccessorReadOptimization(t *testing.T) {
 			fileID, _ := ig.New()
 			fileObj := &core.ObjectInfo{
 				ID:    fileID,
-				PID:   core.ROOT_OID,
+				PID:   testBktID,
 				Type:  core.OBJ_TYPE_FILE,
 				Name:  "compressed_size_test.txt",
 				Size:  0,
@@ -908,7 +908,7 @@ func TestRandomAccessorReadOptimization(t *testing.T) {
 			fileID, _ := ig.New()
 			fileObj := &core.ObjectInfo{
 				ID:    fileID,
-				PID:   core.ROOT_OID,
+				PID:   testBktID,
 				Type:  core.OBJ_TYPE_FILE,
 				Name:  "encrypted_size_test.txt",
 				Size:  0,
@@ -948,7 +948,7 @@ func TestRandomAccessorReadOptimization(t *testing.T) {
 			fileID, _ := ig.New()
 			fileObj := &core.ObjectInfo{
 				ID:    fileID,
-				PID:   core.ROOT_OID,
+				PID:   testBktID,
 				Type:  core.OBJ_TYPE_FILE,
 				Name:  "empty_file.txt",
 				Size:  0,
@@ -973,7 +973,7 @@ func TestRandomAccessorReadOptimization(t *testing.T) {
 			fileID, _ := ig.New()
 			fileObj := &core.ObjectInfo{
 				ID:    fileID,
-				PID:   core.ROOT_OID,
+				PID:   testBktID,
 				Type:  core.OBJ_TYPE_FILE,
 				Name:  "buffer_only_test.txt",
 				Size:  0,
@@ -1009,7 +1009,7 @@ func TestRandomAccessorReadOptimization(t *testing.T) {
 			fileID, _ := ig.New()
 			fileObj := &core.ObjectInfo{
 				ID:    fileID,
-				PID:   core.ROOT_OID,
+				PID:   testBktID,
 				Type:  core.OBJ_TYPE_FILE,
 				Name:  "partial_buffer_test.txt",
 				Size:  0,
@@ -1052,7 +1052,7 @@ func TestRandomAccessorReadOptimization(t *testing.T) {
 			fileID, _ := ig.New()
 			fileObj := &core.ObjectInfo{
 				ID:    fileID,
-				PID:   core.ROOT_OID,
+				PID:   testBktID,
 				Type:  core.OBJ_TYPE_FILE,
 				Name:  "beyond_size_test.txt",
 				Size:  0,
@@ -1131,7 +1131,7 @@ func TestSequentialWriteFallbackToRandom(t *testing.T) {
 		fileID, _ := ig.New()
 		fileObj := &core.ObjectInfo{
 			ID:    fileID,
-			PID:   core.ROOT_OID,
+			PID:   testBktID,
 			Type:  core.OBJ_TYPE_FILE,
 			Name:  "test_file.txt",
 			Size:  0,
@@ -1232,7 +1232,7 @@ func TestMultipleFlush(t *testing.T) {
 		fileID, _ := ig.New()
 		fileObj := &core.ObjectInfo{
 			ID:    fileID,
-			PID:   core.ROOT_OID,
+			PID:   testBktID,
 			Type:  core.OBJ_TYPE_FILE,
 			Name:  "test_file.txt",
 			Size:  0,
@@ -1306,7 +1306,7 @@ func TestWriteToExistingFile(t *testing.T) {
 		fileID, _ := ig.New()
 		fileObj := &core.ObjectInfo{
 			ID:    fileID,
-			PID:   core.ROOT_OID,
+			PID:   testBktID,
 			Type:  core.OBJ_TYPE_FILE,
 			Name:  "test_file.txt",
 			Size:  0,
@@ -1322,7 +1322,7 @@ func TestWriteToExistingFile(t *testing.T) {
 			fileID1, _ := ig.New()
 			fileObj1 := &core.ObjectInfo{
 				ID:    fileID1,
-				PID:   core.ROOT_OID,
+				PID:   testBktID,
 				Type:  core.OBJ_TYPE_FILE,
 				Name:  "test_file1.txt",
 				Size:  0,
@@ -1359,7 +1359,7 @@ func TestWriteToExistingFile(t *testing.T) {
 			fileID2, _ := ig.New()
 			fileObj2 := &core.ObjectInfo{
 				ID:    fileID2,
-				PID:   core.ROOT_OID,
+				PID:   testBktID,
 				Type:  core.OBJ_TYPE_FILE,
 				Name:  "test_file2.txt",
 				Size:  0,
@@ -1436,7 +1436,7 @@ func TestDifferentCompressionAlgorithms(t *testing.T) {
 				fileID, _ := ig.New()
 				fileObj := &core.ObjectInfo{
 					ID:    fileID,
-					PID:   core.ROOT_OID,
+					PID:   testBktID,
 					Type:  core.OBJ_TYPE_FILE,
 					Name:  fmt.Sprintf("test_%s.txt", algo.name),
 					Size:  0,
@@ -1513,7 +1513,7 @@ func TestDifferentEncryptionMethods(t *testing.T) {
 				fileID, _ := ig.New()
 				fileObj := &core.ObjectInfo{
 					ID:    fileID,
-					PID:   core.ROOT_OID,
+					PID:   testBktID,
 					Type:  core.OBJ_TYPE_FILE,
 					Name:  fmt.Sprintf("test_%s.txt", method.name),
 					Size:  0,
@@ -1578,7 +1578,7 @@ func TestLargeFileOperations(t *testing.T) {
 		fileID, _ := ig.New()
 		fileObj := &core.ObjectInfo{
 			ID:    fileID,
-			PID:   core.ROOT_OID,
+			PID:   testBktID,
 			Type:  core.OBJ_TYPE_FILE,
 			Name:  "large_file.txt",
 			Size:  0,
@@ -1663,7 +1663,7 @@ func TestConcurrentReadWrite(t *testing.T) {
 		fileID, _ := ig.New()
 		fileObj := &core.ObjectInfo{
 			ID:    fileID,
-			PID:   core.ROOT_OID,
+			PID:   testBktID,
 			Type:  core.OBJ_TYPE_FILE,
 			Name:  "test_file.txt",
 			Size:  0,
@@ -1752,7 +1752,7 @@ func TestEmptyWrite(t *testing.T) {
 		fileID, _ := ig.New()
 		fileObj := &core.ObjectInfo{
 			ID:    fileID,
-			PID:   core.ROOT_OID,
+			PID:   testBktID,
 			Type:  core.OBJ_TYPE_FILE,
 			Name:  "test_file.txt",
 			Size:  0,
@@ -1820,7 +1820,7 @@ func TestReadAfterClose(t *testing.T) {
 		fileID, _ := ig.New()
 		fileObj := &core.ObjectInfo{
 			ID:    fileID,
-			PID:   core.ROOT_OID,
+			PID:   testBktID,
 			Type:  core.OBJ_TYPE_FILE,
 			Name:  "test_file.txt",
 			Size:  0,
@@ -1891,7 +1891,7 @@ func TestTruncate(t *testing.T) {
 			fileID, _ := ig.New()
 			fileObj := &core.ObjectInfo{
 				ID:    fileID,
-				PID:   core.ROOT_OID,
+				PID:   testBktID,
 				Type:  core.OBJ_TYPE_FILE,
 				Name:  "truncate_test1.txt",
 				Size:  0,
@@ -1931,7 +1931,7 @@ func TestTruncate(t *testing.T) {
 			fileID, _ := ig.New()
 			fileObj := &core.ObjectInfo{
 				ID:    fileID,
-				PID:   core.ROOT_OID,
+				PID:   testBktID,
 				Type:  core.OBJ_TYPE_FILE,
 				Name:  "truncate_test2.txt",
 				Size:  0,
@@ -1971,7 +1971,7 @@ func TestTruncate(t *testing.T) {
 			fileID, _ := ig.New()
 			fileObj := &core.ObjectInfo{
 				ID:    fileID,
-				PID:   core.ROOT_OID,
+				PID:   testBktID,
 				Type:  core.OBJ_TYPE_FILE,
 				Name:  "truncate_test3.txt",
 				Size:  0,
@@ -2005,7 +2005,7 @@ func TestTruncate(t *testing.T) {
 			fileID, _ := ig.New()
 			fileObj := &core.ObjectInfo{
 				ID:    fileID,
-				PID:   core.ROOT_OID,
+				PID:   testBktID,
 				Type:  core.OBJ_TYPE_FILE,
 				Name:  "truncate_test4.txt",
 				Size:  0,
@@ -2048,7 +2048,7 @@ func TestTruncate(t *testing.T) {
 			fileID, _ := ig.New()
 			fileObj := &core.ObjectInfo{
 				ID:    fileID,
-				PID:   core.ROOT_OID,
+				PID:   testBktID,
 				Type:  core.OBJ_TYPE_FILE,
 				Name:  "truncate_test5.txt",
 				Size:  0,
@@ -2108,7 +2108,7 @@ func TestTruncateAndWrite(t *testing.T) {
 			fileID, _ := ig.New()
 			fileObj := &core.ObjectInfo{
 				ID:    fileID,
-				PID:   core.ROOT_OID,
+				PID:   testBktID,
 				Type:  core.OBJ_TYPE_FILE,
 				Name:  "truncate_write_test.txt",
 				Size:  0,
@@ -2180,7 +2180,7 @@ func TestTruncateWithCompression(t *testing.T) {
 			fileID, _ := ig.New()
 			fileObj := &core.ObjectInfo{
 				ID:    fileID,
-				PID:   core.ROOT_OID,
+				PID:   testBktID,
 				Type:  core.OBJ_TYPE_FILE,
 				Name:  "truncate_compressed_test.txt",
 				Size:  0,
@@ -2254,7 +2254,7 @@ func TestBatchWriteManagerSmallFile(t *testing.T) {
 			fileID, _ := ig.New()
 			fileObj := &core.ObjectInfo{
 				ID:    fileID,
-				PID:   core.ROOT_OID,
+				PID:   testBktID,
 				Type:  core.OBJ_TYPE_FILE,
 				Name:  "small_file_test.txt",
 				Size:  0,
@@ -2342,7 +2342,7 @@ func TestSequentialWriteLargeFile(t *testing.T) {
 			fileID, _ := ig.New()
 			fileObj := &core.ObjectInfo{
 				ID:    fileID,
-				PID:   core.ROOT_OID,
+				PID:   testBktID,
 				Type:  core.OBJ_TYPE_FILE,
 				Name:  "large_sequential_test.txt",
 				Size:  0,
@@ -2424,7 +2424,7 @@ func TestTruncateReferenceDataBlock(t *testing.T) {
 			fileID, _ := ig.New()
 			fileObj := &core.ObjectInfo{
 				ID:    fileID,
-				PID:   core.ROOT_OID,
+				PID:   testBktID,
 				Type:  core.OBJ_TYPE_FILE,
 				Name:  "truncate_ref_test.txt",
 				Size:  0,

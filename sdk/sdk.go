@@ -132,7 +132,8 @@ func (osi *OrcasSDKImpl) Path2ID(c core.Ctx, bktID, pid int64, rpath string) (in
 }
 
 func (osi *OrcasSDKImpl) ID2Path(c core.Ctx, bktID, id int64) (rpath string, err error) {
-	for id != core.ROOT_OID {
+	// Root is now bucketID, stop when we reach root
+	for id != bktID {
 		os, err := osi.h.Get(c, bktID, []int64{id})
 		if err != nil {
 			return "", fmt.Errorf("open remote object error(id:%d): %+v", id, err)
@@ -142,6 +143,10 @@ func (osi *OrcasSDKImpl) ID2Path(c core.Ctx, bktID, id int64) (rpath string, err
 		}
 		rpath = filepath.Join(os[0].Name, rpath)
 		id = os[0].PID
+		// If PID is 0 (legacy data), we've reached root
+		if id == 0 {
+			break
+		}
 	}
 	return rpath, nil
 }

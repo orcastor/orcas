@@ -32,7 +32,7 @@ func (ofs *OrcasFS) initRootNode() {
 	if ofs.root == nil {
 		ofs.root = &OrcasNode{
 			fs:     ofs,
-			objID:  core.ROOT_OID,
+			objID:  ofs.bktID,
 			obj:    nil,
 			isRoot: true,
 		}
@@ -409,7 +409,7 @@ func dokanyCreateFile(ofs *OrcasFS, fileName string, desiredAccess, shareMode, c
 			// Create new file
 			parentPath := filepath.Dir(fileName)
 			name := filepath.Base(fileName)
-			var pid int64 = core.ROOT_OID
+			var pid int64 = ofs.bktID // Root is now bucketID
 			if parentPath != "." && parentPath != "/" {
 				parentObj, err := findObjectByPath(ofs, parentPath)
 				if err != nil {
@@ -632,7 +632,7 @@ func dokanyMoveFile(ofs *OrcasFS, fileName, newFileName string, replaceIfExistin
 	// Get destination parent
 	dstParentPath := filepath.Dir(newFileName)
 	dstName := filepath.Base(newFileName)
-	var dstParentID int64 = core.ROOT_OID
+	var dstParentID int64 = ofs.bktID // Root is now bucketID
 	if dstParentPath != "." && dstParentPath != "/" {
 		dstParentObj, err := findObjectByPath(ofs, dstParentPath)
 		if err != nil {
@@ -829,7 +829,7 @@ func findObjectByPath(ofs *OrcasFS, path string) (*core.ObjectInfo, error) {
 	path = normalizePath(path)
 	if path == "/" {
 		return &core.ObjectInfo{
-			ID:   core.ROOT_OID,
+			ID:   ofs.bktID,
 			PID:  0,
 			Type: core.OBJ_TYPE_DIR,
 			Name: "/",
@@ -840,7 +840,7 @@ func findObjectByPath(ofs *OrcasFS, path string) (*core.ObjectInfo, error) {
 	path = strings.TrimPrefix(path, "/")
 	if path == "" {
 		return &core.ObjectInfo{
-			ID:   core.ROOT_OID,
+			ID:   ofs.bktID,
 			PID:  0,
 			Type: core.OBJ_TYPE_DIR,
 			Name: "/",
@@ -852,7 +852,7 @@ func findObjectByPath(ofs *OrcasFS, path string) (*core.ObjectInfo, error) {
 		return nil, fmt.Errorf("object not found")
 	}
 
-	var currentID int64 = core.ROOT_OID
+	var currentID int64 = ofs.bktID // Root is now bucketID
 
 	// Traverse path
 	for i, part := range parts {

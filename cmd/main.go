@@ -170,12 +170,12 @@ func main() {
 	}
 
 	// Execute operation
-	var pid int64 = core.ROOT_OID
+	var pid int64 = selectedBktID
 	if *action == "upload" {
 		// If remote path is specified, need to find parent directory ID
 		remotePathStr := *remotePath
 		if *remotePath != "" && *remotePath != "/" {
-			pid, err = sdkInstance.Path2ID(ctx, selectedBktID, core.ROOT_OID, *remotePath)
+			pid, err = sdkInstance.Path2ID(ctx, selectedBktID, selectedBktID, *remotePath)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "Error: Cannot find remote path %s: %v\n", *remotePath, err)
 				os.Exit(1)
@@ -198,7 +198,7 @@ func main() {
 			os.Exit(1)
 		}
 
-		pid, err = sdkInstance.Path2ID(ctx, selectedBktID, core.ROOT_OID, *remotePath)
+		pid, err = sdkInstance.Path2ID(ctx, selectedBktID, selectedBktID, *remotePath)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error: Cannot find remote path %s: %v\n", *remotePath, err)
 			os.Exit(1)
