@@ -222,17 +222,6 @@ func (n *OrcasNode) invalidateObj() {
 	n.obj.Store((*core.ObjectInfo)(nil))
 }
 
-// invalidateDirListCache invalidates directory listing cache
-// Uses delayed refresh: marks cache as stale instead of immediately deleting
-func (n *OrcasNode) invalidateDirListCache(dirID int64) {
-	cacheKey := dirID
-	// Mark Readdir cache as stale (delayed refresh)
-	readdirCacheStale.Store(dirID, true)
-	// Also invalidate dirListCache for consistency
-	dirListCache.Del(cacheKey)
-	// DebugLog("[VFS invalidateDirListCache] Marked directory cache as stale (delayed refresh): dirID=%d", dirID)
-}
-
 // appendChildToDirCache appends a newly created child object into the
 // cached directory listing instead of invalidating the entire cache.
 // If cache doesn't exist, creates a new cache entry with the child.
@@ -323,8 +312,10 @@ func (n *OrcasNode) updateChildInDirCache(dirID int64, updatedChild *core.Object
 
 // Getattr gets file/directory attributes
 func (n *OrcasNode) Getattr(ctx context.Context, f fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
-	if errno := n.fs.checkKey(); errno != 0 {
-		return errno
+	if n.objID != core.ROOT_OID {
+		if errno := n.fs.checkKey(); errno != 0 {
+			return errno
+		}
 	}
 
 	obj, err := n.getObj()
@@ -3794,8 +3785,10 @@ func (n *OrcasNode) forceFlushTempFileBeforeRename(fileID int64, oldName, newNam
 // Release releases file handle (closes file)
 // Optimization: use atomic operations, completely lock-free
 func (n *OrcasNode) Release(ctx context.Context) syscall.Errno {
-	if errno := n.fs.checkKey(); errno != 0 {
-		return errno
+	if n.objID != core.ROOT_OID {
+		if errno := n.fs.checkKey(); errno != 0 {
+			return errno
+		}
 	}
 
 	// Atomically get and swap with released marker
