@@ -229,7 +229,7 @@ func (n *OrcasNode) appendChildToDirCache(dirID int64, child *core.ObjectInfo) {
 	if child == nil {
 		return
 	}
-	cacheKey := dirID
+	cacheKey := n.getDirListCacheKey(dirID)
 	if cached, ok := dirListCache.Get(cacheKey); ok {
 		if children, ok := cached.([]*core.ObjectInfo); ok && children != nil {
 			// Check if child already exists
@@ -256,7 +256,7 @@ func (n *OrcasNode) appendChildToDirCache(dirID int64, child *core.ObjectInfo) {
 // removeChildFromDirCache removes a child object from the cached directory listing
 // instead of invalidating the entire cache. This preserves other cached children.
 func (n *OrcasNode) removeChildFromDirCache(dirID int64, childID int64) {
-	cacheKey := dirID
+	cacheKey := n.getDirListCacheKey(dirID)
 	if cached, ok := dirListCache.Get(cacheKey); ok {
 		if children, ok := cached.([]*core.ObjectInfo); ok && children != nil {
 			updatedChildren := make([]*core.ObjectInfo, 0, len(children))
@@ -284,7 +284,7 @@ func (n *OrcasNode) updateChildInDirCache(dirID int64, updatedChild *core.Object
 	if updatedChild == nil {
 		return
 	}
-	cacheKey := dirID
+	cacheKey := n.getDirListCacheKey(dirID)
 	if cached, ok := dirListCache.Get(cacheKey); ok {
 		if children, ok := cached.([]*core.ObjectInfo); ok && children != nil {
 			updated := false
@@ -488,7 +488,8 @@ func (n *OrcasNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
 			// Asynchronously preload child directories in background
 			go func() {
 				// Get children from dirListCache for preloading
-				if childrenCached, ok := dirListCache.Get(cacheKey); ok {
+				dirListCacheKey := n.getDirListCacheKey(obj.ID)
+				if childrenCached, ok := dirListCache.Get(dirListCacheKey); ok {
 					if children, ok := childrenCached.([]*core.ObjectInfo); ok && children != nil {
 						n.preloadChildDirs(children)
 					}
@@ -542,6 +543,19 @@ func (n *OrcasNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
 	return fs.NewListDirStream(entries), 0
 }
 
+// getDirListCacheKey generates cache key for directory listing
+// When dirID is 0 (root), use bucketID to differentiate between buckets
+// Encoding: if dirID == 0, use -(bktID + 1); otherwise use dirID
+func (n *OrcasNode) getDirListCacheKey(dirID int64) int64 {
+	if dirID == 0 {
+		// Root directory: use negative value to encode bucketID
+		// Use -(bktID + 1) to ensure it's negative and avoid conflict with dirID 0
+		return -(n.fs.bktID + 1)
+	}
+	// Non-root directory: dirID is globally unique, use it directly
+	return dirID
+}
+
 // getDirListWithCache gets directory listing with cache and singleflight
 // Uses singleflight to prevent duplicate concurrent requests for the same directory
 func (n *OrcasNode) getDirListWithCache(dirID int64) ([]*core.ObjectInfo, syscall.Errno) {
@@ -549,7 +563,7 @@ func (n *OrcasNode) getDirListWithCache(dirID int64) ([]*core.ObjectInfo, syscal
 	pendingChildren := n.getPendingObjectsForDir(dirID)
 
 	// Check cache first
-	cacheKey := dirID
+	cacheKey := n.getDirListCacheKey(dirID)
 	if cached, ok := dirListCache.Get(cacheKey); ok {
 		if children, ok := cached.([]*core.ObjectInfo); ok && children != nil {
 			// Merge pending objects with cached children
@@ -803,7 +817,8 @@ func (n *OrcasNode) preloadChildDirs(children []*core.ObjectInfo) {
 		cacheKey := child.ID
 		fileObjCache.Put(cacheKey, child)
 
-		if _, ok := dirListCache.Get(cacheKey); ok {
+		dirListCacheKey := n.getDirListCacheKey(child.ID)
+		if _, ok := dirListCache.Get(dirListCacheKey); ok {
 			// Already cached, skip
 			continue
 		}
@@ -811,10 +826,10 @@ func (n *OrcasNode) preloadChildDirs(children []*core.ObjectInfo) {
 		// Preload directory listing asynchronously
 		// Use singleflight to prevent duplicate requests
 		key := fmt.Sprintf("%d", child.ID)
-		go func(dirID int64, cacheKey int64, key string) {
+		go func(dirID int64, dirListCacheKey int64, key string) {
 			_, err, _ := dirListSingleFlight.Do(key, func() (interface{}, error) {
 				// Double-check cache
-				if _, ok := dirListCache.Get(cacheKey); ok {
+				if _, ok := dirListCache.Get(dirListCacheKey); ok {
 					return nil, nil
 				}
 
@@ -829,7 +844,7 @@ func (n *OrcasNode) preloadChildDirs(children []*core.ObjectInfo) {
 				}
 
 				// Cache the result
-				dirListCache.Put(cacheKey, children)
+				dirListCache.Put(dirListCacheKey, children)
 				// DebugLog("[VFS preloadChildDirs] Preloaded directory: dirID=%d, count=%d", dirID, len(children))
 
 				// Cache child objects for GetAttr optimization
@@ -843,7 +858,7 @@ func (n *OrcasNode) preloadChildDirs(children []*core.ObjectInfo) {
 			if err != nil {
 				DebugLog("[VFS preloadChildDirs] ERROR: Singleflight error: dirID=%d, error=%v", dirID, err)
 			}
-		}(child.ID, cacheKey, key)
+		}(child.ID, dirListCacheKey, key)
 	}
 }
 
@@ -869,7 +884,7 @@ func (n *OrcasNode) Create(ctx context.Context, name string, flags uint32, mode 
 
 	// Check if file already exists
 	// First check cache for directory listing to see if there's a directory with the same name
-	parentCacheKey := obj.ID
+	parentCacheKey := n.getDirListCacheKey(obj.ID)
 	var children []*core.ObjectInfo
 	if cachedChildren, ok := dirListCache.Get(parentCacheKey); ok {
 		if cachedList, ok := cachedChildren.([]*core.ObjectInfo); ok && cachedList != nil {
@@ -994,7 +1009,53 @@ func (n *OrcasNode) Create(ctx context.Context, name string, flags uint32, mode 
 				existingFileID = 0
 				existingFileObj = nil
 			} else {
-				// Existing file is not a .tmp file, create version before truncating
+				// Existing file is not a .tmp file, but check if there are .tmp files with the same name in cache
+				// This handles the case where .tmp files exist in the directory listing cache but weren't found in database query
+				parentCacheKey := n.getDirListCacheKey(obj.ID)
+				if cachedChildren, ok := dirListCache.Get(parentCacheKey); ok {
+					if cachedList, ok := cachedChildren.([]*core.ObjectInfo); ok && cachedList != nil {
+						// Look for .tmp files with the same name (without .tmp suffix matching the target name)
+						tmpFileName := name + ".tmp"
+						updatedChildren := make([]*core.ObjectInfo, 0, len(cachedList))
+						for _, child := range cachedList {
+							if isTempFile(child) && (child.Name == tmpFileName || child.Name == name) {
+								// Found a .tmp file with matching name, delete it
+								DebugLog("[VFS Create] Found .tmp file in cache with same name, deleting it: fileID=%d, name=%s, targetName=%s", child.ID, child.Name, name)
+								
+								// Force flush before deletion (if RandomAccessor exists)
+								if n.fs != nil {
+									if targetRA := n.fs.getRandomAccessorByFileID(child.ID); targetRA != nil {
+										if _, err := targetRA.ForceFlush(); err != nil {
+											DebugLog("[VFS Create] WARNING: Failed to flush cached .tmp file before deletion: fileID=%d, error=%v", child.ID, err)
+										}
+										n.fs.unregisterRandomAccessor(child.ID, targetRA)
+									}
+								}
+								
+								// Delete the .tmp file from database
+								if err := n.fs.h.Delete(n.fs.c, n.fs.bktID, child.ID); err != nil {
+									DebugLog("[VFS Create] WARNING: Failed to delete cached .tmp file: fileID=%d, error=%v", child.ID, err)
+								} else {
+									DebugLog("[VFS Create] Successfully deleted cached .tmp file: fileID=%d, name=%s", child.ID, child.Name)
+								}
+								
+								// Remove from file object cache
+								fileObjCache.Del(child.ID)
+								// Skip adding this .tmp file to updated children list
+								continue
+							}
+							updatedChildren = append(updatedChildren, child)
+						}
+						
+						// Update cache with filtered children (without .tmp files)
+						if len(updatedChildren) != len(cachedList) {
+							dirListCache.Put(parentCacheKey, updatedChildren)
+							DebugLog("[VFS Create] Updated directory cache, removed .tmp files with same name: removedCount=%d", len(cachedList)-len(updatedChildren))
+						}
+					}
+				}
+				
+				// Create version before truncating
 				// This preserves file history for non-.tmp files
 				if lh, ok := n.fs.h.(*core.LocalHandler); ok {
 					err := lh.CreateVersionFromFile(n.fs.c, n.fs.bktID, existingFileID)
@@ -1059,7 +1120,7 @@ func (n *OrcasNode) Create(ctx context.Context, name string, flags uint32, mode 
 	// Before creating new file, check if cache has a directory with the same name
 	// If so, clear it to ensure we create a file, not a directory
 	// This prevents issues where cache might have incorrect type information
-	// parentCacheKey is already declared above
+	// parentCacheKey is already declared above (using getDirListCacheKey)
 	if cachedChildren, ok := dirListCache.Get(parentCacheKey); ok {
 		if children, ok := cachedChildren.([]*core.ObjectInfo); ok && children != nil {
 			for _, child := range children {
@@ -1300,7 +1361,53 @@ func (n *OrcasNode) Create(ctx context.Context, name string, flags uint32, mode 
 				existingFileID = 0
 				existingFileObj = nil
 			} else {
-				// Existing file is not a .tmp file, create version before truncating
+				// Existing file is not a .tmp file, but check if there are .tmp files with the same name in cache
+				// This handles the case where .tmp files exist in the directory listing cache but weren't found in database query
+				parentCacheKey := n.getDirListCacheKey(obj.ID)
+				if cachedChildren, ok := dirListCache.Get(parentCacheKey); ok {
+					if cachedList, ok := cachedChildren.([]*core.ObjectInfo); ok && cachedList != nil {
+						// Look for .tmp files with the same name (without .tmp suffix matching the target name)
+						tmpFileName := name + ".tmp"
+						updatedChildren := make([]*core.ObjectInfo, 0, len(cachedList))
+						for _, child := range cachedList {
+							if isTempFile(child) && (child.Name == tmpFileName || child.Name == name) {
+								// Found a .tmp file with matching name, delete it
+								DebugLog("[VFS Create] Found .tmp file in cache with same name, deleting it: fileID=%d, name=%s, targetName=%s", child.ID, child.Name, name)
+								
+								// Force flush before deletion (if RandomAccessor exists)
+								if n.fs != nil {
+									if targetRA := n.fs.getRandomAccessorByFileID(child.ID); targetRA != nil {
+										if _, err := targetRA.ForceFlush(); err != nil {
+											DebugLog("[VFS Create] WARNING: Failed to flush cached .tmp file before deletion: fileID=%d, error=%v", child.ID, err)
+										}
+										n.fs.unregisterRandomAccessor(child.ID, targetRA)
+									}
+								}
+								
+								// Delete the .tmp file from database
+								if err := n.fs.h.Delete(n.fs.c, n.fs.bktID, child.ID); err != nil {
+									DebugLog("[VFS Create] WARNING: Failed to delete cached .tmp file: fileID=%d, error=%v", child.ID, err)
+								} else {
+									DebugLog("[VFS Create] Successfully deleted cached .tmp file: fileID=%d, name=%s", child.ID, child.Name)
+								}
+								
+								// Remove from file object cache
+								fileObjCache.Del(child.ID)
+								// Skip adding this .tmp file to updated children list
+								continue
+							}
+							updatedChildren = append(updatedChildren, child)
+						}
+						
+						// Update cache with filtered children (without .tmp files)
+						if len(updatedChildren) != len(cachedList) {
+							dirListCache.Put(parentCacheKey, updatedChildren)
+							DebugLog("[VFS Create] Updated directory cache, removed .tmp files with same name: removedCount=%d", len(cachedList)-len(updatedChildren))
+						}
+					}
+				}
+				
+				// Create version before truncating
 				// This preserves file history for non-.tmp files
 				if lh, ok := n.fs.h.(*core.LocalHandler); ok {
 					err := lh.CreateVersionFromFile(n.fs.c, n.fs.bktID, existingFileID)
@@ -1360,6 +1467,7 @@ func (n *OrcasNode) Create(ctx context.Context, name string, flags uint32, mode 
 	// Before caching new file, ensure any directory with the same name is removed from cache
 	// This is critical to prevent the file from being incorrectly identified as a directory
 	// Check directory listing cache and remove any directory with the same name
+	// parentCacheKey is already set above using getDirListCacheKey
 	if cachedChildren, ok := dirListCache.Get(parentCacheKey); ok {
 		if children, ok := cachedChildren.([]*core.ObjectInfo); ok && children != nil {
 			updatedChildren := make([]*core.ObjectInfo, 0, len(children))

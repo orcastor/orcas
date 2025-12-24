@@ -127,6 +127,19 @@ func formatPathCacheKey(bktID int64, path string) string {
 	return result
 }
 
+// getDirListCacheKey generates cache key for directory listing
+// When pid is 0 (root), use bucketID to differentiate between buckets
+// Encoding: if pid == 0, use -(bktID + 1); otherwise use pid
+func getDirListCacheKey(bktID int64, pid int64) int64 {
+	if pid == 0 {
+		// Root directory: use negative value to encode bucketID
+		// Use -(bktID + 1) to ensure it's negative and avoid conflict with pid 0
+		return -(bktID + 1)
+	}
+	// Non-root directory: pid is globally unique, use it directly
+	return pid
+}
+
 // invalidatePathCache invalidates cache for a path and its parent directories
 func invalidatePathCache(bktID int64, path string) {
 	// Invalidate the path itself
@@ -160,8 +173,10 @@ func invalidateBucketCache(bktID int64) {
 }
 
 // invalidateDirListCache invalidates directory listing cache
-func invalidateDirListCache(pid int64) {
-	dirListCache.Del(pid)
+// When pid is 0 (root), bktID is required to differentiate between buckets
+func invalidateDirListCache(bktID int64, pid int64) {
+	cacheKey := getDirListCacheKey(bktID, pid)
+	dirListCache.Del(cacheKey)
 }
 
 // getBucketByName gets bucket by name (with cache)
@@ -298,7 +313,8 @@ func findObjectByPath(c *gin.Context, bktID int64, key string) (*core.ObjectInfo
 
 		// Try directory listing cache
 		var objs []*core.ObjectInfo
-		if cached, ok := dirListCache.Get(pid); ok {
+		dirListCacheKey := getDirListCacheKey(bktID, pid)
+		if cached, ok := dirListCache.Get(dirListCacheKey); ok {
 			if cachedObjs, ok := cached.([]*core.ObjectInfo); ok {
 				objs = cachedObjs
 			}
@@ -315,7 +331,7 @@ func findObjectByPath(c *gin.Context, bktID int64, key string) (*core.ObjectInfo
 				return nil, err
 			}
 			// Update cache
-			dirListCache.Put(pid, objs)
+			dirListCache.Put(dirListCacheKey, objs)
 		}
 
 		// Find matching object by exact name
@@ -511,7 +527,8 @@ func ensurePath(c *gin.Context, bktID int64, key string) (int64, error) {
 
 		// Try directory listing cache
 		var objs []*core.ObjectInfo
-		if cached, ok := dirListCache.Get(pid); ok {
+		cacheKey := getDirListCacheKey(bktID, pid)
+		if cached, ok := dirListCache.Get(cacheKey); ok {
 			if cachedObjs, ok := cached.([]*core.ObjectInfo); ok {
 				objs = cachedObjs
 			}
@@ -528,7 +545,7 @@ func ensurePath(c *gin.Context, bktID int64, key string) (int64, error) {
 				return 0, err
 			}
 			// Update cache
-			dirListCache.Put(pid, objs)
+			dirListCache.Put(cacheKey, objs)
 		}
 
 		// Find matching object by exact name
@@ -582,7 +599,7 @@ func ensurePath(c *gin.Context, bktID int64, key string) (int64, error) {
 		// Invalidate caches for all created directories
 		for i, dirObj := range dirsToCreate {
 			if i < len(ids) && ids[i] > 0 {
-				invalidateDirListCache(dirObj.PID)
+				invalidateDirListCache(bktID, dirObj.PID)
 				// Build parent path for cache invalidation
 				pathParts := parts[:i+1]
 				parentPath := strings.Join(pathParts, "/")
@@ -1704,7 +1721,7 @@ func PutObject(c *gin.Context) {
 		// For updates, we need to refresh the cache to get the latest data
 		// For new objects, we can add to cache, but to avoid ecache slice reuse issues,
 		// we invalidate and let next query refresh from database
-		invalidateDirListCache(pid)
+		invalidateDirListCache(bktID, pid)
 
 		// Invalidate path caches to ensure consistency
 		// Invalidate the object's path cache
@@ -1750,10 +1767,10 @@ func DeleteObject(c *gin.Context) {
 		// Try to get parent PID and invalidate dir list cache
 		if parentPath != "." && parentPath != "/" && parentPath != "" {
 			if parentObj, err2 := findObjectByPath(c, bktID, parentPath); err2 == nil && parentObj != nil {
-				invalidateDirListCache(parentObj.ID)
+				invalidateDirListCache(bktID, parentObj.ID)
 			}
 		} else {
-			invalidateDirListCache(0)
+			invalidateDirListCache(bktID, 0)
 		}
 		// Retry once after cache invalidation
 		obj, err = findObjectByPath(c, bktID, key)
@@ -1773,7 +1790,8 @@ func DeleteObject(c *gin.Context) {
 	if parentPath != "." && parentPath != "/" {
 		parentObj, err := findObjectByPath(c, bktID, parentPath)
 		if err == nil && parentObj != nil {
-			if cached, ok := dirListCache.Get(parentObj.ID); ok {
+			cacheKey := getDirListCacheKey(bktID, parentObj.ID)
+			if cached, ok := dirListCache.Get(cacheKey); ok {
 				if cachedObjs, ok := cached.([]*core.ObjectInfo); ok {
 					// Remove deleted object from cache
 					filteredObjs := make([]*core.ObjectInfo, 0, len(cachedObjs))
@@ -1782,16 +1800,17 @@ func DeleteObject(c *gin.Context) {
 							filteredObjs = append(filteredObjs, cachedObj)
 						}
 					}
-					dirListCache.Put(parentObj.ID, filteredObjs)
+					dirListCache.Put(cacheKey, filteredObjs)
 				}
 			} else {
 				// Cache miss, invalidate to force refresh
-				invalidateDirListCache(parentObj.ID)
+				invalidateDirListCache(bktID, parentObj.ID)
 			}
 		}
 	} else {
 		// Root directory
-		if cached, ok := dirListCache.Get(0); ok {
+		cacheKey := getDirListCacheKey(bktID, 0)
+		if cached, ok := dirListCache.Get(cacheKey); ok {
 			if cachedObjs, ok := cached.([]*core.ObjectInfo); ok {
 				// Remove deleted object from cache
 				filteredObjs := make([]*core.ObjectInfo, 0, len(cachedObjs))
@@ -1800,10 +1819,10 @@ func DeleteObject(c *gin.Context) {
 						filteredObjs = append(filteredObjs, cachedObj)
 					}
 				}
-				dirListCache.Put(0, filteredObjs)
+				dirListCache.Put(cacheKey, filteredObjs)
 			}
 		} else {
-			invalidateDirListCache(0)
+			invalidateDirListCache(bktID, 0)
 		}
 	}
 
@@ -2016,7 +2035,7 @@ func copyObject(c *gin.Context) {
 
 	// Update caches
 	objectCache.Put(destObjID, objInfo)
-	invalidateDirListCache(pid)
+	invalidateDirListCache(destBktID, pid)
 	invalidatePathCache(destBktID, destKey)
 	if parentPath != "." && parentPath != "/" {
 		invalidatePathCache(destBktID, parentPath)
@@ -2257,7 +2276,7 @@ func moveObject(c *gin.Context) {
 	}
 
 	// Update caches
-	invalidateDirListCache(pid)
+	invalidateDirListCache(destBktID, pid)
 	invalidatePathCache(destBktID, destKey)
 	if parentPath != "." && parentPath != "/" {
 		invalidatePathCache(destBktID, parentPath)
@@ -2267,10 +2286,10 @@ func moveObject(c *gin.Context) {
 	if sourceParentPath != "." && sourceParentPath != "/" {
 		sourceParentObj, err := findObjectByPath(c, sourceBktID, sourceParentPath)
 		if err == nil && sourceParentObj != nil {
-			invalidateDirListCache(sourceParentObj.ID)
+			invalidateDirListCache(sourceBktID, sourceParentObj.ID)
 		}
 	} else {
-		invalidateDirListCache(0)
+		invalidateDirListCache(sourceBktID, 0)
 	}
 
 	c.Header("ETag", util.FormatETag(destObjID))
@@ -2765,7 +2784,7 @@ func CompleteMultipartUpload(c *gin.Context) {
 	invalidateObjectCache(objID)
 	if parentPath != "." && parentPath != "/" {
 		invalidatePathCache(bktID, parentPath)
-		invalidateDirListCache(pid)
+		invalidateDirListCache(bktID, pid)
 	}
 
 	// Return XML response
