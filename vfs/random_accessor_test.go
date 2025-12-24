@@ -2512,7 +2512,7 @@ func TestTruncateReferenceDataBlock(t *testing.T) {
 		lh := core.NewLocalHandler("", "").(*core.LocalHandler)
 		lh.SetAdapter(dma, dda)
 
-		testCtx, _, _, err := lh.Login(c, "orcas", "orcas")
+		testCtx, userInfo, _, err := lh.Login(c, "orcas", "orcas")
 		So(err, ShouldBeNil)
 
 		bucket := &core.BucketInfo{
@@ -2523,7 +2523,13 @@ func TestTruncateReferenceDataBlock(t *testing.T) {
 			Used:     0,
 			RealUsed: 0,
 		}
-		So(dma.PutBkt(testCtx, []*core.BucketInfo{bucket}), ShouldBeNil)
+		admin := core.NewLocalAdmin(".", ".")
+		So(admin.PutBkt(testCtx, []*core.BucketInfo{bucket}), ShouldBeNil)
+
+		// Ensure user has ALL permission to write to the bucket
+		if userInfo != nil && userInfo.ID > 0 {
+			So(admin.PutACL(testCtx, testBktID, userInfo.ID, core.ALL), ShouldBeNil)
+		}
 
 		ofs := NewOrcasFS(lh, testCtx, testBktID)
 
