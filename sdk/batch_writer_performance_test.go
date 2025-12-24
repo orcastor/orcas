@@ -75,7 +75,7 @@ func setupTestEnvironmentForBatchWrite(t *testing.T, batchWriteEnabled bool) (in
 	}
 
 	// 预热权限缓存：进行一次权限检查确保缓存正确设置
-	_, _ = handler.PutData(ctx, testBktID, 0, -1, []byte{})
+	_, _ = handler.PutData(ctx, testBktID, 0, 0, []byte{})
 	// 忽略错误，这只是为了预热缓存
 
 	return testBktID, ctx, handler
@@ -163,11 +163,11 @@ func runBatchWritePerformanceTest(t *testing.T, batchWriteEnabled bool, numObjec
 					added, _, addErr = batchMgr.AddFile(objID, testData, 0, key, int64(len(testData)), 0)
 					if !added || addErr != nil {
 						// Fallback to direct write for large files or when buffer is full
-						_, err = handler.PutData(ctx, bktID, 0, -1, testData)
+						_, err = handler.PutData(ctx, bktID, 0, 0, testData)
 					}
 				}
 			} else {
-				_, err = handler.PutData(ctx, bktID, 0, -1, testData)
+				_, err = handler.PutData(ctx, bktID, 0, 0, testData)
 			}
 
 			latency := time.Since(reqStart)
@@ -410,7 +410,7 @@ func BenchmarkBatchWriteComparison(b *testing.B) {
 							b.Errorf("AddFile failed: err=%v, added=%v", err, added)
 						}
 					} else {
-						_, err := handler.PutData(ctx, bktID, 0, -1, testData)
+						_, err := handler.PutData(ctx, bktID, 0, 0, testData)
 						if err != nil {
 							b.Errorf("PutData failed: %v", err)
 						}

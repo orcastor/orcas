@@ -17,7 +17,6 @@ import (
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
 	b "github.com/orca-zhang/borm"
-	"github.com/orca-zhang/ecache2"
 	"github.com/orcastor/orcas/core"
 )
 
@@ -101,14 +100,6 @@ var (
 	_                  = fs.FileWriter(&OrcasNode{})
 	_                  = fs.FileReleaser(&OrcasNode{})
 )
-
-var streamingReaderCache = ecache2.NewLRUCache[int64](4, 256, 15*time.Second)
-
-type cachedReader struct {
-	reader     io.Reader
-	nextOffset int64
-	dataID     int64
-}
 
 // getObj gets object information (with cache)
 // Optimization: use atomic operations, completely lock-free

@@ -350,7 +350,7 @@ func TestBatchWriterBufferFullWithNormalWrite(t *testing.T) {
 	// The context returned from handler.Login() already has user info set via UserInfo2Ctx
 
 	testData := []byte("test data when both buffers full")
-	testDataID, err := handler.PutData(ctx, bktID, 0, -1, testData)
+	testDataID, err := handler.PutData(ctx, bktID, 0, 0, testData)
 	if err != nil {
 		t.Fatalf("PutData failed: %v", err)
 	}

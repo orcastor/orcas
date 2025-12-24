@@ -66,7 +66,7 @@ type OrcasFS struct {
 	core.Config                  // Embedded Config: compression, encryption, instant upload settings
 	bucket      *core.BucketInfo // Bucket configuration (chunkSize, quota, etc.)
 	chunkSize   int64
-	requireKey  bool // If true, return EPERM error when KEY is not provided
+	requireKey  bool // If true, return EPERM error when EndecKey is not provided
 	// Business layer configuration (from MountOptions.Config, not from bucket config)
 	// These fields are NOT stored in database, handled at business layer
 	raRegistry sync.Map // map[fileID]*RandomAccessor
@@ -76,7 +76,7 @@ type OrcasFS struct {
 
 // NewOrcasFS creates a new ORCAS filesystem
 // This function is available on all platforms
-// requireKey: if true, return EPERM error when KEY is not provided in context
+// requireKey: if true, return EPERM error when EndecKey is not provided in Config
 func NewOrcasFS(h core.Handler, c core.Ctx, bktID int64, requireKey ...bool) *OrcasFS {
 	return NewOrcasFSWithConfig(h, c, bktID, nil, requireKey...)
 }
@@ -87,7 +87,7 @@ func NewOrcasFS(h core.Handler, c core.Ctx, bktID int64, requireKey ...bool) *Or
 //
 //	If nil, uses default configuration (no compression, no encryption, instant upload OFF)
 //
-// requireKey: if true, return EPERM error when KEY is not provided in context
+// requireKey: if true, return EPERM error when EndecKey is not provided in Config
 func NewOrcasFSWithConfig(h core.Handler, c core.Ctx, bktID int64, cfg *core.Config, requireKey ...bool) *OrcasFS {
 	// Get bucket configuration (includes chunkSize, compression, encryption settings)
 	var chunkSize int64
@@ -259,18 +259,15 @@ func (fs *OrcasFS) getBucketConfig() *core.BucketInfo {
 	}
 }
 
-// checkKey checks if KEY is required and present in context
+// checkKey checks if KEY is required and present in OrcasFS.Config.EndecKey
 // Returns EPERM if requireKey is true but KEY is not provided
 func (fs *OrcasFS) checkKey() syscall.Errno {
 	if !fs.requireKey {
 		return 0 // Key not required
 	}
-	// Check if KEY exists in context
-	// Use core.getKey function to extract key from context
-	if v, ok := fs.c.Value("o").(map[string]interface{}); ok {
-		if key, okk := v["key"].(string); okk && key != "" {
-			return 0 // Key is present
-		}
+	// Check if EndecKey exists in OrcasFS.Config
+	if fs.Config.EndecKey != "" {
+		return 0 // Key is present
 	}
 	// Key is required but not provided
 	return syscall.EPERM

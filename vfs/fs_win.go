@@ -218,7 +218,7 @@ type MountOptions struct {
 	Config *core.Config
 	// Enable debug mode (verbose output with timestamps)
 	Debug bool
-	// RequireKey: if true, return EPERM error when KEY is not provided in context
+	// RequireKey: if true, return EPERM error when EndecKey is not provided in Config
 	RequireKey bool
 }
 
