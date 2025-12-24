@@ -323,6 +323,10 @@ func (n *OrcasNode) updateChildInDirCache(dirID int64, updatedChild *core.Object
 
 // Getattr gets file/directory attributes
 func (n *OrcasNode) Getattr(ctx context.Context, f fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
+	if errno := n.fs.checkKey(); errno != 0 {
+		return errno
+	}
+
 	obj, err := n.getObj()
 	if err != nil {
 		DebugLog("[VFS Getattr] ERROR: Failed to get object: objID=%d, error=%v", n.objID, err)
@@ -352,6 +356,10 @@ func getMode(objType int) uint32 {
 
 // Lookup looks up child node
 func (n *OrcasNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
+	if errno := n.fs.checkKey(); errno != 0 {
+		return nil, errno
+	}
+
 	// DebugLog("[VFS Lookup] Looking up child node: name=%s, parentID=%d", name, n.objID)
 	obj, err := n.getObj()
 	if err != nil {
@@ -458,6 +466,10 @@ func (n *OrcasNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut)
 // Optimized: uses interface-level cache to avoid rebuilding entries every time
 // Implements delayed cache refresh: marks cache as stale instead of immediately deleting
 func (n *OrcasNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
+	if errno := n.fs.checkKey(); errno != 0 {
+		return nil, errno
+	}
+
 	obj, err := n.getObj()
 	if err != nil {
 		return nil, syscall.ENOENT
@@ -1477,6 +1489,7 @@ func (n *OrcasNode) Mkdir(ctx context.Context, name string, mode uint32, out *fu
 	if errno := n.fs.checkKey(); errno != 0 {
 		return nil, errno
 	}
+
 	obj, err := n.getObj()
 	if err != nil {
 		return nil, syscall.ENOENT
@@ -1575,6 +1588,7 @@ func (n *OrcasNode) Unlink(ctx context.Context, name string) syscall.Errno {
 	if errno := n.fs.checkKey(); errno != 0 {
 		return errno
 	}
+
 	obj, err := n.getObj()
 	if err != nil {
 		return syscall.ENOENT
@@ -1706,6 +1720,7 @@ func (n *OrcasNode) Rmdir(ctx context.Context, name string) syscall.Errno {
 	if errno := n.fs.checkKey(); errno != 0 {
 		return errno
 	}
+
 	obj, err := n.getObj()
 	if err != nil {
 		return syscall.ENOENT
@@ -1812,6 +1827,7 @@ func (n *OrcasNode) Rename(ctx context.Context, name string, newParent fs.InodeE
 	if errno := n.fs.checkKey(); errno != 0 {
 		return errno
 	}
+
 	obj, err := n.getObj()
 	if err != nil {
 		return syscall.ENOENT
@@ -2965,6 +2981,10 @@ func (n *OrcasNode) Write(ctx context.Context, data []byte, off int64) (written 
 // Flush flushes file
 // Optimization: use atomic operations, completely lock-free
 func (n *OrcasNode) Flush(ctx context.Context) syscall.Errno {
+	if errno := n.fs.checkKey(); errno != 0 {
+		return errno
+	}
+
 	// Atomically read ra
 	val := n.ra.Load()
 	if val == nil || val == releasedMarker {
@@ -3009,6 +3029,7 @@ func (n *OrcasNode) Fsync(ctx context.Context, flags uint32) syscall.Errno {
 	if errno := n.Flush(ctx); errno != 0 {
 		return errno
 	}
+
 	// Flush object cache
 	n.invalidateObj()
 	return 0
@@ -3016,6 +3037,10 @@ func (n *OrcasNode) Fsync(ctx context.Context, flags uint32) syscall.Errno {
 
 // Setattr sets file attributes (including truncate operation)
 func (n *OrcasNode) Setattr(ctx context.Context, in *fuse.SetAttrIn, out *fuse.AttrOut) syscall.Errno {
+	if errno := n.fs.checkKey(); errno != 0 {
+		return errno
+	}
+
 	obj, err := n.getObj()
 	if err != nil {
 		return syscall.ENOENT
@@ -3769,6 +3794,10 @@ func (n *OrcasNode) forceFlushTempFileBeforeRename(fileID int64, oldName, newNam
 // Release releases file handle (closes file)
 // Optimization: use atomic operations, completely lock-free
 func (n *OrcasNode) Release(ctx context.Context) syscall.Errno {
+	if errno := n.fs.checkKey(); errno != 0 {
+		return errno
+	}
+
 	// Atomically get and swap with released marker
 	// atomic.Value cannot store nil, so we use releasedMarker instead
 	val := n.ra.Load()
