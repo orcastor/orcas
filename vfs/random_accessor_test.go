@@ -42,7 +42,12 @@ func TestVFSRandomAccessor(t *testing.T) {
 			t.Fatalf("InitBucketDB failed: %+v", err)
 		}
 
-		dma := &core.DefaultMetadataAdapter{}
+		dma := &core.DefaultMetadataAdapter{
+			DefaultBaseMetadataAdapter: &core.DefaultBaseMetadataAdapter{},
+			DefaultDataMetadataAdapter: &core.DefaultDataMetadataAdapter{},
+		}
+		dma.DefaultBaseMetadataAdapter.SetPath(".")
+		dma.DefaultDataMetadataAdapter.SetPath(".")
 		dda := &core.DefaultDataAdapter{}
 		dda.SetOptions(core.Options{})
 
@@ -236,7 +241,12 @@ func TestVFSRandomAccessorWithSDK(t *testing.T) {
 		err := core.InitBucketDB(".", testBktID)
 		So(err, ShouldBeNil)
 
-		dma := &core.DefaultMetadataAdapter{}
+		dma := &core.DefaultMetadataAdapter{
+			DefaultBaseMetadataAdapter: &core.DefaultBaseMetadataAdapter{},
+			DefaultDataMetadataAdapter: &core.DefaultDataMetadataAdapter{},
+		}
+		dma.DefaultBaseMetadataAdapter.SetPath(".")
+		dma.DefaultDataMetadataAdapter.SetPath(".")
 		dda := &core.DefaultDataAdapter{}
 		dda.SetOptions(core.Options{})
 
@@ -701,7 +711,12 @@ func TestRandomAccessorReadWithEncryption(t *testing.T) {
 		err := core.InitBucketDB(".", testBktID)
 		So(err, ShouldBeNil)
 
-		dma := &core.DefaultMetadataAdapter{}
+		dma := &core.DefaultMetadataAdapter{
+			DefaultBaseMetadataAdapter: &core.DefaultBaseMetadataAdapter{},
+			DefaultDataMetadataAdapter: &core.DefaultDataMetadataAdapter{},
+		}
+		dma.DefaultBaseMetadataAdapter.SetPath(".")
+		dma.DefaultDataMetadataAdapter.SetPath(".")
 		dda := &core.DefaultDataAdapter{}
 		dda.SetOptions(core.Options{})
 
@@ -788,7 +803,12 @@ func TestRandomAccessorReadOptimization(t *testing.T) {
 		err := core.InitBucketDB(".", testBktID)
 		So(err, ShouldBeNil)
 
-		dma := &core.DefaultMetadataAdapter{}
+		dma := &core.DefaultMetadataAdapter{
+			DefaultBaseMetadataAdapter: &core.DefaultBaseMetadataAdapter{},
+			DefaultDataMetadataAdapter: &core.DefaultDataMetadataAdapter{},
+		}
+		dma.DefaultBaseMetadataAdapter.SetPath(".")
+		dma.DefaultDataMetadataAdapter.SetPath(".")
 		dda := &core.DefaultDataAdapter{}
 		dda.SetOptions(core.Options{})
 
@@ -1108,7 +1128,12 @@ func TestSequentialWriteFallbackToRandom(t *testing.T) {
 		err := core.InitBucketDB(".", testBktID)
 		So(err, ShouldBeNil)
 
-		dma := &core.DefaultMetadataAdapter{}
+		dma := &core.DefaultMetadataAdapter{
+			DefaultBaseMetadataAdapter: &core.DefaultBaseMetadataAdapter{},
+			DefaultDataMetadataAdapter: &core.DefaultDataMetadataAdapter{},
+		}
+		dma.DefaultBaseMetadataAdapter.SetPath(".")
+		dma.DefaultDataMetadataAdapter.SetPath(".")
 		dda := &core.DefaultDataAdapter{}
 		dda.SetOptions(core.Options{})
 
@@ -1209,7 +1234,12 @@ func TestMultipleFlush(t *testing.T) {
 		err := core.InitBucketDB(".", testBktID)
 		So(err, ShouldBeNil)
 
-		dma := &core.DefaultMetadataAdapter{}
+		dma := &core.DefaultMetadataAdapter{
+			DefaultBaseMetadataAdapter: &core.DefaultBaseMetadataAdapter{},
+			DefaultDataMetadataAdapter: &core.DefaultDataMetadataAdapter{},
+		}
+		dma.DefaultBaseMetadataAdapter.SetPath(".")
+		dma.DefaultDataMetadataAdapter.SetPath(".")
 		dda := &core.DefaultDataAdapter{}
 		dda.SetOptions(core.Options{})
 
@@ -1283,7 +1313,12 @@ func TestWriteToExistingFile(t *testing.T) {
 		err := core.InitBucketDB(".", testBktID)
 		So(err, ShouldBeNil)
 
-		dma := &core.DefaultMetadataAdapter{}
+		dma := &core.DefaultMetadataAdapter{
+			DefaultBaseMetadataAdapter: &core.DefaultBaseMetadataAdapter{},
+			DefaultDataMetadataAdapter: &core.DefaultDataMetadataAdapter{},
+		}
+		dma.DefaultBaseMetadataAdapter.SetPath(".")
+		dma.DefaultDataMetadataAdapter.SetPath(".")
 		dda := &core.DefaultDataAdapter{}
 		dda.SetOptions(core.Options{})
 
@@ -1401,7 +1436,12 @@ func TestDifferentCompressionAlgorithms(t *testing.T) {
 		err := core.InitBucketDB(".", testBktID)
 		So(err, ShouldBeNil)
 
-		dma := &core.DefaultMetadataAdapter{}
+		dma := &core.DefaultMetadataAdapter{
+			DefaultBaseMetadataAdapter: &core.DefaultBaseMetadataAdapter{},
+			DefaultDataMetadataAdapter: &core.DefaultDataMetadataAdapter{},
+		}
+		dma.DefaultBaseMetadataAdapter.SetPath(".")
+		dma.DefaultDataMetadataAdapter.SetPath(".")
 		dda := &core.DefaultDataAdapter{}
 		dda.SetOptions(core.Options{})
 
@@ -1479,7 +1519,12 @@ func TestDifferentEncryptionMethods(t *testing.T) {
 		err := core.InitBucketDB(".", testBktID)
 		So(err, ShouldBeNil)
 
-		dma := &core.DefaultMetadataAdapter{}
+		dma := &core.DefaultMetadataAdapter{
+			DefaultBaseMetadataAdapter: &core.DefaultBaseMetadataAdapter{},
+			DefaultDataMetadataAdapter: &core.DefaultDataMetadataAdapter{},
+		}
+		dma.DefaultBaseMetadataAdapter.SetPath(".")
+		dma.DefaultDataMetadataAdapter.SetPath(".")
 		dda := &core.DefaultDataAdapter{}
 		dda.SetOptions(core.Options{})
 
@@ -1555,7 +1600,12 @@ func TestLargeFileOperations(t *testing.T) {
 		err := core.InitBucketDB(".", testBktID)
 		So(err, ShouldBeNil)
 
-		dma := &core.DefaultMetadataAdapter{}
+		dma := &core.DefaultMetadataAdapter{
+			DefaultBaseMetadataAdapter: &core.DefaultBaseMetadataAdapter{},
+			DefaultDataMetadataAdapter: &core.DefaultDataMetadataAdapter{},
+		}
+		dma.DefaultBaseMetadataAdapter.SetPath(".")
+		dma.DefaultDataMetadataAdapter.SetPath(".")
 		dda := &core.DefaultDataAdapter{}
 		dda.SetOptions(core.Options{})
 
@@ -1640,7 +1690,12 @@ func TestConcurrentReadWrite(t *testing.T) {
 		err := core.InitBucketDB(".", testBktID)
 		So(err, ShouldBeNil)
 
-		dma := &core.DefaultMetadataAdapter{}
+		dma := &core.DefaultMetadataAdapter{
+			DefaultBaseMetadataAdapter: &core.DefaultBaseMetadataAdapter{},
+			DefaultDataMetadataAdapter: &core.DefaultDataMetadataAdapter{},
+		}
+		dma.DefaultBaseMetadataAdapter.SetPath(".")
+		dma.DefaultDataMetadataAdapter.SetPath(".")
 		dda := &core.DefaultDataAdapter{}
 		dda.SetOptions(core.Options{})
 
@@ -1729,7 +1784,12 @@ func TestEmptyWrite(t *testing.T) {
 		err := core.InitBucketDB(".", testBktID)
 		So(err, ShouldBeNil)
 
-		dma := &core.DefaultMetadataAdapter{}
+		dma := &core.DefaultMetadataAdapter{
+			DefaultBaseMetadataAdapter: &core.DefaultBaseMetadataAdapter{},
+			DefaultDataMetadataAdapter: &core.DefaultDataMetadataAdapter{},
+		}
+		dma.DefaultBaseMetadataAdapter.SetPath(".")
+		dma.DefaultDataMetadataAdapter.SetPath(".")
 		dda := &core.DefaultDataAdapter{}
 		dda.SetOptions(core.Options{})
 
@@ -1797,7 +1857,12 @@ func TestReadAfterClose(t *testing.T) {
 		err := core.InitBucketDB(".", testBktID)
 		So(err, ShouldBeNil)
 
-		dma := &core.DefaultMetadataAdapter{}
+		dma := &core.DefaultMetadataAdapter{
+			DefaultBaseMetadataAdapter: &core.DefaultBaseMetadataAdapter{},
+			DefaultDataMetadataAdapter: &core.DefaultDataMetadataAdapter{},
+		}
+		dma.DefaultBaseMetadataAdapter.SetPath(".")
+		dma.DefaultDataMetadataAdapter.SetPath(".")
 		dda := &core.DefaultDataAdapter{}
 		dda.SetOptions(core.Options{})
 
@@ -1865,7 +1930,12 @@ func TestTruncate(t *testing.T) {
 		err := core.InitBucketDB(".", testBktID)
 		So(err, ShouldBeNil)
 
-		dma := &core.DefaultMetadataAdapter{}
+		dma := &core.DefaultMetadataAdapter{
+			DefaultBaseMetadataAdapter: &core.DefaultBaseMetadataAdapter{},
+			DefaultDataMetadataAdapter: &core.DefaultDataMetadataAdapter{},
+		}
+		dma.DefaultBaseMetadataAdapter.SetPath(".")
+		dma.DefaultDataMetadataAdapter.SetPath(".")
 		dda := &core.DefaultDataAdapter{}
 		dda.SetOptions(core.Options{})
 
@@ -2082,7 +2152,12 @@ func TestTruncateAndWrite(t *testing.T) {
 		err := core.InitBucketDB(".", testBktID)
 		So(err, ShouldBeNil)
 
-		dma := &core.DefaultMetadataAdapter{}
+		dma := &core.DefaultMetadataAdapter{
+			DefaultBaseMetadataAdapter: &core.DefaultBaseMetadataAdapter{},
+			DefaultDataMetadataAdapter: &core.DefaultDataMetadataAdapter{},
+		}
+		dma.DefaultBaseMetadataAdapter.SetPath(".")
+		dma.DefaultDataMetadataAdapter.SetPath(".")
 		dda := &core.DefaultDataAdapter{}
 		dda.SetOptions(core.Options{})
 
@@ -2153,14 +2228,19 @@ func TestTruncateWithCompression(t *testing.T) {
 		err := core.InitBucketDB(".", testBktID)
 		So(err, ShouldBeNil)
 
-		dma := &core.DefaultMetadataAdapter{}
+		dma := &core.DefaultMetadataAdapter{
+			DefaultBaseMetadataAdapter: &core.DefaultBaseMetadataAdapter{},
+			DefaultDataMetadataAdapter: &core.DefaultDataMetadataAdapter{},
+		}
+		dma.DefaultBaseMetadataAdapter.SetPath(".")
+		dma.DefaultDataMetadataAdapter.SetPath(".")
 		dda := &core.DefaultDataAdapter{}
 		dda.SetOptions(core.Options{})
 
 		lh := core.NewLocalHandler("", "").(*core.LocalHandler)
 		lh.SetAdapter(dma, dda)
 
-		testCtx, _, _, err := lh.Login(c, "orcas", "orcas")
+		testCtx, userInfo, _, err := lh.Login(c, "orcas", "orcas")
 		So(err, ShouldBeNil)
 
 		bucket := &core.BucketInfo{
@@ -2171,7 +2251,13 @@ func TestTruncateWithCompression(t *testing.T) {
 			Used:     0,
 			RealUsed: 0,
 		}
-		So(dma.PutBkt(testCtx, []*core.BucketInfo{bucket}), ShouldBeNil)
+		admin := core.NewLocalAdmin(".", ".")
+		So(admin.PutBkt(testCtx, []*core.BucketInfo{bucket}), ShouldBeNil)
+
+		// Ensure user has ALL permission to write to the bucket
+		if userInfo != nil && userInfo.ID > 0 {
+			So(admin.PutACL(testCtx, testBktID, userInfo.ID, core.ALL), ShouldBeNil)
+		}
 
 		// 使用压缩配置
 		ofs := NewOrcasFS(lh, testCtx, testBktID)
@@ -2228,14 +2314,19 @@ func TestBatchWriteManagerSmallFile(t *testing.T) {
 		err := core.InitBucketDB(".", testBktID)
 		So(err, ShouldBeNil)
 
-		dma := &core.DefaultMetadataAdapter{}
+		dma := &core.DefaultMetadataAdapter{
+			DefaultBaseMetadataAdapter: &core.DefaultBaseMetadataAdapter{},
+			DefaultDataMetadataAdapter: &core.DefaultDataMetadataAdapter{},
+		}
+		dma.DefaultBaseMetadataAdapter.SetPath(".")
+		dma.DefaultDataMetadataAdapter.SetPath(".")
 		dda := &core.DefaultDataAdapter{}
 		dda.SetOptions(core.Options{})
 
 		lh := core.NewLocalHandler("", "").(*core.LocalHandler)
 		lh.SetAdapter(dma, dda)
 
-		testCtx, _, _, err := lh.Login(c, "orcas", "orcas")
+		testCtx, userInfo, _, err := lh.Login(c, "orcas", "orcas")
 		So(err, ShouldBeNil)
 
 		bucket := &core.BucketInfo{
@@ -2246,7 +2337,13 @@ func TestBatchWriteManagerSmallFile(t *testing.T) {
 			Used:     0,
 			RealUsed: 0,
 		}
-		So(dma.PutBkt(testCtx, []*core.BucketInfo{bucket}), ShouldBeNil)
+		admin := core.NewLocalAdmin(".", ".")
+		So(admin.PutBkt(testCtx, []*core.BucketInfo{bucket}), ShouldBeNil)
+
+		// Ensure user has ALL permission to write to the bucket
+		if userInfo != nil && userInfo.ID > 0 {
+			So(admin.PutACL(testCtx, testBktID, userInfo.ID, core.ALL), ShouldBeNil)
+		}
 
 		ofs := NewOrcasFS(lh, testCtx, testBktID)
 
@@ -2316,7 +2413,12 @@ func TestSequentialWriteLargeFile(t *testing.T) {
 		err := core.InitBucketDB(".", testBktID)
 		So(err, ShouldBeNil)
 
-		dma := &core.DefaultMetadataAdapter{}
+		dma := &core.DefaultMetadataAdapter{
+			DefaultBaseMetadataAdapter: &core.DefaultBaseMetadataAdapter{},
+			DefaultDataMetadataAdapter: &core.DefaultDataMetadataAdapter{},
+		}
+		dma.DefaultBaseMetadataAdapter.SetPath(".")
+		dma.DefaultDataMetadataAdapter.SetPath(".")
 		dda := &core.DefaultDataAdapter{}
 		dda.SetOptions(core.Options{})
 
@@ -2398,7 +2500,12 @@ func TestTruncateReferenceDataBlock(t *testing.T) {
 		err := core.InitBucketDB(".", testBktID)
 		So(err, ShouldBeNil)
 
-		dma := &core.DefaultMetadataAdapter{}
+		dma := &core.DefaultMetadataAdapter{
+			DefaultBaseMetadataAdapter: &core.DefaultBaseMetadataAdapter{},
+			DefaultDataMetadataAdapter: &core.DefaultDataMetadataAdapter{},
+		}
+		dma.DefaultBaseMetadataAdapter.SetPath(".")
+		dma.DefaultDataMetadataAdapter.SetPath(".")
 		dda := &core.DefaultDataAdapter{}
 		dda.SetOptions(core.Options{})
 

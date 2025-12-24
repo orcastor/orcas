@@ -172,14 +172,19 @@ func TestRandomWriteSparseFile(t *testing.T) {
 		ig := idgen.NewIDGen(nil, 0)
 		testBktID, _ := ig.New()
 
-		dma := &core.DefaultMetadataAdapter{}
+		dma := &core.DefaultMetadataAdapter{
+			DefaultBaseMetadataAdapter: &core.DefaultBaseMetadataAdapter{},
+			DefaultDataMetadataAdapter: &core.DefaultDataMetadataAdapter{},
+		}
+		dma.DefaultBaseMetadataAdapter.SetPath(".")
+		dma.DefaultDataMetadataAdapter.SetPath(".")
 		dda := &core.DefaultDataAdapter{}
 		dda.SetOptions(core.Options{})
 
 		lh := core.NewLocalHandler("", "").(*core.LocalHandler)
 		lh.SetAdapter(dma, dda)
 
-		testCtx, _, _, err := lh.Login(context.Background(), "orcas", "orcas")
+		testCtx, userInfo, _, err := lh.Login(context.Background(), "orcas", "orcas")
 		So(err, ShouldBeNil)
 
 		bucket := &core.BucketInfo{
@@ -188,7 +193,13 @@ func TestRandomWriteSparseFile(t *testing.T) {
 			Type:  1,
 			Quota: 100 << 30, // 100GB quota
 		}
-		So(dma.PutBkt(testCtx, []*core.BucketInfo{bucket}), ShouldBeNil)
+		admin := core.NewLocalAdmin(".", ".")
+		So(admin.PutBkt(testCtx, []*core.BucketInfo{bucket}), ShouldBeNil)
+
+		// Ensure user has ALL permission to write to the bucket
+		if userInfo != nil && userInfo.ID > 0 {
+			So(admin.PutACL(testCtx, testBktID, userInfo.ID, core.ALL), ShouldBeNil)
+		}
 
 		fs := &OrcasFS{
 			h:         lh,

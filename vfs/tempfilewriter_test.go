@@ -25,7 +25,12 @@ func TestTempFileWriterLargeFileWithEncryption(t *testing.T) {
 		err := core.InitBucketDB(".", testBktID)
 		So(err, ShouldBeNil)
 
-		dma := &core.DefaultMetadataAdapter{}
+		dma := &core.DefaultMetadataAdapter{
+			DefaultBaseMetadataAdapter: &core.DefaultBaseMetadataAdapter{},
+			DefaultDataMetadataAdapter: &core.DefaultDataMetadataAdapter{},
+		}
+		dma.DefaultBaseMetadataAdapter.SetPath(".")
+		dma.DefaultDataMetadataAdapter.SetPath(".")
 		dda := &core.DefaultDataAdapter{}
 		dda.SetOptions(core.Options{})
 
@@ -438,7 +443,12 @@ func TestTempFileWriterMemoryEfficiency(t *testing.T) {
 		err := core.InitBucketDB(".", testBktID)
 		So(err, ShouldBeNil)
 
-		dma := &core.DefaultMetadataAdapter{}
+		dma := &core.DefaultMetadataAdapter{
+			DefaultBaseMetadataAdapter: &core.DefaultBaseMetadataAdapter{},
+			DefaultDataMetadataAdapter: &core.DefaultDataMetadataAdapter{},
+		}
+		dma.DefaultBaseMetadataAdapter.SetPath(".")
+		dma.DefaultDataMetadataAdapter.SetPath(".")
 		dda := &core.DefaultDataAdapter{}
 		dda.SetOptions(core.Options{})
 

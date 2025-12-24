@@ -19,13 +19,18 @@ func TestRandomWriteRedundancy(t *testing.T) {
 	ig := idgen.NewIDGen(nil, 0)
 	testBktID, _ := ig.New()
 
-	dma := &core.DefaultMetadataAdapter{}
+	dma := &core.DefaultMetadataAdapter{
+		DefaultBaseMetadataAdapter: &core.DefaultBaseMetadataAdapter{},
+		DefaultDataMetadataAdapter: &core.DefaultDataMetadataAdapter{},
+	}
+	dma.DefaultBaseMetadataAdapter.SetPath(".")
+	dma.DefaultDataMetadataAdapter.SetPath(".")
 	dda := &core.DefaultDataAdapter{}
 	dda.SetOptions(core.Options{}) // Use default options
 	lh := core.NewLocalHandler("", "").(*core.LocalHandler)
 	lh.SetAdapter(dma, dda)
 
-	ctx, _, _, err := lh.Login(context.Background(), "orcas", "orcas")
+	ctx, userInfo, _, err := lh.Login(context.Background(), "orcas", "orcas")
 	if err != nil {
 		t.Fatalf("Login failed: %v", err)
 	}
@@ -36,8 +41,16 @@ func TestRandomWriteRedundancy(t *testing.T) {
 		Type:  1,
 		Quota: 10 << 30, // 10GB quota
 	}
-	if err := dma.PutBkt(ctx, []*core.BucketInfo{bucket}); err != nil {
+	admin := core.NewLocalAdmin(".", ".")
+	if err := admin.PutBkt(ctx, []*core.BucketInfo{bucket}); err != nil {
 		t.Fatalf("PutBkt failed: %v", err)
+	}
+
+	// Ensure user has ALL permission to write to the bucket
+	if userInfo != nil && userInfo.ID > 0 {
+		if err := admin.PutACL(ctx, testBktID, userInfo.ID, core.ALL); err != nil {
+			t.Fatalf("PutACL failed: %v", err)
+		}
 	}
 
 	fs := &OrcasFS{
