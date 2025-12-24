@@ -69,13 +69,6 @@ type BatchWriter struct {
 
 	// Callback function to update dirListCache after flush (optional, set by VFS layer)
 	onFlushComplete func(objectInfos []*core.ObjectInfo)
-
-	// Bucket configuration for compression/encryption (set by VFS layer)
-	// Used for package-level compression/encryption
-	cmprWay  uint32 // Compression method (DATA_CMPR_*)
-	cmprQlty uint32 // Compression quality
-	endecWay uint32 // Encryption method (DATA_ENDEC_*)
-	endecKey string // Encryption key
 }
 
 var (
@@ -232,7 +225,7 @@ func (bwm *BatchWriter) ensureContextWithUID(ctx context.Context) context.Contex
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	
+
 	// Check if context already has UID
 	if v, ok := ctx.Value("o").(map[string]interface{}); ok {
 		if uid, okk := v["uid"].(int64); okk && uid > 0 {
@@ -240,7 +233,7 @@ func (bwm *BatchWriter) ensureContextWithUID(ctx context.Context) context.Contex
 			return ctx
 		}
 	}
-	
+
 	// Context doesn't have UID, try to use stored UID from SetFlushContext
 	if val := bwm.flushUID.Load(); val != nil {
 		if uid, ok := val.(int64); ok && uid > 0 {
@@ -259,7 +252,7 @@ func (bwm *BatchWriter) ensureContextWithUID(ctx context.Context) context.Contex
 			return context.WithValue(ctx, "o", o)
 		}
 	}
-	
+
 	// If we can't get UID, return original context
 	// The permission check will fail, but at least we tried
 	return ctx
@@ -271,7 +264,7 @@ func (bwm *BatchWriter) flush(ctx context.Context) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	
+
 	// Ensure context has UID before flushing
 	ctx = bwm.ensureContextWithUID(ctx)
 	// Get current buffer (for writing) - atomic load
@@ -418,15 +411,6 @@ func (bwm *BatchWriter) SetOnFlushComplete(callback func(objectInfos []*core.Obj
 	bwm.onFlushComplete = callback
 }
 
-// SetBucketConfig sets bucket configuration for compression/encryption
-// This allows package-level compression/encryption instead of per-file processing
-func (bwm *BatchWriter) SetBucketConfig(cmprWay, cmprQlty, endecWay uint32, endecKey string) {
-	bwm.cmprWay = cmprWay
-	bwm.cmprQlty = cmprQlty
-	bwm.endecWay = endecWay
-	bwm.endecKey = endecKey
-}
-
 // flushPackage flushes a single packaged data block
 // Uses buffer slice directly, no data copying
 // Returns objectInfos for successfully flushed objects
@@ -485,11 +469,11 @@ func (bwm *BatchWriter) flushPackage(ctx context.Context, fileInfos []*PackagedF
 		processedFileSize := pkgInfo.Size // Size of processed file data in package
 		dataInfos = append(dataInfos, &core.DataInfo{
 			ID:        dataID,
-			Size:      processedFileSize,  // Processed file size in package (after compression/encryption)
-			OrigSize:  pkgInfo.OrigSize,   // Original file size (before compression/encryption)
-			PkgID:     pkgID,               // Package ID (contains processed file data)
-			PkgOffset: pkgInfo.PkgOffset,  // Offset in package (points to processed file data)
-			Kind:      pkgInfo.Kind,        // Use per-file compression/encryption flags
+			Size:      processedFileSize, // Processed file size in package (after compression/encryption)
+			OrigSize:  pkgInfo.OrigSize,  // Original file size (before compression/encryption)
+			PkgID:     pkgID,             // Package ID (contains processed file data)
+			PkgOffset: pkgInfo.PkgOffset, // Offset in package (points to processed file data)
+			Kind:      pkgInfo.Kind,      // Use per-file compression/encryption flags
 		})
 
 		// Create ObjectInfo (inline struct creation for better performance)
@@ -814,7 +798,7 @@ func (bwm *BatchWriter) SetFlushContext(ctx context.Context) {
 		return
 	}
 	bwm.flushCtx.Store(ctx)
-	
+
 	// Extract UID from context and store it separately as fallback
 	// This ensures we have UID even if context is lost or doesn't have UID
 	if v, ok := ctx.Value("o").(map[string]interface{}); ok {

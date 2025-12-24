@@ -57,9 +57,6 @@ func TestVFSConcurrentChunkUpload(t *testing.T) {
 		err = admin.PutBkt(ctx, []*core.BucketInfo{bkt})
 		So(err, ShouldBeNil)
 
-		// Clear bucket config cache to ensure new config is used
-		bucketConfigCache.Del(testBktID)
-
 		// Create filesystem
 		ofs := NewOrcasFS(handler, ctx, testBktID)
 
@@ -188,7 +185,7 @@ func TestVFSConcurrentChunkUpload(t *testing.T) {
 		// Step 4.6: Force flush TempFileWriter directly to ensure all data is persisted
 		_, err = ra.ForceFlush()
 		So(err, ShouldBeNil)
-		
+
 		// Step 4.7: Call ForceFlush one more time to ensure TempFileWriter is fully flushed
 		_, err = ra.ForceFlush()
 		So(err, ShouldBeNil)
@@ -305,9 +302,6 @@ func TestVFSRepeatedChunkWrite(t *testing.T) {
 		err = admin.PutBkt(ctx, []*core.BucketInfo{bkt})
 		So(err, ShouldBeNil)
 
-		// Clear bucket config cache
-		bucketConfigCache.Del(testBktID)
-
 		// Create filesystem
 		ofs := NewOrcasFS(handler, ctx, testBktID)
 
@@ -414,7 +408,7 @@ func TestVFSRepeatedChunkWrite(t *testing.T) {
 		// so ForceFlush will flush TempFileWriter if it exists
 		_, err = ra.ForceFlush()
 		So(err, ShouldBeNil)
-		
+
 		// Step 3.8: Call ForceFlush one more time to ensure TempFileWriter is fully flushed
 		_, err = ra.ForceFlush()
 		So(err, ShouldBeNil)
@@ -512,9 +506,6 @@ func TestVFSConcurrentChunkUploadWithWait(t *testing.T) {
 		}
 		err = admin.PutBkt(ctx, []*core.BucketInfo{bkt})
 		So(err, ShouldBeNil)
-
-		// Clear bucket config cache
-		bucketConfigCache.Del(testBktID)
 
 		// Create filesystem
 		ofs := NewOrcasFS(handler, ctx, testBktID)
@@ -653,11 +644,11 @@ func TestVFSConcurrentChunkUploadWithWait(t *testing.T) {
 		// so ForceFlush will flush TempFileWriter if it exists
 		_, err = ra.ForceFlush()
 		So(err, ShouldBeNil)
-		
+
 		// Step 5.6: Call ForceFlush one more time to ensure TempFileWriter is fully flushed
 		_, err = ra.ForceFlush()
 		So(err, ShouldBeNil)
-		
+
 		// Step 5.7: Call ForceFlush one more time to ensure TempFileWriter is fully flushed
 		_, err = ra.ForceFlush()
 		So(err, ShouldBeNil)

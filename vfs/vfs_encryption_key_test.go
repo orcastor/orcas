@@ -48,9 +48,6 @@ func TestVFSEncryptionKeyMismatch(t *testing.T) {
 		err = admin.PutBkt(ctx, []*core.BucketInfo{bkt})
 		So(err, ShouldBeNil)
 
-		// Clear bucket config cache
-		bucketConfigCache.Del(testBktID)
-
 		// Create filesystem with encryption configuration (not from bucket config)
 		cfg := &core.Config{
 			EndecWay: core.DATA_ENDEC_AES256,
@@ -181,9 +178,6 @@ func TestVFSEncryptionKeyMismatchAfterReopen(t *testing.T) {
 		err = admin.PutBkt(ctx, []*core.BucketInfo{bkt})
 		So(err, ShouldBeNil)
 
-		// Clear bucket config cache
-		bucketConfigCache.Del(testBktID)
-
 		// Create filesystem with encryption configuration (not from bucket config)
 		cfg := &core.Config{
 			EndecWay: core.DATA_ENDEC_AES256,
@@ -254,4 +248,3 @@ func TestVFSEncryptionKeyMismatchAfterReopen(t *testing.T) {
 		t.Logf("Successfully verified encryption/decryption after reopen: %d bytes", fileSize)
 	})
 }
-

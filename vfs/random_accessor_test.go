@@ -309,8 +309,6 @@ func TestVFSRandomAccessorWithSDK(t *testing.T) {
 		Convey("test with encryption", func() {
 			// 创建bucket（不再存储加密配置）
 			So(dma.PutBkt(testCtx, []*core.BucketInfo{bucket}), ShouldBeNil)
-			// 清除bucket配置缓存
-			bucketConfigCache.Del(testBktID)
 
 			// 创建OrcasFS（通过OrcasFS配置加密设置，不再从bucket获取）
 			encryptionKey := "this-is-a-test-encryption-key-that-is-long-enough-for-aes256-encryption-12345678901234567890"
@@ -366,8 +364,6 @@ func TestVFSRandomAccessorWithSDK(t *testing.T) {
 		Convey("test with compression and encryption", func() {
 			// 创建bucket（不再存储压缩和加密配置）
 			So(dma.PutBkt(testCtx, []*core.BucketInfo{bucket}), ShouldBeNil)
-			// 清除bucket配置缓存
-			bucketConfigCache.Del(testBktID)
 
 			// 创建OrcasFS（通过OrcasFS配置压缩和加密设置，不再从bucket获取）
 			encryptionKey := "this-is-a-test-encryption-key-that-is-long-enough-for-aes256-encryption-12345678901234567890"
@@ -419,8 +415,6 @@ func TestVFSRandomAccessorWithSDK(t *testing.T) {
 		Convey("test random read and write with chunk-based compression and encryption", func() {
 			// 创建bucket（不再存储压缩和加密配置）
 			So(dma.PutBkt(testCtx, []*core.BucketInfo{bucket}), ShouldBeNil)
-			// 清除bucket配置缓存
-			bucketConfigCache.Del(testBktID)
 
 			// 创建OrcasFS（通过OrcasFS配置压缩和加密设置，不再从bucket获取）
 			encryptionKey := "this-is-a-test-encryption-key-that-is-long-enough-for-aes256-encryption-12345678901234567890"
@@ -533,8 +527,6 @@ func TestVFSRandomAccessorWithSDK(t *testing.T) {
 		Convey("test random write with overlapping chunks", func() {
 			// 创建bucket（不再存储压缩配置）
 			So(dma.PutBkt(testCtx, []*core.BucketInfo{bucket}), ShouldBeNil)
-			// 清除bucket配置缓存
-			bucketConfigCache.Del(testBktID)
 
 			// 创建OrcasFS（通过OrcasFS配置压缩设置，不再从bucket获取）
 			cfg := &core.Config{

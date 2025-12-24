@@ -1219,10 +1219,6 @@ func TestQuotaAndUsed(t *testing.T) {
 			// Wait for async cache to flush (bucket stats are updated asynchronously)
 			time.Sleep(2500 * time.Millisecond)
 
-			// Clear bucket cache to force refresh from database (important for quota check)
-			// This ensures PutData uses the latest RealUsed value from database
-			lh.SetBucketConfig(testBktID, nil)
-
 			// 尝试上传超过配额的数据
 			dataID2, _ := ig.New()
 			// 配额是1000，已经用了len(testData1)=5，剩余配额是995

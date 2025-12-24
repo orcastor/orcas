@@ -134,10 +134,6 @@ var (
 	// This ensures one file uses the same reader, sharing chunk cache
 	decodingReaderCache = ecache2.NewLRUCache[int64](4, 64, 5*time.Minute)
 
-	// ecache cache: cache bucket configuration to reduce database queries
-	// key: bktID (int64), value: *core.BucketInfo (bktID is globally unique)
-	bucketConfigCache = ecache2.NewLRUCache[int64](4, 64, 5*time.Minute)
-
 	// singleflight group: prevent duplicate concurrent requests for the same directory
 	// key: "<dirID>", ensures only one request per directory at a time
 	dirListSingleFlight singleflight.Group
@@ -220,31 +216,6 @@ var (
 		".gdb": {}, ".pst": {}, ".ost": {}, ".msg": {}, ".eml": {},
 	}
 )
-
-// getBucketConfigWithCache gets bucket configuration with global cache
-// This reduces database queries when multiple RandomAccessors access the same bucket
-func getBucketConfigWithCache(fs *OrcasFS) *core.BucketInfo {
-	if fs == nil {
-		return nil
-	}
-
-	// Check cache first
-	cacheKey := fs.bktID
-	if cached, ok := bucketConfigCache.Get(cacheKey); ok {
-		if bucket, ok := cached.(*core.BucketInfo); ok && bucket != nil {
-			return bucket
-		}
-	}
-
-	// Get from OrcasFS (which has its own cache)
-	bucket := fs.getBucketConfig()
-	if bucket != nil {
-		// Cache the result
-		bucketConfigCache.Put(cacheKey, bucket)
-	}
-
-	return bucket
-}
 
 // createCompressor creates a compressor based on compression way and quality
 // Returns nil if cmprWay is 0 or unsupported
@@ -2530,12 +2501,7 @@ func (ra *RandomAccessor) flushSequentialBuffer() error {
 		// Try instant upload first (before batch write) if enabled
 		allData := ra.seqBuffer.buffer
 		if len(allData) > 0 {
-			// Create unified config from bucket config
-			var instantUploadCfg *core.InstantUploadConfig
-			bucket := getBucketConfigWithCache(ra.fs)
-			instantUploadCfg = core.GetBucketInstantUploadConfig(bucket)
-
-			if core.IsInstantUploadEnabledWithConfig(instantUploadCfg) {
+			if core.IsInstantUploadEnabledWithConfig(core.GetBucketInstantUploadConfig(ra.fs.getBucketConfig())) {
 				// Try instant upload (deduplication)
 				instantDataID, err := tryInstantUpload(ra.fs, allData, totalSize, core.DATA_NORMAL)
 				if err == nil && instantDataID > 0 {
@@ -2576,7 +2542,6 @@ func (ra *RandomAccessor) flushSequentialBuffer() error {
 					// If update failed, continue with batch write or normal write
 				}
 			}
-
 		}
 	}
 

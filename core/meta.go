@@ -614,7 +614,15 @@ func (dda *DefaultDataMetadataAdapter) ListAllBuckets(c Ctx) (o []*BucketInfo, e
 		go func(id int64) {
 			defer wg.Done()
 
-			// Try to read bucket info from bucket database
+			// Try cache first
+			if cached := getBucketInfoFromCache(id); cached != nil {
+				mu.Lock()
+				results = append(results, cached)
+				mu.Unlock()
+				return
+			}
+
+			// Cache miss, read from bucket database
 			bktDirPath := filepath.Join(dda.dataPath, fmt.Sprint(id))
 			db, err := GetReadDB(bktDirPath, "")
 			if err != nil {
@@ -627,8 +635,11 @@ func (dda *DefaultDataMetadataAdapter) ListAllBuckets(c Ctx) (o []*BucketInfo, e
 				return
 			}
 			if len(bucketInfo) > 0 {
+				bkt := bucketInfo[0]
+				// Update cache with bucket info
+				updateBucketInfoInCache(id, dda.dataPath, bkt)
 				mu.Lock()
-				results = append(results, bucketInfo...)
+				results = append(results, bkt)
 				mu.Unlock()
 			}
 		}(bktID)
@@ -693,6 +704,8 @@ func (dma *DefaultMetadataAdapter) PutBkt(c Ctx, o []*BucketInfo) error {
 		if _, err = b.TableContext(c, db, BKT_TBL).ReplaceInto(&bktSlice); err != nil {
 			return fmt.Errorf("%w: PutBkt failed (bktID=%d, count=%d): %v", ERR_EXEC_DB, x.ID, len(o), err)
 		}
+		// Update cache with new bucket info
+		updateBucketInfoInCache(x.ID, dma.DefaultDataMetadataAdapter.dataPath, x)
 	}
 	return nil
 }
@@ -700,43 +713,81 @@ func (dma *DefaultMetadataAdapter) PutBkt(c Ctx, o []*BucketInfo) error {
 // GetBkt overrides DefaultBaseMetadataAdapter.GetBkt to access dataPath from DefaultDataMetadataAdapter
 func (dma *DefaultMetadataAdapter) GetBkt(c Ctx, ids []int64) (o []*BucketInfo, err error) {
 	// Bucket info is now stored in bucket database, not main database
-	// Read from each bucket's database in parallel
+	// Strategy: 1) Get from cache first, 2) Batch query missing ones from database using IN clause
 	if len(ids) == 0 {
 		return []*BucketInfo{}, nil
 	}
 
-	var wg sync.WaitGroup
-	var mu sync.Mutex
-	results := make([]*BucketInfo, 0, len(ids))
-
-	for _, bktID := range ids {
-		wg.Add(1)
-		go func(id int64) {
-			defer wg.Done()
-
-			// Use read connection for bucket database
-			bktDirPath := filepath.Join(dma.DefaultDataMetadataAdapter.dataPath, fmt.Sprint(id))
-			db, err := GetReadDB(bktDirPath, "")
-			if err != nil {
-				// If bucket database doesn't exist, skip it
-				return
-			}
-			// Note: Don't close the connection, it's from the pool
-
-			var bucketInfo []*BucketInfo
-			if _, err = b.TableContext(c, db, BKT_TBL).Select(&bucketInfo, b.Where(b.Eq("id", id))); err != nil {
-				// If query fails, skip this bucket
-				return
-			}
-			if len(bucketInfo) > 0 {
-				mu.Lock()
-				results = append(results, bucketInfo[0])
-				mu.Unlock()
-			}
-		}(bktID)
+	dataPath := dma.DefaultDataMetadataAdapter.dataPath
+	if dataPath == "" {
+		dataPath = "."
 	}
 
-	wg.Wait()
+	// Step 1: Try to get from cache first
+	cachedResults := make(map[int64]*BucketInfo)
+	missingIDs := make([]int64, 0, len(ids))
+
+	for _, id := range ids {
+		if cached := getBucketInfoFromCache(id); cached != nil {
+			cachedResults[id] = cached
+		} else {
+			missingIDs = append(missingIDs, id)
+		}
+	}
+
+	// Step 2: If all found in cache, return early
+	if len(missingIDs) == 0 {
+		results := make([]*BucketInfo, 0, len(ids))
+		for _, id := range ids {
+			if bkt, ok := cachedResults[id]; ok {
+				results = append(results, bkt)
+			}
+		}
+		// Sort results by ID to ensure consistent ordering
+		sort.Slice(results, func(i, j int) bool {
+			return results[i].ID < results[j].ID
+		})
+		return results, nil
+	}
+
+	// Step 3: Query missing buckets from database
+	// Note: Each bucket has its own database, so we query each database separately
+	// Use IN clause for each database query (though each bucket DB typically has one bucket)
+	dbResults := make([]*BucketInfo, 0, len(missingIDs))
+	for _, bktID := range missingIDs {
+		bktDirPath := filepath.Join(dataPath, fmt.Sprint(bktID))
+		db, err := GetReadDB(bktDirPath, "")
+		if err != nil {
+			// If bucket database doesn't exist, skip it
+			continue
+		}
+		// Note: Don't close the connection, it's from the pool
+
+		var bucketInfo []*BucketInfo
+		// Use IN clause to query (though typically only one ID per database)
+		if _, err = b.TableContext(c, db, BKT_TBL).Select(&bucketInfo, b.Where(b.In("id", missingIDs))); err != nil {
+			// If query fails, skip this bucket
+			continue
+		}
+		if len(bucketInfo) > 0 {
+			bkt := bucketInfo[0]
+			// Update cache with bucket info
+			updateBucketInfoInCache(bktID, dataPath, bkt)
+			dbResults = append(dbResults, bkt)
+		}
+	}
+
+	// Step 4: Combine cached and database results
+	results := make([]*BucketInfo, 0, len(ids))
+	// Add cached results
+	for _, id := range ids {
+		if bkt, ok := cachedResults[id]; ok {
+			results = append(results, bkt)
+		}
+	}
+	// Add database results
+	results = append(results, dbResults...)
+
 	// Sort results by ID to ensure consistent ordering
 	sort.Slice(results, func(i, j int) bool {
 		return results[i].ID < results[j].ID
@@ -1809,6 +1860,8 @@ func (dma *DefaultMetadataAdapter) DeleteBkt(c Ctx, bktID int64) error {
 	if _, err = b.TableContext(c, db, BKT_TBL).Delete(b.Where(b.Eq("id", bktID))); err != nil {
 		return fmt.Errorf("%w: DeleteBkt failed (bktID=%d): %v", ERR_EXEC_DB, bktID, err)
 	}
+	// Invalidate cache (remove bucket info but keep delta for potential flush)
+	invalidateBucketInfoCache(bktID)
 	return nil
 }
 
@@ -1842,56 +1895,12 @@ func (dma *DefaultMetadataAdapter) UpdateBktQuota(c Ctx, bktID int64, quota int6
 	if _, err = table.Update(b.V{"q": quota}, b.Where(b.Eq("id", bktID))); err != nil {
 		return fmt.Errorf("%w: UpdateBktQuota failed (bktID=%d, quota=%d): %v", ERR_EXEC_DB, bktID, quota, err)
 	}
-	return nil
-}
-
-func (dba *DefaultBaseMetadataAdapter) IncBktRealUsed(c Ctx, bktID int64, size int64) error {
-	// 使用ecache异步合并刷新，不立即写入数据库
-	// DefaultBaseMetadataAdapter doesn't have dataPath, use empty string
-	// dataPath will be set when DefaultMetadataAdapter methods are called
-	updateBucketStatsCache(bktID, "", 0, size, 0, 0)
-	return nil
-}
-
-func (dba *DefaultBaseMetadataAdapter) DecBktRealUsed(c Ctx, bktID int64, size int64) error {
-	// 使用ecache异步合并刷新，不立即写入数据库
-	updateBucketStatsCache(bktID, "", 0, -size, 0, 0)
-	return nil
-}
-
-func (dba *DefaultBaseMetadataAdapter) IncBktUsed(c Ctx, bktID int64, size int64) error {
-	// 使用ecache异步合并刷新，不立即写入数据库
-	updateBucketStatsCache(bktID, "", size, 0, 0, 0)
-	return nil
-}
-
-func (dba *DefaultBaseMetadataAdapter) DecBktUsed(c Ctx, bktID int64, size int64) error {
-	// 使用ecache异步合并刷新，不立即写入数据库
-	updateBucketStatsCache(bktID, "", -size, 0, 0, 0)
-	return nil
-}
-
-func (dba *DefaultBaseMetadataAdapter) IncBktLogicalUsed(c Ctx, bktID int64, size int64) error {
-	// 使用ecache异步合并刷新，不立即写入数据库
-	updateBucketStatsCache(bktID, "", 0, 0, size, 0)
-	return nil
-}
-
-func (dba *DefaultBaseMetadataAdapter) DecBktLogicalUsed(c Ctx, bktID int64, size int64) error {
-	// 使用ecache异步合并刷新，不立即写入数据库
-	updateBucketStatsCache(bktID, "", 0, 0, -size, 0)
-	return nil
-}
-
-func (dba *DefaultBaseMetadataAdapter) IncBktDedupSavings(c Ctx, bktID int64, size int64) error {
-	// 使用ecache异步合并刷新，不立即写入数据库
-	updateBucketStatsCache(bktID, "", 0, 0, 0, size)
-	return nil
-}
-
-func (dba *DefaultBaseMetadataAdapter) DecBktDedupSavings(c Ctx, bktID int64, size int64) error {
-	// 使用ecache异步合并刷新，不立即写入数据库
-	updateBucketStatsCache(bktID, "", 0, 0, 0, -size)
+	// Update cache with new quota
+	if v, ok := bucketStatsCache.Get(bktID); ok {
+		if delta, ok := v.(*BucketStatsDelta); ok && delta != nil && delta.BucketInfo != nil {
+			delta.BucketInfo.Quota = quota
+		}
+	}
 	return nil
 }
 

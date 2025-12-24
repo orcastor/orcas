@@ -4,9 +4,7 @@ import (
 	"bytes"
 	"strconv"
 	"testing"
-	"time"
 
-	"github.com/orca-zhang/ecache2"
 	"github.com/orca-zhang/idgen"
 	. "github.com/smartystreets/goconvey/convey"
 )
@@ -187,7 +185,12 @@ func TestUpdateData(t *testing.T) {
 		testUID, _ := ig.New()
 		InitBucketDB(".", testBktID)
 
-		dma := &DefaultMetadataAdapter{}
+		dma := &DefaultMetadataAdapter{
+			DefaultBaseMetadataAdapter: &DefaultBaseMetadataAdapter{},
+			DefaultDataMetadataAdapter: &DefaultDataMetadataAdapter{},
+		}
+		dma.DefaultBaseMetadataAdapter.SetPath(".")
+		dma.DefaultDataMetadataAdapter.SetPath(".")
 		dda := &DefaultDataAdapter{}
 		dda.SetOptions(Options{})
 		lh := &LocalHandler{
@@ -198,13 +201,17 @@ func TestUpdateData(t *testing.T) {
 
 		// Create bucket
 		bucket := &BucketInfo{
-			ID:   testBktID,
-			Name: "test",
-			Type: 1,
+			ID:    testBktID,
+			Name:  "test",
+			Type:  1,
 			Quota: 1000000, // 1MB quota
 		}
-		ctx := UserInfo2Ctx(c, &UserInfo{ID: testUID})
-		So(dma.PutBkt(ctx, []*BucketInfo{bucket}), ShouldBeNil)
+		ctx := UserInfo2Ctx(c, &UserInfo{ID: testUID, Role: ADMIN})
+		// Use admin to create bucket (automatically creates ACL)
+		admin := NewNoAuthAdminWithPaths(".", ".")
+		So(admin.PutBkt(ctx, []*BucketInfo{bucket}), ShouldBeNil)
+		// Create ACL for user
+		So(dma.PutACL(ctx, testBktID, testUID, ALL), ShouldBeNil)
 
 		// Create user context for permission checks
 		userInfo := &UserInfo{
@@ -286,10 +293,9 @@ func TestSparseFileSupport(t *testing.T) {
 		dda := &DefaultDataAdapter{}
 		dda.SetOptions(Options{})
 		lh := &LocalHandler{
-			ma:            dma,
-			da:            dda,
-			acm:           &DefaultAccessCtrlMgr{ma: dma},
-			bucketConfigs: ecache2.NewLRUCache[int64](16, 256, 5*time.Minute),
+			ma:  dma,
+			da:  dda,
+			acm: &DefaultAccessCtrlMgr{ma: dma},
 		}
 
 		// Create user context for permission checks
@@ -307,8 +313,12 @@ func TestSparseFileSupport(t *testing.T) {
 				Type:  1,
 				Quota: 1000000,
 			}
-			ctx := UserInfo2Ctx(c, &UserInfo{ID: testUID})
-			So(dma.PutBkt(ctx, []*BucketInfo{bucket}), ShouldBeNil)
+			ctx := UserInfo2Ctx(c, &UserInfo{ID: testUID, Role: ADMIN})
+			// Use admin to create bucket (automatically creates ACL)
+			admin := NewNoAuthAdminWithPaths(".", ".")
+			So(admin.PutBkt(ctx, []*BucketInfo{bucket}), ShouldBeNil)
+			// Create ACL for user
+			So(dma.PutACL(ctx, testBktID, testUID, ALL), ShouldBeNil)
 
 			// Create sparse data info
 			dataID, _ := ig.New()
@@ -339,8 +349,12 @@ func TestSparseFileSupport(t *testing.T) {
 				Type:  1,
 				Quota: 1000000,
 			}
-			ctx := UserInfo2Ctx(c, &UserInfo{ID: testUID})
-			So(dma.PutBkt(ctx, []*BucketInfo{bucket}), ShouldBeNil)
+			ctx := UserInfo2Ctx(c, &UserInfo{ID: testUID, Role: ADMIN})
+			// Use admin to create bucket (automatically creates ACL)
+			admin := NewNoAuthAdminWithPaths(".", ".")
+			So(admin.PutBkt(ctx, []*BucketInfo{bucket}), ShouldBeNil)
+			// Create ACL for user
+			So(dma.PutACL(ctx, testBktID, testUID, ALL), ShouldBeNil)
 
 			// Create non-sparse data info
 			dataID, _ := ig.New()
@@ -367,8 +381,12 @@ func TestSparseFileSupport(t *testing.T) {
 				Type:  1,
 				Quota: 1000000,
 			}
-			ctx := UserInfo2Ctx(c, &UserInfo{ID: testUID})
-			So(dma.PutBkt(ctx, []*BucketInfo{bucket}), ShouldBeNil)
+			ctx := UserInfo2Ctx(c, &UserInfo{ID: testUID, Role: ADMIN})
+			// Use admin to create bucket (automatically creates ACL)
+			admin := NewNoAuthAdminWithPaths(".", ".")
+			So(admin.PutBkt(ctx, []*BucketInfo{bucket}), ShouldBeNil)
+			// Create ACL for user
+			So(dma.PutACL(ctx, testBktID, testUID, ALL), ShouldBeNil)
 
 			// Create sparse data info
 			dataID, _ := ig.New()
@@ -418,8 +436,12 @@ func TestSparseFileSupport(t *testing.T) {
 				Quota:     1000000,
 				ChunkSize: 4 * 1024 * 1024, // 4MB
 			}
-			ctx := UserInfo2Ctx(c, &UserInfo{ID: testUID})
-			So(dma.PutBkt(ctx, []*BucketInfo{bucket}), ShouldBeNil)
+			ctx := UserInfo2Ctx(c, &UserInfo{ID: testUID, Role: ADMIN})
+			// Use admin to create bucket (automatically creates ACL)
+			admin := NewNoAuthAdminWithPaths(".", ".")
+			So(admin.PutBkt(ctx, []*BucketInfo{bucket}), ShouldBeNil)
+			// Create ACL for user
+			So(dma.PutACL(ctx, testBktID, testUID, ALL), ShouldBeNil)
 
 			// Create sparse data info
 			dataID, _ := ig.New()
@@ -458,8 +480,12 @@ func TestSparseFileSupport(t *testing.T) {
 				Quota:     1000000,
 				ChunkSize: 1024 * 1024, // 1MB chunks for easier testing
 			}
-			ctx := UserInfo2Ctx(c, &UserInfo{ID: testUID})
-			So(dma.PutBkt(ctx, []*BucketInfo{bucket}), ShouldBeNil)
+			ctx := UserInfo2Ctx(c, &UserInfo{ID: testUID, Role: ADMIN})
+			// Use admin to create bucket (automatically creates ACL)
+			admin := NewNoAuthAdminWithPaths(".", ".")
+			So(admin.PutBkt(ctx, []*BucketInfo{bucket}), ShouldBeNil)
+			// Create ACL for user
+			So(dma.PutACL(ctx, testBktID, testUID, ALL), ShouldBeNil)
 
 			// Create sparse data info (5MB file)
 			dataID, _ := ig.New()
@@ -527,8 +553,12 @@ func TestSparseFileSupport(t *testing.T) {
 				Quota:     10 * 1024 * 1024, // 10MB quota to accommodate test data
 				ChunkSize: 1024 * 1024,      // 1MB chunks
 			}
-			ctx := UserInfo2Ctx(c, &UserInfo{ID: testUID})
-			So(dma.PutBkt(ctx, []*BucketInfo{bucket}), ShouldBeNil)
+			ctx := UserInfo2Ctx(c, &UserInfo{ID: testUID, Role: ADMIN})
+			// Use admin to create bucket (automatically creates ACL)
+			admin := NewNoAuthAdminWithPaths(".", ".")
+			So(admin.PutBkt(ctx, []*BucketInfo{bucket}), ShouldBeNil)
+			// Create ACL for user
+			So(dma.PutACL(ctx, testBktID, testUID, ALL), ShouldBeNil)
 
 			// Create sparse data info
 			dataID, _ := ig.New()
@@ -576,8 +606,12 @@ func TestSparseFileSupport(t *testing.T) {
 				Quota:     1000000,
 				ChunkSize: 1024 * 1024, // 1MB chunks
 			}
-			ctx := UserInfo2Ctx(c, &UserInfo{ID: testUID})
-			So(dma.PutBkt(ctx, []*BucketInfo{bucket}), ShouldBeNil)
+			ctx := UserInfo2Ctx(c, &UserInfo{ID: testUID, Role: ADMIN})
+			// Use admin to create bucket (automatically creates ACL)
+			admin := NewNoAuthAdminWithPaths(".", ".")
+			So(admin.PutBkt(ctx, []*BucketInfo{bucket}), ShouldBeNil)
+			// Create ACL for user
+			So(dma.PutACL(ctx, testBktID, testUID, ALL), ShouldBeNil)
 
 			// Create sparse data info
 			dataID, _ := ig.New()

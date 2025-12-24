@@ -46,8 +46,6 @@ func TestTempFileWriterLargeFileWithEncryption(t *testing.T) {
 			ChunkSize: 10 * 1024 * 1024, // 10MB chunk size
 		}
 		So(dma.PutBkt(testCtx, []*core.BucketInfo{bucket}), ShouldBeNil)
-		// Clear bucket config cache to ensure new config is used
-		bucketConfigCache.Del(testBktID)
 
 		// Create filesystem with encryption configuration (not from bucket config)
 		encryptionKey := "this-is-a-test-encryption-key-that-is-long-enough-for-aes256-encryption-12345678901234567890"
@@ -460,7 +458,6 @@ func TestTempFileWriterMemoryEfficiency(t *testing.T) {
 			ChunkSize: 10 * 1024 * 1024,
 		}
 		So(dma.PutBkt(testCtx, []*core.BucketInfo{bucket}), ShouldBeNil)
-		bucketConfigCache.Del(testBktID)
 
 		// Create filesystem with encryption configuration (not from bucket config)
 		encryptionKey := "this-is-a-test-encryption-key-that-is-long-enough-for-aes256-encryption-12345678901234567890"

@@ -11,9 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"time"
 
-	"github.com/orca-zhang/ecache2"
 	"github.com/orca-zhang/idgen"
 	"golang.org/x/crypto/pbkdf2"
 )
@@ -197,10 +195,6 @@ type LocalHandler struct {
 	da  DataAdapter
 	acm AccessCtrlMgr
 	opt Options
-	// Bucket config cache: key is bktID (int64), value is *BucketInfo
-	// This allows access to bucket configuration for compression/encryption
-	// Cache expires after 5 minutes to ensure bucket config changes are reflected
-	bucketConfigs *ecache2.Cache[int64]
 	// Paths for database and data storage
 	basePath string // Path for main database and bucket databases
 	dataPath string // Path for data file storage
@@ -220,12 +214,11 @@ func NewLocalHandler(basePath, dataPath string) Handler {
 	dda := &DefaultDataAdapter{}
 	dda.SetPath(dataPath)
 	return &LocalHandler{
-		ma:            dma,
-		da:            dda,
-		acm:           &DefaultAccessCtrlMgr{ma: dma},
-		bucketConfigs: ecache2.NewLRUCache[int64](16, 256, 5*time.Minute),
-		basePath:      basePath,
-		dataPath:      dataPath,
+		ma:       dma,
+		da:       dda,
+		acm:      &DefaultAccessCtrlMgr{ma: dma},
+		basePath: basePath,
+		dataPath: dataPath,
 	}
 }
 
@@ -247,12 +240,11 @@ func NewNoAuthHandler(basePath, dataPath string) Handler {
 	dda := &DefaultDataAdapter{}
 	dda.SetPath(dataPath)
 	return &LocalHandler{
-		ma:            dma,
-		da:            dda,
-		acm:           &NoAuthAccessCtrlMgr{},
-		bucketConfigs: ecache2.NewLRUCache[int64](16, 256, 5*time.Minute),
-		basePath:      basePath,
-		dataPath:      dataPath,
+		ma:       dma,
+		da:       dda,
+		acm:      &NoAuthAccessCtrlMgr{},
+		basePath: basePath,
+		dataPath: dataPath,
 	}
 }
 
@@ -299,16 +291,6 @@ func (lh *LocalHandler) SetPaths(basePath, dataPath string) {
 // This allows external packages to access DataAdapter for operations like Delete
 func (lh *LocalHandler) GetDataAdapter() DataAdapter {
 	return lh.da
-}
-
-// SetBucketConfig sets bucket configuration for a bucket
-// This allows ConvertWritingVersions and other operations to access bucket config
-func (lh *LocalHandler) SetBucketConfig(bktID int64, bucket *BucketInfo) {
-	if bucket != nil && lh.bucketConfigs != nil {
-		lh.bucketConfigs.Put(bktID, bucket)
-		// Note: CmprWay, CmprQlty, EndecWay, EndecKey are no longer stored in bucket config
-		// They should be provided via core.Config in business layer (cmd/vfs)
-	}
 }
 
 func (lh *LocalHandler) Login(c Ctx, usr, pwd string) (Ctx, *UserInfo, []*BucketInfo, error) {
@@ -409,28 +391,14 @@ func (lh *LocalHandler) PutData(c Ctx, bktID, dataID int64, sn int, buf []byte) 
 	dataSize := int64(len(buf))
 	if dataSize > 0 {
 		// Optimization: Use bucket cache to avoid database query on every write
-		var bucket *BucketInfo
-		if lh.bucketConfigs != nil {
-			if cached, ok := lh.bucketConfigs.Get(bktID); ok {
-				if bktInfo, ok := cached.(*BucketInfo); ok && bktInfo != nil {
-					bucket = bktInfo
-				}
-			}
+		buckets, err := lh.ma.GetBkt(c, []int64{bktID})
+		if err != nil {
+			return 0, err
 		}
-
-		// If cache miss, query database and update cache
-		if bucket == nil {
-			buckets, err := lh.ma.GetBkt(c, []int64{bktID})
-			if err != nil {
-				return 0, err
-			}
-			if len(buckets) == 0 {
-				return 0, ERR_QUERY_DB
-			}
-			bucket = buckets[0]
-			// Update cache for future use
-			lh.SetBucketConfig(bktID, bucket)
+		if len(buckets) == 0 {
+			return 0, ERR_QUERY_DB
 		}
+		bucket := buckets[0]
 
 		// If quota >= 0, check if it exceeds quota
 		if bucket.Quota >= 0 {
@@ -470,28 +438,14 @@ func (lh *LocalHandler) PutDataFromReader(c Ctx, bktID, dataID int64, sn int, r 
 	// Check quota and update usage (each data block write needs to check)
 	if size > 0 {
 		// Optimization: Use bucket cache to avoid database query on every write
-		var bucket *BucketInfo
-		if lh.bucketConfigs != nil {
-			if cached, ok := lh.bucketConfigs.Get(bktID); ok {
-				if bktInfo, ok := cached.(*BucketInfo); ok && bktInfo != nil {
-					bucket = bktInfo
-				}
-			}
+		buckets, err := lh.ma.GetBkt(c, []int64{bktID})
+		if err != nil {
+			return 0, err
 		}
-
-		// If cache miss, query database and update cache
-		if bucket == nil {
-			buckets, err := lh.ma.GetBkt(c, []int64{bktID})
-			if err != nil {
-				return 0, err
-			}
-			if len(buckets) == 0 {
-				return 0, ERR_QUERY_DB
-			}
-			bucket = buckets[0]
-			// Update cache for future use
-			lh.SetBucketConfig(bktID, bucket)
+		if len(buckets) == 0 {
+			return 0, ERR_QUERY_DB
 		}
+		bucket := buckets[0]
 
 		// If quota >= 0, check if it exceeds quota
 		if bucket.Quota >= 0 {

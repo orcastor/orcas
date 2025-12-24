@@ -63,8 +63,7 @@ type OrcasFS struct {
 	c           core.Ctx
 	bktID       int64
 	root        *OrcasNode
-	core.Config                  // Embedded Config: compression, encryption, instant upload settings
-	bucket      *core.BucketInfo // Bucket configuration (chunkSize, quota, etc.)
+	core.Config // Embedded Config: compression, encryption, instant upload settings
 	chunkSize   int64
 	requireKey  bool // If true, return EPERM error when EndecKey is not provided
 	// Business layer configuration (from MountOptions.Config, not from bucket config)
@@ -108,14 +107,6 @@ func NewOrcasFSWithConfig(h core.Handler, c core.Ctx, bktID int64, cfg *core.Con
 		chunkSize = 10 << 20 // Default 10MB
 	}
 
-	// Register bucket config to Handler for ConvertWritingVersions job
-	// This allows the scheduled job to access compression/encryption settings
-	if bucket != nil {
-		if lh, ok := h.(*core.LocalHandler); ok {
-			lh.SetBucketConfig(bktID, bucket)
-		}
-	}
-
 	// Check if requireKey option is provided
 	reqKey := false
 	if len(requireKey) > 0 {
@@ -132,7 +123,6 @@ func NewOrcasFSWithConfig(h core.Handler, c core.Ctx, bktID int64, cfg *core.Con
 		h:          h,
 		c:          c,
 		bktID:      bktID,
-		bucket:     bucket,
 		chunkSize:  chunkSize,
 		requireKey: reqKey,
 		Config:     config,
@@ -245,12 +235,7 @@ func (fs *OrcasFS) getBucketConfig() *core.BucketInfo {
 	// This is important for tests where bucket config may be updated after OrcasFS creation
 	bucket, err := fs.h.GetBktInfo(fs.c, fs.bktID)
 	if err == nil && bucket != nil {
-		fs.bucket = bucket
 		return bucket
-	}
-	// If GetBktInfo fails, return cached config if available
-	if fs.bucket != nil {
-		return fs.bucket
 	}
 	// Return default config if bucket not found
 	return &core.BucketInfo{

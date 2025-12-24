@@ -21,7 +21,6 @@ func init() {
 	os.Setenv("ORCAS_BATCH_WRITE_ENABLED", "false")
 }
 
-
 // TestVFSRepeatedChunkWriteReproduce reproduces the issue where already written chunks
 // are deleted and rewritten, causing duplicate data issues
 // NOTE: This test is currently skipped as it requires specific conditions that may not
@@ -55,9 +54,6 @@ func TestVFSRepeatedChunkWriteReproduce(t *testing.T) {
 		}
 		err = admin.PutBkt(ctx, []*core.BucketInfo{bkt})
 		So(err, ShouldBeNil)
-
-		// Clear bucket config cache
-		bucketConfigCache.Del(testBktID)
 
 		// Create filesystem with encryption configuration (not from bucket config)
 		encryptionKey := "this-is-a-test-encryption-key-that-is-long-enough-for-aes256-encryption-12345678901234567890"
@@ -224,7 +220,7 @@ func TestVFSRepeatedChunkWriteReproduce(t *testing.T) {
 		// so ForceFlush will flush TempFileWriter if it exists
 		_, err = ra.ForceFlush()
 		So(err, ShouldBeNil)
-		
+
 		// Step 4.7: Call ForceFlush one more time to ensure TempFileWriter is fully flushed
 		_, err = ra.ForceFlush()
 		So(err, ShouldBeNil)
@@ -370,9 +366,6 @@ func TestVFSConcurrentUploadStressTest(t *testing.T) {
 		err = admin.PutBkt(ctx, []*core.BucketInfo{bkt})
 		So(err, ShouldBeNil)
 
-		// Clear bucket config cache
-		bucketConfigCache.Del(testBktID)
-
 		// Create filesystem with encryption configuration (not from bucket config)
 		encryptionKey := "this-is-a-test-encryption-key-that-is-long-enough-for-aes256-encryption-12345678901234567890"
 		cfg := &core.Config{
@@ -382,10 +375,10 @@ func TestVFSConcurrentUploadStressTest(t *testing.T) {
 		ofs := NewOrcasFSWithConfig(handler, ctx, testBktID, cfg)
 
 		// Run multiple test iterations (精简规模)
-		numIterations := 2                // 精简: 3 -> 2
-		fileSize := 20 * 1024 * 1024       // 精简: 100MB -> 20MB
-		chunkSize := 10 * 1024 * 1024      // 10MB
-		numChunks := 2                     // 精简: 5 -> 2
+		numIterations := 2            // 精简: 3 -> 2
+		fileSize := 20 * 1024 * 1024  // 精简: 100MB -> 20MB
+		chunkSize := 10 * 1024 * 1024 // 10MB
+		numChunks := 2                // 精简: 5 -> 2
 
 		for iteration := 0; iteration < numIterations; iteration++ {
 			t.Logf("Starting iteration %d/%d", iteration+1, numIterations)
@@ -474,7 +467,7 @@ func TestVFSConcurrentUploadStressTest(t *testing.T) {
 			// Force flush again after rename to ensure TempFileWriter is fully flushed
 			_, err = ra.ForceFlush()
 			So(err, ShouldBeNil)
-			
+
 			// Call ForceFlush one more time to ensure TempFileWriter is fully flushed
 			_, err = ra.ForceFlush()
 			So(err, ShouldBeNil)
@@ -483,7 +476,7 @@ func TestVFSConcurrentUploadStressTest(t *testing.T) {
 			// Verify
 			fileObjCache.Del(fileObj.ID)
 			dataInfoCache.Del(int64(0))
-			
+
 			var readData []byte
 			for retry := 0; retry < 20; retry++ {
 				// Clear cache before each retry to force reload from database
@@ -514,4 +507,3 @@ func TestVFSConcurrentUploadStressTest(t *testing.T) {
 		t.Logf("Stress test completed: %d iterations", numIterations)
 	})
 }
-
