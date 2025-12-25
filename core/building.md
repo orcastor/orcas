@@ -153,10 +153,10 @@ git clone https://github.com/sqlcipher/sqlcipher.git
 cd sqlcipher
 
 # Adjust --prefix as you like
-CFLAGS="-DSQLITE_HAS_CODEC" \
+# SQLCipher 使用 CFLAGS 设置临时存储，而不是 --enable-tempstore
+CFLAGS="-DSQLITE_HAS_CODEC -DSQLITE_TEMP_STORE=2" \
 LDFLAGS="-L/usr/lib/x86_64-linux-gnu" \
 ./configure \
-  --enable-tempstore \
   --disable-tcl \
   --with-crypto-lib=openssl \
   --prefix=$HOME/sqlcipher-local

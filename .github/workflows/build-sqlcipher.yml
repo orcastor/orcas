@@ -47,17 +47,17 @@ jobs:
     - name: Build Go project with SQLCipher
       run: |
         export CGO_ENABLED=1
-        go build -tags sqlcipher -v ./cmd
+        go build -tags sqlcipher -v -o orcas-server ./cmd
 
     - name: Verify binary
       run: |
-        if [ -f ./cmd ]; then
+        if [ -f ./orcas-server ]; then
           echo "Binary built successfully"
-          ldd ./cmd | grep -i sqlcipher || echo "Note: Static linking may not show sqlcipher in ldd"
-          file ./cmd
+          ldd ./orcas-server | grep -i sqlcipher || echo "Note: Static linking may not show sqlcipher in ldd"
+          file ./orcas-server
         else
           echo "Binary not found, checking for other outputs..."
-          find . -name "server" -o -name "orcas" -o -name "cmd" -type f -executable | head -5
+          find . -name "server" -o -name "orcas" -o -name "orcas-server" -type f -executable | head -5
         fi
 
     - name: Upload artifacts
@@ -66,7 +66,7 @@ jobs:
       with:
         name: sqlcipher-binary
         path: |
-          ./cmd
+          ./orcas-server
           core/libsqlcipher.*
         retention-days: 7
 
@@ -84,13 +84,13 @@ jobs:
 
     - name: Build Go project (standard SQLite)
       run: |
-        go build -v ./cmd
+        go build -v -o orcas-server ./cmd
 
     - name: Verify binary
       run: |
-        if [ -f ./cmd ]; then
+        if [ -f ./orcas-server ]; then
           echo "Binary built successfully"
-          file ./cmd
+          file ./orcas-server
         fi
 
     - name: Upload artifacts
