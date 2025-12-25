@@ -45,7 +45,8 @@ OPENSSL_PREFIX=$(brew --prefix openssl@3)
 
 # 配置 SQLCipher
 # SQLCipher 新版本不再支持 --with-crypto-lib 和 --enable-tempstore
-CFLAGS="-DSQLITE_HAS_CODEC -DSQLITE_TEMP_STORE=2 -DSQLCIPHER_CRYPTO_OPENSSL -I${OPENSSL_PREFIX}/include" \
+# SQLCipher 要求必须定义 SQLITE_EXTRA_INIT 和 SQLITE_EXTRA_SHUTDOWN
+CFLAGS="-DSQLITE_HAS_CODEC -DSQLITE_TEMP_STORE=2 -DSQLCIPHER_CRYPTO_OPENSSL -DSQLITE_EXTRA_INIT=sqlcipher_extra_init -DSQLITE_EXTRA_SHUTDOWN=sqlcipher_extra_shutdown -I${OPENSSL_PREFIX}/include" \
 LDFLAGS="-L${OPENSSL_PREFIX}/lib -lcrypto" \
 ./configure \
   --disable-tcl \
@@ -153,7 +154,8 @@ cd sqlcipher
 
 # Adjust --prefix as you like
 # SQLCipher 新版本不再支持 --with-crypto-lib，使用 CFLAGS 和 LDFLAGS 指定 OpenSSL
-CFLAGS="-DSQLITE_HAS_CODEC -DSQLITE_TEMP_STORE=2 -DSQLCIPHER_CRYPTO_OPENSSL" \
+# SQLCipher 要求必须定义 SQLITE_EXTRA_INIT 和 SQLITE_EXTRA_SHUTDOWN
+CFLAGS="-DSQLITE_HAS_CODEC -DSQLITE_TEMP_STORE=2 -DSQLCIPHER_CRYPTO_OPENSSL -DSQLITE_EXTRA_INIT=sqlcipher_extra_init -DSQLITE_EXTRA_SHUTDOWN=sqlcipher_extra_shutdown" \
 LDFLAGS="-L/usr/lib/x86_64-linux-gnu -lcrypto" \
 ./configure \
   --disable-tcl \

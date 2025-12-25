@@ -70,7 +70,8 @@ fi
 # 配置
 echo -e "\n${YELLOW}配置 SQLCipher...${NC}"
 # SQLCipher 新版本不再支持 --with-crypto-lib，使用 CFLAGS 和 LDFLAGS 指定 OpenSSL
-CFLAGS="-DSQLITE_HAS_CODEC -DSQLITE_TEMP_STORE=2 -DSQLCIPHER_CRYPTO_OPENSSL -I${OPENSSL_PREFIX}/include" \
+# SQLCipher 要求必须定义 SQLITE_EXTRA_INIT 和 SQLITE_EXTRA_SHUTDOWN
+CFLAGS="-DSQLITE_HAS_CODEC -DSQLITE_TEMP_STORE=2 -DSQLCIPHER_CRYPTO_OPENSSL -DSQLITE_EXTRA_INIT=sqlcipher_extra_init -DSQLITE_EXTRA_SHUTDOWN=sqlcipher_extra_shutdown -I${OPENSSL_PREFIX}/include" \
 LDFLAGS="-L${OPENSSL_PREFIX}/lib -lcrypto" \
 ./configure \
   --disable-tcl \
