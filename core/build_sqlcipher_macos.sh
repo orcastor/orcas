@@ -88,32 +88,54 @@ make install
 # 复制库文件到项目
 echo -e "\n${YELLOW}复制库文件到项目目录...${NC}"
 
+# SQLCipher 生成的库文件名是 libsqlite3，但我们需要复制为 libsqlcipher 以便 CGO 链接
 # 查找库文件
 LIB_FILE=""
-if [ -f "$INSTALL_PREFIX/lib/libsqlcipher.a" ]; then
-    LIB_FILE="$INSTALL_PREFIX/lib/libsqlcipher.a"
+TARGET_NAME=""
+
+# 优先查找静态库（.a 文件）
+if [ -f "$INSTALL_PREFIX/lib/libsqlite3.a" ]; then
+    LIB_FILE="$INSTALL_PREFIX/lib/libsqlite3.a"
+    TARGET_NAME="libsqlcipher.a"
     echo -e "${GREEN}找到静态库: ${LIB_FILE}${NC}"
-    cp "$LIB_FILE" "$PROJECT_CORE_DIR/libsqlcipher.a"
-    echo -e "${GREEN}已复制到: ${PROJECT_CORE_DIR}/libsqlcipher.a${NC}"
+    cp "$LIB_FILE" "$PROJECT_CORE_DIR/$TARGET_NAME"
+    echo -e "${GREEN}已复制到: ${PROJECT_CORE_DIR}/$TARGET_NAME${NC}"
+elif [ -f "$INSTALL_PREFIX/lib/libsqlite3.dylib" ]; then
+    LIB_FILE="$INSTALL_PREFIX/lib/libsqlite3.dylib"
+    TARGET_NAME="libsqlcipher.dylib"
+    echo -e "${GREEN}找到动态库: ${LIB_FILE}${NC}"
+    cp "$LIB_FILE" "$PROJECT_CORE_DIR/$TARGET_NAME"
+    echo -e "${GREEN}已复制到: ${PROJECT_CORE_DIR}/$TARGET_NAME${NC}"
+# 兼容旧版本：也检查 libsqlcipher 名称
+elif [ -f "$INSTALL_PREFIX/lib/libsqlcipher.a" ]; then
+    LIB_FILE="$INSTALL_PREFIX/lib/libsqlcipher.a"
+    TARGET_NAME="libsqlcipher.a"
+    echo -e "${GREEN}找到静态库: ${LIB_FILE}${NC}"
+    cp "$LIB_FILE" "$PROJECT_CORE_DIR/$TARGET_NAME"
+    echo -e "${GREEN}已复制到: ${PROJECT_CORE_DIR}/$TARGET_NAME${NC}"
 elif [ -f "$INSTALL_PREFIX/lib/libsqlcipher.dylib" ]; then
     LIB_FILE="$INSTALL_PREFIX/lib/libsqlcipher.dylib"
+    TARGET_NAME="libsqlcipher.dylib"
     echo -e "${GREEN}找到动态库: ${LIB_FILE}${NC}"
-    cp "$LIB_FILE" "$PROJECT_CORE_DIR/libsqlcipher.dylib"
-    echo -e "${GREEN}已复制到: ${PROJECT_CORE_DIR}/libsqlcipher.dylib${NC}"
+    cp "$LIB_FILE" "$PROJECT_CORE_DIR/$TARGET_NAME"
+    echo -e "${GREEN}已复制到: ${PROJECT_CORE_DIR}/$TARGET_NAME${NC}"
 else
     echo -e "${RED}错误: 未找到编译好的库文件${NC}"
     echo "请检查 $INSTALL_PREFIX/lib/ 目录"
+    ls -la "$INSTALL_PREFIX/lib/" || true
     exit 1
 fi
 
 # 检查是否需要复制 OpenSSL 库（通常不需要，系统已安装）
 echo -e "\n${GREEN}构建完成！${NC}"
 echo ""
+echo "库文件位置: ${PROJECT_CORE_DIR}/$TARGET_NAME"
+echo ""
 echo "下一步："
 echo "1. 确保库文件在: ${PROJECT_CORE_DIR}/"
 echo "2. 使用以下命令构建项目:"
 echo "   cd $(dirname "$PROJECT_CORE_DIR")"
-echo "   CGO_ENABLED=1 go build -tags sqlcipher ./cmd"
+echo "   CGO_ENABLED=1 go build -tags sqlcipher -o orcas-server ./cmd"
 echo ""
 echo "或者使用系统安装的 SQLCipher:"
 echo "   brew install sqlcipher"

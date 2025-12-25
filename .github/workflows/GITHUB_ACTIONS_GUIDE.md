@@ -75,6 +75,25 @@ SQLCipher 构建结果会被缓存以加速后续构建：
 
 产物保留 **30 天**。
 
+### 下载产物
+
+#### 方法 1: Web 界面（最简单）
+1. 进入仓库的 **Actions** 页面
+2. 选择对应的工作流运行
+3. 在页面底部找到 **Artifacts** 部分
+4. 点击产物名称即可下载 ZIP 文件
+
+#### 方法 2: GitHub CLI
+```bash
+# 下载最新的 SQLCipher 构建产物
+gh run download --name orcas-server-sqlcipher
+
+# 下载标准构建产物
+gh run download --name orcas-server-standard
+```
+
+详细说明请参考 [ARTIFACTS_DOWNLOAD.md](./ARTIFACTS_DOWNLOAD.md)
+
 ## 查看构建日志
 
 1. 进入 GitHub 仓库

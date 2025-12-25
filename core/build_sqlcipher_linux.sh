@@ -142,23 +142,49 @@ make install
 # 复制库文件到项目
 echo -e "\n${YELLOW}复制库文件到项目目录...${NC}"
 
-# 查找库文件
+# SQLCipher 生成的库文件名是 libsqlite3.so，但我们需要复制为 libsqlcipher.so 以便 CGO 链接
+# 查找库文件（SQLCipher 生成的是 libsqlite3.so，不是 libsqlcipher.so）
 LIB_FILE=""
-if [ -f "$INSTALL_PREFIX/lib/libsqlcipher.so" ]; then
-    LIB_FILE="$INSTALL_PREFIX/lib/libsqlcipher.so"
+TARGET_NAME=""
+
+# 优先查找动态库（.so 文件）
+if [ -f "$INSTALL_PREFIX/lib/libsqlite3.so" ]; then
+    LIB_FILE="$INSTALL_PREFIX/lib/libsqlite3.so"
+    TARGET_NAME="libsqlcipher.so"
     echo -e "${GREEN}找到动态库: ${LIB_FILE}${NC}"
-    cp "$LIB_FILE" "$PROJECT_CORE_DIR/libsqlcipher.so"
-    echo -e "${GREEN}已复制到: ${PROJECT_CORE_DIR}/libsqlcipher.so${NC}"
+    cp "$LIB_FILE" "$PROJECT_CORE_DIR/$TARGET_NAME"
+    echo -e "${GREEN}已复制到: ${PROJECT_CORE_DIR}/$TARGET_NAME${NC}"
     
     # 如果是动态库，可能需要复制依赖
     if ldd "$LIB_FILE" 2>/dev/null | grep -q "libcrypto"; then
         echo -e "${YELLOW}注意: libsqlcipher.so 依赖 libcrypto，确保运行时可用${NC}"
     fi
+elif [ -f "$INSTALL_PREFIX/lib/libsqlite3.so.3.51.1" ]; then
+    # 如果只有版本化的库文件，复制它
+    LIB_FILE="$INSTALL_PREFIX/lib/libsqlite3.so.3.51.1"
+    TARGET_NAME="libsqlcipher.so"
+    echo -e "${GREEN}找到版本化动态库: ${LIB_FILE}${NC}"
+    cp "$LIB_FILE" "$PROJECT_CORE_DIR/$TARGET_NAME"
+    echo -e "${GREEN}已复制到: ${PROJECT_CORE_DIR}/$TARGET_NAME${NC}"
+elif [ -f "$INSTALL_PREFIX/lib/libsqlite3.a" ]; then
+    LIB_FILE="$INSTALL_PREFIX/lib/libsqlite3.a"
+    TARGET_NAME="libsqlcipher.a"
+    echo -e "${GREEN}找到静态库: ${LIB_FILE}${NC}"
+    cp "$LIB_FILE" "$PROJECT_CORE_DIR/$TARGET_NAME"
+    echo -e "${GREEN}已复制到: ${PROJECT_CORE_DIR}/$TARGET_NAME${NC}"
+# 兼容旧版本：也检查 libsqlcipher 名称（虽然不太可能）
+elif [ -f "$INSTALL_PREFIX/lib/libsqlcipher.so" ]; then
+    LIB_FILE="$INSTALL_PREFIX/lib/libsqlcipher.so"
+    TARGET_NAME="libsqlcipher.so"
+    echo -e "${GREEN}找到动态库: ${LIB_FILE}${NC}"
+    cp "$LIB_FILE" "$PROJECT_CORE_DIR/$TARGET_NAME"
+    echo -e "${GREEN}已复制到: ${PROJECT_CORE_DIR}/$TARGET_NAME${NC}"
 elif [ -f "$INSTALL_PREFIX/lib/libsqlcipher.a" ]; then
     LIB_FILE="$INSTALL_PREFIX/lib/libsqlcipher.a"
+    TARGET_NAME="libsqlcipher.a"
     echo -e "${GREEN}找到静态库: ${LIB_FILE}${NC}"
-    cp "$LIB_FILE" "$PROJECT_CORE_DIR/libsqlcipher.a"
-    echo -e "${GREEN}已复制到: ${PROJECT_CORE_DIR}/libsqlcipher.a${NC}"
+    cp "$LIB_FILE" "$PROJECT_CORE_DIR/$TARGET_NAME"
+    echo -e "${GREEN}已复制到: ${PROJECT_CORE_DIR}/$TARGET_NAME${NC}"
 else
     echo -e "${RED}错误: 未找到编译好的库文件${NC}"
     echo "请检查 $INSTALL_PREFIX/lib/ 目录"
@@ -168,8 +194,8 @@ fi
 
 echo -e "\n${GREEN}构建完成！${NC}"
 echo ""
-echo "库文件位置: ${PROJECT_CORE_DIR}/$(basename "$LIB_FILE")"
+echo "库文件位置: ${PROJECT_CORE_DIR}/$TARGET_NAME"
 echo ""
 echo "下一步："
-echo "  CGO_ENABLED=1 go build -tags sqlcipher ./cmd"
+echo "  CGO_ENABLED=1 go build -tags sqlcipher -o orcas-server ./cmd"
 
