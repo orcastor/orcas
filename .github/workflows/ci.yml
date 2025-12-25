@@ -1,0 +1,178 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, master, develop ]
+  pull_request:
+    branches: [ main, master, develop ]
+  workflow_dispatch:
+
+env:
+  GO_VERSION: '1.18'
+  CGO_ENABLED: 1
+
+jobs:
+  test-standard:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: ${{ env.GO_VERSION }}
+
+    - name: Run tests (standard SQLite)
+      run: |
+        go test -v ./...
+
+  test-sqlcipher:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: ${{ env.GO_VERSION }}
+
+    - name: Install build dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y \
+          build-essential \
+          libssl-dev \
+          tcl-dev \
+          git
+
+    - name: Cache SQLCipher build
+      uses: actions/cache@v4
+      id: sqlcipher-cache
+      with:
+        path: |
+          ${{ github.workspace }}/sqlcipher-local
+          ${{ github.workspace }}/sqlcipher-src
+        key: sqlcipher-${{ runner.os }}-${{ hashFiles('core/build_sqlcipher_linux.sh') }}
+        restore-keys: |
+          sqlcipher-${{ runner.os }}-
+
+    - name: Build SQLCipher
+      run: |
+        cd core
+        chmod +x build_sqlcipher_linux.sh
+        # 设置缓存路径
+        export SQLCIPHER_DIR="${{ github.workspace }}/sqlcipher-src"
+        export INSTALL_PREFIX="${{ github.workspace }}/sqlcipher-local"
+        ./build_sqlcipher_linux.sh
+
+    - name: Run tests with SQLCipher
+      run: |
+        export CGO_ENABLED=1
+        go test -tags sqlcipher -v ./...
+
+  build-sqlcipher:
+    runs-on: ubuntu-latest
+    needs: [test-sqlcipher]
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: ${{ env.GO_VERSION }}
+
+    - name: Install build dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y \
+          build-essential \
+          libssl-dev \
+          tcl-dev \
+          git
+
+    - name: Cache SQLCipher build
+      uses: actions/cache@v4
+      id: sqlcipher-cache
+      with:
+        path: |
+          ${{ github.workspace }}/sqlcipher-local
+          ${{ github.workspace }}/sqlcipher-src
+        key: sqlcipher-${{ runner.os }}-${{ hashFiles('core/build_sqlcipher_linux.sh') }}
+        restore-keys: |
+          sqlcipher-${{ runner.os }}-
+
+    - name: Build SQLCipher
+      run: |
+        cd core
+        chmod +x build_sqlcipher_linux.sh
+        export SQLCIPHER_DIR="${{ github.workspace }}/sqlcipher-src"
+        export INSTALL_PREFIX="${{ github.workspace }}/sqlcipher-local"
+        ./build_sqlcipher_linux.sh
+
+    - name: Build Go project with SQLCipher
+      run: |
+        export CGO_ENABLED=1
+        go build -tags sqlcipher -v -o orcas-server ./cmd
+
+    - name: Verify binary
+      run: |
+        if [ -f ./orcas-server ]; then
+          echo "✅ Binary built successfully"
+          file ./orcas-server
+          ldd ./orcas-server 2>/dev/null | grep -i sqlcipher || echo "ℹ️  Static linking or library not in ldd output"
+        else
+          echo "❌ Binary not found"
+          exit 1
+        fi
+
+    - name: Upload build artifacts
+      uses: actions/upload-artifact@v4
+      if: success()
+      with:
+        name: orcas-server-sqlcipher
+        path: |
+          ./orcas-server
+          core/libsqlcipher.*
+        retention-days: 30
+
+  build-standard:
+    runs-on: ubuntu-latest
+    needs: [test-standard]
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: ${{ env.GO_VERSION }}
+
+    - name: Build Go project (standard SQLite)
+      run: |
+        go build -v -o orcas-server ./cmd
+
+    - name: Verify binary
+      run: |
+        if [ -f ./orcas-server ]; then
+          echo "✅ Binary built successfully"
+          file ./orcas-server
+        else
+          echo "❌ Binary not found"
+          exit 1
+        fi
+
+    - name: Upload build artifacts
+      uses: actions/upload-artifact@v4
+      if: success()
+      with:
+        name: orcas-server-standard
+        path: ./orcas-server
+        retention-days: 30
+

@@ -1,0 +1,135 @@
+name: Build with SQLCipher
+
+on:
+  push:
+    branches: [ main, master, develop ]
+  pull_request:
+    branches: [ main, master, develop ]
+  workflow_dispatch:
+
+env:
+  GO_VERSION: '1.18'
+  CGO_ENABLED: 1
+
+jobs:
+  build-sqlcipher:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: ${{ env.GO_VERSION }}
+
+    - name: Install build dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y \
+          build-essential \
+          libssl-dev \
+          tcl-dev \
+          git
+
+    - name: Build SQLCipher
+      run: |
+        cd core
+        chmod +x build_sqlcipher_linux.sh
+        ./build_sqlcipher_linux.sh
+
+    - name: Verify SQLCipher library
+      run: |
+        ls -lh core/libsqlcipher.* || echo "Library file not found"
+        file core/libsqlcipher.* || true
+
+    - name: Build Go project with SQLCipher
+      run: |
+        export CGO_ENABLED=1
+        go build -tags sqlcipher -v ./cmd
+
+    - name: Verify binary
+      run: |
+        if [ -f ./cmd ]; then
+          echo "Binary built successfully"
+          ldd ./cmd | grep -i sqlcipher || echo "Note: Static linking may not show sqlcipher in ldd"
+          file ./cmd
+        else
+          echo "Binary not found, checking for other outputs..."
+          find . -name "server" -o -name "orcas" -o -name "cmd" -type f -executable | head -5
+        fi
+
+    - name: Upload artifacts
+      uses: actions/upload-artifact@v4
+      if: success()
+      with:
+        name: sqlcipher-binary
+        path: |
+          ./cmd
+          core/libsqlcipher.*
+        retention-days: 7
+
+  build-standard:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: ${{ env.GO_VERSION }}
+
+    - name: Build Go project (standard SQLite)
+      run: |
+        go build -v ./cmd
+
+    - name: Verify binary
+      run: |
+        if [ -f ./cmd ]; then
+          echo "Binary built successfully"
+          file ./cmd
+        fi
+
+    - name: Upload artifacts
+      uses: actions/upload-artifact@v4
+      if: success()
+      with:
+        name: standard-binary
+        path: ./cmd
+        retention-days: 7
+
+  test:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: ${{ env.GO_VERSION }}
+
+    - name: Install build dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y \
+          build-essential \
+          libssl-dev \
+          tcl-dev \
+          git
+
+    - name: Build SQLCipher
+      run: |
+        cd core
+        chmod +x build_sqlcipher_linux.sh
+        ./build_sqlcipher_linux.sh
+
+    - name: Run tests with SQLCipher
+      run: |
+        export CGO_ENABLED=1
+        go test -tags sqlcipher -v ./...
+
