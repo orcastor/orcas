@@ -20,7 +20,6 @@ func TestWrite(t *testing.T) {
 	Convey("normal", t, func() {
 		Convey("sync write one file", func() {
 			dda := &DefaultDataAdapter{}
-			dda.SetOptions(Options{})
 			So(dda.Write(c, bktID, 4701534814223, 0, []byte("xxxxx")), ShouldBeNil)
 		})
 		Convey("async write one file", func() {
@@ -31,7 +30,6 @@ func TestWrite(t *testing.T) {
 	Convey("empty file", t, func() {
 		Convey("write one empty file", func() {
 			dda := &DefaultDataAdapter{}
-			dda.SetOptions(Options{})
 			So(dda.Write(c, bktID, 4701534814288, 0, nil), ShouldBeNil)
 		})
 	})
@@ -41,7 +39,6 @@ func TestRead(t *testing.T) {
 	Convey("normal", t, func() {
 		Convey("read one file", func() {
 			dda := &DefaultDataAdapter{}
-			dda.SetOptions(Options{})
 			key, _ := idgen.NewIDGen(nil, 0).New()
 			value := []byte("test_read")
 			So(dda.Write(c, bktID, key, 0, []byte(value)), ShouldBeNil)
@@ -56,7 +53,6 @@ func TestRead(t *testing.T) {
 func TestReadBytes(t *testing.T) {
 	Convey("normal", t, func() {
 		dda := &DefaultDataAdapter{}
-		dda.SetOptions(Options{})
 		key, _ := idgen.NewIDGen(nil, 0).New()
 		value := []byte("test_read")
 		So(dda.Write(c, bktID, key, 0, []byte(value)), ShouldBeNil)
@@ -98,7 +94,6 @@ func TestWriteSyncConcurrent(t *testing.T) {
 		Convey("sync write files", func() {
 			ig := idgen.NewIDGen(nil, 0)
 			dda := &DefaultDataAdapter{}
-			dda.SetOptions(Options{})
 			bid, _ := ig.New()
 			// Initialize bucket database
 			if err := InitBucketDB(".", bid); err != nil {
@@ -106,7 +101,7 @@ func TestWriteSyncConcurrent(t *testing.T) {
 			}
 			// Reduce iterations to avoid timeout (original: 20000)
 			// This test is for concurrent write performance, not correctness
-			for i := 0; i < 100; i++ {  // Reduced from 1000 for faster testing
+			for i := 0; i < 100; i++ { // Reduced from 1000 for faster testing
 				id, _ := ig.New()
 				if err := dda.Write(c, bid, id, 0, []byte(fmt.Sprint(i))); err != nil {
 					t.Fatalf("Write failed at iteration %d: %v", i, err)
@@ -128,7 +123,7 @@ func TestWriteAsyncConcurrent(t *testing.T) {
 			}
 			// Reduce iterations to avoid timeout (original: 20000)
 			// This test is for concurrent write performance, not correctness
-			for i := 0; i < 100; i++ {  // Reduced from 1000 for faster testing
+			for i := 0; i < 100; i++ { // Reduced from 1000 for faster testing
 				id, _ := ig.New()
 				if err := dda.Write(c, bid, id, 0, []byte(fmt.Sprint(i))); err != nil {
 					t.Fatalf("Write failed at iteration %d: %v", i, err)
@@ -141,7 +136,6 @@ func TestWriteAsyncConcurrent(t *testing.T) {
 func TestUpdate(t *testing.T) {
 	Convey("Update data chunk", t, func() {
 		dda := &DefaultDataAdapter{}
-		dda.SetOptions(Options{})
 		key, _ := idgen.NewIDGen(nil, 0).New()
 
 		Convey("create new chunk with Update", func() {

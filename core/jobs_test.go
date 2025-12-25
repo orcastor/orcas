@@ -32,8 +32,7 @@ func TestScrub(t *testing.T) {
 		dma.DefaultBaseMetadataAdapter.SetPath(baseDir)
 		dma.DefaultDataMetadataAdapter.SetPath(dataDir)
 		dda := &DefaultDataAdapter{}
-		dda.SetOptions(Options{})
-		dda.SetPath(dataDir)
+		dda.SetDataPath(dataDir)
 
 		Convey("scrub normal data", func() {
 			// 创建测试数据
@@ -278,8 +277,7 @@ func TestDeleteAndRecycle(t *testing.T) {
 		dma.DefaultBaseMetadataAdapter.SetPath(baseDir)
 		dma.DefaultDataMetadataAdapter.SetPath(dataDir)
 		dda := &DefaultDataAdapter{}
-		dda.SetOptions(Options{})
-		dda.SetPath(dataDir)
+		dda.SetDataPath(dataDir)
 
 		Convey("delete object", func() {
 			// 创建测试对象
@@ -800,8 +798,7 @@ func TestScanDirtyData(t *testing.T) {
 		dma.DefaultBaseMetadataAdapter.SetPath(baseDir)
 		dma.DefaultDataMetadataAdapter.SetPath(dataDir)
 		dda := &DefaultDataAdapter{}
-		dda.SetOptions(Options{})
-		dda.SetPath(dataDir)
+		dda.SetDataPath(dataDir)
 
 		Convey("scan incomplete chunks (missing chunk)", func() {
 			// 创建分片数据，但故意缺少一个分片（模拟上传中断）
@@ -956,8 +953,7 @@ func TestPermanentlyDelete(t *testing.T) {
 		dma.DefaultBaseMetadataAdapter.SetPath(baseDir)
 		dma.DefaultDataMetadataAdapter.SetPath(dataDir)
 		dda := &DefaultDataAdapter{}
-		dda.SetOptions(Options{})
-		dda.SetPath(dataDir)
+		dda.SetDataPath(dataDir)
 
 		Convey("permanently delete file", func() {
 			// 创建LocalHandler
@@ -1131,8 +1127,7 @@ func TestQuotaAndUsed(t *testing.T) {
 		dma.DefaultBaseMetadataAdapter.SetPath(baseDir)
 		dma.DefaultDataMetadataAdapter.SetPath(dataDir)
 		dda := &DefaultDataAdapter{}
-		dda.SetOptions(Options{})
-		dda.SetPath(dataDir)
+		dda.SetDataPath(dataDir)
 
 		// 创建桶并设置配额
 		uid, _ := ig.New()
@@ -1494,8 +1489,7 @@ func TestDefragment(t *testing.T) {
 		dma.DefaultBaseMetadataAdapter.SetPath(baseDir)
 		dma.DefaultDataMetadataAdapter.SetPath(dataDir)
 		dda := &DefaultDataAdapter{}
-		dda.SetOptions(Options{})
-		dda.SetPath(dataDir)
+		dda.SetDataPath(dataDir)
 
 		// Create bucket with chunk size
 		uid, _ := ig.New()

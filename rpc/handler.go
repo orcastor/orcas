@@ -7,6 +7,7 @@ import (
 	"github.com/orcastor/orcas/rpc/util"
 )
 
+// Create handler (DBKey will be set via API or environment variable)
 var hanlder = core.NewLocalHandler("", "")
 
 func login(ctx *gin.Context) {

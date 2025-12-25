@@ -50,7 +50,10 @@ sudo apt-get install -y \
 ### 3. 构建 Go 项目
 
 ```bash
-CGO_ENABLED=1 go build -tags sqlcipher -o orcas-server ./cmd
+CGO_ENABLED=1 go build -tags sqlcipher -ldflags="-s -w" -o orcas-server ./cmd
+
+# Strip 二进制文件（进一步减小大小）
+strip orcas-server
 ```
 
 ## 缓存机制

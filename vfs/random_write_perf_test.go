@@ -18,8 +18,7 @@ func BenchmarkRandomWriteSparseFile(b *testing.B) {
 	core.InitBucketDB(".", testBktID)
 
 	dma := &core.DefaultMetadataAdapter{}
-	dda := &core.DefaultDataAdapter{}
-	dda.SetOptions(core.Options{}) // Use default options
+	dda := &core.DefaultDataAdapter{} // Use default options
 	lh := core.NewLocalHandler("", "")
 	lh.SetAdapter(dma, dda)
 
@@ -179,7 +178,6 @@ func TestRandomWriteSparseFile(t *testing.T) {
 		dma.DefaultBaseMetadataAdapter.SetPath(".")
 		dma.DefaultDataMetadataAdapter.SetPath(".")
 		dda := &core.DefaultDataAdapter{}
-		dda.SetOptions(core.Options{})
 
 		lh := core.NewLocalHandler("", "").(*core.LocalHandler)
 		lh.SetAdapter(dma, dda)
@@ -323,7 +321,6 @@ func BenchmarkRandomWriteDeduplication(b *testing.B) {
 
 	dma := &core.DefaultMetadataAdapter{}
 	dda := &core.DefaultDataAdapter{}
-	dda.SetOptions(core.Options{})
 	lh := core.NewLocalHandler("", "")
 	lh.SetAdapter(dma, dda)
 

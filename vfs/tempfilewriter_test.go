@@ -32,7 +32,6 @@ func TestTempFileWriterLargeFileWithEncryption(t *testing.T) {
 		dma.DefaultBaseMetadataAdapter.SetPath(".")
 		dma.DefaultDataMetadataAdapter.SetPath(".")
 		dda := &core.DefaultDataAdapter{}
-		dda.SetOptions(core.Options{})
 
 		lh := core.NewLocalHandler("", "").(*core.LocalHandler)
 		lh.SetAdapter(dma, dda)
@@ -450,7 +449,6 @@ func TestTempFileWriterMemoryEfficiency(t *testing.T) {
 		dma.DefaultBaseMetadataAdapter.SetPath(".")
 		dma.DefaultDataMetadataAdapter.SetPath(".")
 		dda := &core.DefaultDataAdapter{}
-		dda.SetOptions(core.Options{})
 
 		lh := core.NewLocalHandler("", "").(*core.LocalHandler)
 		lh.SetAdapter(dma, dda)

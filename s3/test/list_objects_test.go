@@ -63,7 +63,7 @@ func setupTestEnvironmentForListObjects(t *testing.T) (int64, *gin.Engine) {
 	if err != nil {
 		t.Fatalf("Login failed: %v", err)
 	}
-	
+
 	// Ensure userInfo is in context for PutBkt (which needs uid for ACL creation)
 	if userInfo != nil {
 		ctx = core.UserInfo2Ctx(ctx, userInfo)
@@ -102,9 +102,6 @@ func setupTestEnvironmentForListObjects(t *testing.T) (int64, *gin.Engine) {
 		}))
 		c.Next()
 	})
-
-	// Set handler paths for S3 handler (must be done before registering routes)
-	s3.SetHandlerPaths(".", ".")
 
 	// Register routes
 	router.GET("/", s3.ListBuckets)

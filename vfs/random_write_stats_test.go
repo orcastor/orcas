@@ -25,8 +25,7 @@ func TestRandomWriteRedundancy(t *testing.T) {
 	}
 	dma.DefaultBaseMetadataAdapter.SetPath(".")
 	dma.DefaultDataMetadataAdapter.SetPath(".")
-	dda := &core.DefaultDataAdapter{}
-	dda.SetOptions(core.Options{}) // Use default options
+	dda := &core.DefaultDataAdapter{} // Use default options
 	lh := core.NewLocalHandler("", "").(*core.LocalHandler)
 	lh.SetAdapter(dma, dda)
 

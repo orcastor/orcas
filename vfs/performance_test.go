@@ -98,7 +98,6 @@ func runPerformanceTest(t *testing.T, name string, dataSize, chunkSize int64, wr
 	dma.DefaultBaseMetadataAdapter.SetPath(tmpBaseDir)
 	dma.DefaultDataMetadataAdapter.SetPath(tmpDataDir)
 	dda := &core.DefaultDataAdapter{}
-	dda.SetOptions(core.Options{})
 
 	lh := core.NewLocalHandler(tmpBaseDir, tmpDataDir).(*core.LocalHandler)
 	lh.SetAdapter(dma, dda)
@@ -454,7 +453,6 @@ func runSequentialWriteTest(t *testing.T, name string, totalSize, chunkSize int6
 	dma.DefaultBaseMetadataAdapter.SetPath(tmpBaseDir)
 	dma.DefaultDataMetadataAdapter.SetPath(tmpDataDir)
 	dda := &core.DefaultDataAdapter{}
-	dda.SetOptions(core.Options{})
 
 	lh := core.NewLocalHandler(tmpBaseDir, tmpDataDir).(*core.LocalHandler)
 	lh.SetAdapter(dma, dda)
@@ -602,7 +600,6 @@ func runRandomWriteTest(t *testing.T, name string, totalSize, chunkSize int64, c
 	dma.DefaultBaseMetadataAdapter.SetPath(tmpBaseDir)
 	dma.DefaultDataMetadataAdapter.SetPath(tmpDataDir)
 	dda := &core.DefaultDataAdapter{}
-	dda.SetOptions(core.Options{})
 
 	lh := core.NewLocalHandler(tmpBaseDir, tmpDataDir).(*core.LocalHandler)
 	lh.SetAdapter(dma, dda)
@@ -772,7 +769,6 @@ func runRandomWriteOverlappingTest(t *testing.T, name string, totalSize, chunkSi
 	dma.DefaultBaseMetadataAdapter.SetPath(tmpBaseDir)
 	dma.DefaultDataMetadataAdapter.SetPath(tmpDataDir)
 	dda := &core.DefaultDataAdapter{}
-	dda.SetOptions(core.Options{})
 
 	lh := core.NewLocalHandler(tmpBaseDir, tmpDataDir).(*core.LocalHandler)
 	lh.SetAdapter(dma, dda)
@@ -911,7 +907,6 @@ func runRandomWriteSmallChunksTest(t *testing.T, name string, totalSize, chunkSi
 	dma.DefaultBaseMetadataAdapter.SetPath(tmpBaseDir)
 	dma.DefaultDataMetadataAdapter.SetPath(tmpDataDir)
 	dda := &core.DefaultDataAdapter{}
-	dda.SetOptions(core.Options{})
 
 	lh := core.NewLocalHandler(tmpBaseDir, tmpDataDir).(*core.LocalHandler)
 	lh.SetAdapter(dma, dda)
@@ -1165,7 +1160,6 @@ func runInstantUploadPerformanceTest(t *testing.T) {
 	dma.DefaultBaseMetadataAdapter.SetPath(tmpBaseDir)
 	dma.DefaultDataMetadataAdapter.SetPath(tmpDataDir)
 	dda := &core.DefaultDataAdapter{}
-	dda.SetOptions(core.Options{})
 
 	lh := core.NewLocalHandler(tmpBaseDir, tmpDataDir).(*core.LocalHandler)
 	lh.SetAdapter(dma, dda)

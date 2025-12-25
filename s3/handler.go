@@ -3094,10 +3094,3 @@ func ListParts(c *gin.Context) {
 	c.Header("Content-Type", "application/xml")
 	c.XML(http.StatusOK, result)
 }
-
-// SetHandlerPaths sets the base path and data path for the global handler
-// basePath: path for main database and bucket databases
-// dataPath: path for data file storage
-func SetHandlerPaths(basePath, dataPath string) {
-	handler.SetPaths(basePath, dataPath)
-}

@@ -30,7 +30,8 @@ var (
 	bucketOwner = flag.String("owner", "", "Bucket owner username or user ID (for create-bucket, default is current user)")
 
 	// Database key parameters
-	dbKey = flag.String("dbkey", "", "Main database encryption key (for InitDB)")
+	baseDBKey = flag.String("basedbkey", "", "Main database encryption key (BASE path, for InitDB)")
+	dataDBKey = flag.String("datadbkey", "", "Bucket database encryption key (DATA path)")
 
 	// Path parameters
 	basePath = flag.String("basepath", "", "Base path for metadata (database storage location)")
@@ -107,9 +108,9 @@ func main() {
 
 	// Initialize database only if needed
 	if needsMainDB {
-		var dbKeyValue string
-		if *dbKey != "" {
-			dbKeyValue = *dbKey
+		dbKeyValue := ""
+		if *baseDBKey != "" {
+			dbKeyValue = *baseDBKey
 		}
 		core.InitDB(cfg.BasePath, dbKeyValue)
 	}
@@ -271,7 +272,8 @@ func handleMount() {
 		defer handler.Close()
 		// Set paths if configured (basePath is always empty for NoAuth)
 		if cfg.DataPath != "" {
-			handler.SetPaths("", cfg.DataPath)
+			handler.DataAdapter().SetDataPath(cfg.DataPath)
+			handler.MetadataAdapter().SetDataPath(cfg.DataPath)
 		}
 		ctx = context.Background()
 
@@ -289,7 +291,16 @@ func handleMount() {
 		defer handler.Close()
 		// Set paths if configured
 		if cfg.BasePath != "" || cfg.DataPath != "" {
-			handler.SetPaths(cfg.BasePath, cfg.DataPath)
+			handler.MetadataAdapter().SetBasePath(cfg.BasePath)
+			handler.MetadataAdapter().SetDataPath(cfg.DataPath)
+			handler.DataAdapter().SetDataPath(cfg.DataPath)
+		}
+		// Set database encryption keys if provided
+		if *baseDBKey != "" {
+			handler.MetadataAdapter().SetBaseKey(*baseDBKey)
+		}
+		if *dataDBKey != "" {
+			handler.MetadataAdapter().SetDataKey(*dataDBKey)
 		}
 
 		// Login
@@ -363,6 +374,8 @@ func handleMount() {
 		Config:     &cfg,
 		Debug:      *debug,
 		RequireKey: *requireKey,
+		BaseDBKey:  *baseDBKey, // Set base database encryption key if provided
+		DataDBKey:  *dataDBKey, // Set data database encryption key if provided
 	}
 	server, err := vfs.Mount(handler, ctx, selectedBktID, mountOpts)
 	if err != nil {

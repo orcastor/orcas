@@ -11,8 +11,9 @@ import (
 )
 
 type DataAdapter interface {
-	SetOptions(opt Options)
 	Close()
+
+	SetDataPath(dataPath string)
 
 	Write(c Ctx, bktID, dataID int64, sn int, buf []byte) error
 	// Update updates part of existing data chunk (for writing versions with name="0")
@@ -29,16 +30,11 @@ type DataAdapter interface {
 }
 
 type DefaultDataAdapter struct {
-	opt      Options
 	dataPath string // Path for data file storage
 }
 
-func (dda *DefaultDataAdapter) SetOptions(opt Options) {
-	dda.opt = opt
-}
-
-// SetPath sets the data path for the adapter
-func (dda *DefaultDataAdapter) SetPath(dataPath string) {
+// SetDataPath sets the data path for the adapter
+func (dda *DefaultDataAdapter) SetDataPath(dataPath string) {
 	dda.dataPath = dataPath
 }
 

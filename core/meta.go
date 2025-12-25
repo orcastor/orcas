@@ -266,6 +266,9 @@ type BaseMetadataAdapter interface {
 	Close()
 	UserMetadataAdapter
 	ACLMetadataAdapter
+
+	SetBasePath(basePath string)
+	SetBaseKey(key string)
 }
 
 // DataMetadataAdapter manages data and object metadata stored in bucket databases
@@ -275,6 +278,9 @@ type DataMetadataAdapter interface {
 	BucketMetadataAdapter // Buckets are stored in bucket databases, not main database
 	DataInfoMetadataAdapter
 	ObjectMetadataAdapter
+
+	SetDataPath(dataPath string)
+	SetDataKey(key string)
 }
 
 // MetadataAdapter combines BaseMetadataAdapter and DataMetadataAdapter for backward compatibility
@@ -565,6 +571,7 @@ func InitBucketDB(dataPath string, bktID int64, key ...string) error {
 // DefaultBaseMetadataAdapter implements BaseMetadataAdapter
 type DefaultBaseMetadataAdapter struct {
 	basePath string // Path for main database
+	dbKey    string // Encryption key for main database (empty means unencrypted)
 }
 
 func (dba *DefaultBaseMetadataAdapter) Close() {
@@ -575,9 +582,25 @@ func (dba *DefaultBaseMetadataAdapter) SetPath(basePath string) {
 	dba.basePath = basePath
 }
 
+// SetBasePath sets the base path for the adapter (for main database)
+func (dba *DefaultBaseMetadataAdapter) SetBasePath(basePath string) {
+	dba.basePath = basePath
+}
+
+// SetKey sets the encryption key for the adapter (for main database)
+func (dba *DefaultBaseMetadataAdapter) SetKey(key string) {
+	dba.dbKey = key
+}
+
+// SetBaseKey sets the encryption key for the adapter (for main database)
+func (dba *DefaultBaseMetadataAdapter) SetBaseKey(key string) {
+	dba.dbKey = key
+}
+
 // DefaultDataMetadataAdapter implements DataMetadataAdapter
 type DefaultDataMetadataAdapter struct {
 	dataPath string // Path for data file storage and bucket databases
+	dbKey    string // Encryption key for bucket databases (empty means unencrypted)
 }
 
 func (dda *DefaultDataMetadataAdapter) Close() {
@@ -586,6 +609,21 @@ func (dda *DefaultDataMetadataAdapter) Close() {
 // SetPath sets the data path for the adapter (for bucket databases and data files)
 func (dda *DefaultDataMetadataAdapter) SetPath(dataPath string) {
 	dda.dataPath = dataPath
+}
+
+// SetDataPath sets the data path for the adapter (for bucket databases and data files)
+func (dda *DefaultDataMetadataAdapter) SetDataPath(dataPath string) {
+	dda.dataPath = dataPath
+}
+
+// SetKey sets the encryption key for the adapter (for bucket databases)
+func (dda *DefaultDataMetadataAdapter) SetKey(key string) {
+	dda.dbKey = key
+}
+
+// SetDataKey sets the encryption key for the adapter (for bucket databases)
+func (dda *DefaultDataMetadataAdapter) SetDataKey(key string) {
+	dda.dbKey = key
 }
 
 func (dda *DefaultDataMetadataAdapter) ListAllBuckets(c Ctx) (o []*BucketInfo, err error) {
@@ -624,7 +662,7 @@ func (dda *DefaultDataMetadataAdapter) ListAllBuckets(c Ctx) (o []*BucketInfo, e
 
 			// Cache miss, read from bucket database
 			bktDirPath := filepath.Join(dda.dataPath, fmt.Sprint(id))
-			db, err := GetReadDB(bktDirPath, "")
+			db, err := GetReadDB(bktDirPath, dda.dbKey)
 			if err != nil {
 				return
 			}
@@ -667,6 +705,34 @@ func NewDefaultMetadataAdapter() *DefaultMetadataAdapter {
 	}
 }
 
+// SetBasePath sets the base path (for main database)
+func (dma *DefaultMetadataAdapter) SetBasePath(basePath string) {
+	if dma.DefaultBaseMetadataAdapter != nil {
+		dma.DefaultBaseMetadataAdapter.SetBasePath(basePath)
+	}
+}
+
+// SetBaseKey sets the encryption key for the main database
+func (dma *DefaultMetadataAdapter) SetBaseKey(key string) {
+	if dma.DefaultBaseMetadataAdapter != nil {
+		dma.DefaultBaseMetadataAdapter.SetBaseKey(key)
+	}
+}
+
+// SetDataPath sets the data path (for bucket databases and data files)
+func (dma *DefaultMetadataAdapter) SetDataPath(dataPath string) {
+	if dma.DefaultDataMetadataAdapter != nil {
+		dma.DefaultDataMetadataAdapter.SetDataPath(dataPath)
+	}
+}
+
+// SetDataKey sets the encryption key for bucket databases
+func (dma *DefaultMetadataAdapter) SetDataKey(key string) {
+	if dma.DefaultDataMetadataAdapter != nil {
+		dma.DefaultDataMetadataAdapter.SetDataKey(key)
+	}
+}
+
 func (dma *DefaultMetadataAdapter) Close() {
 	// Both adapters are embedded, no need to close separately
 }
@@ -693,7 +759,7 @@ func (dma *DefaultMetadataAdapter) PutBkt(c Ctx, o []*BucketInfo) error {
 
 		// Use write connection for bucket database
 		bktDirPath := filepath.Join(dma.DefaultDataMetadataAdapter.dataPath, fmt.Sprint(x.ID))
-		db, err := GetWriteDB(bktDirPath, "")
+		db, err := GetWriteDB(bktDirPath, dma.DefaultDataMetadataAdapter.dbKey)
 		if err != nil {
 			return fmt.Errorf("%w: PutBkt GetWriteDB failed (bktID=%d): %v", ERR_OPEN_DB, x.ID, err)
 		}
@@ -756,7 +822,7 @@ func (dma *DefaultMetadataAdapter) GetBkt(c Ctx, ids []int64) (o []*BucketInfo, 
 	dbResults := make([]*BucketInfo, 0, len(missingIDs))
 	for _, bktID := range missingIDs {
 		bktDirPath := filepath.Join(dataPath, fmt.Sprint(bktID))
-		db, err := GetReadDB(bktDirPath, "")
+		db, err := GetReadDB(bktDirPath, dma.DefaultDataMetadataAdapter.dbKey)
 		if err != nil {
 			// If bucket database doesn't exist, skip it
 			continue
@@ -801,7 +867,7 @@ func (dma *DefaultMetadataAdapter) GetBkt(c Ctx, ids []int64) (o []*BucketInfo, 
 // ACL is stored in main database, not in bucket database
 func (dba *DefaultBaseMetadataAdapter) PutACL(c Ctx, bktID int64, uid int64, perm int) error {
 	// Use write connection for main database
-	db, err := GetWriteDB(dba.basePath, "")
+	db, err := GetWriteDB(dba.basePath, dba.dbKey)
 	if err != nil {
 		return fmt.Errorf("%w: PutACL GetWriteDB failed (bktID=%d): %v", ERR_OPEN_DB, bktID, err)
 	}
@@ -823,7 +889,7 @@ func (dba *DefaultBaseMetadataAdapter) PutACL(c Ctx, bktID int64, uid int64, per
 
 func (dba *DefaultBaseMetadataAdapter) ListACL(c Ctx, bktID int64) ([]*BucketACL, error) {
 	// Use read connection for main database
-	db, err := GetReadDB(dba.basePath, "")
+	db, err := GetReadDB(dba.basePath, dba.dbKey)
 	if err != nil {
 		return nil, fmt.Errorf("%w: ListACL GetReadDB failed (bktID=%d): %v", ERR_OPEN_DB, bktID, err)
 	}
@@ -838,7 +904,7 @@ func (dba *DefaultBaseMetadataAdapter) ListACL(c Ctx, bktID int64) ([]*BucketACL
 
 func (dba *DefaultBaseMetadataAdapter) DeleteACL(c Ctx, bktID int64, uid int64) error {
 	// Use write connection for main database
-	db, err := GetWriteDB(dba.basePath, "")
+	db, err := GetWriteDB(dba.basePath, dba.dbKey)
 	if err != nil {
 		return fmt.Errorf("%w: DeleteACL GetWriteDB failed (bktID=%d, uid=%d): %v", ERR_OPEN_DB, bktID, uid, err)
 	}
@@ -852,7 +918,7 @@ func (dba *DefaultBaseMetadataAdapter) DeleteACL(c Ctx, bktID int64, uid int64) 
 
 func (dba *DefaultBaseMetadataAdapter) DeleteAllACL(c Ctx, bktID int64) error {
 	// Use write connection for main database
-	db, err := GetWriteDB(dba.basePath, "")
+	db, err := GetWriteDB(dba.basePath, dba.dbKey)
 	if err != nil {
 		return fmt.Errorf("%w: DeleteAllACL GetWriteDB failed (bktID=%d): %v", ERR_OPEN_DB, bktID, err)
 	}
@@ -868,7 +934,7 @@ func (dba *DefaultBaseMetadataAdapter) DeleteAllACL(c Ctx, bktID int64) error {
 // Returns true if the user's ACL permission covers the required action
 func (dba *DefaultBaseMetadataAdapter) CheckPermission(c Ctx, bktID int64, uid int64, action int) (bool, error) {
 	// Use read connection for main database
-	db, err := GetReadDB(dba.basePath, "")
+	db, err := GetReadDB(dba.basePath, dba.dbKey)
 	if err != nil {
 		return false, fmt.Errorf("%w: CheckPermission GetReadDB failed (bktID=%d): %v", ERR_OPEN_DB, bktID, err)
 	}
@@ -894,7 +960,7 @@ func (dba *DefaultBaseMetadataAdapter) CheckPermission(c Ctx, bktID int64, uid i
 
 func (dba *DefaultBaseMetadataAdapter) ListACLByUser(c Ctx, uid int64) ([]*BucketACL, error) {
 	// ACL is stored in main database, query directly
-	db, err := GetReadDB(dba.basePath, "")
+	db, err := GetReadDB(dba.basePath, dba.dbKey)
 	if err != nil {
 		return nil, fmt.Errorf("%w: ListACLByUser GetReadDB failed (uid=%d): %v", ERR_OPEN_DB, uid, err)
 	}
@@ -1737,7 +1803,7 @@ func (dma *DefaultMetadataAdapter) ListObj(c Ctx, bktID, pid int64,
 
 func (dba *DefaultBaseMetadataAdapter) PutUsr(c Ctx, u *UserInfo) error {
 	// Use write connection for user creation/update
-	db, err := GetWriteDB(dba.basePath, "")
+	db, err := GetWriteDB(dba.basePath, dba.dbKey)
 	if err != nil {
 		return ERR_OPEN_DB
 	}
@@ -1751,7 +1817,7 @@ func (dba *DefaultBaseMetadataAdapter) PutUsr(c Ctx, u *UserInfo) error {
 
 func (dba *DefaultBaseMetadataAdapter) GetUsr(c Ctx, ids []int64) (o []*UserInfo, err error) {
 	// Use read connection for user retrieval
-	db, err := GetReadDB(dba.basePath, "")
+	db, err := GetReadDB(dba.basePath, dba.dbKey)
 	if err != nil {
 		return nil, ERR_OPEN_DB
 	}
@@ -1765,7 +1831,7 @@ func (dba *DefaultBaseMetadataAdapter) GetUsr(c Ctx, ids []int64) (o []*UserInfo
 
 func (dba *DefaultBaseMetadataAdapter) GetUsr2(c Ctx, usr string) (o *UserInfo, err error) {
 	// Use read connection for user lookup
-	db, err := GetReadDB(dba.basePath, "")
+	db, err := GetReadDB(dba.basePath, dba.dbKey)
 	if err != nil {
 		return nil, ERR_OPEN_DB
 	}
@@ -1780,7 +1846,7 @@ func (dba *DefaultBaseMetadataAdapter) GetUsr2(c Ctx, usr string) (o *UserInfo, 
 
 func (dba *DefaultBaseMetadataAdapter) SetUsr(c Ctx, fields []string, u *UserInfo) error {
 	// Use write connection for user update
-	db, err := GetWriteDB(dba.basePath, "")
+	db, err := GetWriteDB(dba.basePath, dba.dbKey)
 	if err != nil {
 		return ERR_OPEN_DB
 	}
@@ -1795,7 +1861,7 @@ func (dba *DefaultBaseMetadataAdapter) SetUsr(c Ctx, fields []string, u *UserInf
 
 func (dba *DefaultBaseMetadataAdapter) ListUsers(c Ctx) (o []*UserInfo, err error) {
 	// Use read connection for listing users
-	db, err := GetReadDB(dba.basePath, "")
+	db, err := GetReadDB(dba.basePath, dba.dbKey)
 	if err != nil {
 		return nil, ERR_OPEN_DB
 	}
@@ -1815,7 +1881,7 @@ func (dba *DefaultBaseMetadataAdapter) ListUsers(c Ctx) (o []*UserInfo, err erro
 
 func (dba *DefaultBaseMetadataAdapter) DeleteUser(c Ctx, userID int64) error {
 	// Use write connection for user deletion
-	db, err := GetWriteDB(dba.basePath, "")
+	db, err := GetWriteDB(dba.basePath, dba.dbKey)
 	if err != nil {
 		return ERR_OPEN_DB
 	}

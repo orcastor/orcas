@@ -47,7 +47,15 @@ jobs:
     - name: Build Go project with SQLCipher
       run: |
         export CGO_ENABLED=1
-        go build -tags sqlcipher -v -o orcas-server ./cmd
+        go build -tags sqlcipher -v -ldflags="-s -w" -o orcas-server ./cmd
+
+    - name: Strip binary
+      run: |
+        if [ -f ./orcas-server ]; then
+          echo "Stripping binary..."
+          strip ./orcas-server || true
+          ls -lh ./orcas-server
+        fi
 
     - name: Verify binary
       run: |
@@ -84,7 +92,15 @@ jobs:
 
     - name: Build Go project (standard SQLite)
       run: |
-        go build -v -o orcas-server ./cmd
+        go build -v -ldflags="-s -w" -o orcas-server ./cmd
+
+    - name: Strip binary
+      run: |
+        if [ -f ./orcas-server ]; then
+          echo "Stripping binary..."
+          strip ./orcas-server || true
+          ls -lh ./orcas-server
+        fi
 
     - name: Verify binary
       run: |
@@ -98,6 +114,6 @@ jobs:
       if: success()
       with:
         name: standard-binary
-        path: ./cmd
+        path: ./orcas-server
         retention-days: 7
 

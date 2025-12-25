@@ -36,6 +36,14 @@ type MountOptions struct {
 	// If empty, encryption key will not be used (data will not be encrypted/decrypted)
 	// This overrides bucket config EndecKey
 	EndecKey string
+	// BaseDBKey: Encryption key for main database (BASE path, SQLCipher)
+	// If empty, database will not be encrypted
+	// This can be set at runtime before mounting
+	BaseDBKey string
+	// DataDBKey: Encryption key for bucket databases (DATA path, SQLCipher)
+	// If empty, bucket databases will not be encrypted
+	// This can be set at runtime before mounting
+	DataDBKey string
 }
 
 // Mount mounts ORCAS filesystem
@@ -76,7 +84,17 @@ func Mount(h core.Handler, c core.Ctx, bktID int64, opts *MountOptions) (*fuse.S
 	// If config has paths, set them in Handler
 	// Paths are now managed via Handler, not context
 	if cfg != nil && (cfg.BasePath != "" || cfg.DataPath != "") {
-		h.SetPaths(cfg.BasePath, cfg.DataPath)
+		h.MetadataAdapter().SetBasePath(cfg.BasePath)
+		h.MetadataAdapter().SetDataPath(cfg.DataPath)
+		h.DataAdapter().SetDataPath(cfg.DataPath)
+	}
+
+	// Set database encryption keys if provided
+	if opts.BaseDBKey != "" {
+		h.MetadataAdapter().SetBaseKey(opts.BaseDBKey)
+	}
+	if opts.DataDBKey != "" {
+		h.MetadataAdapter().SetDataKey(opts.DataDBKey)
 	}
 
 	// Check if mount point exists

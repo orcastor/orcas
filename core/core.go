@@ -94,18 +94,18 @@ type FixScrubIssuesResult struct {
 	Errors                  []string `json:"errors"`                    // 修复过程中的错误信息
 }
 
-type Options struct{}
-
 type Handler interface {
 	// 传入underlying，返回当前的，构成链式调用
 	New(h Handler) Handler
 	Close()
 
-	SetOptions(opt Options)
 	// 设置自定义的存储适配器
 	SetAdapter(ma MetadataAdapter, da DataAdapter)
-	// 设置路径：basePath 用于主数据库和bucket数据库，dataPath 用于数据文件存储
-	SetPaths(basePath, dataPath string)
+	SetAccessCtrlMgr(acm AccessCtrlMgr)
+
+	MetadataAdapter() MetadataAdapter
+	DataAdapter() DataAdapter
+	AccessCtrlMgr() AccessCtrlMgr
 
 	// 登录用户
 	Login(c Ctx, usr, pwd string) (Ctx, *UserInfo, []*BucketInfo, error)
@@ -194,10 +194,12 @@ type LocalHandler struct {
 	ma  MetadataAdapter
 	da  DataAdapter
 	acm AccessCtrlMgr
-	opt Options
 	// Paths for database and data storage
 	basePath string // Path for main database and bucket databases
 	dataPath string // Path for data file storage
+	// Database encryption keys
+	baseDBKey string // Encryption key for main database (BASE path)
+	dataDBKey string // Encryption key for bucket databases (DATA path)
 }
 
 // NewLocalHandler creates a new LocalHandler
@@ -209,17 +211,24 @@ func NewLocalHandler(basePath, dataPath string) Handler {
 		DefaultDataMetadataAdapter: &DefaultDataMetadataAdapter{},
 	}
 	// Set paths in metadata adapter
+	dma.DefaultBaseMetadataAdapter.SetBasePath(basePath)
+	dma.DefaultDataMetadataAdapter.SetDataPath(dataPath)
+	dda := &DefaultDataAdapter{}
+	dda.SetDataPath(dataPath)
+	lh := &LocalHandler{
+		ma:        dma,
+		da:        dda,
+		acm:       &DefaultAccessCtrlMgr{ma: dma},
+		basePath:  basePath,
+		dataPath:  dataPath,
+		baseDBKey: "",
+		dataDBKey: "",
+	}
+	// Set paths in adapters
 	dma.DefaultBaseMetadataAdapter.SetPath(basePath)
 	dma.DefaultDataMetadataAdapter.SetPath(dataPath)
-	dda := &DefaultDataAdapter{}
-	dda.SetPath(dataPath)
-	return &LocalHandler{
-		ma:       dma,
-		da:       dda,
-		acm:      &DefaultAccessCtrlMgr{ma: dma},
-		basePath: basePath,
-		dataPath: dataPath,
-	}
+	dda.SetDataPath(dataPath)
+	return lh
 }
 
 // NewNoAuthHandler creates a Handler that bypasses all authentication and permission checks
@@ -239,14 +248,21 @@ func NewNoAuthHandler(dataPath string) Handler {
 	dma.DefaultBaseMetadataAdapter.SetPath(basePath)
 	dma.DefaultDataMetadataAdapter.SetPath(dataPath)
 	dda := &DefaultDataAdapter{}
-	dda.SetPath(dataPath)
-	return &LocalHandler{
-		ma:       dma,
-		da:       dda,
-		acm:      &NoAuthAccessCtrlMgr{},
-		basePath: basePath,
-		dataPath: dataPath,
+	dda.SetDataPath(dataPath)
+	lh := &LocalHandler{
+		ma:        dma,
+		da:        dda,
+		acm:       &NoAuthAccessCtrlMgr{},
+		basePath:  basePath,
+		dataPath:  dataPath,
+		baseDBKey: "",
+		dataDBKey: "",
 	}
+	// Set paths in adapters
+	dma.DefaultBaseMetadataAdapter.SetPath(basePath)
+	dma.DefaultDataMetadataAdapter.SetPath(dataPath)
+	dda.SetDataPath(dataPath)
+	return lh
 }
 
 // New returns current handler, forming a chain with underlying handler
@@ -260,32 +276,46 @@ func (lh *LocalHandler) Close() {
 	lh.ma.Close()
 }
 
-func (lh *LocalHandler) SetOptions(opt Options) {
-	lh.da.SetOptions(opt)
-	lh.opt = opt
-}
-
 func (lh *LocalHandler) SetAdapter(ma MetadataAdapter, da DataAdapter) {
 	lh.ma = ma
 	lh.da = da
 	lh.acm.SetAdapter(ma)
-}
 
-// SetPaths sets the base path and data path for the handler
-// basePath: path for main database and bucket databases
-// dataPath: path for data file storage
-func (lh *LocalHandler) SetPaths(basePath, dataPath string) {
-	lh.basePath = basePath
-	lh.dataPath = dataPath
-	// Also set paths in metadata adapter
-	if dma, ok := lh.ma.(*DefaultMetadataAdapter); ok {
-		dma.DefaultBaseMetadataAdapter.SetPath(basePath)
-		dma.DefaultDataMetadataAdapter.SetPath(dataPath)
+	// Set paths and keys in the new adapters if they support it
+	// This ensures the adapters use the correct paths and keys from handler
+	if dma, ok := ma.(*DefaultMetadataAdapter); ok {
+		// Set paths
+		dma.DefaultBaseMetadataAdapter.SetBasePath(lh.basePath)
+		dma.DefaultDataMetadataAdapter.SetDataPath(lh.dataPath)
+		// Set database keys (if they were previously set in handler)
+		// Note: Keys are stored in adapters, so we preserve them when switching adapters
+		if lh.baseDBKey != "" {
+			dma.DefaultBaseMetadataAdapter.SetBaseKey(lh.baseDBKey)
+		}
+		if lh.dataDBKey != "" {
+			dma.DefaultDataMetadataAdapter.SetDataKey(lh.dataDBKey)
+		}
 	}
 	// Also set data path in data adapter
-	if dda, ok := lh.da.(*DefaultDataAdapter); ok {
-		dda.SetPath(dataPath)
+	if dda, ok := da.(*DefaultDataAdapter); ok {
+		dda.SetDataPath(lh.dataPath)
 	}
+}
+
+func (lh *LocalHandler) SetAccessCtrlMgr(acm AccessCtrlMgr) {
+	lh.acm = acm
+}
+
+func (lh *LocalHandler) MetadataAdapter() MetadataAdapter {
+	return lh.ma
+}
+
+func (lh *LocalHandler) DataAdapter() DataAdapter {
+	return lh.da
+}
+
+func (lh *LocalHandler) AccessCtrlMgr() AccessCtrlMgr {
+	return lh.acm
 }
 
 // GetDataAdapter returns the DataAdapter instance
@@ -1065,10 +1095,10 @@ func NewLocalAdmin(basePath, dataPath string) Admin {
 		DefaultDataMetadataAdapter: &DefaultDataMetadataAdapter{},
 	}
 	// Set paths
-	dma.DefaultBaseMetadataAdapter.SetPath(basePath)
-	dma.DefaultDataMetadataAdapter.SetPath(dataPath)
+	dma.DefaultBaseMetadataAdapter.SetBasePath(basePath)
+	dma.DefaultDataMetadataAdapter.SetDataPath(dataPath)
 	dda := &DefaultDataAdapter{}
-	dda.SetPath(dataPath)
+	dda.SetDataPath(dataPath)
 	return &LocalAdmin{
 		ma:  dma,
 		da:  dda,
@@ -1086,9 +1116,9 @@ func NewNoAuthAdmin(dataPath string) Admin {
 		DefaultBaseMetadataAdapter: &DefaultBaseMetadataAdapter{},
 		DefaultDataMetadataAdapter: &DefaultDataMetadataAdapter{},
 	}
-	dma.DefaultDataMetadataAdapter.SetPath(dataPath)
+	dma.DefaultDataMetadataAdapter.SetDataPath(dataPath)
 	dda := &DefaultDataAdapter{}
-	dda.SetPath(dataPath)
+	dda.SetDataPath(dataPath)
 	return &LocalAdmin{
 		ma:  dma,
 		da:  dda,
@@ -1103,9 +1133,6 @@ func NewAdminWithAccessCtrl(acm AccessCtrlMgr) Admin {
 		DefaultBaseMetadataAdapter: &DefaultBaseMetadataAdapter{},
 		DefaultDataMetadataAdapter: &DefaultDataMetadataAdapter{},
 	}
-	// Set default paths to current directory
-	dma.DefaultBaseMetadataAdapter.SetPath(".")
-	dma.DefaultDataMetadataAdapter.SetPath(".")
 	if acm == nil {
 		acm = &DefaultAccessCtrlMgr{ma: dma}
 	}
@@ -1121,14 +1148,10 @@ func NewAdminWithAccessCtrl(acm AccessCtrlMgr) Admin {
 // This provides maximum flexibility for testing or custom implementations
 func NewAdminWithAdapters(ma MetadataAdapter, da DataAdapter, acm AccessCtrlMgr) Admin {
 	if ma == nil {
-		dma := &DefaultMetadataAdapter{
+		ma = &DefaultMetadataAdapter{
 			DefaultBaseMetadataAdapter: &DefaultBaseMetadataAdapter{},
 			DefaultDataMetadataAdapter: &DefaultDataMetadataAdapter{},
 		}
-		// Set default paths to current directory
-		dma.DefaultBaseMetadataAdapter.SetPath(".")
-		dma.DefaultDataMetadataAdapter.SetPath(".")
-		ma = dma
 	}
 	if da == nil {
 		da = &DefaultDataAdapter{}

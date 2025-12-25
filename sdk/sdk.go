@@ -72,7 +72,6 @@ func (osi *OrcasSDKImpl) Login(cfg core.Config) (core.Ctx, *core.UserInfo, []*co
 	if cfg.PkgThres <= 0 {
 		cfg.PkgThres = 1000
 	}
-	osi.h.SetOptions(core.Options{})
 	osi.bl = strings.Split(cfg.DontSync, ";")
 	if cfg.WorkersN < 16 {
 		cfg.WorkersN = 16

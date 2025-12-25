@@ -105,11 +105,11 @@ cd /Users/orca/Documents/GitHub/orcas
 # 确保 CGO 已启用
 export CGO_ENABLED=1
 
-# 使用 sqlcipher 标签构建
-go build -tags sqlcipher ./cmd
+# 使用 sqlcipher 标签构建（带 strip 优化）
+go build -tags sqlcipher -ldflags="-s -w" -o orcas-server ./cmd
 
-# 或者构建特定命令
-go build -tags sqlcipher -o server ./cmd
+# 进一步 strip 二进制文件（可选）
+strip orcas-server
 ```
 
 ### 6. 使用系统库（替代方案）
