@@ -69,12 +69,11 @@ fi
 
 # 配置
 echo -e "\n${YELLOW}配置 SQLCipher...${NC}"
-# SQLCipher 使用 CFLAGS 设置临时存储，而不是 --enable-tempstore
-CFLAGS="-DSQLITE_HAS_CODEC -DSQLITE_TEMP_STORE=2 -I${OPENSSL_PREFIX}/include" \
-LDFLAGS="-L${OPENSSL_PREFIX}/lib" \
+# SQLCipher 新版本不再支持 --with-crypto-lib，使用 CFLAGS 和 LDFLAGS 指定 OpenSSL
+CFLAGS="-DSQLITE_HAS_CODEC -DSQLITE_TEMP_STORE=2 -DSQLCIPHER_CRYPTO_OPENSSL -I${OPENSSL_PREFIX}/include" \
+LDFLAGS="-L${OPENSSL_PREFIX}/lib -lcrypto" \
 ./configure \
   --disable-tcl \
-  --with-crypto-lib=openssl \
   --prefix="$INSTALL_PREFIX"
 
 # 编译

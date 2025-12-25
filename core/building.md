@@ -44,12 +44,11 @@ fi
 OPENSSL_PREFIX=$(brew --prefix openssl@3)
 
 # 配置 SQLCipher
-CFLAGS="-DSQLITE_HAS_CODEC -I${OPENSSL_PREFIX}/include" \
-LDFLAGS="-L${OPENSSL_PREFIX}/lib" \
+# SQLCipher 新版本不再支持 --with-crypto-lib 和 --enable-tempstore
+CFLAGS="-DSQLITE_HAS_CODEC -DSQLITE_TEMP_STORE=2 -DSQLCIPHER_CRYPTO_OPENSSL -I${OPENSSL_PREFIX}/include" \
+LDFLAGS="-L${OPENSSL_PREFIX}/lib -lcrypto" \
 ./configure \
-  --enable-tempstore=yes \
   --disable-tcl \
-  --with-crypto-lib=openssl \
   --prefix=$HOME/sqlcipher-local
 
 # 编译
@@ -153,12 +152,11 @@ git clone https://github.com/sqlcipher/sqlcipher.git
 cd sqlcipher
 
 # Adjust --prefix as you like
-# SQLCipher 使用 CFLAGS 设置临时存储，而不是 --enable-tempstore
-CFLAGS="-DSQLITE_HAS_CODEC -DSQLITE_TEMP_STORE=2" \
-LDFLAGS="-L/usr/lib/x86_64-linux-gnu" \
+# SQLCipher 新版本不再支持 --with-crypto-lib，使用 CFLAGS 和 LDFLAGS 指定 OpenSSL
+CFLAGS="-DSQLITE_HAS_CODEC -DSQLITE_TEMP_STORE=2 -DSQLCIPHER_CRYPTO_OPENSSL" \
+LDFLAGS="-L/usr/lib/x86_64-linux-gnu -lcrypto" \
 ./configure \
   --disable-tcl \
-  --with-crypto-lib=openssl \
   --prefix=$HOME/sqlcipher-local
 
 make -j$(nproc)
