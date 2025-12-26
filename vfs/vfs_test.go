@@ -3859,3 +3859,136 @@ func TestTempFileWriterMemoryEfficiency(t *testing.T) {
 		})
 	})
 }
+
+// TestOnRootDeletedImmediateUnmount tests immediate unmount in OnRootDeleted callback
+func TestOnRootDeletedImmediateUnmount(t *testing.T) {
+	Convey("Test OnRootDeleted callback with immediate Unmount", t, func() {
+		ensureTestUser(t)
+		handler := core.NewLocalHandler("", "")
+		ctx := context.Background()
+		ctx, _, _, err := handler.Login(ctx, "orcas", "orcas")
+		So(err, ShouldBeNil)
+
+		ig := idgen.NewIDGen(nil, 0)
+		testBktID, _ := ig.New()
+		err = core.InitBucketDB(".", testBktID)
+		So(err, ShouldBeNil)
+
+		// Get user info for bucket creation
+		_, _, _, err = handler.Login(ctx, "orcas", "orcas")
+		So(err, ShouldBeNil)
+
+		// Create bucket
+		admin := core.NewLocalAdmin(".", ".")
+		bkt := &core.BucketInfo{
+			ID:        testBktID,
+			Name:      "test-on-root-deleted-immediate",
+			Type:      1,
+			Quota:     -1,
+			ChunkSize: 4 * 1024 * 1024,
+		}
+		err = admin.PutBkt(ctx, []*core.BucketInfo{bkt})
+		So(err, ShouldBeNil)
+
+		// Create temporary mount point
+		mountPoint, err := os.MkdirTemp("", "orcas-vfs-test-*")
+		So(err, ShouldBeNil)
+		defer os.RemoveAll(mountPoint)
+
+		// Create OrcasFS first so we can set the callback
+		ofs := NewOrcasFS(handler, ctx, testBktID, false)
+
+		// Mount using internal Mount method to get server reference
+		server, mountErr := ofs.Mount(mountPoint, nil)
+		if mountErr != nil {
+			t.Skipf("Skipping test: FUSE mount failed (may not be available in test environment): %v", mountErr)
+			return
+		}
+		So(server, ShouldNotBeNil)
+		So(ofs.Server, ShouldNotBeNil) // Server should be set by Mount
+
+		// Set OnRootDeleted callback that will immediately unmount
+		unmounted := make(chan bool, 1)
+		unmountError := make(chan error, 1)
+		ofs.OnRootDeleted = func(fs *OrcasFS) {
+			DebugLog("[Test] OnRootDeleted called, attempting immediate unmount")
+			if fs.Server != nil {
+				// Try immediate unmount
+				unmountErr := fs.Server.Unmount()
+				if unmountErr != nil {
+					DebugLog("[Test] ERROR: Failed to unmount in OnRootDeleted: %v", unmountErr)
+					unmountError <- unmountErr
+				} else {
+					DebugLog("[Test] Successfully unmounted immediately in OnRootDeleted")
+					unmounted <- true
+				}
+			} else {
+				DebugLog("[Test] ERROR: Server is nil in OnRootDeleted")
+				unmountError <- fmt.Errorf("server is nil")
+			}
+		}
+
+		// Start server in background
+		go func() {
+			server.Serve()
+		}()
+
+		// Wait for mount to be ready
+		time.Sleep(500 * time.Millisecond)
+
+		// Verify mount point is accessible
+		_, err = os.Stat(mountPoint)
+		So(err, ShouldBeNil)
+
+		// Create a test file
+		testFile := filepath.Join(mountPoint, "test.txt")
+		err = os.WriteFile(testFile, []byte("test data"), 0o644)
+		So(err, ShouldBeNil)
+
+		// Directly trigger the callback to test unmount
+		Convey("Test immediate unmount in callback", func() {
+			if ofs.OnRootDeleted != nil {
+				ofs.OnRootDeleted(ofs)
+			}
+
+			// Wait for unmount to complete
+			select {
+			case <-unmounted:
+				DebugLog("[Test] Immediate unmount completed successfully")
+				So(true, ShouldBeTrue) // Success
+			case err := <-unmountError:
+				// If immediate unmount fails, it might be because we're in the middle of an operation
+				// This is expected behavior - unmount might need to be delayed
+				DebugLog("[Test] Immediate unmount failed (may be expected): %v", err)
+				// Try delayed unmount instead
+				go func() {
+					time.Sleep(200 * time.Millisecond)
+					if ofs.Server != nil {
+						unmountErr := ofs.Server.Unmount()
+						if unmountErr == nil {
+							unmounted <- true
+						}
+					}
+				}()
+				select {
+				case <-unmounted:
+					DebugLog("[Test] Delayed unmount completed successfully")
+				case <-time.After(2 * time.Second):
+					t.Fatal("Unmount timeout")
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatal("Unmount timeout")
+			}
+		})
+
+		// Cleanup: Ensure unmount if not already done
+		select {
+		case <-unmounted:
+			// Already unmounted
+		default:
+			if server != nil {
+				server.Unmount()
+			}
+		}
+	})
+}

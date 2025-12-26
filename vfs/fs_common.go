@@ -71,6 +71,18 @@ type OrcasFS struct {
 	raRegistry sync.Map // map[fileID]*RandomAccessor
 	// Mutex to protect RandomAccessor creation for .tmp files during concurrent writes
 	raCreateMu sync.Mutex // Protects creation of RandomAccessor for same fileID
+	// OnRootDeleted is called when the root node is deleted (entire bucket is deleted)
+	// This callback can be used to perform cleanup operations
+	// Note: If you need to unmount in the callback, use fs.Server.Unmount()
+	// The server field is set automatically when Mount() is called
+	OnRootDeleted func(fs *OrcasFS)
+	// Server is the FUSE server instance (set automatically by Mount method)
+	// Can be used in OnRootDeleted callback to unmount the filesystem
+	Server interface {
+		Unmount() error
+		Wait()
+		Serve()
+	}
 }
 
 // NewOrcasFS creates a new ORCAS filesystem
@@ -246,6 +258,8 @@ func (fs *OrcasFS) getBucketConfig() *core.BucketInfo {
 
 // checkKey checks if KEY is required and present in OrcasFS.Config.EndecKey
 // Returns EPERM if requireKey is true but KEY is not provided
+// Note: This should not happen if mount-time validation is working correctly,
+// but we keep this check as a safety measure
 func (fs *OrcasFS) checkKey() syscall.Errno {
 	if !fs.requireKey {
 		return 0 // Key not required
@@ -255,6 +269,8 @@ func (fs *OrcasFS) checkKey() syscall.Errno {
 		return 0 // Key is present
 	}
 	// Key is required but not provided
+	// This should have been caught at mount time, but return EPERM as fallback
+	DebugLog("[VFS checkKey] ERROR: RequireKey is enabled but EndecKey is not provided")
 	return syscall.EPERM
 }
 

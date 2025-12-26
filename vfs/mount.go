@@ -6,6 +6,7 @@ package vfs
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"syscall"
@@ -112,6 +113,20 @@ func Mount(h core.Handler, c core.Ctx, bktID int64, opts *MountOptions) (*fuse.S
 		return nil, fmt.Errorf("mount point is not a directory: %s", mountPoint)
 	}
 
+	// Check if RequireKey is set but EndecKey is not provided
+	if opts.RequireKey {
+		var endecKey string
+		if cfg != nil {
+			endecKey = cfg.EndecKey
+		}
+		if opts.EndecKey != "" {
+			endecKey = opts.EndecKey
+		}
+		if endecKey == "" {
+			return nil, fmt.Errorf("RequireKey is enabled but EndecKey is not provided. Please provide encryption key via Config.EndecKey or MountOptions.EndecKey")
+		}
+	}
+
 	// Create filesystem with full configuration
 	var ofs *OrcasFS
 	if cfg != nil {
@@ -186,12 +201,53 @@ func Serve(server *fuse.Server, foreground bool) error {
 	}
 }
 
-// Unmount unmounts filesystem
-// Note: This function requires a mounted server, or use system command to unmount
-// If using server.Unmount(), please call server's method directly
+// Unmount unmounts filesystem using system command
+// This function attempts to unmount the filesystem at the given mount point
+// using fusermount -u (preferred) or umount as fallback
 func Unmount(mountPoint string) error {
-	// Note: On Unix systems, can use system command to unmount
-	// For example: fusermount -u /mnt/point or umount /mnt/point
-	// Here returns error, prompting user to use server.Unmount() or system command
-	return fmt.Errorf("please use server.Unmount() or system command 'fusermount -u %s' to unmount", mountPoint)
+	// Resolve absolute path
+	absMountPoint, err := filepath.Abs(mountPoint)
+	if err != nil {
+		return fmt.Errorf("invalid mount point: %w", err)
+	}
+
+	// Check if mount point exists
+	info, err := os.Stat(absMountPoint)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("mount point does not exist: %s", absMountPoint)
+		}
+		return fmt.Errorf("failed to stat mount point: %w", err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("mount point is not a directory: %s", absMountPoint)
+	}
+
+	// Try fusermount -u first (preferred for FUSE filesystems)
+	// fusermount3 is the newer version, but fusermount should work too
+	cmd := exec.Command("fusermount", "-u", absMountPoint)
+	fusermountErr := cmd.Run()
+	if fusermountErr == nil {
+		DebugLog("[VFS Unmount] Successfully unmounted using fusermount: %s", absMountPoint)
+		return nil
+	}
+
+	// If fusermount fails, try fusermount3 (newer version)
+	cmd = exec.Command("fusermount3", "-u", absMountPoint)
+	fusermount3Err := cmd.Run()
+	if fusermount3Err == nil {
+		DebugLog("[VFS Unmount] Successfully unmounted using fusermount3: %s", absMountPoint)
+		return nil
+	}
+
+	// As fallback, try umount (may require root privileges)
+	cmd = exec.Command("umount", absMountPoint)
+	umountErr := cmd.Run()
+	if umountErr == nil {
+		DebugLog("[VFS Unmount] Successfully unmounted using umount: %s", absMountPoint)
+		return nil
+	}
+
+	// All methods failed
+	return fmt.Errorf("failed to unmount %s: tried fusermount (error: %v), fusermount3 (error: %v), and umount (error: %v), all failed. You may need to use server.Unmount() instead", absMountPoint, fusermountErr, fusermount3Err, umountErr)
 }

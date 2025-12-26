@@ -69,6 +69,9 @@ func (ofs *OrcasFS) Mount(mountPoint string, opts *fuse.MountOptions) (*fuse.Ser
 		return nil, fmt.Errorf("failed to mount: %w", err)
 	}
 
+	// Store server reference in OrcasFS for use in OnRootDeleted callback
+	ofs.Server = server
+
 	return server, nil
 }
 
@@ -1547,7 +1550,11 @@ func (n *OrcasNode) Open(ctx context.Context, flags uint32) (fh fs.FileHandle, f
 
 	obj, err := n.getObj()
 	if err != nil {
-		DebugLog("[VFS Open] ERROR: Failed to get object: objID=%d, error=%v", n.objID, err)
+		DebugLog("[VFS Open] ERROR: Failed to get object: objID=%d, error=%v, flags=0x%x", n.objID, err, flags)
+		// If O_CREAT is set and file doesn't exist, return ENOENT
+		// The caller should use Create() instead, but some applications may try Open with O_CREAT
+		// In FUSE, Open() is called after Create() or Lookup(), so if we get here with ENOENT,
+		// it means the file doesn't exist and Create() should have been called first
 		return nil, 0, syscall.ENOENT
 	}
 
@@ -1846,11 +1853,6 @@ func (n *OrcasNode) Unlink(ctx context.Context, name string) syscall.Errno {
 
 // Rmdir deletes a directory
 func (n *OrcasNode) Rmdir(ctx context.Context, name string) syscall.Errno {
-	// Check if KEY is required
-	if errno := n.fs.checkKey(); errno != 0 {
-		return errno
-	}
-
 	obj, err := n.getObj()
 	if err != nil {
 		return syscall.ENOENT
@@ -1858,6 +1860,25 @@ func (n *OrcasNode) Rmdir(ctx context.Context, name string) syscall.Errno {
 
 	if obj.Type != core.OBJ_TYPE_DIR {
 		return syscall.ENOTDIR
+	}
+
+	// Check if trying to remove root node
+	// Root node's objID is bucketID
+	if n.isRoot {
+		DebugLog("[VFS Rmdir] Attempted to remove root node: objID=%d, name=%s", obj.ID, name)
+
+		// Call OnRootDeleted callback if set (root node deletion means entire bucket is deleted)
+		if n.fs.OnRootDeleted != nil {
+			DebugLog("[VFS Rmdir] Calling OnRootDeleted callback due to root node deletion")
+			n.fs.OnRootDeleted(n.fs)
+		}
+		// Allow root node removal, return success
+		return 0
+	}
+
+	// Check if KEY is required (only for non-root nodes)
+	if errno := n.fs.checkKey(); errno != 0 {
+		return errno
 	}
 
 	// Find child directory
@@ -3042,8 +3063,11 @@ func (n *OrcasNode) getDataReader(offset int64) (dataReader, syscall.Errno) {
 // Write writes file content
 // Optimization: reduce lock hold time, ra.Write itself is thread-safe
 func (n *OrcasNode) Write(ctx context.Context, data []byte, off int64) (written uint32, errno syscall.Errno) {
+	DebugLog("[VFS Write] Write called: objID=%d, offset=%d, size=%d", n.objID, off, len(data))
+
 	// Check if KEY is required
 	if errno := n.fs.checkKey(); errno != 0 {
+		DebugLog("[VFS Write] ERROR: checkKey failed: objID=%d, errno=%d (EPERM=%d)", n.objID, errno, syscall.EPERM)
 		return 0, errno
 	}
 
@@ -3220,6 +3244,12 @@ func (n *OrcasNode) Setattr(ctx context.Context, in *fuse.SetAttrIn, out *fuse.A
 
 // truncateFile truncates file to specified size
 func (n *OrcasNode) truncateFile(newSize int64) syscall.Errno {
+	// Check if KEY is required
+	if errno := n.fs.checkKey(); errno != 0 {
+		DebugLog("[VFS truncateFile] ERROR: checkKey failed: objID=%d, errno=%d (EPERM=%d)", n.objID, errno, syscall.EPERM)
+		return errno
+	}
+
 	obj, err := n.getObj()
 	if err != nil {
 		return syscall.ENOENT
