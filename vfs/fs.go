@@ -1551,8 +1551,8 @@ func (n *OrcasNode) Open(ctx context.Context, flags uint32) (fh fs.FileHandle, f
 		return nil, 0, syscall.ENOENT
 	}
 
-	DebugLog("[VFS Open] Object info: objID=%d, type=%d (FILE=%d, DIR=%d), name=%s, PID=%d",
-		obj.ID, obj.Type, core.OBJ_TYPE_FILE, core.OBJ_TYPE_DIR, obj.Name, obj.PID)
+	DebugLog("[VFS Open] Object info: objID=%d, type=%d (FILE=%d, DIR=%d), name=%s, PID=%d, flags=0x%x",
+		obj.ID, obj.Type, core.OBJ_TYPE_FILE, core.OBJ_TYPE_DIR, obj.Name, obj.PID, flags)
 
 	if obj.Type != core.OBJ_TYPE_FILE {
 		DebugLog("[VFS Open] ERROR: Object is not a file (type=%d, expected FILE=%d): objID=%d, name=%s, PID=%d",
@@ -1582,12 +1582,28 @@ func (n *OrcasNode) Open(ctx context.Context, flags uint32) (fh fs.FileHandle, f
 		return nil, 0, syscall.EISDIR
 	}
 
+	// Check if O_TRUNC is set - if so, truncate file to size 0
+	// Note: FUSE will also call Setattr after Open, but we handle it here proactively
+	// to ensure the file is ready for writing immediately
+	if flags&syscall.O_TRUNC != 0 {
+		DebugLog("[VFS Open] O_TRUNC flag set, truncating file: fileID=%d", obj.ID)
+		if errno := n.truncateFile(0); errno != 0 {
+			DebugLog("[VFS Open] ERROR: Failed to truncate file: fileID=%d, errno=%d", obj.ID, errno)
+			return nil, 0, errno
+		}
+		// Update object size in cache
+		obj.Size = 0
+		n.obj.Store(obj)
+		// Invalidate cache
+		n.invalidateObj()
+	}
+
 	// RandomAccessor is now created lazily on the first write.
 	// Even when the file is opened RDWR, we defer creation so that pure reads
 	// still go directly to the underlying data without touching RA state.
 
 	// Increment reference count when file is opened
-	DebugLog("[VFS Open] Opened file: fileID=%d", obj.ID)
+	DebugLog("[VFS Open] Opened file: fileID=%d, flags=0x%x", obj.ID, flags)
 
 	// Return the node itself as FileHandle
 	// This allows Write/Read operations to work on the file
