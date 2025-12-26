@@ -176,7 +176,6 @@ func TestCronJobConfig(t *testing.T) {
 			os.Unsetenv("ORCAS_CRON_DEFRAGMENT_MAX_SIZE")
 			os.Unsetenv("ORCAS_CRON_DEFRAGMENT_ACCESS_WINDOW")
 		})
-
 	})
 }
 

@@ -1591,9 +1591,12 @@ func (n *OrcasNode) Open(ctx context.Context, flags uint32) (fh fs.FileHandle, f
 			DebugLog("[VFS Open] ERROR: Failed to truncate file: fileID=%d, errno=%d", obj.ID, errno)
 			return nil, 0, errno
 		}
-		// Update object size in cache
+		// Update object size in both local and global cache
 		obj.Size = 0
 		n.obj.Store(obj)
+		// Also update global cache to ensure getObj() returns correct size
+		cacheKey := obj.ID
+		fileObjCache.Put(cacheKey, obj)
 		// Invalidate cache
 		n.invalidateObj()
 	}
