@@ -409,9 +409,9 @@ func (n *OrcasNode) Getattr(ctx context.Context, f fs.FileHandle, out *fuse.Attr
 		return syscall.ENOENT
 	}
 
-	// For root directory, use 755 permissions
+	// For root directory, use 777 permissions
 	if n.isRoot && obj.Type == core.OBJ_TYPE_DIR {
-		out.Mode = syscall.S_IFDIR | 0o755
+		out.Mode = syscall.S_IFDIR | 0o777
 	} else {
 		out.Mode = getModeFromObj(obj)
 	}
