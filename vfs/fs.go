@@ -20,6 +20,13 @@ import (
 	"github.com/orcastor/orcas/core"
 )
 
+// O_LARGEFILE flag for large file support (files > 2GB)
+// On 64-bit systems, this is typically 0 or not needed, but we support it for compatibility
+// On 32-bit Linux systems, this is typically 0x8000
+// Note: Using ALL_CAPS for system constant is acceptable
+//nolint:revive // O_LARGEFILE is a system constant, ALL_CAPS is appropriate
+const O_LARGEFILE = 0x8000
+
 // cachedDirStream wraps DirStream entries for caching
 type cachedDirStream struct {
 	entries []fuse.DirEntry
@@ -907,7 +914,14 @@ func (n *OrcasNode) Create(ctx context.Context, name string, flags uint32, mode 
 		return nil, nil, 0, syscall.ENOTDIR
 	}
 
-	DebugLog("[VFS Create] Creating file: name=%s, parentID=%d, flags=0x%x, mode=0%o", name, obj.ID, flags, mode)
+	// Check for O_LARGEFILE flag (support for files > 2GB)
+	hasLargeFileFlag := (flags & O_LARGEFILE) != 0
+	if hasLargeFileFlag {
+		DebugLog("[VFS Create] O_LARGEFILE flag set: name=%s, parentID=%d, flags=0x%x", name, obj.ID, flags)
+	}
+	
+	DebugLog("[VFS Create] Creating file: name=%s, parentID=%d, flags=0x%x (O_LARGEFILE=0x%x), mode=0%o", 
+		name, obj.ID, flags, O_LARGEFILE, mode)
 
 	// Check if file already exists
 	// First check cache for directory listing to see if there's a directory with the same name
@@ -1629,11 +1643,30 @@ func (n *OrcasNode) Open(ctx context.Context, flags uint32) (fh fs.FileHandle, f
 	// Even when the file is opened RDWR, we defer creation so that pure reads
 	// still go directly to the underlying data without touching RA state.
 
+	// Check for O_LARGEFILE flag (support for files > 2GB)
+	hasLargeFileFlag := (flags & O_LARGEFILE) != 0
+	if hasLargeFileFlag {
+		DebugLog("[VFS Open] O_LARGEFILE flag set: fileID=%d, flags=0x%x", obj.ID, flags)
+	}
+
 	// Increment reference count when file is opened
-	DebugLog("[VFS Open] Opened file: fileID=%d, flags=0x%x", obj.ID, flags)
+	DebugLog("[VFS Open] Opened file: fileID=%d, flags=0x%x (O_WRONLY=0x%x, O_RDWR=0x%x, O_RDONLY=0x%x, O_LARGEFILE=0x%x)",
+		obj.ID, flags, syscall.O_WRONLY, syscall.O_RDWR, syscall.O_RDONLY, O_LARGEFILE)
+
+	// Check if file is opened for writing
+	isWriteMode := (flags&syscall.O_WRONLY != 0) || (flags&syscall.O_RDWR != 0)
+	DebugLog("[VFS Open] File open mode: fileID=%d, isWriteMode=%v, hasLargeFileFlag=%v, flags=0x%x", 
+		obj.ID, isWriteMode, hasLargeFileFlag, flags)
+	
+	// Note: O_LARGEFILE is supported - we already support large files (>2GB) by default
+	// This flag is mainly for compatibility with 32-bit applications
 
 	// Return the node itself as FileHandle
 	// This allows Write/Read operations to work on the file
+	// Note: fuseFlags=0 means default behavior (no special flags)
+	// FUSE will call Write/Read methods on the FileHandle if they are implemented
+	DebugLog("[VFS Open] Returning FileHandle: fileID=%d, fuseFlags=0x%x, FileHandle type=%T, implements FileWriter=%v",
+		obj.ID, 0, n, true)
 	return n, 0, 0
 }
 
