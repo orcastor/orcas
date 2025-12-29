@@ -3455,17 +3455,27 @@ func (ra *RandomAccessor) flushInternal(force bool) (int64, error) {
 			DebugLog("[VFS RandomAccessor Flush] WARNING: Failed to update file object cache after flush (writing version): fileID=%d, error=%v", ra.fileID, err)
 		}
 
+		// For sparse files, writing version returns 0 (no new version created)
+		// This is acceptable for sparse files as they use writing version mechanism
+		// However, we should still return 0 to indicate no new version was created
 		return newVersionID, nil
 	}
 
-	// For non-sparse files, use SDK path which handles compression/encryption properly
-	DebugLog("[VFS RandomAccessor Flush] Non-sparse file, using SDK path: fileID=%d, fileObj.DataID=%d, fileObj.Size=%d, mergedOps count=%d", ra.fileID, fileObj.DataID, fileObj.Size, len(mergedOps))
+	// For non-sparse files, ALWAYS use SDK path which creates a new version (versionID > 0)
+	// Non-sparse files must have versionID, do NOT use writing version
+	DebugLog("[VFS RandomAccessor Flush] Non-sparse file, using SDK path (will create versionID): fileID=%d, fileObj.DataID=%d, fileObj.Size=%d, mergedOps count=%d", ra.fileID, fileObj.DataID, fileObj.Size, len(mergedOps))
 	for i, op := range mergedOps {
 		DebugLog("[VFS RandomAccessor Flush] MergedOp[%d]: offset=%d, size=%d", i, op.Offset, len(op.Data))
 	}
 	versionID, err := ra.applyRandomWritesWithSDK(fileObj, mergedOps)
 	if err != nil {
 		return 0, err
+	}
+	// For non-sparse files, versionID must be > 0 (a new version must be created)
+	// Non-sparse files should NOT use writing version, must create a new version
+	if versionID <= 0 {
+		DebugLog("[VFS RandomAccessor Flush] ERROR: Non-sparse file must have versionID > 0, but got versionID=%d: fileID=%d", versionID, ra.fileID)
+		return 0, fmt.Errorf("non-sparse file must have versionID > 0, but got versionID=%d", versionID)
 	}
 
 	// After flush completes, update file object cache with latest metadata from database

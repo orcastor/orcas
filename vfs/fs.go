@@ -4409,8 +4409,9 @@ func (n *OrcasNode) releaseImpl(ctx context.Context) syscall.Errno {
 		DebugLog("[VFS Release] Releasing file: fileID=%d (failed to get obj: %v)", fileID, err)
 	}
 
-	// For non-.tmp files, execute Flush and Close
-	versionID, err := ra.Flush()
+	// For non-.tmp files, execute ForceFlush to ensure immediate flush (no delayed flush)
+	// Release should always flush immediately for non-.tmp files, not schedule delayed flush
+	versionID, err := ra.ForceFlush()
 	if err != nil {
 		DebugLog("[VFS Release] ERROR: Failed to flush during release: fileID=%d, error=%v", fileID, err)
 		// Record error but don't prevent close
