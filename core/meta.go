@@ -540,23 +540,6 @@ func InitBucketDB(dataPath string, bktID int64, key ...string) error {
 		return fmt.Errorf("%w: create obj table: %v", ERR_EXEC_DB, err)
 	}
 
-	// Add md column to existing tables (for migration)
-	// Simply try to add the column - if it already exists, SQLite will return an error which we ignore
-	// This is simpler and more robust than checking if column exists first
-	// IMPORTANT: This migration must run AFTER CREATE TABLE IF NOT EXISTS to handle existing databases
-	_, alterErr := db.Exec(`ALTER TABLE obj ADD COLUMN md INTEGER NOT NULL DEFAULT 0`)
-	if alterErr != nil {
-		// Check if error is because column already exists (SQLite error: duplicate column name)
-		errorStr := alterErr.Error()
-		if strings.Contains(errorStr, "duplicate column") || strings.Contains(errorStr, "already exists") {
-			// Column already exists, this is fine - ignore the error
-			// This can happen if:
-			// 1. Table was created with md column (new database)
-			// 2. Migration already ran (existing database upgraded)
-			// 3. Concurrent migration (race condition)
-		}
-	}
-
 	_, err = db.Exec(`CREATE TABLE IF NOT EXISTS data (id BIGINT PRIMARY KEY NOT NULL,
 		s BIGINT NOT NULL,
 		os BIGINT NOT NULL,

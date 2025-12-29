@@ -364,7 +364,6 @@ func (n *OrcasNode) updateChildInDirCache(dirID int64, updatedChild *core.Object
 
 // Getattr gets file/directory attributes
 func (n *OrcasNode) Getattr(ctx context.Context, f fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
-	DebugLog("[VFS Getattr] Entry: objID=%d, isRoot=%v", n.objID, n.isRoot)
 	if !n.isRoot {
 		if errno := n.fs.checkKey(); errno != 0 {
 			DebugLog("[VFS Getattr] ERROR: checkKey failed: objID=%d, errno=%d", n.objID, errno)
