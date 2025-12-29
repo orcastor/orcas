@@ -267,6 +267,7 @@ func (n *OrcasNode) invalidateObj() {
 // appendChildToDirCache appends a newly created child object into the
 // cached directory listing instead of invalidating the entire cache.
 // If cache doesn't exist, creates a new cache entry with the child.
+// If child already exists, updates it with latest information (especially size for files).
 func (n *OrcasNode) appendChildToDirCache(dirID int64, child *core.ObjectInfo) {
 	if child == nil {
 		return
@@ -274,19 +275,28 @@ func (n *OrcasNode) appendChildToDirCache(dirID int64, child *core.ObjectInfo) {
 	cacheKey := n.getDirListCacheKey(dirID)
 	if cached, ok := dirListCache.Get(cacheKey); ok {
 		if children, ok := cached.([]*core.ObjectInfo); ok && children != nil {
-			// Check if child already exists
-			for _, existing := range children {
+			// Check if child already exists, and update it if found
+			found := false
+			for i, existing := range children {
 				if existing != nil && existing.ID == child.ID {
+					// Child already exists, update it with latest information
+					// This is important for files where size may have changed
+					children[i] = child
+					found = true
+					dirListCache.Put(cacheKey, children)
+					DebugLog("[VFS appendChildToDirCache] Updated existing child in cache: dirID=%d, childID=%d, size=%d", dirID, child.ID, child.Size)
 					return
 				}
 			}
-			// Append child to existing cache
-			newChildren := make([]*core.ObjectInfo, len(children)+1)
-			copy(newChildren, children)
-			newChildren[len(children)] = child
-			dirListCache.Put(cacheKey, newChildren)
-			DebugLog("[VFS appendChildToDirCache] Appended child to existing cache: dirID=%d, childID=%d", dirID, child.ID)
-			return
+			if !found {
+				// Append child to existing cache
+				newChildren := make([]*core.ObjectInfo, len(children)+1)
+				copy(newChildren, children)
+				newChildren[len(children)] = child
+				dirListCache.Put(cacheKey, newChildren)
+				DebugLog("[VFS appendChildToDirCache] Appended child to existing cache: dirID=%d, childID=%d", dirID, child.ID)
+				return
+			}
 		}
 	}
 	// Cache doesn't exist, create new cache entry with the child
@@ -474,22 +484,49 @@ func (n *OrcasNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut)
 		return nil, syscall.ENOENT
 	}
 
-	// Verify that the matched object type is correct by querying database
-	// This prevents issues where cache might have incorrect type information
+	// For file objects, always check global fileObjCache first to get latest size
+	// Directory listing cache may have stale size information
 	cacheKey := matchedChild.ID
-	if cached, ok := fileObjCache.Get(cacheKey); ok {
-		if cachedObj, ok := cached.(*core.ObjectInfo); ok && cachedObj != nil {
-			// If cached object type doesn't match, invalidate cache and fetch from database
-			if cachedObj.Type != matchedChild.Type || cachedObj.ID != matchedChild.ID {
-				DebugLog("[VFS Lookup] WARNING: Cached object type mismatch (cached type=%d, list type=%d), invalidating cache: objID=%d", cachedObj.Type, matchedChild.Type, matchedChild.ID)
-				fileObjCache.Del(cacheKey)
-				// Fetch from database to get correct type
-				objs, err := n.fs.h.Get(n.fs.c, n.fs.bktID, []int64{matchedChild.ID})
-				if err == nil && len(objs) > 0 {
-					matchedChild = objs[0]
-					// Update cache with correct type
-					fileObjCache.Put(cacheKey, matchedChild)
-					DebugLog("[VFS Lookup] Fetched from database and updated cache: objID=%d, type=%d", matchedChild.ID, matchedChild.Type)
+	if matchedChild.Type == core.OBJ_TYPE_FILE {
+		if cached, ok := fileObjCache.Get(cacheKey); ok {
+			if cachedObj, ok := cached.(*core.ObjectInfo); ok && cachedObj != nil {
+				// Verify that cached object ID matches
+				if cachedObj.ID == matchedChild.ID {
+					// Use cached object (has latest size from RandomAccessor/Release updates)
+					matchedChild = cachedObj
+					DebugLog("[VFS Lookup] Using file object from global cache (latest size): objID=%d, size=%d", matchedChild.ID, matchedChild.Size)
+				} else {
+					// Cache has incorrect ID, invalidate it
+					DebugLog("[VFS Lookup] WARNING: Cached object ID mismatch (expected %d, got %d), invalidating cache", matchedChild.ID, cachedObj.ID)
+					fileObjCache.Del(cacheKey)
+				}
+			}
+		} else {
+			// Global cache miss, fetch from database to get latest size
+			objs, err := n.fs.h.Get(n.fs.c, n.fs.bktID, []int64{matchedChild.ID})
+			if err == nil && len(objs) > 0 {
+				matchedChild = objs[0]
+				// Update cache with latest information
+				fileObjCache.Put(cacheKey, matchedChild)
+				DebugLog("[VFS Lookup] Fetched file object from database (latest size): objID=%d, size=%d", matchedChild.ID, matchedChild.Size)
+			}
+		}
+	} else {
+		// For directories, verify type matches
+		if cached, ok := fileObjCache.Get(cacheKey); ok {
+			if cachedObj, ok := cached.(*core.ObjectInfo); ok && cachedObj != nil {
+				// If cached object type doesn't match, invalidate cache and fetch from database
+				if cachedObj.Type != matchedChild.Type || cachedObj.ID != matchedChild.ID {
+					DebugLog("[VFS Lookup] WARNING: Cached object type mismatch (cached type=%d, list type=%d), invalidating cache: objID=%d", cachedObj.Type, matchedChild.Type, matchedChild.ID)
+					fileObjCache.Del(cacheKey)
+					// Fetch from database to get correct type
+					objs, err := n.fs.h.Get(n.fs.c, n.fs.bktID, []int64{matchedChild.ID})
+					if err == nil && len(objs) > 0 {
+						matchedChild = objs[0]
+						// Update cache with correct type
+						fileObjCache.Put(cacheKey, matchedChild)
+						DebugLog("[VFS Lookup] Fetched from database and updated cache: objID=%d, type=%d", matchedChild.ID, matchedChild.Type)
+					}
 				}
 			}
 		}
