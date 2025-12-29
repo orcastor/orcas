@@ -1729,6 +1729,11 @@ func (n *OrcasNode) Open(ctx context.Context, flags uint32) (fh fs.FileHandle, f
 	// This allows Write/Read operations to work on the file
 	// Note: fuseFlags=0 means default behavior (no special flags)
 	// FUSE will call Write/Read methods on the FileHandle if they are implemented
+
+	// Print file metadata after Open completes
+	DebugLog("[VFS Open] File metadata after Open: fileID=%d, name=%s, size=%d, dataID=%d, mtime=%d, mode=0%o, type=%d, pid=%d",
+		obj.ID, obj.Name, obj.Size, obj.DataID, obj.MTime, getModeFromObj(obj), obj.Type, obj.PID)
+
 	DebugLog("[VFS Open] Returning FileHandle: fileID=%d, fuseFlags=0x%x, FileHandle type=%T, implements FileWriter=%v",
 		obj.ID, 0, n, true)
 	return n, 0, 0
@@ -3336,13 +3341,30 @@ func (n *OrcasNode) flushImpl(ctx context.Context) syscall.Errno {
 		DebugLog("[VFS Flush] ERROR: Failed to flush file: fileID=%d, error=%v", fileID, err)
 		return syscall.EIO
 	}
-	// After flush, invalidate object cache
-	n.invalidateObj()
+	// After flush, get updated object from database to ensure we have latest size
+	fileID := n.objID
+	if obj != nil {
+		fileID = obj.ID
+	}
+	updatedObjs, err := n.fs.h.Get(n.fs.c, n.fs.bktID, []int64{fileID})
+	if err == nil && len(updatedObjs) > 0 {
+		updatedObj := updatedObjs[0]
 
-	// Get updated object to log final size
-	obj, err = n.getObj()
-	if err == nil && obj != nil {
-		DebugLog("[VFS Flush] Successfully flushed file: fileID=%d, versionID=%d, finalSize=%d", obj.ID, versionID, obj.Size)
+		// Update global file object cache with latest metadata
+		cacheKey := updatedObj.ID
+		fileObjCache.Put(cacheKey, updatedObj)
+		DebugLog("[VFS Flush] Updated file object cache: fileID=%d, size=%d, dataID=%d, mtime=%d",
+			updatedObj.ID, updatedObj.Size, updatedObj.DataID, updatedObj.MTime)
+
+		// Update local cache
+		n.obj.Store(updatedObj)
+
+		DebugLog("[VFS Flush] Successfully flushed file: fileID=%d, versionID=%d, finalSize=%d, dataID=%d, mtime=%d",
+			updatedObj.ID, versionID, updatedObj.Size, updatedObj.DataID, updatedObj.MTime)
+	} else {
+		// If we can't get updated object, at least invalidate cache
+		n.invalidateObj()
+		DebugLog("[VFS Flush] Successfully flushed file: fileID=%d, versionID=%d (failed to get final obj: %v)", fileID, versionID, err)
 	}
 
 	return 0
@@ -4309,14 +4331,25 @@ func (n *OrcasNode) releaseImpl(ctx context.Context) syscall.Errno {
 		DebugLog("[VFS Release] ERROR: Failed to close RandomAccessor: fileID=%d, error=%v", fileID, err)
 	}
 
-	// After flush, invalidate object cache
-	n.invalidateObj()
+	// After flush, get updated object from database to ensure we have latest size
+	updatedObjs, err := n.fs.h.Get(n.fs.c, n.fs.bktID, []int64{fileID})
+	if err == nil && len(updatedObjs) > 0 {
+		updatedObj := updatedObjs[0]
 
-	// Get updated object to log final size
-	obj, err = n.getObj()
-	if err == nil && obj != nil {
-		DebugLog("[VFS Release] Successfully released file: fileID=%d, finalSize=%d", obj.ID, obj.Size)
+		// Update global file object cache with latest metadata
+		cacheKey := updatedObj.ID
+		fileObjCache.Put(cacheKey, updatedObj)
+		DebugLog("[VFS Release] Updated file object cache: fileID=%d, size=%d, dataID=%d, mtime=%d",
+			updatedObj.ID, updatedObj.Size, updatedObj.DataID, updatedObj.MTime)
+
+		// Update local cache
+		n.obj.Store(updatedObj)
+
+		DebugLog("[VFS Release] Successfully released file: fileID=%d, finalSize=%d, dataID=%d, mtime=%d",
+			updatedObj.ID, updatedObj.Size, updatedObj.DataID, updatedObj.MTime)
 	} else {
+		// If we can't get updated object, at least invalidate cache
+		n.invalidateObj()
 		DebugLog("[VFS Release] Successfully released file: fileID=%d (failed to get final obj: %v)", fileID, err)
 	}
 

@@ -3231,6 +3231,18 @@ func (ra *RandomAccessor) flushInternal(force bool) (int64, error) {
 			return 0, err
 		}
 		DebugLog("[VFS RandomAccessor Flush] Sequential flush completed: fileID=%d, dataID=%d, size=%d", ra.fileID, fileObj.DataID, fileObj.Size)
+
+		// Update file object cache with latest metadata from database
+		updatedObjs, err := ra.fs.h.Get(ra.fs.c, ra.fs.bktID, []int64{ra.fileID})
+		if err == nil && len(updatedObjs) > 0 {
+			updatedObj := updatedObjs[0]
+			fileObjCache.Put(ra.fileObjKey, updatedObj)
+			ra.fileObj.Store(updatedObj)
+			DebugLog("[VFS RandomAccessor Flush] Updated file object cache after sequential flush: fileID=%d, size=%d, dataID=%d, mtime=%d",
+				updatedObj.ID, updatedObj.Size, updatedObj.DataID, updatedObj.MTime)
+			fileObj = updatedObj
+		}
+
 		if fileObj.DataID > 0 {
 			return core.NewID(), nil // Return new version ID
 		}
@@ -3272,7 +3284,17 @@ func (ra *RandomAccessor) flushInternal(force bool) (int64, error) {
 					}
 				}
 			}
-			// For .tmp files, after TempFileWriter flush, return new version ID
+			// For .tmp files, after TempFileWriter flush, update cache and return new version ID
+			// Update file object cache with latest metadata from database
+			updatedObjs, err := ra.fs.h.Get(ra.fs.c, ra.fs.bktID, []int64{ra.fileID})
+			if err == nil && len(updatedObjs) > 0 {
+				updatedObj := updatedObjs[0]
+				fileObjCache.Put(ra.fileObjKey, updatedObj)
+				ra.fileObj.Store(updatedObj)
+				DebugLog("[VFS RandomAccessor Flush] Updated file object cache after .tmp file flush: fileID=%d, size=%d, dataID=%d, mtime=%d",
+					updatedObj.ID, updatedObj.Size, updatedObj.DataID, updatedObj.MTime)
+			}
+
 			if fileObj.DataID > 0 && fileObj.DataID != core.EmptyDataID {
 				return core.NewID(), nil
 			}
@@ -3359,10 +3381,38 @@ func (ra *RandomAccessor) flushInternal(force bool) (int64, error) {
 		if err != nil {
 			if errors.Is(err, core.ERR_QUERY_DB) || errors.Is(err, core.ERR_OPEN_DB) {
 				DebugLog("[VFS RandomAccessor Flush] Writing version unavailable, falling back to SDK path: fileID=%d, error=%v", ra.fileID, err)
-				return ra.applyRandomWritesWithSDK(fileObj, mergedOps)
+				versionID, err := ra.applyRandomWritesWithSDK(fileObj, mergedOps)
+				if err != nil {
+					return 0, err
+				}
+				// After flush completes, update file object cache with latest metadata from database
+				updatedObjs, err := ra.fs.h.Get(ra.fs.c, ra.fs.bktID, []int64{ra.fileID})
+				if err == nil && len(updatedObjs) > 0 {
+					updatedObj := updatedObjs[0]
+					fileObjCache.Put(ra.fileObjKey, updatedObj)
+					ra.fileObj.Store(updatedObj)
+					DebugLog("[VFS RandomAccessor Flush] Updated file object cache after flush (fallback): fileID=%d, size=%d, dataID=%d, mtime=%d",
+						updatedObj.ID, updatedObj.Size, updatedObj.DataID, updatedObj.MTime)
+				}
+				return versionID, nil
 			}
 			return 0, err
 		}
+
+		// After flush completes with writing version, update file object cache with latest metadata from database
+		updatedObjs, err := ra.fs.h.Get(ra.fs.c, ra.fs.bktID, []int64{ra.fileID})
+		if err == nil && len(updatedObjs) > 0 {
+			updatedObj := updatedObjs[0]
+			// Update global file object cache
+			fileObjCache.Put(ra.fileObjKey, updatedObj)
+			// Update local cache
+			ra.fileObj.Store(updatedObj)
+			DebugLog("[VFS RandomAccessor Flush] Updated file object cache after flush (writing version): fileID=%d, size=%d, dataID=%d, mtime=%d",
+				updatedObj.ID, updatedObj.Size, updatedObj.DataID, updatedObj.MTime)
+		} else {
+			DebugLog("[VFS RandomAccessor Flush] WARNING: Failed to update file object cache after flush (writing version): fileID=%d, error=%v", ra.fileID, err)
+		}
+
 		return newVersionID, nil
 	}
 
@@ -3371,7 +3421,27 @@ func (ra *RandomAccessor) flushInternal(force bool) (int64, error) {
 	for i, op := range mergedOps {
 		DebugLog("[VFS RandomAccessor Flush] MergedOp[%d]: offset=%d, size=%d", i, op.Offset, len(op.Data))
 	}
-	return ra.applyRandomWritesWithSDK(fileObj, mergedOps)
+	versionID, err := ra.applyRandomWritesWithSDK(fileObj, mergedOps)
+	if err != nil {
+		return 0, err
+	}
+
+	// After flush completes, update file object cache with latest metadata from database
+	// This ensures cache has the latest file size and other metadata
+	updatedObjs, err := ra.fs.h.Get(ra.fs.c, ra.fs.bktID, []int64{ra.fileID})
+	if err == nil && len(updatedObjs) > 0 {
+		updatedObj := updatedObjs[0]
+		// Update global file object cache
+		fileObjCache.Put(ra.fileObjKey, updatedObj)
+		// Update local cache
+		ra.fileObj.Store(updatedObj)
+		DebugLog("[VFS RandomAccessor Flush] Updated file object cache after flush: fileID=%d, size=%d, dataID=%d, mtime=%d",
+			updatedObj.ID, updatedObj.Size, updatedObj.DataID, updatedObj.MTime)
+	} else {
+		DebugLog("[VFS RandomAccessor Flush] WARNING: Failed to update file object cache after flush: fileID=%d, error=%v", ra.fileID, err)
+	}
+
+	return versionID, nil
 }
 
 // applyRandomWritesWithSDK uses SDK's listener to handle compression and encryption, applies random writes
