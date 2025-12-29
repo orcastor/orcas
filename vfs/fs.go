@@ -316,8 +316,10 @@ func (n *OrcasNode) updateChildInDirCache(dirID int64, updatedChild *core.Object
 
 // Getattr gets file/directory attributes
 func (n *OrcasNode) Getattr(ctx context.Context, f fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
+	DebugLog("[VFS Getattr] Entry: objID=%d, isRoot=%v", n.objID, n.isRoot)
 	if !n.isRoot {
 		if errno := n.fs.checkKey(); errno != 0 {
+			DebugLog("[VFS Getattr] ERROR: checkKey failed: objID=%d, errno=%d", n.objID, errno)
 			return errno
 		}
 	}
@@ -351,23 +353,27 @@ func getMode(objType int) uint32 {
 
 // Lookup looks up child node
 func (n *OrcasNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
+	DebugLog("[VFS Lookup] Entry: name=%s, parentID=%d", name, n.objID)
 	if errno := n.fs.checkKey(); errno != 0 {
+		DebugLog("[VFS Lookup] ERROR: checkKey failed: parentID=%d, name=%s, errno=%d", n.objID, name, errno)
 		return nil, errno
 	}
 
-	// DebugLog("[VFS Lookup] Looking up child node: name=%s, parentID=%d", name, n.objID)
 	obj, err := n.getObj()
 	if err != nil {
+		DebugLog("[VFS Lookup] ERROR: Failed to get parent object: parentID=%d, name=%s, error=%v", n.objID, name, err)
 		return nil, syscall.ENOENT
 	}
 
 	if obj.Type != core.OBJ_TYPE_DIR {
+		DebugLog("[VFS Lookup] ERROR: Parent is not a directory: parentID=%d, name=%s, type=%d", n.objID, name, obj.Type)
 		return nil, syscall.ENOTDIR
 	}
 
 	// Get directory listing with cache and singleflight
 	children, errno := n.getDirListWithCache(obj.ID)
 	if errno != 0 {
+		DebugLog("[VFS Lookup] ERROR: Failed to get directory listing: parentID=%d, name=%s, errno=%d", n.objID, name, errno)
 		return nil, errno
 	}
 
@@ -395,6 +401,7 @@ func (n *OrcasNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut)
 	}
 
 	if matchedChild == nil {
+		DebugLog("[VFS Lookup] ERROR: Child not found: parentID=%d, name=%s", n.objID, name)
 		return nil, syscall.ENOENT
 	}
 
@@ -461,19 +468,24 @@ func (n *OrcasNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut)
 // Optimized: uses interface-level cache to avoid rebuilding entries every time
 // Implements delayed cache refresh: marks cache as stale instead of immediately deleting
 func (n *OrcasNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
+	DebugLog("[VFS Readdir] Entry: objID=%d, isRoot=%v", n.objID, n.isRoot)
 	if errno := n.fs.checkKey(); errno != 0 {
 		if !n.isRoot {
+			DebugLog("[VFS Readdir] ERROR: checkKey failed: objID=%d, errno=%d", n.objID, errno)
 			return nil, errno
 		}
+		DebugLog("[VFS Readdir] Root node, returning empty directory stream (key check failed)")
 		return fs.NewListDirStream([]fuse.DirEntry{}), 0
 	}
 
 	obj, err := n.getObj()
 	if err != nil {
+		DebugLog("[VFS Readdir] ERROR: Failed to get object: objID=%d, error=%v", n.objID, err)
 		return nil, syscall.ENOENT
 	}
 
 	if obj.Type != core.OBJ_TYPE_DIR {
+		DebugLog("[VFS Readdir] ERROR: Object is not a directory: objID=%d, type=%d", n.objID, obj.Type)
 		return nil, syscall.ENOTDIR
 	}
 
@@ -506,6 +518,7 @@ func (n *OrcasNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
 	// Cache miss, get directory listing and build entries
 	children, errno := n.getDirListWithCache(obj.ID)
 	if errno != 0 {
+		DebugLog("[VFS Readdir] ERROR: Failed to get directory listing: objID=%d, errno=%d", n.objID, errno)
 		return nil, errno
 	}
 
@@ -876,19 +889,21 @@ func (n *OrcasNode) preloadChildDirs(children []*core.ObjectInfo) {
 
 // Create creates a file
 func (n *OrcasNode) Create(ctx context.Context, name string, flags uint32, mode uint32, out *fuse.EntryOut) (node *fs.Inode, fh fs.FileHandle, fuseFlags uint32, errno syscall.Errno) {
+	DebugLog("[VFS Create] Entry: name=%s, parentID=%d, flags=0x%x, mode=0%o", name, n.objID, flags, mode)
 	// Check if KEY is required
 	if errno := n.fs.checkKey(); errno != 0 {
+		DebugLog("[VFS Create] ERROR: checkKey failed: name=%s, parentID=%d, errno=%d", name, n.objID, errno)
 		return nil, nil, 0, errno
 	}
 
 	obj, err := n.getObj()
 	if err != nil {
-		DebugLog("[VFS Create] ERROR: Failed to get parent directory object: %v", err)
+		DebugLog("[VFS Create] ERROR: Failed to get parent directory object: parentID=%d, name=%s, error=%v", n.objID, name, err)
 		return nil, nil, 0, syscall.ENOENT
 	}
 
 	if obj.Type != core.OBJ_TYPE_DIR {
-		DebugLog("[VFS Create] ERROR: Parent is not a directory (type=%d)", obj.Type)
+		DebugLog("[VFS Create] ERROR: Parent is not a directory: parentID=%d, name=%s, type=%d", n.objID, name, obj.Type)
 		return nil, nil, 0, syscall.ENOTDIR
 	}
 
@@ -1543,8 +1558,10 @@ func (n *OrcasNode) Create(ctx context.Context, name string, flags uint32, mode 
 
 // Open opens a file
 func (n *OrcasNode) Open(ctx context.Context, flags uint32) (fh fs.FileHandle, fuseFlags uint32, errno syscall.Errno) {
+	DebugLog("[VFS Open] Entry: objID=%d, flags=0x%x", n.objID, flags)
 	// Check if KEY is required
 	if errno := n.fs.checkKey(); errno != 0 {
+		DebugLog("[VFS Open] ERROR: checkKey failed: objID=%d, flags=0x%x, errno=%d", n.objID, flags, errno)
 		return nil, 0, errno
 	}
 
@@ -1622,17 +1639,21 @@ func (n *OrcasNode) Open(ctx context.Context, flags uint32) (fh fs.FileHandle, f
 
 // Mkdir creates a directory
 func (n *OrcasNode) Mkdir(ctx context.Context, name string, mode uint32, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
+	DebugLog("[VFS Mkdir] Entry: name=%s, parentID=%d, mode=0%o", name, n.objID, mode)
 	// Check if KEY is required
 	if errno := n.fs.checkKey(); errno != 0 {
+		DebugLog("[VFS Mkdir] ERROR: checkKey failed: name=%s, parentID=%d, errno=%d", name, n.objID, errno)
 		return nil, errno
 	}
 
 	obj, err := n.getObj()
 	if err != nil {
+		DebugLog("[VFS Mkdir] ERROR: Failed to get parent object: name=%s, parentID=%d, error=%v", name, n.objID, err)
 		return nil, syscall.ENOENT
 	}
 
 	if obj.Type != core.OBJ_TYPE_DIR {
+		DebugLog("[VFS Mkdir] ERROR: Parent is not a directory: name=%s, parentID=%d, type=%d", name, n.objID, obj.Type)
 		return nil, syscall.ENOTDIR
 	}
 
@@ -1721,17 +1742,21 @@ func (n *OrcasNode) Mkdir(ctx context.Context, name string, mode uint32, out *fu
 
 // Unlink deletes a file
 func (n *OrcasNode) Unlink(ctx context.Context, name string) syscall.Errno {
+	DebugLog("[VFS Unlink] Entry: name=%s, parentID=%d", name, n.objID)
 	// Check if KEY is required
 	if errno := n.fs.checkKey(); errno != 0 {
+		DebugLog("[VFS Unlink] ERROR: checkKey failed: name=%s, parentID=%d, errno=%d", name, n.objID, errno)
 		return errno
 	}
 
 	obj, err := n.getObj()
 	if err != nil {
+		DebugLog("[VFS Unlink] ERROR: Failed to get parent object: name=%s, parentID=%d, error=%v", name, n.objID, err)
 		return syscall.ENOENT
 	}
 
 	if obj.Type != core.OBJ_TYPE_DIR {
+		DebugLog("[VFS Unlink] ERROR: Parent is not a directory: name=%s, parentID=%d, type=%d", name, n.objID, obj.Type)
 		return syscall.ENOTDIR
 	}
 
@@ -1765,6 +1790,7 @@ func (n *OrcasNode) Unlink(ctx context.Context, name string) syscall.Errno {
 			Count: core.DefaultListPageSize,
 		})
 		if err != nil {
+			DebugLog("[VFS Unlink] ERROR: Failed to list directory children: name=%s, parentID=%d, error=%v", name, obj.ID, err)
 			return syscall.EIO
 		}
 
@@ -1803,6 +1829,7 @@ func (n *OrcasNode) Unlink(ctx context.Context, name string) syscall.Errno {
 	// This makes the file disappear from parent's listing immediately
 	err = n.fs.h.Recycle(n.fs.c, n.fs.bktID, targetID)
 	if err != nil {
+		DebugLog("[VFS Unlink] ERROR: Failed to recycle file: fileID=%d, name=%s, parentID=%d, error=%v", targetID, name, obj.ID, err)
 		return syscall.EIO
 	}
 
@@ -1853,12 +1880,15 @@ func (n *OrcasNode) Unlink(ctx context.Context, name string) syscall.Errno {
 
 // Rmdir deletes a directory
 func (n *OrcasNode) Rmdir(ctx context.Context, name string) syscall.Errno {
+	DebugLog("[VFS Rmdir] Entry: name=%s, parentID=%d", name, n.objID)
 	obj, err := n.getObj()
 	if err != nil {
+		DebugLog("[VFS Rmdir] ERROR: Failed to get parent object: name=%s, parentID=%d, error=%v", name, n.objID, err)
 		return syscall.ENOENT
 	}
 
 	if obj.Type != core.OBJ_TYPE_DIR {
+		DebugLog("[VFS Rmdir] ERROR: Parent is not a directory: name=%s, parentID=%d, type=%d", name, n.objID, obj.Type)
 		return syscall.ENOTDIR
 	}
 
@@ -1878,6 +1908,7 @@ func (n *OrcasNode) Rmdir(ctx context.Context, name string) syscall.Errno {
 
 	// Check if KEY is required (only for non-root nodes)
 	if errno := n.fs.checkKey(); errno != 0 {
+		DebugLog("[VFS Rmdir] ERROR: checkKey failed: name=%s, parentID=%d, errno=%d", name, n.objID, errno)
 		return errno
 	}
 
@@ -1920,6 +1951,7 @@ func (n *OrcasNode) Rmdir(ctx context.Context, name string) syscall.Errno {
 		}
 
 		if targetID == 0 {
+			DebugLog("[VFS Rmdir] ERROR: Target directory not found: name=%s, parentID=%d", name, obj.ID)
 			return syscall.ENOENT
 		}
 
@@ -1933,6 +1965,7 @@ func (n *OrcasNode) Rmdir(ctx context.Context, name string) syscall.Errno {
 			// Log warning but continue with deletion
 			DebugLog("[VFS Rmdir] WARNING: Failed to check if directory is empty (I/O error), assuming empty: dirID=%d, error=%v", targetID, err)
 		} else if len(dirChildren) > 0 {
+			DebugLog("[VFS Rmdir] ERROR: Directory is not empty: name=%s, dirID=%d, parentID=%d, childCount=%d", name, targetID, obj.ID, len(dirChildren))
 			return syscall.ENOTEMPTY
 		}
 	}
@@ -1974,17 +2007,21 @@ func (n *OrcasNode) Rmdir(ctx context.Context, name string) syscall.Errno {
 
 // Rename renames a file/directory
 func (n *OrcasNode) Rename(ctx context.Context, name string, newParent fs.InodeEmbedder, newName string, flags uint32) syscall.Errno {
+	DebugLog("[VFS Rename] Entry: name=%s, newName=%s, parentID=%d, flags=0x%x", name, newName, n.objID, flags)
 	// Check if KEY is required
 	if errno := n.fs.checkKey(); errno != 0 {
+		DebugLog("[VFS Rename] ERROR: checkKey failed: name=%s, newName=%s, parentID=%d, errno=%d", name, newName, n.objID, errno)
 		return errno
 	}
 
 	obj, err := n.getObj()
 	if err != nil {
+		DebugLog("[VFS Rename] ERROR: Failed to get source parent object: name=%s, newName=%s, parentID=%d, error=%v", name, newName, n.objID, err)
 		return syscall.ENOENT
 	}
 
 	if obj.Type != core.OBJ_TYPE_DIR {
+		DebugLog("[VFS Rename] ERROR: Source parent is not a directory: name=%s, newName=%s, parentID=%d, type=%d", name, newName, n.objID, obj.Type)
 		return syscall.ENOTDIR
 	}
 
@@ -2016,6 +2053,7 @@ func (n *OrcasNode) Rename(ctx context.Context, name string, newParent fs.InodeE
 			Count: core.DefaultListPageSize,
 		})
 		if err != nil {
+			DebugLog("[VFS Unlink] ERROR: Failed to list directory children: name=%s, parentID=%d, error=%v", name, obj.ID, err)
 			return syscall.EIO
 		}
 
@@ -2253,6 +2291,7 @@ func (n *OrcasNode) Rename(ctx context.Context, name string, newParent fs.InodeE
 			Count: core.DefaultListPageSize,
 		})
 		if err != nil {
+			DebugLog("[VFS Unlink] ERROR: Failed to list directory children: name=%s, parentID=%d, error=%v", name, obj.ID, err)
 			return syscall.EIO
 		}
 
@@ -2890,8 +2929,10 @@ func (n *OrcasNode) Rename(ctx context.Context, name string, newParent fs.InodeE
 
 // Read reads file content
 func (n *OrcasNode) Read(ctx context.Context, dest []byte, off int64) (fuse.ReadResult, syscall.Errno) {
+	DebugLog("[VFS Read] Entry: objID=%d, offset=%d, size=%d", n.objID, off, len(dest))
 	// Check if KEY is required
 	if errno := n.fs.checkKey(); errno != 0 {
+		DebugLog("[VFS Read] ERROR: checkKey failed: objID=%d, offset=%d, size=%d, errno=%d", n.objID, off, len(dest), errno)
 		return nil, errno
 	}
 
@@ -2901,11 +2942,12 @@ func (n *OrcasNode) Read(ctx context.Context, dest []byte, off int64) (fuse.Read
 
 	obj, err := n.getObj()
 	if err != nil {
-		// DebugLog("[VFS Read] ERROR: Failed to get object: objID=%d, error=%v", n.objID, err)
+		DebugLog("[VFS Read] ERROR: Failed to get object: objID=%d, offset=%d, size=%d, error=%v", n.objID, off, len(dest), err)
 		return nil, syscall.ENOENT
 	}
 
 	if obj.Type != core.OBJ_TYPE_FILE {
+		DebugLog("[VFS Read] ERROR: Object is not a file: objID=%d, type=%d, offset=%d, size=%d", n.objID, obj.Type, off, len(dest))
 		return nil, syscall.EISDIR
 	}
 
@@ -3135,7 +3177,9 @@ func (n *OrcasNode) Write(ctx context.Context, data []byte, off int64) (written 
 // Flush flushes file
 // Optimization: use atomic operations, completely lock-free
 func (n *OrcasNode) Flush(ctx context.Context) syscall.Errno {
+	DebugLog("[VFS Flush] Entry: objID=%d", n.objID)
 	if errno := n.fs.checkKey(); errno != 0 {
+		DebugLog("[VFS Flush] ERROR: checkKey failed: objID=%d, errno=%d", n.objID, errno)
 		return errno
 	}
 
@@ -3179,8 +3223,10 @@ func (n *OrcasNode) Flush(ctx context.Context) syscall.Errno {
 
 // Fsync syncs file
 func (n *OrcasNode) Fsync(ctx context.Context, flags uint32) syscall.Errno {
+	DebugLog("[VFS Fsync] Entry: objID=%d, flags=0x%x", n.objID, flags)
 	// Flush RandomAccessor first
 	if errno := n.Flush(ctx); errno != 0 {
+		DebugLog("[VFS Fsync] ERROR: Flush failed: objID=%d, flags=0x%x, errno=%d", n.objID, flags, errno)
 		return errno
 	}
 
@@ -3191,12 +3237,15 @@ func (n *OrcasNode) Fsync(ctx context.Context, flags uint32) syscall.Errno {
 
 // Setattr sets file attributes (including truncate operation)
 func (n *OrcasNode) Setattr(ctx context.Context, in *fuse.SetAttrIn, out *fuse.AttrOut) syscall.Errno {
+	DebugLog("[VFS Setattr] Entry: objID=%d, valid=0x%x", n.objID, in.Valid)
 	if errno := n.fs.checkKey(); errno != 0 {
+		DebugLog("[VFS Setattr] ERROR: checkKey failed: objID=%d, valid=0x%x, errno=%d", n.objID, in.Valid, errno)
 		return errno
 	}
 
 	obj, err := n.getObj()
 	if err != nil {
+		DebugLog("[VFS Setattr] ERROR: Failed to get object: objID=%d, valid=0x%x, error=%v", n.objID, in.Valid, err)
 		return syscall.ENOENT
 	}
 
