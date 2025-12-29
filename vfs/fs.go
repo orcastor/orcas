@@ -368,7 +368,7 @@ func (n *OrcasNode) Getattr(ctx context.Context, f fs.FileHandle, out *fuse.Attr
 		return syscall.ENOENT
 	}
 
-	out.Mode = getMode(obj.Type)
+	out.Mode = getModeFromObj(obj)
 	out.Size = uint64(obj.Size)
 	out.Mtime = uint64(obj.MTime)
 	out.Ctime = out.Mtime
@@ -377,7 +377,38 @@ func (n *OrcasNode) Getattr(ctx context.Context, f fs.FileHandle, out *fuse.Attr
 	return 0
 }
 
-// getMode returns file mode based on object type
+// getModeFromObj extracts file mode from ObjectInfo.Mode field
+// If Mode is 0, returns default mode based on object type
+func getModeFromObj(obj *core.ObjectInfo) uint32 {
+	if obj == nil {
+		return syscall.S_IFREG | 0o644
+	}
+
+	// If Mode is set, use it (preserving file type bits)
+	if obj.Mode != 0 {
+		var fileTypeBits uint32 = syscall.S_IFREG
+		if obj.Type == core.OBJ_TYPE_DIR {
+			fileTypeBits = syscall.S_IFDIR
+		}
+		// Preserve file type bits and use stored permission bits
+		return fileTypeBits | (obj.Mode & 0o7777)
+	}
+
+	// Default mode based on object type
+	return getMode(obj.Type)
+}
+
+// setModeInObj sets file mode in ObjectInfo.Mode field
+func setModeInObj(obj *core.ObjectInfo, mode uint32) {
+	if obj == nil {
+		return
+	}
+
+	// Extract permission bits (remove file type bits)
+	obj.Mode = mode & 0o7777
+}
+
+// getMode returns default file mode based on object type
 func getMode(objType int) uint32 {
 	switch objType {
 	case core.OBJ_TYPE_DIR:
@@ -1171,7 +1202,7 @@ func (n *OrcasNode) Create(ctx context.Context, name string, flags uint32, mode 
 			fileInode := n.NewInode(ctx, fileNode, stableAttr)
 
 			// Fill EntryOut
-			out.Mode = syscall.S_IFREG | 0o644
+			out.Mode = getModeFromObj(existingFileObj)
 			out.Size = uint64(existingFileObj.Size)
 			out.Mtime = uint64(existingFileObj.MTime)
 			out.Ctime = out.Mtime
@@ -1230,6 +1261,8 @@ func (n *OrcasNode) Create(ctx context.Context, name string, flags uint32, mode 
 		Size:  0,
 		MTime: core.Now(),
 	}
+	// Save mode (permissions)
+	setModeInObj(fileObj, mode)
 
 	ids, err := n.fs.h.Put(n.fs.c, n.fs.bktID, []*core.ObjectInfo{fileObj})
 	if err != nil {
@@ -1523,7 +1556,7 @@ func (n *OrcasNode) Create(ctx context.Context, name string, flags uint32, mode 
 			fileInode := n.NewInode(ctx, fileNode, stableAttr)
 
 			// Fill EntryOut
-			out.Mode = syscall.S_IFREG | 0o644
+			out.Mode = getModeFromObj(existingFileObj)
 			out.Size = uint64(existingFileObj.Size)
 			out.Mtime = uint64(existingFileObj.MTime)
 			out.Ctime = out.Mtime
@@ -1588,7 +1621,7 @@ func (n *OrcasNode) Create(ctx context.Context, name string, flags uint32, mode 
 	fileInode := n.NewInode(ctx, fileNode, stableAttr)
 
 	// Fill EntryOut
-	out.Mode = syscall.S_IFREG | 0o644
+	out.Mode = getModeFromObj(fileObj)
 	out.Size = 0
 	out.Mtime = uint64(fileObj.MTime)
 	out.Ctime = out.Mtime
@@ -1753,6 +1786,8 @@ func (n *OrcasNode) Mkdir(ctx context.Context, name string, mode uint32, out *fu
 		Size:  0,
 		MTime: core.Now(),
 	}
+	// Save mode (permissions)
+	setModeInObj(dirObj, mode)
 
 	ids, err := n.fs.h.Put(n.fs.c, n.fs.bktID, []*core.ObjectInfo{dirObj})
 	if err != nil || len(ids) == 0 || ids[0] == 0 {
@@ -1791,7 +1826,7 @@ func (n *OrcasNode) Mkdir(ctx context.Context, name string, mode uint32, out *fu
 	dirInode := n.NewInode(ctx, dirNode, stableAttr)
 
 	// Fill EntryOut
-	out.Mode = syscall.S_IFDIR | 0o755
+	out.Mode = getModeFromObj(dirObj)
 	out.Size = 0
 	out.Mtime = uint64(dirObj.MTime)
 	out.Ctime = out.Mtime
@@ -3370,31 +3405,98 @@ func (n *OrcasNode) Setattr(ctx context.Context, f fs.FileHandle, in *fuse.SetAt
 		}
 	}
 
+	// Handle mode (permissions) change
+	needUpdate := false
+	oldMode := obj.Mode
+	if in.Valid&fuse.FATTR_MODE != 0 {
+		oldModeValue := getModeFromObj(obj)
+		DebugLog("[VFS Setattr] Setting file mode: objID=%d, oldMode=0%o, newMode=0%o, oldModeField=%d", n.objID, oldModeValue, in.Mode, oldMode)
+		setModeInObj(obj, in.Mode)
+		needUpdate = true
+		DebugLog("[VFS Setattr] Mode updated: objID=%d, newModeField=%d", n.objID, obj.Mode)
+	}
+
 	// Update modification time
 	if in.Valid&fuse.FATTR_MTIME != 0 {
+		oldMTime := obj.MTime
 		obj.MTime = int64(in.Mtime)
+		DebugLog("[VFS Setattr] Setting mtime: objID=%d, oldMTime=%d, newMTime=%d", n.objID, oldMTime, obj.MTime)
+		needUpdate = true
 	}
 
-	// Update object information to database
+	// Update access time
+	if in.Valid&fuse.FATTR_ATIME != 0 {
+		// Note: We don't store atime separately, but we can update it if needed
+		// For now, we'll just use mtime for atime
+		DebugLog("[VFS Setattr] Setting atime: objID=%d, atime=%d", n.objID, in.Atime)
+	}
+
+	// Update change time (ctime is typically updated automatically on any change)
+	// We'll set it to current time if any attribute changed
+	if needUpdate {
+		// CTime is typically set to current time when any attribute changes
+		// But we'll use the provided ctime if available, otherwise use mtime
+		if in.Valid&fuse.FATTR_CTIME != 0 {
+			DebugLog("[VFS Setattr] Setting ctime: objID=%d, ctime=%d", n.objID, in.Ctime)
+		}
+	}
+
+	// Update object information to database if needed
+	if needUpdate {
+		// If mode or mtime changed, update through Handler
+		_, err := n.fs.h.Put(n.fs.c, n.fs.bktID, []*core.ObjectInfo{obj})
+		if err != nil {
+			DebugLog("[VFS Setattr] ERROR: Failed to update object: objID=%d, error=%v", n.objID, err)
+			return syscall.EIO
+		}
+		DebugLog("[VFS Setattr] Successfully updated object in database: objID=%d, mode=%d, mtime=%d", n.objID, obj.Mode, obj.MTime)
+
+		// Update global file object cache to ensure consistency
+		cacheKey := obj.ID
+		fileObjCache.Put(cacheKey, obj)
+		DebugLog("[VFS Setattr] Updated file object cache: objID=%d", n.objID)
+
+		// Update local cache to ensure immediate consistency
+		n.obj.Store(obj)
+		DebugLog("[VFS Setattr] Updated local object cache: objID=%d", n.objID)
+
+		// If this is a child object, also update parent directory listing cache
+		// This ensures that directory listings show updated permissions
+		if obj.PID > 0 {
+			parentCacheKey := n.getDirListCacheKey(obj.PID)
+			dirListCache.Del(parentCacheKey)
+			DebugLog("[VFS Setattr] Invalidated parent directory listing cache: objID=%d, parentID=%d", n.objID, obj.PID)
+		}
+	}
+
 	// Note: File size update has been completed in truncateFile through Flush
-	// Here only need to update mtime (if set)
-	if in.Valid&fuse.FATTR_MTIME != 0 && in.Valid&fuse.FATTR_SIZE == 0 {
-		// If only updating mtime, need to update through Handler
-		// Since RandomAccessor's Flush automatically updates file size, truncate operation's size update is already done
-		// Here only need to handle separate mtime update
-		// Simplified handling: mtime update can be automatically updated on next write or Flush
-	}
+	// Here only need to update mtime and mode (if set)
 
-	// Invalidate cache
+	// Invalidate cache (this will force re-fetch on next access)
+	// But we've already updated caches above, so this is just for safety
 	n.invalidateObj()
 
-	// Fill output
-	out.Mode = getMode(obj.Type)
+	// Fill output with updated values
+	out.Mode = getModeFromObj(obj)
 	out.Size = uint64(obj.Size)
 	out.Mtime = uint64(obj.MTime)
-	out.Ctime = out.Mtime
-	out.Atime = out.Mtime
 
+	// Set ctime and atime
+	if in.Valid&fuse.FATTR_CTIME != 0 {
+		out.Ctime = in.Ctime
+	} else {
+		// Use mtime as ctime if ctime not explicitly set
+		out.Ctime = out.Mtime
+	}
+
+	if in.Valid&fuse.FATTR_ATIME != 0 {
+		out.Atime = in.Atime
+	} else {
+		// Use mtime as atime if atime not explicitly set
+		out.Atime = out.Mtime
+	}
+
+	DebugLog("[VFS Setattr] Successfully completed: objID=%d, mode=0%o, size=%d, mtime=%d", n.objID, out.Mode, out.Size, out.Mtime)
 	return 0
 }
 
