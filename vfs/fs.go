@@ -4455,9 +4455,10 @@ func (n *OrcasNode) Statfs(ctx context.Context, out *fuse.StatfsOut) syscall.Err
 	// Get bucket information to determine quota and used space
 	bucket, err := n.fs.h.GetBktInfo(n.fs.c, n.fs.bktID)
 	if err != nil {
-		DebugLog("[VFS Statfs] WARNING: Failed to get bucket info: bktID=%d, error=%v, using defaults", n.fs.bktID, err)
+		DebugLog("[VFS Statfs] ERROR: Failed to get bucket info: bktID=%d, error=%v, using defaults", n.fs.bktID, err)
 		// If we can't get bucket info, use default values
 		*out = fuse.StatfsOut{}
+		DebugLog("[VFS Statfs] Returning default (zeroed) statfs: objID=%d, bktID=%d, error=%v", n.objID, n.fs.bktID, err)
 		return 0
 	}
 
@@ -4557,6 +4558,11 @@ func (n *OrcasNode) Getxattr(ctx context.Context, attr string, dest []byte) (uin
 			value, exists := entry.attrs[attr]
 			entry.mu.RUnlock()
 			if exists {
+				// Check if this is a "not found" sentinel (nil)
+				if value == nil {
+					DebugLog("[VFS Getxattr] Attribute not found (from sentinel cache), returning empty: objID=%d, attr=%s", n.objID, attr)
+					return 0, 0 // Return empty data, not ENODATA
+				}
 				if len(value) > len(dest) {
 					DebugLog("[VFS Getxattr] ERROR: Buffer too small (from cache): objID=%d, attr=%s, valueLen=%d, destLen=%d", n.objID, attr, len(value), len(dest))
 					return uint32(len(value)), syscall.ERANGE
@@ -4574,6 +4580,30 @@ func (n *OrcasNode) Getxattr(ctx context.Context, attr string, dest []byte) (uin
 		if ma != nil {
 			value, err := ma.GetAttr(n.fs.c, n.fs.bktID, n.objID, attr)
 			if err != nil {
+				// Check if this is a "not found" error (attribute doesn't exist)
+				// If so, cache a sentinel value (nil) to prevent repeated database queries
+				if strings.Contains(err.Error(), "attribute not found") {
+					DebugLog("[VFS Getxattr] Attribute not found, caching sentinel (nil): objID=%d, attr=%s", n.objID, attr)
+					// Update cache with sentinel value (nil)
+					var entry *attrCacheEntry
+					if cached, ok := attrCache.Get(cacheKey); ok {
+						if e, ok := cached.(*attrCacheEntry); ok && e != nil {
+							entry = e
+						}
+					}
+					if entry == nil {
+						entry = &attrCacheEntry{
+							attrs: make(map[string][]byte),
+						}
+					}
+					entry.mu.Lock()
+					entry.attrs[attr] = nil // Use nil as sentinel
+					entry.mu.Unlock()
+					attrCache.Put(cacheKey, entry)
+					// Return empty data, not ENODATA
+					DebugLog("[VFS Getxattr] Attribute not found, returning empty: objID=%d, attr=%s", n.objID, attr)
+					return 0, 0
+				}
 				DebugLog("[VFS Getxattr] ERROR: Failed to get attribute: objID=%d, attr=%s, error=%v", n.objID, attr, err)
 				return 0, syscall.ENODATA
 			}
@@ -4721,46 +4751,39 @@ func (n *OrcasNode) Listxattr(ctx context.Context, dest []byte) (uint32, syscall
 	}
 
 	// Cache miss, get from database
-	if keys == nil {
-		if lh, ok := n.fs.h.(*core.LocalHandler); ok {
-			ma := lh.MetadataAdapter()
-			if ma != nil {
-				var err error
-				keys, err = ma.ListAttrs(n.fs.c, n.fs.bktID, n.objID)
-				if err != nil {
-					DebugLog("[VFS Listxattr] ERROR: Failed to list attributes: objID=%d, error=%v", n.objID, err)
-					return 0, syscall.EIO
-				}
-				DebugLog("[VFS Listxattr] Retrieved keys from database: objID=%d, count=%d", n.objID, len(keys))
-
-				// Update cache: merge database keys with existing cache entry
-				var entry *attrCacheEntry
-				if cached, ok := attrCache.Get(cacheKey); ok {
-					if e, ok := cached.(*attrCacheEntry); ok && e != nil {
-						entry = e
-					}
-				}
-				if entry == nil {
-					entry = &attrCacheEntry{
-						attrs: make(map[string][]byte),
-					}
-				}
-				// Merge keys: add any keys from database that aren't already in cache
-				entry.mu.Lock()
-				for _, key := range keys {
-					if _, exists := entry.attrs[key]; !exists {
-						entry.attrs[key] = nil // Mark key as known, value will be loaded on demand via Getxattr
-					}
-				}
-				entry.mu.Unlock()
-				attrCache.Put(cacheKey, entry)
+	if lh, ok := n.fs.h.(*core.LocalHandler); ok {
+		ma := lh.MetadataAdapter()
+		if ma != nil {
+			var err error
+			keys, err = ma.ListAttrs(n.fs.c, n.fs.bktID, n.objID)
+			if err != nil {
+				DebugLog("[VFS Listxattr] ERROR: Failed to list attributes: objID=%d, error=%v", n.objID, err)
+				return 0, syscall.EIO
 			}
-		}
-	}
+			DebugLog("[VFS Listxattr] Retrieved keys from database: objID=%d, count=%d", n.objID, len(keys))
 
-	if keys == nil {
-		DebugLog("[VFS Listxattr] ERROR: MetadataAdapter not available: objID=%d", n.objID)
-		return 0, 0
+			// Update cache: merge database keys with existing cache entry
+			var entry *attrCacheEntry
+			if cached, ok := attrCache.Get(cacheKey); ok {
+				if e, ok := cached.(*attrCacheEntry); ok && e != nil {
+					entry = e
+				}
+			}
+			if entry == nil {
+				entry = &attrCacheEntry{
+					attrs: make(map[string][]byte),
+				}
+			}
+			// Merge keys: add any keys from database that aren't already in cache
+			entry.mu.Lock()
+			for _, key := range keys {
+				if _, exists := entry.attrs[key]; !exists {
+					entry.attrs[key] = nil // Mark key as known, value will be loaded on demand via Getxattr
+				}
+			}
+			entry.mu.Unlock()
+			attrCache.Put(cacheKey, entry)
+		}
 	}
 
 	// Format keys as null-terminated strings: "key1\0key2\0key3\0"

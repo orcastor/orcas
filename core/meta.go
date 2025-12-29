@@ -2296,9 +2296,9 @@ func (dma *DefaultMetadataAdapter) ListAttrs(c Ctx, bktID int64, objID int64) ([
 		Key string `borm:"k"`
 	}
 	var attrRows []*AttrRow
+	// Select all rows matching the objID, borm will automatically map the "k" column to Key field
 	_, err = b.TableContext(c, db, ATTR_TBL).Select(&attrRows,
-		b.Where(b.Eq("id", objID)),
-		b.Fields("k"))
+		b.Where(b.Eq("id", objID)))
 	if err != nil {
 		return nil, fmt.Errorf("%w: ListAttrs failed (bktID=%d, objID=%d): %v", ERR_QUERY_DB, bktID, objID, err)
 	}
