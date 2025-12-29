@@ -3119,6 +3119,16 @@ func (ra *RandomAccessor) flushInternal(force bool) (int64, error) {
 
 	DebugLog("[VFS RandomAccessor Flush] Starting flush: fileID=%d, force=%v", ra.fileID, force)
 
+	// Validate RandomAccessor is properly initialized
+	if ra.fs == nil {
+		DebugLog("[VFS RandomAccessor Flush] ERROR: RandomAccessor.fs is nil: fileID=%d", ra.fileID)
+		return 0, fmt.Errorf("RandomAccessor.fs is nil")
+	}
+	if ra.fileID <= 0 {
+		DebugLog("[VFS RandomAccessor Flush] ERROR: RandomAccessor.fileID is invalid: fileID=%d", ra.fileID)
+		return 0, fmt.Errorf("RandomAccessor.fileID is invalid: %d", ra.fileID)
+	}
+
 	// For .tmp files, check final file size before flushing TempFileWriter
 	fileObj, err := ra.getFileObj()
 	isTmpFile := err == nil && fileObj != nil && isTempFile(fileObj)

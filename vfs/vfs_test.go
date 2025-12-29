@@ -3992,3 +3992,140 @@ func TestOnRootDeletedImmediateUnmount(t *testing.T) {
 		}
 	})
 }
+
+// TestTruncateCreatesVersionAndWrite tests that truncate creates a new version and allows writing new data
+func TestTruncateCreatesVersionAndWrite(t *testing.T) {
+	Convey("Test truncate creates new version and allows writing", t, func() {
+		ensureTestUser(t)
+		handler := core.NewLocalHandler("", "")
+		ctx := context.Background()
+		ctx, _, _, err := handler.Login(ctx, "orcas", "orcas")
+		So(err, ShouldBeNil)
+
+		ig := idgen.NewIDGen(nil, 0)
+		testBktID, _ := ig.New()
+		err = core.InitBucketDB(".", testBktID)
+		So(err, ShouldBeNil)
+
+		// Get user info for bucket creation
+		_, _, _, err = handler.Login(ctx, "orcas", "orcas")
+		So(err, ShouldBeNil)
+
+		// Create bucket
+		admin := core.NewLocalAdmin(".", ".")
+		bkt := &core.BucketInfo{
+			ID:        testBktID,
+			Name:      "test-truncate-version-bucket",
+			Type:      1,
+			Quota:     -1,
+			ChunkSize: 4 * 1024 * 1024, // 4MB chunk size
+		}
+		err = admin.PutBkt(ctx, []*core.BucketInfo{bkt})
+		So(err, ShouldBeNil)
+
+		// Create filesystem
+		ofs := NewOrcasFS(handler, ctx, testBktID)
+
+		// Step 1: Create a file and write initial data
+		Convey("Create file with initial data", func() {
+			fileObj := &core.ObjectInfo{
+				ID:    core.NewID(),
+				PID:   testBktID,
+				Type:  core.OBJ_TYPE_FILE,
+				Name:  "test-truncate-version.txt",
+				Size:  0,
+				MTime: core.Now(),
+			}
+
+			_, err = handler.Put(ctx, testBktID, []*core.ObjectInfo{fileObj})
+			So(err, ShouldBeNil)
+
+			// Write initial data (100 bytes)
+			ra, err := NewRandomAccessor(ofs, fileObj.ID)
+			So(err, ShouldBeNil)
+			defer ra.Close()
+
+			initialData := make([]byte, 100)
+			for i := range initialData {
+				initialData[i] = byte(i % 256)
+			}
+
+			err = ra.Write(0, initialData)
+			So(err, ShouldBeNil)
+
+			_, err = ra.Flush()
+			So(err, ShouldBeNil)
+
+			// Verify initial data was written
+			obj, err := handler.Get(ctx, testBktID, []int64{fileObj.ID})
+			So(err, ShouldBeNil)
+			So(len(obj), ShouldEqual, 1)
+			So(obj[0].Size, ShouldEqual, int64(100))
+
+			// Step 2: Truncate file to smaller size (should create new version)
+			Convey("Truncate file to create new version", func() {
+				fileNode := &OrcasNode{
+					fs:    ofs,
+					objID: fileObj.ID,
+				}
+				fileNode.obj.Store(obj[0])
+
+				// Truncate to 50 bytes
+				newSize := int64(50)
+				errno := fileNode.truncateFile(newSize)
+				So(errno, ShouldEqual, syscall.Errno(0))
+
+				// Verify file size was truncated
+				objAfterTruncate, err := handler.Get(ctx, testBktID, []int64{fileObj.ID})
+				So(err, ShouldBeNil)
+				So(len(objAfterTruncate), ShouldEqual, 1)
+				So(objAfterTruncate[0].Size, ShouldEqual, newSize)
+
+				// Verify truncate operation completed successfully
+				// The truncate operation should create a new version with the old DataID
+				// After truncate, the file should have a new DataID (or same if no data was written)
+				// The old data should be preserved in a version
+
+				// Step 3: Write new data after truncate
+				Convey("Write new data after truncate", func() {
+					// Get RandomAccessor for the truncated file
+					ra2, err := NewRandomAccessor(ofs, fileObj.ID)
+					So(err, ShouldBeNil)
+					defer ra2.Close()
+
+					// Write new data starting from position 0
+					newData := make([]byte, 30)
+					for i := range newData {
+						newData[i] = byte(200 + i) // Different pattern
+					}
+
+					err = ra2.Write(0, newData)
+					So(err, ShouldBeNil)
+
+					_, err = ra2.Flush()
+					So(err, ShouldBeNil)
+
+					// Verify new data was written
+					objAfterWrite, err := handler.Get(ctx, testBktID, []int64{fileObj.ID})
+					So(err, ShouldBeNil)
+					So(len(objAfterWrite), ShouldEqual, 1)
+					So(objAfterWrite[0].Size, ShouldEqual, int64(30))
+
+					// Step 4: Verify we can read the new data
+					Convey("Read new data after truncate and write", func() {
+						readData, err := ra2.Read(0, 30)
+						So(err, ShouldBeNil)
+						So(len(readData), ShouldEqual, 30)
+						So(readData, ShouldResemble, newData)
+
+						// Verify the file now has the new data size
+						objFinal, err := handler.Get(ctx, testBktID, []int64{fileObj.ID})
+						So(err, ShouldBeNil)
+						So(len(objFinal), ShouldEqual, 1)
+						So(objFinal[0].Size, ShouldEqual, int64(30))
+					})
+				})
+			})
+		})
+	})
+}

@@ -3531,7 +3531,12 @@ func (n *OrcasNode) truncateFile(newSize int64) syscall.Errno {
 		var ra *RandomAccessor
 		if val != nil {
 			if r, ok := val.(*RandomAccessor); ok && r != nil {
-				ra = r
+				// Validate RandomAccessor is properly initialized
+				if r.fs != nil && r.fileID > 0 && r.fileID == obj.ID {
+					ra = r
+				} else {
+					DebugLog("[VFS truncateFile] WARNING: Invalid RandomAccessor detected: fileID=%d, ra.fileID=%d, ra.fs=%v, objID=%d", n.objID, r.fileID, r.fs != nil, obj.ID)
+				}
 			}
 		}
 		if ra != nil {
@@ -3539,18 +3544,22 @@ func (n *OrcasNode) truncateFile(newSize int64) syscall.Errno {
 			// This will reference previous data block but with new size, and create new version
 			_, err := ra.Truncate(newSize)
 			if err != nil {
+				DebugLog("[VFS truncateFile] ERROR: Failed to truncate using RandomAccessor: objID=%d, newSize=%d, error=%v", n.objID, newSize, err)
 				return syscall.EIO
 			}
 		} else {
-			// No RandomAccessor, create one and use Truncate method
+			// No RandomAccessor or invalid RandomAccessor, create one and use Truncate method
+			DebugLog("[VFS truncateFile] Creating new RandomAccessor for truncate: objID=%d, newSize=%d", obj.ID, newSize)
 			ra, err := NewRandomAccessor(n.fs, obj.ID)
 			if err != nil {
+				DebugLog("[VFS truncateFile] ERROR: Failed to create RandomAccessor: objID=%d, error=%v", obj.ID, err)
 				return syscall.EIO
 			}
 			defer ra.Close()
 
 			_, err = ra.Truncate(newSize)
 			if err != nil {
+				DebugLog("[VFS truncateFile] ERROR: Failed to truncate with new RandomAccessor: objID=%d, newSize=%d, error=%v", obj.ID, newSize, err)
 				return syscall.EIO
 			}
 		}
