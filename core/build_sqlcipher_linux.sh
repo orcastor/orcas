@@ -124,10 +124,12 @@ fi
 echo -e "\n${YELLOW}配置 SQLCipher...${NC}"
 # SQLCipher 新版本不再支持 --with-crypto-lib，使用 CFLAGS 和 LDFLAGS 指定 OpenSSL
 # SQLCipher 要求必须定义 SQLITE_EXTRA_INIT 和 SQLITE_EXTRA_SHUTDOWN
+# 启用静态库构建（--enable-static）以确保生成 .a 文件
 CFLAGS="-DSQLITE_HAS_CODEC -DSQLITE_TEMP_STORE=2 -DSQLCIPHER_CRYPTO_OPENSSL -DSQLITE_EXTRA_INIT=sqlcipher_extra_init -DSQLITE_EXTRA_SHUTDOWN=sqlcipher_extra_shutdown -I${OPENSSL_INCLUDE_DIR}" \
 LDFLAGS="-L${OPENSSL_LIB_DIR} -lcrypto" \
 ./configure \
   --disable-tcl \
+  --enable-static \
   --prefix="$INSTALL_PREFIX"
 
 # 编译
@@ -142,16 +144,33 @@ make install
 # 复制库文件到项目
 echo -e "\n${YELLOW}复制库文件到项目目录...${NC}"
 
-# SQLCipher 生成的库文件名是 libsqlite3.so，但我们需要复制为 libsqlcipher.so 以便 CGO 链接
-# 查找库文件（SQLCipher 生成的是 libsqlite3.so，不是 libsqlcipher.so）
+# SQLCipher 生成的库文件名是 libsqlite3，但我们需要复制为 libsqlcipher 以便 CGO 链接
+# 优先查找静态库（.a 文件），如果没有则使用动态库（.so 文件）
 LIB_FILE=""
 TARGET_NAME=""
 
-# 优先查找动态库（.so 文件）
-if [ -f "$INSTALL_PREFIX/lib/libsqlite3.so" ]; then
+# 优先查找静态库（.a 文件）
+if [ -f "$INSTALL_PREFIX/lib/libsqlite3.a" ]; then
+    LIB_FILE="$INSTALL_PREFIX/lib/libsqlite3.a"
+    TARGET_NAME="libsqlcipher.a"
+    echo -e "${GREEN}找到静态库: ${LIB_FILE}${NC}"
+    cp "$LIB_FILE" "$PROJECT_CORE_DIR/$TARGET_NAME"
+    echo -e "${GREEN}已复制到: ${PROJECT_CORE_DIR}/$TARGET_NAME${NC}"
+    echo -e "${GREEN}使用静态库，无需运行时依赖${NC}"
+# 兼容旧版本：也检查 libsqlcipher 名称
+elif [ -f "$INSTALL_PREFIX/lib/libsqlcipher.a" ]; then
+    LIB_FILE="$INSTALL_PREFIX/lib/libsqlcipher.a"
+    TARGET_NAME="libsqlcipher.a"
+    echo -e "${GREEN}找到静态库: ${LIB_FILE}${NC}"
+    cp "$LIB_FILE" "$PROJECT_CORE_DIR/$TARGET_NAME"
+    echo -e "${GREEN}已复制到: ${PROJECT_CORE_DIR}/$TARGET_NAME${NC}"
+    echo -e "${GREEN}使用静态库，无需运行时依赖${NC}"
+# 如果没有静态库，回退到动态库
+elif [ -f "$INSTALL_PREFIX/lib/libsqlite3.so" ]; then
     LIB_FILE="$INSTALL_PREFIX/lib/libsqlite3.so"
     TARGET_NAME="libsqlcipher.so"
-    echo -e "${GREEN}找到动态库: ${LIB_FILE}${NC}"
+    echo -e "${YELLOW}找到动态库: ${LIB_FILE}${NC}"
+    echo -e "${YELLOW}注意: 未找到静态库，使用动态库（需要运行时依赖）${NC}"
     cp "$LIB_FILE" "$PROJECT_CORE_DIR/$TARGET_NAME"
     echo -e "${GREEN}已复制到: ${PROJECT_CORE_DIR}/$TARGET_NAME${NC}"
     
@@ -163,26 +182,15 @@ elif [ -f "$INSTALL_PREFIX/lib/libsqlite3.so.3.51.1" ]; then
     # 如果只有版本化的库文件，复制它
     LIB_FILE="$INSTALL_PREFIX/lib/libsqlite3.so.3.51.1"
     TARGET_NAME="libsqlcipher.so"
-    echo -e "${GREEN}找到版本化动态库: ${LIB_FILE}${NC}"
+    echo -e "${YELLOW}找到版本化动态库: ${LIB_FILE}${NC}"
+    echo -e "${YELLOW}注意: 未找到静态库，使用动态库（需要运行时依赖）${NC}"
     cp "$LIB_FILE" "$PROJECT_CORE_DIR/$TARGET_NAME"
     echo -e "${GREEN}已复制到: ${PROJECT_CORE_DIR}/$TARGET_NAME${NC}"
-elif [ -f "$INSTALL_PREFIX/lib/libsqlite3.a" ]; then
-    LIB_FILE="$INSTALL_PREFIX/lib/libsqlite3.a"
-    TARGET_NAME="libsqlcipher.a"
-    echo -e "${GREEN}找到静态库: ${LIB_FILE}${NC}"
-    cp "$LIB_FILE" "$PROJECT_CORE_DIR/$TARGET_NAME"
-    echo -e "${GREEN}已复制到: ${PROJECT_CORE_DIR}/$TARGET_NAME${NC}"
-# 兼容旧版本：也检查 libsqlcipher 名称（虽然不太可能）
 elif [ -f "$INSTALL_PREFIX/lib/libsqlcipher.so" ]; then
     LIB_FILE="$INSTALL_PREFIX/lib/libsqlcipher.so"
     TARGET_NAME="libsqlcipher.so"
-    echo -e "${GREEN}找到动态库: ${LIB_FILE}${NC}"
-    cp "$LIB_FILE" "$PROJECT_CORE_DIR/$TARGET_NAME"
-    echo -e "${GREEN}已复制到: ${PROJECT_CORE_DIR}/$TARGET_NAME${NC}"
-elif [ -f "$INSTALL_PREFIX/lib/libsqlcipher.a" ]; then
-    LIB_FILE="$INSTALL_PREFIX/lib/libsqlcipher.a"
-    TARGET_NAME="libsqlcipher.a"
-    echo -e "${GREEN}找到静态库: ${LIB_FILE}${NC}"
+    echo -e "${YELLOW}找到动态库: ${LIB_FILE}${NC}"
+    echo -e "${YELLOW}注意: 未找到静态库，使用动态库（需要运行时依赖）${NC}"
     cp "$LIB_FILE" "$PROJECT_CORE_DIR/$TARGET_NAME"
     echo -e "${GREEN}已复制到: ${PROJECT_CORE_DIR}/$TARGET_NAME${NC}"
 else

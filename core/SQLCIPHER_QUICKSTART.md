@@ -81,7 +81,22 @@ ldd ./server | grep sqlcipher
 - 确保运行时能找到库文件
 - 或使用系统安装的 SQLCipher（Homebrew）
 
+## 在依赖项目中使用 SQLCipher
+
+如果你的项目依赖 `github.com/orcastor/orcas`，请参考 `SQLCIPHER_DEPENDENCY.md` 了解如何在你的项目中启用 SQLCipher。
+
+**关键点**：
+- 在你的项目构建时使用 `-tags sqlcipher`
+- 确保 `CGO_ENABLED=1`
+- 确保 SQLCipher 库文件在 orcas 项目的 `core/` 目录中
+
+```bash
+# 在你的项目中构建（启用 SQLCipher）
+CGO_ENABLED=1 go build -tags sqlcipher -o your-app ./cmd
+```
+
 ## 更多信息
 
-详细文档请参考 `building.md`。
+- 详细构建文档：`building.md`
+- 依赖项目使用指南：`SQLCIPHER_DEPENDENCY.md`
 
