@@ -88,6 +88,12 @@ type OrcasFS struct {
 // NewOrcasFS creates a new ORCAS filesystem
 // This function is available on all platforms
 // requireKey: if true, return EPERM error when EndecKey is not provided in Config
+//
+// IMPORTANT: VFS requires LocalHandler for full functionality:
+// - TempFileWriter (for .tmp files and large files) requires LocalHandler
+// - Random writes with writing version require LocalHandler
+// - Direct data updates require LocalHandler
+// If a non-LocalHandler is provided, some features may not work (e.g., .tmp file writes)
 func NewOrcasFS(h core.Handler, c core.Ctx, bktID int64, requireKey ...bool) *OrcasFS {
 	return NewOrcasFSWithConfig(h, c, bktID, nil, requireKey...)
 }
@@ -129,6 +135,14 @@ func NewOrcasFSWithConfig(h core.Handler, c core.Ctx, bktID int64, cfg *core.Con
 	var config core.Config
 	if cfg != nil {
 		config = *cfg
+	}
+
+	// Verify handler type and log warning if not LocalHandler
+	// VFS requires LocalHandler for full functionality (TempFileWriter, writing version, etc.)
+	if _, ok := h.(*core.LocalHandler); !ok {
+		handlerType := fmt.Sprintf("%T", h)
+		DebugLog("[VFS NewOrcasFSWithConfig] WARNING: handler is not LocalHandler (type: %s), some features may not work: bktID=%d", handlerType, bktID)
+		DebugLog("[VFS NewOrcasFSWithConfig] NOTE: TempFileWriter, writing version, and direct data updates require LocalHandler")
 	}
 
 	ofs := &OrcasFS{

@@ -626,13 +626,21 @@ func (ra *RandomAccessor) getOrCreateTempWriter() (*TempFileWriter, error) {
 	}
 
 	// Cache LocalHandler if available
-	// IMPORTANT: TempFileWriter requires LocalHandler, return error if not available
+	// IMPORTANT: TempFileWriter requires LocalHandler because it needs:
+	// 1. PutDataInfoAndObj() - for atomic metadata writes (in Handler interface)
+	// 2. GetOrCreateWritingVersion() - for writing version support (LocalHandler only)
+	// 3. UpdateData() - for direct data block updates (LocalHandler only)
+	// 4. GetDataAdapter() - for accessing data adapter (LocalHandler only)
+	// If handler is not LocalHandler (e.g., RPC handler, wrapper handler), these methods won't be available
 	var lh *core.LocalHandler
 	if handler, ok := ra.fs.h.(*core.LocalHandler); ok {
 		lh = handler
 	} else {
-		DebugLog("[VFS RandomAccessor getOrCreateTempWriter] ERROR: handler is not LocalHandler, cannot create TempFileWriter: fileID=%d", ra.fileID)
-		return nil, fmt.Errorf("handler is not LocalHandler, cannot create TempFileWriter")
+		// Log handler type for debugging
+		handlerType := fmt.Sprintf("%T", ra.fs.h)
+		DebugLog("[VFS RandomAccessor getOrCreateTempWriter] ERROR: handler is not LocalHandler, cannot create TempFileWriter: fileID=%d, handlerType=%s", ra.fileID, handlerType)
+		DebugLog("[VFS RandomAccessor getOrCreateTempWriter] NOTE: TempFileWriter requires LocalHandler for direct data access. If using RPC/wrapper handler, consider using a different write path.")
+		return nil, fmt.Errorf("handler is not LocalHandler (type: %s), cannot create TempFileWriter", handlerType)
 	}
 
 	tw := &TempFileWriter{

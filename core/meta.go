@@ -523,6 +523,9 @@ func InitBucketDB(dataPath string, bktID int64, key ...string) error {
 		return fmt.Errorf("%w: create bkt table: %v", ERR_EXEC_DB, err)
 	}
 
+	// Create obj table (if not exists)
+	// Note: CREATE TABLE IF NOT EXISTS will not modify existing tables
+	// So we need to handle migration separately for existing tables
 	_, err = db.Exec(`CREATE TABLE IF NOT EXISTS obj (id BIGINT PRIMARY KEY NOT NULL,
 		pid BIGINT NOT NULL,
 		did BIGINT NOT NULL,
@@ -538,40 +541,19 @@ func InitBucketDB(dataPath string, bktID int64, key ...string) error {
 	}
 
 	// Add md column to existing tables (for migration)
-	// Check if column exists first to avoid errors on existing databases
-	// This handles upgrade from older versions that don't have the md column
-	hasMdColumn := false
-	rows, queryErr := db.Query(`PRAGMA table_info(obj)`)
-	if queryErr == nil {
-		defer rows.Close()
-		for rows.Next() {
-			var cid int
-			var name string
-			var dataType string
-			var notNull int
-			var defaultValue interface{}
-			var pk int
-			if scanErr := rows.Scan(&cid, &name, &dataType, &notNull, &defaultValue, &pk); scanErr == nil {
-				if name == "md" {
-					hasMdColumn = true
-					break
-				}
-			}
-		}
-		rows.Close()
-	}
-
-	// Only add column if it doesn't exist
-	// If PRAGMA query failed, we'll try to add the column anyway (it will fail gracefully if it already exists)
-	if !hasMdColumn {
-		_, alterErr := db.Exec(`ALTER TABLE obj ADD COLUMN md INTEGER NOT NULL DEFAULT 0`)
-		if alterErr != nil {
-			// Ignore error if column already exists (race condition or concurrent migration)
-			// SQLite will return an error if the column already exists, which is safe to ignore
-			// This is safe because:
-			// 1. If column exists, it already has the correct default value (0)
-			// 2. If column doesn't exist and we can't add it, the error will be caught by subsequent operations
-			// We don't fail initialization here to allow graceful degradation
+	// Simply try to add the column - if it already exists, SQLite will return an error which we ignore
+	// This is simpler and more robust than checking if column exists first
+	// IMPORTANT: This migration must run AFTER CREATE TABLE IF NOT EXISTS to handle existing databases
+	_, alterErr := db.Exec(`ALTER TABLE obj ADD COLUMN md INTEGER NOT NULL DEFAULT 0`)
+	if alterErr != nil {
+		// Check if error is because column already exists (SQLite error: duplicate column name)
+		errorStr := alterErr.Error()
+		if strings.Contains(errorStr, "duplicate column") || strings.Contains(errorStr, "already exists") {
+			// Column already exists, this is fine - ignore the error
+			// This can happen if:
+			// 1. Table was created with md column (new database)
+			// 2. Migration already ran (existing database upgraded)
+			// 3. Concurrent migration (race condition)
 		}
 	}
 
