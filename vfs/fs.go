@@ -4399,25 +4399,28 @@ func (n *OrcasNode) OnAdd(ctx context.Context) {
 // Getxattr implements NodeGetxattrer interface
 func (n *OrcasNode) Getxattr(ctx context.Context, attr string, dest []byte) (uint32, syscall.Errno) {
 	DebugLog("[VFS Getxattr] Entry: objID=%d, attr=%s, destLen=%d", n.objID, attr, len(dest))
-	// Default implementation: return ENOATTR (no such attribute)
+	// Default implementation: return ENODATA (no such attribute)
+	// Note: ENODATA is Linux-compatible, ENOATTR is not available on Linux
 	DebugLog("[VFS Getxattr] ERROR: Attribute not found: objID=%d, attr=%s", n.objID, attr)
-	return 0, syscall.ENOATTR
+	return 0, syscall.ENODATA
 }
 
 // Setxattr implements NodeSetxattrer interface
 func (n *OrcasNode) Setxattr(ctx context.Context, attr string, data []byte, flags uint32) syscall.Errno {
 	DebugLog("[VFS Setxattr] Entry: objID=%d, attr=%s, dataLen=%d, flags=0x%x", n.objID, attr, len(data), flags)
-	// Default implementation: return ENOATTR (no such attribute)
+	// Default implementation: return ENODATA (attribute not supported)
+	// Note: ENODATA is Linux-compatible, ENOATTR is not available on Linux
 	DebugLog("[VFS Setxattr] ERROR: Attribute not supported: objID=%d, attr=%s", n.objID, attr)
-	return syscall.ENOATTR
+	return syscall.ENODATA
 }
 
 // Removexattr implements NodeRemovexattrer interface
 func (n *OrcasNode) Removexattr(ctx context.Context, attr string) syscall.Errno {
 	DebugLog("[VFS Removexattr] Entry: objID=%d, attr=%s", n.objID, attr)
-	// Default implementation: return ENOATTR (no such attribute)
+	// Default implementation: return ENODATA (no such attribute)
+	// Note: ENODATA is Linux-compatible, ENOATTR is not available on Linux
 	DebugLog("[VFS Removexattr] ERROR: Attribute not found: objID=%d, attr=%s", n.objID, attr)
-	return syscall.ENOATTR
+	return syscall.ENODATA
 }
 
 // Listxattr implements NodeListxattrer interface
