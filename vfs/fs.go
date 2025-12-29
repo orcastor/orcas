@@ -4578,14 +4578,10 @@ func (n *OrcasNode) Access(ctx context.Context, mask uint32) syscall.Errno {
 
 // OnAdd implements NodeOnAdder interface
 func (n *OrcasNode) OnAdd(ctx context.Context) {
-	DebugLog("[VFS OnAdd] Entry: objID=%d", n.objID)
-	// Called when this InodeEmbedder is initialized
-	DebugLog("[VFS OnAdd] Inode initialized: objID=%d", n.objID)
 }
 
 // Getxattr implements NodeGetxattrer interface
 func (n *OrcasNode) Getxattr(ctx context.Context, attr string, dest []byte) (uint32, syscall.Errno) {
-	DebugLog("[VFS Getxattr] Entry: objID=%d, attr=%s, destLen=%d", n.objID, attr, len(dest))
 	if errno := n.fs.checkKey(); errno != 0 {
 		DebugLog("[VFS Getxattr] ERROR: checkKey failed: objID=%d, attr=%s, errno=%d", n.objID, attr, errno)
 		return 0, errno
@@ -4601,15 +4597,12 @@ func (n *OrcasNode) Getxattr(ctx context.Context, attr string, dest []byte) (uin
 			if exists {
 				// Check if this is a "not found" sentinel (nil)
 				if value == nil {
-					DebugLog("[VFS Getxattr] Attribute not found (from sentinel cache): objID=%d, attr=%s", n.objID, attr)
 					return 0, syscall.ENODATA
 				}
 				if len(value) > len(dest) {
-					DebugLog("[VFS Getxattr] ERROR: Buffer too small (from cache): objID=%d, attr=%s, valueLen=%d, destLen=%d", n.objID, attr, len(value), len(dest))
 					return uint32(len(value)), syscall.ERANGE
 				}
 				copy(dest, value)
-				DebugLog("[VFS Getxattr] Successfully retrieved attribute from cache: objID=%d, attr=%s, valueLen=%d", n.objID, attr, len(value))
 				return uint32(len(value)), 0
 			}
 		}
@@ -4624,7 +4617,6 @@ func (n *OrcasNode) Getxattr(ctx context.Context, attr string, dest []byte) (uin
 				// Check if this is a "not found" error (attribute doesn't exist)
 				// If so, cache a sentinel value (nil) to prevent repeated database queries
 				if strings.Contains(err.Error(), "attribute not found") {
-					DebugLog("[VFS Getxattr] Attribute not found, caching sentinel (nil): objID=%d, attr=%s", n.objID, attr)
 					// Update cache with sentinel value (nil)
 					var entry *attrCacheEntry
 					if cached, ok := attrCache.Get(cacheKey); ok {
@@ -4641,14 +4633,11 @@ func (n *OrcasNode) Getxattr(ctx context.Context, attr string, dest []byte) (uin
 					entry.attrs[attr] = nil // Use nil as sentinel
 					entry.mu.Unlock()
 					attrCache.Put(cacheKey, entry)
-					DebugLog("[VFS Getxattr] Attribute not found: objID=%d, attr=%s", n.objID, attr)
 					return 0, syscall.ENODATA
 				}
-				DebugLog("[VFS Getxattr] ERROR: Failed to get attribute: objID=%d, attr=%s, error=%v", n.objID, attr, err)
 				return 0, syscall.ENODATA
 			}
 			if len(value) > len(dest) {
-				DebugLog("[VFS Getxattr] ERROR: Buffer too small: objID=%d, attr=%s, valueLen=%d, destLen=%d", n.objID, attr, len(value), len(dest))
 				return uint32(len(value)), syscall.ERANGE
 			}
 			copy(dest, value)
@@ -4670,19 +4659,16 @@ func (n *OrcasNode) Getxattr(ctx context.Context, attr string, dest []byte) (uin
 			entry.mu.Unlock()
 			attrCache.Put(cacheKey, entry)
 
-			DebugLog("[VFS Getxattr] Successfully retrieved attribute from database: objID=%d, attr=%s, valueLen=%d", n.objID, attr, len(value))
 			return uint32(len(value)), 0
 		}
 	}
 	// If MetadataAdapter is not available, return ENODATA (attribute doesn't exist)
 	// This is acceptable for Getxattr - the attribute simply doesn't exist
-	DebugLog("[VFS Getxattr] MetadataAdapter not available, returning ENODATA: objID=%d, attr=%s", n.objID, attr)
 	return 0, syscall.ENODATA
 }
 
 // Setxattr implements NodeSetxattrer interface
 func (n *OrcasNode) Setxattr(ctx context.Context, attr string, data []byte, flags uint32) syscall.Errno {
-	DebugLog("[VFS Setxattr] Entry: objID=%d, attr=%s, dataLen=%d, flags=0x%x", n.objID, attr, len(data), flags)
 	if errno := n.fs.checkKey(); errno != 0 {
 		DebugLog("[VFS Setxattr] ERROR: checkKey failed: objID=%d, attr=%s, errno=%d", n.objID, attr, errno)
 		return errno
@@ -4694,7 +4680,6 @@ func (n *OrcasNode) Setxattr(ctx context.Context, attr string, data []byte, flag
 		if ma != nil {
 			err := ma.SetAttr(n.fs.c, n.fs.bktID, n.objID, attr, data)
 			if err != nil {
-				DebugLog("[VFS Setxattr] ERROR: Failed to set attribute: objID=%d, attr=%s, error=%v", n.objID, attr, err)
 				return syscall.EIO
 			}
 
@@ -4715,21 +4700,17 @@ func (n *OrcasNode) Setxattr(ctx context.Context, attr string, data []byte, flag
 			entry.attrs[attr] = data
 			entry.mu.Unlock()
 			attrCache.Put(cacheKey, entry)
-
-			DebugLog("[VFS Setxattr] Successfully set attribute: objID=%d, attr=%s, dataLen=%d", n.objID, attr, len(data))
 			return 0
 		}
 	}
 	// If MetadataAdapter is not available, return ENOTSUP (operation not supported)
 	// This tells macOS that extended attributes are not supported, which is better than ENODATA
 	// ENODATA would suggest the attribute doesn't exist, but ENOTSUP indicates the feature isn't available
-	DebugLog("[VFS Setxattr] MetadataAdapter not available, returning ENOTSUP: objID=%d, attr=%s", n.objID, attr)
 	return syscall.ENOTSUP
 }
 
 // Removexattr implements NodeRemovexattrer interface
 func (n *OrcasNode) Removexattr(ctx context.Context, attr string) syscall.Errno {
-	DebugLog("[VFS Removexattr] Entry: objID=%d, attr=%s", n.objID, attr)
 	if errno := n.fs.checkKey(); errno != 0 {
 		DebugLog("[VFS Removexattr] ERROR: checkKey failed: objID=%d, attr=%s, errno=%d", n.objID, attr, errno)
 		return errno
@@ -4741,7 +4722,6 @@ func (n *OrcasNode) Removexattr(ctx context.Context, attr string) syscall.Errno 
 		if ma != nil {
 			err := ma.RemoveAttr(n.fs.c, n.fs.bktID, n.objID, attr)
 			if err != nil {
-				DebugLog("[VFS Removexattr] ERROR: Failed to remove attribute: objID=%d, attr=%s, error=%v", n.objID, attr, err)
 				return syscall.ENODATA
 			}
 
@@ -4761,18 +4741,14 @@ func (n *OrcasNode) Removexattr(ctx context.Context, attr string) syscall.Errno 
 					}
 				}
 			}
-
-			DebugLog("[VFS Removexattr] Successfully removed attribute: objID=%d, attr=%s", n.objID, attr)
 			return 0
 		}
 	}
-	DebugLog("[VFS Removexattr] ERROR: MetadataAdapter not available: objID=%d, attr=%s", n.objID, attr)
 	return syscall.ENODATA
 }
 
 // Listxattr implements NodeListxattrer interface
 func (n *OrcasNode) Listxattr(ctx context.Context, dest []byte) (uint32, syscall.Errno) {
-	DebugLog("[VFS Listxattr] Entry: objID=%d, destLen=%d", n.objID, len(dest))
 	if errno := n.fs.checkKey(); errno != 0 {
 		DebugLog("[VFS Listxattr] ERROR: checkKey failed: objID=%d, errno=%d", n.objID, errno)
 		return 0, errno
@@ -4797,7 +4773,6 @@ func (n *OrcasNode) Listxattr(ctx context.Context, dest []byte) (uint32, syscall
 			entry.mu.RUnlock()
 			if len(keys) > 0 {
 				cacheHit = true
-				DebugLog("[VFS Listxattr] Retrieved keys from cache: objID=%d, count=%d (filtered sentinels)", n.objID, len(keys))
 			}
 		}
 	}
@@ -4810,10 +4785,8 @@ func (n *OrcasNode) Listxattr(ctx context.Context, dest []byte) (uint32, syscall
 				var err error
 				keys, err = ma.ListAttrs(n.fs.c, n.fs.bktID, n.objID)
 				if err != nil {
-					DebugLog("[VFS Listxattr] ERROR: Failed to list attributes: objID=%d, error=%v", n.objID, err)
 					return 0, syscall.EIO
 				}
-				DebugLog("[VFS Listxattr] Retrieved keys from database: objID=%d, count=%d", n.objID, len(keys))
 
 				// Update cache: merge database keys with existing cache entry
 				var entry *attrCacheEntry
@@ -4860,7 +4833,6 @@ func (n *OrcasNode) Listxattr(ctx context.Context, dest []byte) (uint32, syscall
 
 	// If no attributes found, return ENODATA
 	if len(keys) == 0 {
-		DebugLog("[VFS Listxattr] No attributes found: objID=%d", n.objID)
 		return 0, syscall.ENODATA
 	}
 
@@ -4870,7 +4842,6 @@ func (n *OrcasNode) Listxattr(ctx context.Context, dest []byte) (uint32, syscall
 		totalLen += len(key) + 1 // +1 for null terminator
 	}
 	if totalLen > len(dest) {
-		DebugLog("[VFS Listxattr] ERROR: Buffer too small: objID=%d, totalLen=%d, destLen=%d", n.objID, totalLen, len(dest))
 		return uint32(totalLen), syscall.ERANGE
 	}
 	pos := 0
@@ -4880,7 +4851,6 @@ func (n *OrcasNode) Listxattr(ctx context.Context, dest []byte) (uint32, syscall
 		dest[pos] = 0 // null terminator
 		pos++
 	}
-	DebugLog("[VFS Listxattr] Successfully listed attributes: objID=%d, count=%d, totalLen=%d", n.objID, len(keys), totalLen)
 	return uint32(totalLen), 0
 }
 
@@ -4965,16 +4935,10 @@ func (n *OrcasNode) Ioctl(ctx context.Context, f fs.FileHandle, cmd uint32, arg 
 
 // OnForget implements NodeOnForgetter interface
 func (n *OrcasNode) OnForget() {
-	DebugLog("[VFS OnForget] Entry: objID=%d", n.objID)
-	// Called when the node becomes unreachable
-	DebugLog("[VFS OnForget] Node forgotten: objID=%d", n.objID)
 }
 
 // WrapChild implements NodeWrapChilder interface
 func (n *OrcasNode) WrapChild(ctx context.Context, ops fs.InodeEmbedder) fs.InodeEmbedder {
-	DebugLog("[VFS WrapChild] Entry: objID=%d, ops=%v", n.objID, ops)
-	// Default implementation: return ops unchanged
-	DebugLog("[VFS WrapChild] Returning ops unchanged: objID=%d", n.objID)
 	return ops
 }
 
