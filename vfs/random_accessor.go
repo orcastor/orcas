@@ -571,6 +571,7 @@ func (ra *RandomAccessor) getOrCreateTempWriter() (*TempFileWriter, error) {
 
 	fileObj, err := ra.getFileObj()
 	if err != nil {
+		DebugLog("[VFS RandomAccessor getOrCreateTempWriter] ERROR: Failed to get file object: fileID=%d, error=%v", ra.fileID, err)
 		return nil, err
 	}
 
@@ -591,6 +592,7 @@ func (ra *RandomAccessor) getOrCreateTempWriter() (*TempFileWriter, error) {
 		// File has no DataID, create new one
 		dataID = core.NewID()
 		if dataID <= 0 {
+			DebugLog("[VFS RandomAccessor getOrCreateTempWriter] ERROR: Failed to create DataID for .tmp file: fileID=%d", ra.fileID)
 			return nil, fmt.Errorf("failed to create DataID for .tmp file")
 		}
 		DebugLog("[VFS TempFileWriter Create] Created new DataID: fileID=%d, dataID=%d", ra.fileID, dataID)
@@ -658,6 +660,7 @@ func (tw *TempFileWriter) Write(offset int64, data []byte) error {
 
 	// Check handler type early
 	if tw.lh == nil {
+		DebugLog("[VFS TempFileWriter Write] ERROR: handler is not LocalHandler, cannot use Write: fileID=%d, dataID=%d, offset=%d, size=%d", tw.fileID, tw.dataID, offset, len(data))
 		return fmt.Errorf("handler is not LocalHandler, cannot use Write")
 	}
 
@@ -1368,6 +1371,7 @@ func (tw *TempFileWriter) flushChunkWithBuffer(sn int, buf *chunkBuffer) error {
 	// This prevents Size from being accumulated multiple times if chunk is flushed multiple times
 	err = tw.writeChunkSync(sn, finalData)
 	if err != nil {
+		DebugLog("[VFS TempFileWriter Write] ERROR: Failed to write chunk synchronously: fileID=%d, dataID=%d, sn=%d, size=%d, error=%v", tw.fileID, tw.dataID, sn, len(finalData), err)
 		return err
 	}
 
@@ -1635,6 +1639,7 @@ func (tw *TempFileWriter) Flush() error {
 	// Get file object
 	fileObj, err := tw.fs.h.Get(tw.fs.c, tw.fs.bktID, []int64{tw.fileID})
 	if err != nil || len(fileObj) == 0 {
+		DebugLog("[VFS TempFileWriter Flush] ERROR: Failed to get file object: fileID=%d, dataID=%d, error=%v, len=%d", tw.fileID, tw.dataID, err, len(fileObj))
 		return fmt.Errorf("failed to get file object: %v", err)
 	}
 	obj := fileObj[0]
@@ -1941,6 +1946,7 @@ func (ra *RandomAccessor) Write(offset int64, data []byte) error {
 	if fileObj == nil {
 		fileObj, err = ra.getFileObj()
 		if err != nil {
+			DebugLog("[VFS RandomAccessor Write] ERROR: Failed to get file object: fileID=%d, offset=%d, size=%d, error=%v", ra.fileID, offset, len(data), err)
 			return err
 		}
 	}
@@ -2007,6 +2013,7 @@ func (ra *RandomAccessor) Write(offset int64, data []byte) error {
 
 		tw, err := ra.getOrCreateTempWriter()
 		if err != nil {
+			DebugLog("[VFS RandomAccessor Write] ERROR: Failed to get or create TempFileWriter for .tmp file: fileID=%d, offset=%d, size=%d, error=%v", ra.fileID, offset, len(data), err)
 			return fmt.Errorf("failed to get or create TempFileWriter for .tmp file: %w", err)
 		}
 		return tw.Write(offset, data)
@@ -2021,6 +2028,7 @@ func (ra *RandomAccessor) Write(offset int64, data []byte) error {
 		} else if offset < ra.seqBuffer.offset {
 			// Write backwards, switch to random write mode
 			if flushErr := ra.flushSequentialBuffer(); flushErr != nil {
+				DebugLog("[VFS RandomAccessor Write] ERROR: Failed to flush sequential buffer (backwards write): fileID=%d, offset=%d, seqOffset=%d, size=%d, error=%v", ra.fileID, offset, ra.seqBuffer.offset, len(data), flushErr)
 				return flushErr
 			}
 			ra.seqBuffer.closed = true
@@ -2031,6 +2039,7 @@ func (ra *RandomAccessor) Write(offset int64, data []byte) error {
 			// to ensure the data written so far is persisted, then continue with random writes
 			// The subsequent random writes will be merged with the sequential data during flush
 			if flushErr := ra.flushSequentialBuffer(); flushErr != nil {
+				DebugLog("[VFS RandomAccessor Write] ERROR: Failed to flush sequential buffer (skipped positions): fileID=%d, offset=%d, seqOffset=%d, size=%d, error=%v", ra.fileID, offset, ra.seqBuffer.offset, len(data), flushErr)
 				return flushErr
 			}
 			ra.seqBuffer.closed = true
@@ -2061,6 +2070,7 @@ func (ra *RandomAccessor) Write(offset int64, data []byte) error {
 						return ra.writeSequential(offset, data)
 					}
 					// Initialization failed, fallback to random write
+					DebugLog("[VFS RandomAccessor Write] WARNING: Failed to initialize sequential buffer, falling back to random write: fileID=%d, offset=%d, size=%d, error=%v", ra.fileID, offset, len(data), initErr)
 				}
 			}
 		}
@@ -2083,6 +2093,7 @@ func (ra *RandomAccessor) Write(offset int64, data []byte) error {
 
 		tw, err := ra.getOrCreateTempWriter()
 		if err != nil {
+			DebugLog("[VFS RandomAccessor Write] ERROR: Failed to get or create TempFileWriter (random mode fallback): fileID=%d, offset=%d, size=%d, error=%v", ra.fileID, offset, len(data), err)
 			return fmt.Errorf("failed to get or create TempFileWriter: %w", err)
 		}
 		return tw.Write(offset, data)
@@ -2107,6 +2118,7 @@ func (ra *RandomAccessor) Write(offset int64, data []byte) error {
 		if fileObj == nil {
 			fileObj, err = ra.getFileObj()
 			if err != nil {
+				DebugLog("[VFS RandomAccessor Write] ERROR: Failed to get file object (for sequential detection): fileID=%d, offset=%d, size=%d, error=%v", ra.fileID, offset, len(data), err)
 				return err
 			}
 		}
@@ -2232,11 +2244,13 @@ func (ra *RandomAccessor) Write(offset int64, data []byte) error {
 func (ra *RandomAccessor) initSequentialBuffer(force bool) error {
 	fileObj, err := ra.getFileObj()
 	if err != nil {
+		DebugLog("[VFS RandomAccessor initSequentialBuffer] ERROR: Failed to get file object: fileID=%d, error=%v", ra.fileID, err)
 		return err
 	}
 
 	// Create new data object for sequential buffer (only when file has no data)
 	if fileObj.DataID > 0 && fileObj.DataID != core.EmptyDataID {
+		DebugLog("[VFS RandomAccessor initSequentialBuffer] ERROR: File already has data: fileID=%d, dataID=%d", ra.fileID, fileObj.DataID)
 		return fmt.Errorf("file already has data")
 	}
 	return ra.initSequentialBufferWithNewData()
@@ -2315,6 +2329,7 @@ func (ra *RandomAccessor) writeSequential(offset int64, data []byte) error {
 		if remainingInChunk <= 0 {
 			// Current chunk is full, write and clear
 			if err := ra.flushSequentialChunk(); err != nil {
+				DebugLog("[VFS RandomAccessor writeSequential] ERROR: Failed to flush sequential chunk (chunk full): fileID=%d, offset=%d, size=%d, error=%v", ra.fileID, offset, len(data), err)
 				return err
 			}
 			remainingInChunk = ra.seqBuffer.chunkSize
@@ -2335,6 +2350,7 @@ func (ra *RandomAccessor) writeSequential(offset int64, data []byte) error {
 		// If chunk is full, write immediately
 		if int64(len(ra.seqBuffer.buffer)) >= ra.seqBuffer.chunkSize {
 			if err := ra.flushSequentialChunk(); err != nil {
+				DebugLog("[VFS RandomAccessor writeSequential] ERROR: Failed to flush sequential chunk (immediate flush): fileID=%d, offset=%d, size=%d, error=%v", ra.fileID, offset, len(data), err)
 				return err
 			}
 		}
@@ -2548,6 +2564,7 @@ func (ra *RandomAccessor) flushSequentialBuffer() error {
 	// Write last chunk (if there's still data)
 	if len(ra.seqBuffer.buffer) > 0 {
 		if err := ra.flushSequentialChunk(); err != nil {
+			DebugLog("[VFS RandomAccessor flushSequentialBuffer] ERROR: Failed to flush last sequential chunk: fileID=%d, bufferSize=%d, error=%v", ra.fileID, len(ra.seqBuffer.buffer), err)
 			return err
 		}
 	}
@@ -2571,6 +2588,7 @@ func (ra *RandomAccessor) flushSequentialBuffer() error {
 	// Get file object first to prepare for combined write
 	fileObj, err := ra.getFileObj()
 	if err != nil {
+		DebugLog("[VFS RandomAccessor flushSequentialBuffer] ERROR: Failed to get file object: fileID=%d, error=%v", ra.fileID, err)
 		return err
 	}
 
@@ -3352,6 +3370,7 @@ func (ra *RandomAccessor) applyRandomWritesWithSDK(fileObj *core.ObjectInfo, wri
 	// Get LocalHandler to access ig, ma, da
 	lh, ok := ra.fs.h.(*core.LocalHandler)
 	if !ok {
+		DebugLog("[VFS applyRandomWritesWithSDK] ERROR: handler is not LocalHandler, operation not supported: fileID=%d, writes=%d", ra.fileID, len(writes))
 		return 0, fmt.Errorf("handler is not LocalHandler")
 	}
 
@@ -3684,6 +3703,7 @@ func (ra *RandomAccessor) applyWritesWithWritingVersion(fileObj *core.ObjectInfo
 	// Get LocalHandler
 	lh, ok := ra.fs.h.(*core.LocalHandler)
 	if !ok {
+		DebugLog("[VFS applyWritesWithWritingVersion] ERROR: handler is not LocalHandler, operation not supported: fileID=%d, writes=%d", ra.fileID, len(writes))
 		return 0, fmt.Errorf("handler is not LocalHandler")
 	}
 
@@ -5323,6 +5343,7 @@ func (ra *RandomAccessor) Truncate(newSize int64) (int64, error) {
 	// Get LocalHandler
 	lh, ok := ra.fs.h.(*core.LocalHandler)
 	if !ok {
+		DebugLog("[VFS Truncate] ERROR: handler is not LocalHandler, operation not supported: fileID=%d, oldSize=%d, newSize=%d", ra.fileID, oldSize, newSize)
 		return 0, fmt.Errorf("handler is not LocalHandler")
 	}
 
