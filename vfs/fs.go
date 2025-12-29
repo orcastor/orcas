@@ -24,6 +24,7 @@ import (
 // On 64-bit systems, this is typically 0 or not needed, but we support it for compatibility
 // On 32-bit Linux systems, this is typically 0x8000
 // Note: Using ALL_CAPS for system constant is acceptable
+//
 //nolint:revive // O_LARGEFILE is a system constant, ALL_CAPS is appropriate
 const O_LARGEFILE = 0x8000
 
@@ -919,8 +920,8 @@ func (n *OrcasNode) Create(ctx context.Context, name string, flags uint32, mode 
 	if hasLargeFileFlag {
 		DebugLog("[VFS Create] O_LARGEFILE flag set: name=%s, parentID=%d, flags=0x%x", name, obj.ID, flags)
 	}
-	
-	DebugLog("[VFS Create] Creating file: name=%s, parentID=%d, flags=0x%x (O_LARGEFILE=0x%x), mode=0%o", 
+
+	DebugLog("[VFS Create] Creating file: name=%s, parentID=%d, flags=0x%x (O_LARGEFILE=0x%x), mode=0%o",
 		name, obj.ID, flags, O_LARGEFILE, mode)
 
 	// Check if file already exists
@@ -1655,9 +1656,9 @@ func (n *OrcasNode) Open(ctx context.Context, flags uint32) (fh fs.FileHandle, f
 
 	// Check if file is opened for writing
 	isWriteMode := (flags&syscall.O_WRONLY != 0) || (flags&syscall.O_RDWR != 0)
-	DebugLog("[VFS Open] File open mode: fileID=%d, isWriteMode=%v, hasLargeFileFlag=%v, flags=0x%x", 
+	DebugLog("[VFS Open] File open mode: fileID=%d, isWriteMode=%v, hasLargeFileFlag=%v, flags=0x%x",
 		obj.ID, isWriteMode, hasLargeFileFlag, flags)
-	
+
 	// Note: O_LARGEFILE is supported - we already support large files (>2GB) by default
 	// This flag is mainly for compatibility with 32-bit applications
 
