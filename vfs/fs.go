@@ -98,19 +98,49 @@ type OrcasNode struct {
 var releasedMarker = &RandomAccessor{}
 
 var (
-	_ fs.InodeEmbedder = (*OrcasNode)(nil)
-	_                  = fs.NodeLookuper(&OrcasNode{})
-	_                  = fs.NodeReaddirer(&OrcasNode{})
-	_                  = fs.NodeCreater(&OrcasNode{})
-	_                  = fs.NodeMkdirer(&OrcasNode{})
-	_                  = fs.NodeUnlinker(&OrcasNode{})
-	_                  = fs.NodeRmdirer(&OrcasNode{})
-	_                  = fs.NodeRenamer(&OrcasNode{})
-	_                  = fs.NodeGetattrer(&OrcasNode{})
-	_                  = fs.NodeOpener(&OrcasNode{})
-	_                  = fs.FileReader(&OrcasNode{})
-	_                  = fs.FileWriter(&OrcasNode{})
-	_                  = fs.FileReleaser(&OrcasNode{})
+	_ fs.InodeEmbedder     = (*OrcasNode)(nil)
+	_ fs.NodeStatfser      = (*OrcasNode)(nil)
+	_ fs.NodeAccesser      = (*OrcasNode)(nil)
+	_ fs.NodeGetattrer     = (*OrcasNode)(nil)
+	_ fs.NodeSetattrer     = (*OrcasNode)(nil)
+	_ fs.NodeOnAdder       = (*OrcasNode)(nil)
+	_ fs.NodeGetxattrer    = (*OrcasNode)(nil)
+	_ fs.NodeSetxattrer    = (*OrcasNode)(nil)
+	_ fs.NodeRemovexattrer = (*OrcasNode)(nil)
+	_ fs.NodeListxattrer   = (*OrcasNode)(nil)
+	_ fs.NodeReadlinker    = (*OrcasNode)(nil)
+	_ fs.NodeOpener        = (*OrcasNode)(nil)
+	// Note: NodeReader and NodeWriter are automatically forwarded to FileHandle by go-fuse
+	// Since OrcasNode implements FileReader and FileWriter, NodeReader/NodeWriter will work automatically
+	_ fs.NodeFsyncer        = (*OrcasNode)(nil)
+	_ fs.NodeFlusher        = (*OrcasNode)(nil)
+	_ fs.NodeReleaser       = (*OrcasNode)(nil)
+	_ fs.NodeAllocater      = (*OrcasNode)(nil)
+	_ fs.NodeCopyFileRanger = (*OrcasNode)(nil)
+	_ fs.NodeStatxer        = (*OrcasNode)(nil)
+	_ fs.NodeLseeker        = (*OrcasNode)(nil)
+	_ fs.NodeGetlker        = (*OrcasNode)(nil)
+	_ fs.NodeSetlker        = (*OrcasNode)(nil)
+	_ fs.NodeSetlkwer       = (*OrcasNode)(nil)
+	_ fs.NodeIoctler        = (*OrcasNode)(nil)
+	_ fs.NodeOnForgetter    = (*OrcasNode)(nil)
+	_ fs.NodeLookuper       = (*OrcasNode)(nil)
+	_ fs.NodeWrapChilder    = (*OrcasNode)(nil)
+	_ fs.NodeOpendirer      = (*OrcasNode)(nil)
+	_ fs.NodeReaddirer      = (*OrcasNode)(nil)
+	_ fs.NodeMkdirer        = (*OrcasNode)(nil)
+	_ fs.NodeMknoder        = (*OrcasNode)(nil)
+	_ fs.NodeLinker         = (*OrcasNode)(nil)
+	_ fs.NodeSymlinker      = (*OrcasNode)(nil)
+	_ fs.NodeCreater        = (*OrcasNode)(nil)
+	_ fs.NodeUnlinker       = (*OrcasNode)(nil)
+	_ fs.NodeRmdirer        = (*OrcasNode)(nil)
+	_ fs.NodeRenamer        = (*OrcasNode)(nil)
+	_ fs.FileReader         = (*OrcasNode)(nil)
+	_ fs.FileWriter         = (*OrcasNode)(nil)
+	// Note: FileReleaser.Release has different signature than NodeReleaser.Release
+	// We implement NodeReleaser.Release which forwards to FileReleaser if needed
+	// FileReleaser interface is not explicitly declared here due to signature mismatch
 )
 
 // getObj gets object information (with cache)
@@ -2962,7 +2992,13 @@ func (n *OrcasNode) Rename(ctx context.Context, name string, newParent fs.InodeE
 }
 
 // Read reads file content
+// Read implements FileReader interface
 func (n *OrcasNode) Read(ctx context.Context, dest []byte, off int64) (fuse.ReadResult, syscall.Errno) {
+	return n.readImpl(ctx, dest, off)
+}
+
+// readImpl is the actual read implementation
+func (n *OrcasNode) readImpl(ctx context.Context, dest []byte, off int64) (fuse.ReadResult, syscall.Errno) {
 	DebugLog("[VFS Read] Entry: objID=%d, offset=%d, size=%d", n.objID, off, len(dest))
 	// Check if KEY is required
 	if errno := n.fs.checkKey(); errno != 0 {
@@ -3138,7 +3174,13 @@ func (n *OrcasNode) getDataReader(offset int64) (dataReader, syscall.Errno) {
 
 // Write writes file content
 // Optimization: reduce lock hold time, ra.Write itself is thread-safe
+// Write implements FileWriter interface
 func (n *OrcasNode) Write(ctx context.Context, data []byte, off int64) (written uint32, errno syscall.Errno) {
+	return n.writeImpl(ctx, data, off)
+}
+
+// writeImpl is the actual write implementation
+func (n *OrcasNode) writeImpl(ctx context.Context, data []byte, off int64) (written uint32, errno syscall.Errno) {
 	DebugLog("[VFS Write] Write called: objID=%d, offset=%d, size=%d", n.objID, off, len(data))
 
 	// Check if KEY is required
@@ -3208,10 +3250,26 @@ func (n *OrcasNode) Write(ctx context.Context, data []byte, off int64) (written 
 	return uint32(len(data)), 0
 }
 
-// Flush flushes file
+// Flush implements NodeFlusher interface
 // Optimization: use atomic operations, completely lock-free
-func (n *OrcasNode) Flush(ctx context.Context) syscall.Errno {
-	DebugLog("[VFS Flush] Entry: objID=%d", n.objID)
+func (n *OrcasNode) Flush(ctx context.Context, f fs.FileHandle) syscall.Errno {
+	DebugLog("[VFS Flush] Entry: objID=%d, FileHandle=%v", n.objID, f)
+	// Forward to FileHandle if it implements FileFlusher
+	if f != nil {
+		if fileFlusher, ok := f.(fs.FileFlusher); ok {
+			errno := fileFlusher.Flush(ctx)
+			DebugLog("[VFS Flush] Forwarded to FileHandle: objID=%d, errno=%d", n.objID, errno)
+			return errno
+		}
+	}
+	// Otherwise use our own implementation
+	// Call flushImpl which doesn't need FileHandle
+	return n.flushImpl(ctx)
+}
+
+// flushImpl is the actual flush implementation
+func (n *OrcasNode) flushImpl(ctx context.Context) syscall.Errno {
+	DebugLog("[VFS flushImpl] Entry: objID=%d", n.objID)
 	if errno := n.fs.checkKey(); errno != 0 {
 		DebugLog("[VFS Flush] ERROR: checkKey failed: objID=%d, errno=%d", n.objID, errno)
 		return errno
@@ -3255,11 +3313,26 @@ func (n *OrcasNode) Flush(ctx context.Context) syscall.Errno {
 	return 0
 }
 
-// Fsync syncs file
-func (n *OrcasNode) Fsync(ctx context.Context, flags uint32) syscall.Errno {
-	DebugLog("[VFS Fsync] Entry: objID=%d, flags=0x%x", n.objID, flags)
+// Fsync implements NodeFsyncer interface
+func (n *OrcasNode) Fsync(ctx context.Context, f fs.FileHandle, flags uint32) syscall.Errno {
+	DebugLog("[VFS Fsync] Entry: objID=%d, FileHandle=%v, flags=0x%x", n.objID, f, flags)
+	// Forward to FileHandle if it implements FileFsyncer
+	if f != nil {
+		if fileFsyncer, ok := f.(fs.FileFsyncer); ok {
+			errno := fileFsyncer.Fsync(ctx, flags)
+			DebugLog("[VFS Fsync] Forwarded to FileHandle: objID=%d, errno=%d", n.objID, errno)
+			return errno
+		}
+	}
+	// Otherwise use our own implementation
+	return n.fsyncImpl(ctx, flags)
+}
+
+// fsyncImpl is the actual fsync implementation
+func (n *OrcasNode) fsyncImpl(ctx context.Context, flags uint32) syscall.Errno {
+	DebugLog("[VFS fsyncImpl] Entry: objID=%d, flags=0x%x", n.objID, flags)
 	// Flush RandomAccessor first
-	if errno := n.Flush(ctx); errno != 0 {
+	if errno := n.Flush(ctx, nil); errno != 0 {
 		DebugLog("[VFS Fsync] ERROR: Flush failed: objID=%d, flags=0x%x, errno=%d", n.objID, flags, errno)
 		return errno
 	}
@@ -3270,8 +3343,8 @@ func (n *OrcasNode) Fsync(ctx context.Context, flags uint32) syscall.Errno {
 }
 
 // Setattr sets file attributes (including truncate operation)
-func (n *OrcasNode) Setattr(ctx context.Context, in *fuse.SetAttrIn, out *fuse.AttrOut) syscall.Errno {
-	DebugLog("[VFS Setattr] Entry: objID=%d, valid=0x%x", n.objID, in.Valid)
+func (n *OrcasNode) Setattr(ctx context.Context, f fs.FileHandle, in *fuse.SetAttrIn, out *fuse.AttrOut) syscall.Errno {
+	DebugLog("[VFS Setattr] Entry: objID=%d, valid=0x%x, FileHandle=%v", n.objID, in.Valid, f)
 	if errno := n.fs.checkKey(); errno != 0 {
 		DebugLog("[VFS Setattr] ERROR: checkKey failed: objID=%d, valid=0x%x, errno=%d", n.objID, in.Valid, errno)
 		return errno
@@ -4036,7 +4109,24 @@ func (n *OrcasNode) forceFlushTempFileBeforeRename(fileID int64, oldName, newNam
 
 // Release releases file handle (closes file)
 // Optimization: use atomic operations, completely lock-free
-func (n *OrcasNode) Release(ctx context.Context) syscall.Errno {
+// Release implements NodeReleaser interface
+func (n *OrcasNode) Release(ctx context.Context, f fs.FileHandle) syscall.Errno {
+	DebugLog("[VFS Release] Entry: objID=%d, FileHandle=%v", n.objID, f)
+	// Forward to FileHandle if it implements FileReleaser
+	if f != nil {
+		if fileReleaser, ok := f.(fs.FileReleaser); ok {
+			errno := fileReleaser.Release(ctx)
+			DebugLog("[VFS Release] Forwarded to FileHandle: objID=%d, errno=%d", n.objID, errno)
+			return errno
+		}
+	}
+	// Otherwise use our own implementation
+	return n.releaseImpl(ctx)
+}
+
+// releaseImpl is the actual release implementation
+func (n *OrcasNode) releaseImpl(ctx context.Context) syscall.Errno {
+	DebugLog("[VFS releaseImpl] Entry: objID=%d", n.objID)
 	if !n.isRoot {
 		if errno := n.fs.checkKey(); errno != 0 {
 			return errno
@@ -4172,4 +4262,193 @@ func (n *OrcasNode) queryFileByNameDirectly(parentID int64, fileName string) (in
 	}
 
 	return 0, nil
+}
+
+// ============================================================================
+// Missing FUSE interface implementations (with logging)
+// ============================================================================
+
+// Statfs implements NodeStatfser interface
+func (n *OrcasNode) Statfs(ctx context.Context, out *fuse.StatfsOut) syscall.Errno {
+	DebugLog("[VFS Statfs] Entry: objID=%d", n.objID)
+	// Default implementation: zero out the structure
+	// This is required for macOS filesystems
+	*out = fuse.StatfsOut{}
+	DebugLog("[VFS Statfs] Returning default (zeroed) statfs: objID=%d", n.objID)
+	return 0
+}
+
+// Access implements NodeAccesser interface
+func (n *OrcasNode) Access(ctx context.Context, mask uint32) syscall.Errno {
+	DebugLog("[VFS Access] Entry: objID=%d, mask=0x%x", n.objID, mask)
+	// Default implementation: allow access
+	// For precise permission checking, implement based on Getattr result
+	DebugLog("[VFS Access] Allowing access: objID=%d, mask=0x%x", n.objID, mask)
+	return 0
+}
+
+// OnAdd implements NodeOnAdder interface
+func (n *OrcasNode) OnAdd(ctx context.Context) {
+	DebugLog("[VFS OnAdd] Entry: objID=%d", n.objID)
+	// Called when this InodeEmbedder is initialized
+	DebugLog("[VFS OnAdd] Inode initialized: objID=%d", n.objID)
+}
+
+// Getxattr implements NodeGetxattrer interface
+func (n *OrcasNode) Getxattr(ctx context.Context, attr string, dest []byte) (uint32, syscall.Errno) {
+	DebugLog("[VFS Getxattr] Entry: objID=%d, attr=%s, destLen=%d", n.objID, attr, len(dest))
+	// Default implementation: return ENOATTR (no such attribute)
+	DebugLog("[VFS Getxattr] ERROR: Attribute not found: objID=%d, attr=%s", n.objID, attr)
+	return 0, syscall.ENOATTR
+}
+
+// Setxattr implements NodeSetxattrer interface
+func (n *OrcasNode) Setxattr(ctx context.Context, attr string, data []byte, flags uint32) syscall.Errno {
+	DebugLog("[VFS Setxattr] Entry: objID=%d, attr=%s, dataLen=%d, flags=0x%x", n.objID, attr, len(data), flags)
+	// Default implementation: return ENOATTR (no such attribute)
+	DebugLog("[VFS Setxattr] ERROR: Attribute not supported: objID=%d, attr=%s", n.objID, attr)
+	return syscall.ENOATTR
+}
+
+// Removexattr implements NodeRemovexattrer interface
+func (n *OrcasNode) Removexattr(ctx context.Context, attr string) syscall.Errno {
+	DebugLog("[VFS Removexattr] Entry: objID=%d, attr=%s", n.objID, attr)
+	// Default implementation: return ENOATTR (no such attribute)
+	DebugLog("[VFS Removexattr] ERROR: Attribute not found: objID=%d, attr=%s", n.objID, attr)
+	return syscall.ENOATTR
+}
+
+// Listxattr implements NodeListxattrer interface
+func (n *OrcasNode) Listxattr(ctx context.Context, dest []byte) (uint32, syscall.Errno) {
+	DebugLog("[VFS Listxattr] Entry: objID=%d, destLen=%d", n.objID, len(dest))
+	// Default implementation: return empty list
+	DebugLog("[VFS Listxattr] Returning empty attribute list: objID=%d", n.objID)
+	return 0, 0
+}
+
+// Readlink implements NodeReadlinker interface
+func (n *OrcasNode) Readlink(ctx context.Context) ([]byte, syscall.Errno) {
+	DebugLog("[VFS Readlink] Entry: objID=%d", n.objID)
+	// Default implementation: return EINVAL (not a symlink)
+	DebugLog("[VFS Readlink] ERROR: Not a symlink: objID=%d", n.objID)
+	return nil, syscall.EINVAL
+}
+
+// Note: NodeReader and NodeWriter are automatically forwarded to FileHandle by go-fuse
+// Since OrcasNode implements FileReader and FileWriter, NodeReader/NodeWriter will work automatically
+
+// Allocate implements NodeAllocater interface
+func (n *OrcasNode) Allocate(ctx context.Context, f fs.FileHandle, off uint64, size uint64, mode uint32) syscall.Errno {
+	DebugLog("[VFS Allocate] Entry: objID=%d, FileHandle=%v, offset=%d, size=%d, mode=0x%x", n.objID, f, off, size, mode)
+	// Default implementation: return ENOTSUP (not supported)
+	DebugLog("[VFS Allocate] ERROR: Not supported: objID=%d", n.objID)
+	return syscall.ENOTSUP
+}
+
+// CopyFileRange implements NodeCopyFileRanger interface
+func (n *OrcasNode) CopyFileRange(ctx context.Context, fhIn fs.FileHandle, offIn uint64, out *fs.Inode, fhOut fs.FileHandle, offOut uint64, len uint64, flags uint64) (uint32, syscall.Errno) {
+	DebugLog("[VFS CopyFileRange] Entry: objID=%d, fhIn=%v, offIn=%d, outInode=%v, fhOut=%v, offOut=%d, len=%d, flags=0x%x",
+		n.objID, fhIn, offIn, out, fhOut, offOut, len, flags)
+	// Default implementation: return ENOTSUP (not supported)
+	DebugLog("[VFS CopyFileRange] ERROR: Not supported: objID=%d", n.objID)
+	return 0, syscall.ENOTSUP
+}
+
+// Statx implements NodeStatxer interface
+func (n *OrcasNode) Statx(ctx context.Context, f fs.FileHandle, flags uint32, mask uint32, out *fuse.StatxOut) syscall.Errno {
+	DebugLog("[VFS Statx] Entry: objID=%d, FileHandle=%v, flags=0x%x, mask=0x%x", n.objID, f, flags, mask)
+	// Default implementation: return ENOTSUP (not supported)
+	// Statx is a Linux-specific extension
+	DebugLog("[VFS Statx] ERROR: Not supported: objID=%d", n.objID)
+	return syscall.ENOTSUP
+}
+
+// Lseek implements NodeLseeker interface
+func (n *OrcasNode) Lseek(ctx context.Context, f fs.FileHandle, off uint64, whence uint32) (uint64, syscall.Errno) {
+	DebugLog("[VFS Lseek] Entry: objID=%d, FileHandle=%v, offset=%d, whence=%d", n.objID, f, off, whence)
+	// Default implementation: return ENOTSUP (not supported)
+	// Lseek is used for SEEK_DATA and SEEK_HOLE
+	DebugLog("[VFS Lseek] ERROR: Not supported: objID=%d", n.objID)
+	return 0, syscall.ENOTSUP
+}
+
+// Getlk implements NodeGetlker interface
+func (n *OrcasNode) Getlk(ctx context.Context, f fs.FileHandle, owner uint64, lk *fuse.FileLock, flags uint32, out *fuse.FileLock) syscall.Errno {
+	DebugLog("[VFS Getlk] Entry: objID=%d, FileHandle=%v, owner=%d, flags=0x%x", n.objID, f, owner, flags)
+	// Default implementation: return ENOTSUP (not supported)
+	DebugLog("[VFS Getlk] ERROR: Not supported: objID=%d", n.objID)
+	return syscall.ENOTSUP
+}
+
+// Setlk implements NodeSetlker interface
+func (n *OrcasNode) Setlk(ctx context.Context, f fs.FileHandle, owner uint64, lk *fuse.FileLock, flags uint32) syscall.Errno {
+	DebugLog("[VFS Setlk] Entry: objID=%d, FileHandle=%v, owner=%d, flags=0x%x", n.objID, f, owner, flags)
+	// Default implementation: return ENOTSUP (not supported)
+	DebugLog("[VFS Setlk] ERROR: Not supported: objID=%d", n.objID)
+	return syscall.ENOTSUP
+}
+
+// Setlkw implements NodeSetlkwer interface
+func (n *OrcasNode) Setlkw(ctx context.Context, f fs.FileHandle, owner uint64, lk *fuse.FileLock, flags uint32) syscall.Errno {
+	DebugLog("[VFS Setlkw] Entry: objID=%d, FileHandle=%v, owner=%d, flags=0x%x", n.objID, f, owner, flags)
+	// Default implementation: return ENOTSUP (not supported)
+	DebugLog("[VFS Setlkw] ERROR: Not supported: objID=%d", n.objID)
+	return syscall.ENOTSUP
+}
+
+// Ioctl implements NodeIoctler interface
+func (n *OrcasNode) Ioctl(ctx context.Context, f fs.FileHandle, cmd uint32, arg uint64, input []byte, output []byte) (int32, syscall.Errno) {
+	DebugLog("[VFS Ioctl] Entry: objID=%d, FileHandle=%v, cmd=0x%x, arg=%d, inputLen=%d, outputLen=%d",
+		n.objID, f, cmd, arg, len(input), len(output))
+	// Default implementation: return ENOTSUP (not supported)
+	DebugLog("[VFS Ioctl] ERROR: Not supported: objID=%d", n.objID)
+	return 0, syscall.ENOTSUP
+}
+
+// OnForget implements NodeOnForgetter interface
+func (n *OrcasNode) OnForget() {
+	DebugLog("[VFS OnForget] Entry: objID=%d", n.objID)
+	// Called when the node becomes unreachable
+	DebugLog("[VFS OnForget] Node forgotten: objID=%d", n.objID)
+}
+
+// WrapChild implements NodeWrapChilder interface
+func (n *OrcasNode) WrapChild(ctx context.Context, ops fs.InodeEmbedder) fs.InodeEmbedder {
+	DebugLog("[VFS WrapChild] Entry: objID=%d, ops=%v", n.objID, ops)
+	// Default implementation: return ops unchanged
+	DebugLog("[VFS WrapChild] Returning ops unchanged: objID=%d", n.objID)
+	return ops
+}
+
+// Opendir implements NodeOpendirer interface
+func (n *OrcasNode) Opendir(ctx context.Context) syscall.Errno {
+	DebugLog("[VFS Opendir] Entry: objID=%d", n.objID)
+	// Default implementation: return success
+	// This is just for sanity/permission checks
+	DebugLog("[VFS Opendir] Allowing directory open: objID=%d", n.objID)
+	return 0
+}
+
+// Mknod implements NodeMknoder interface
+func (n *OrcasNode) Mknod(ctx context.Context, name string, mode uint32, dev uint32, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
+	DebugLog("[VFS Mknod] Entry: name=%s, parentID=%d, mode=0%o, dev=%d", name, n.objID, mode, dev)
+	// Default implementation: return ENOTSUP (not supported)
+	DebugLog("[VFS Mknod] ERROR: Not supported: name=%s, parentID=%d", name, n.objID)
+	return nil, syscall.ENOTSUP
+}
+
+// Link implements NodeLinker interface
+func (n *OrcasNode) Link(ctx context.Context, target fs.InodeEmbedder, name string, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
+	DebugLog("[VFS Link] Entry: name=%s, parentID=%d, target=%v", name, n.objID, target)
+	// Default implementation: return ENOTSUP (not supported)
+	DebugLog("[VFS Link] ERROR: Not supported: name=%s, parentID=%d", name, n.objID)
+	return nil, syscall.ENOTSUP
+}
+
+// Symlink implements NodeSymlinker interface
+func (n *OrcasNode) Symlink(ctx context.Context, target, name string, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
+	DebugLog("[VFS Symlink] Entry: target=%s, name=%s, parentID=%d", target, name, n.objID)
+	// Default implementation: return ENOTSUP (not supported)
+	DebugLog("[VFS Symlink] ERROR: Not supported: target=%s, name=%s, parentID=%d", target, name, n.objID)
+	return nil, syscall.ENOTSUP
 }
