@@ -409,7 +409,12 @@ func (n *OrcasNode) Getattr(ctx context.Context, f fs.FileHandle, out *fuse.Attr
 		return syscall.ENOENT
 	}
 
-	out.Mode = getModeFromObj(obj)
+	// For root directory, use 755 permissions
+	if n.isRoot && obj.Type == core.OBJ_TYPE_DIR {
+		out.Mode = syscall.S_IFDIR | 0o755
+	} else {
+		out.Mode = getModeFromObj(obj)
+	}
 	out.Size = uint64(obj.Size)
 	out.Mtime = uint64(obj.MTime)
 	out.Ctime = out.Mtime
@@ -511,7 +516,18 @@ func (n *OrcasNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut)
 	}
 
 	if matchedChild == nil {
-		DebugLog("[VFS Lookup] ERROR: Child not found: parentID=%d, name=%s", n.objID, name)
+		// Check if this is a macOS-specific file (Save Bundle or resource fork)
+		// macOS creates these files during file modification:
+		// - .sb-xxx suffix: Save Bundle temporary file
+		// - ._ prefix: Resource fork file (AppleDouble format)
+		// These files don't exist yet, but macOS will try to create them
+		// Returning ENOENT is correct - macOS will then call Create to create them
+		isMacOSFile := strings.HasPrefix(name, "._") || strings.Contains(name, ".sb-")
+		if isMacOSFile {
+			DebugLog("[VFS Lookup] macOS-specific file not found (will be created): parentID=%d, name=%s", n.objID, name)
+		} else {
+			DebugLog("[VFS Lookup] ERROR: Child not found: parentID=%d, name=%s", n.objID, name)
+		}
 		return nil, syscall.ENOENT
 	}
 
