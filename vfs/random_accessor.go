@@ -135,6 +135,11 @@ var (
 	// This cache stores all attributes for an object, allowing efficient Getxattr and Listxattr
 	attrCache = ecache2.NewLRUCache[int64](16, 512, 30*time.Second)
 
+	// Per-directory mutexes for thread-safe directory listing cache operations
+	// key: dirID (int64), value: *sync.RWMutex
+	// Used to synchronize cache reads and writes for directory listings
+	dirListCacheMu sync.Map
+
 	// Map to track directories that need delayed cache refresh
 	// key: "<dirID>", value: true (if true, cache needs refresh on next access)
 	// This allows marking cache as stale without immediately deleting it

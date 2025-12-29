@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -264,15 +265,34 @@ func (n *OrcasNode) invalidateObj() {
 	n.obj.Store((*core.ObjectInfo)(nil))
 }
 
+// getDirListCacheMutex gets or creates a mutex for a specific directory cache
+// This ensures thread-safe operations on directory listing cache
+func getDirListCacheMutex(dirID int64) *sync.RWMutex {
+	if mu, ok := dirListCacheMu.Load(dirID); ok {
+		return mu.(*sync.RWMutex)
+	}
+	// Create new mutex if not exists
+	mu := &sync.RWMutex{}
+	if actual, loaded := dirListCacheMu.LoadOrStore(dirID, mu); loaded {
+		return actual.(*sync.RWMutex)
+	}
+	return mu
+}
+
 // appendChildToDirCache appends a newly created child object into the
 // cached directory listing instead of invalidating the entire cache.
 // If cache doesn't exist, creates a new cache entry with the child.
 // If child already exists, updates it with latest information (especially size for files).
+// Thread-safe: uses per-directory mutex to prevent race conditions.
 func (n *OrcasNode) appendChildToDirCache(dirID int64, child *core.ObjectInfo) {
 	if child == nil {
 		return
 	}
 	cacheKey := n.getDirListCacheKey(dirID)
+	mu := getDirListCacheMutex(cacheKey)
+	mu.Lock()
+	defer mu.Unlock()
+
 	if cached, ok := dirListCache.Get(cacheKey); ok {
 		if children, ok := cached.([]*core.ObjectInfo); ok && children != nil {
 			// Check if child already exists, and update it if found
@@ -281,9 +301,11 @@ func (n *OrcasNode) appendChildToDirCache(dirID int64, child *core.ObjectInfo) {
 				if existing != nil && existing.ID == child.ID {
 					// Child already exists, update it with latest information
 					// This is important for files where size may have changed
-					children[i] = child
-					found = true
-					dirListCache.Put(cacheKey, children)
+					// Create a new slice to avoid modifying the cached slice directly
+					newChildren := make([]*core.ObjectInfo, len(children))
+					copy(newChildren, children)
+					newChildren[i] = child
+					dirListCache.Put(cacheKey, newChildren)
 					DebugLog("[VFS appendChildToDirCache] Updated existing child in cache: dirID=%d, childID=%d, size=%d", dirID, child.ID, child.Size)
 					return
 				}
@@ -307,8 +329,13 @@ func (n *OrcasNode) appendChildToDirCache(dirID int64, child *core.ObjectInfo) {
 
 // removeChildFromDirCache removes a child object from the cached directory listing
 // instead of invalidating the entire cache. This preserves other cached children.
+// Thread-safe: uses per-directory mutex to prevent race conditions.
 func (n *OrcasNode) removeChildFromDirCache(dirID int64, childID int64) {
 	cacheKey := n.getDirListCacheKey(dirID)
+	mu := getDirListCacheMutex(cacheKey)
+	mu.Lock()
+	defer mu.Unlock()
+
 	if cached, ok := dirListCache.Get(cacheKey); ok {
 		if children, ok := cached.([]*core.ObjectInfo); ok && children != nil {
 			updatedChildren := make([]*core.ObjectInfo, 0, len(children))
@@ -332,33 +359,38 @@ func (n *OrcasNode) removeChildFromDirCache(dirID int64, childID int64) {
 // instead of invalidating the entire cache. This preserves other cached children.
 // If the child is not found in cache, it will append it instead (for newly created files).
 // Also marks Readdir cache as stale for delayed refresh.
+// Thread-safe: uses per-directory mutex to prevent race conditions.
 func (n *OrcasNode) updateChildInDirCache(dirID int64, updatedChild *core.ObjectInfo) {
 	if updatedChild == nil {
 		return
 	}
 	cacheKey := n.getDirListCacheKey(dirID)
+	mu := getDirListCacheMutex(cacheKey)
+	mu.Lock()
+	defer mu.Unlock()
+
 	if cached, ok := dirListCache.Get(cacheKey); ok {
 		if children, ok := cached.([]*core.ObjectInfo); ok && children != nil {
-			updated := false
 			for i, child := range children {
 				if child != nil && child.ID == updatedChild.ID {
 					// Update the child in place
-					children[i] = updatedChild
-					updated = true
-					break
+					// Create a new slice to avoid modifying the cached slice directly
+					newChildren := make([]*core.ObjectInfo, len(children))
+					copy(newChildren, children)
+					newChildren[i] = updatedChild
+					dirListCache.Put(cacheKey, newChildren)
+					// Mark Readdir cache as stale (delayed refresh)
+					readdirCacheStale.Store(dirID, true)
+					// DebugLog("[VFS updateChildInDirCache] Updated child in cache: dirID=%d, childID=%d, newName=%s", dirID, updatedChild.ID, updatedChild.Name)
+					return
 				}
-			}
-			if updated {
-				dirListCache.Put(cacheKey, children)
-				// Mark Readdir cache as stale (delayed refresh)
-				readdirCacheStale.Store(dirID, true)
-				// DebugLog("[VFS updateChildInDirCache] Updated child in cache: dirID=%d, childID=%d, newName=%s", dirID, updatedChild.ID, updatedChild.Name)
-				return
 			}
 		}
 	}
 	// If child not found in cache (e.g., newly created file), append it instead
-	// DebugLog("[VFS updateChildInDirCache] Child not found in cache, appending instead: dirID=%d, childID=%d, newName=%s", dirID, updatedChild.ID, updatedChild.Name)
+	// Note: We need to unlock before calling appendChildToDirCache to avoid deadlock
+	// since appendChildToDirCache will try to acquire the same lock
+	mu.Unlock()
 	n.appendChildToDirCache(dirID, updatedChild)
 }
 
@@ -688,13 +720,19 @@ func (n *OrcasNode) getDirListCacheKey(dirID int64) int64 {
 
 // getDirListWithCache gets directory listing with cache and singleflight
 // Uses singleflight to prevent duplicate concurrent requests for the same directory
+// Thread-safe: uses per-directory mutex to prevent race conditions with cache updates
 func (n *OrcasNode) getDirListWithCache(dirID int64) ([]*core.ObjectInfo, syscall.Errno) {
 	// Get pending objects first (these are always fresh and should be included)
 	pendingChildren := n.getPendingObjectsForDir(dirID)
 
-	// Check cache first
+	// Check cache first (with lock to prevent race conditions with cache updates)
 	cacheKey := n.getDirListCacheKey(dirID)
-	if cached, ok := dirListCache.Get(cacheKey); ok {
+	mu := getDirListCacheMutex(cacheKey)
+	mu.RLock()
+	cached, cacheOk := dirListCache.Get(cacheKey)
+	mu.RUnlock()
+
+	if cacheOk {
 		if children, ok := cached.([]*core.ObjectInfo); ok && children != nil {
 			// Merge pending objects with cached children
 			// Strategy: Cached entries (from database) are authoritative
@@ -857,8 +895,11 @@ func (n *OrcasNode) getDirListWithCache(dirID int64) ([]*core.ObjectInfo, syscal
 			DebugLog("[VFS getDirListWithCache] Added pending object to directory listing: dirID=%d, fileID=%d, name=%s", dirID, pending.ID, pending.Name)
 		}
 
-		// Cache the result (including pending objects)
+		// Cache the result (including pending objects) with write lock
+		mu := getDirListCacheMutex(cacheKey)
+		mu.Lock()
 		dirListCache.Put(cacheKey, children)
+		mu.Unlock()
 		// DebugLog("[VFS getDirListWithCache] Cached directory listing: dirID=%d, count=%d", dirID, len(children))
 
 		return children, nil
@@ -4560,8 +4601,8 @@ func (n *OrcasNode) Getxattr(ctx context.Context, attr string, dest []byte) (uin
 			if exists {
 				// Check if this is a "not found" sentinel (nil)
 				if value == nil {
-					DebugLog("[VFS Getxattr] Attribute not found (from sentinel cache), returning empty: objID=%d, attr=%s", n.objID, attr)
-					return 0, 0 // Return empty data, not ENODATA
+					DebugLog("[VFS Getxattr] Attribute not found (from sentinel cache): objID=%d, attr=%s", n.objID, attr)
+					return 0, syscall.ENODATA
 				}
 				if len(value) > len(dest) {
 					DebugLog("[VFS Getxattr] ERROR: Buffer too small (from cache): objID=%d, attr=%s, valueLen=%d, destLen=%d", n.objID, attr, len(value), len(dest))
@@ -4600,9 +4641,8 @@ func (n *OrcasNode) Getxattr(ctx context.Context, attr string, dest []byte) (uin
 					entry.attrs[attr] = nil // Use nil as sentinel
 					entry.mu.Unlock()
 					attrCache.Put(cacheKey, entry)
-					// Return empty data, not ENODATA
-					DebugLog("[VFS Getxattr] Attribute not found, returning empty: objID=%d, attr=%s", n.objID, attr)
-					return 0, 0
+					DebugLog("[VFS Getxattr] Attribute not found: objID=%d, attr=%s", n.objID, attr)
+					return 0, syscall.ENODATA
 				}
 				DebugLog("[VFS Getxattr] ERROR: Failed to get attribute: objID=%d, attr=%s, error=%v", n.objID, attr, err)
 				return 0, syscall.ENODATA
@@ -4634,7 +4674,9 @@ func (n *OrcasNode) Getxattr(ctx context.Context, attr string, dest []byte) (uin
 			return uint32(len(value)), 0
 		}
 	}
-	DebugLog("[VFS Getxattr] ERROR: MetadataAdapter not available: objID=%d, attr=%s", n.objID, attr)
+	// If MetadataAdapter is not available, return ENODATA (attribute doesn't exist)
+	// This is acceptable for Getxattr - the attribute simply doesn't exist
+	DebugLog("[VFS Getxattr] MetadataAdapter not available, returning ENODATA: objID=%d, attr=%s", n.objID, attr)
 	return 0, syscall.ENODATA
 }
 
@@ -4678,8 +4720,11 @@ func (n *OrcasNode) Setxattr(ctx context.Context, attr string, data []byte, flag
 			return 0
 		}
 	}
-	DebugLog("[VFS Setxattr] ERROR: MetadataAdapter not available: objID=%d, attr=%s", n.objID, attr)
-	return syscall.ENODATA
+	// If MetadataAdapter is not available, return ENOTSUP (operation not supported)
+	// This tells macOS that extended attributes are not supported, which is better than ENODATA
+	// ENODATA would suggest the attribute doesn't exist, but ENOTSUP indicates the feature isn't available
+	DebugLog("[VFS Setxattr] MetadataAdapter not available, returning ENOTSUP: objID=%d, attr=%s", n.objID, attr)
+	return syscall.ENOTSUP
 }
 
 // Removexattr implements NodeRemovexattrer interface
@@ -4737,53 +4782,86 @@ func (n *OrcasNode) Listxattr(ctx context.Context, dest []byte) (uint32, syscall
 	cacheKey := n.objID
 
 	// Try to get keys from cache first
+	cacheHit := false
 	if cached, ok := attrCache.Get(cacheKey); ok {
 		if entry, ok := cached.(*attrCacheEntry); ok && entry != nil {
 			entry.mu.RLock()
-			// Extract all keys from the cache entry
+			// Extract all keys from the cache entry, but filter out sentinel values (nil)
 			keys = make([]string, 0, len(entry.attrs))
-			for key := range entry.attrs {
-				keys = append(keys, key)
+			for key, value := range entry.attrs {
+				// Only include keys with actual values (not sentinel nil)
+				if value != nil {
+					keys = append(keys, key)
+				}
 			}
 			entry.mu.RUnlock()
-			DebugLog("[VFS Listxattr] Retrieved keys from cache: objID=%d, count=%d", n.objID, len(keys))
+			if len(keys) > 0 {
+				cacheHit = true
+				DebugLog("[VFS Listxattr] Retrieved keys from cache: objID=%d, count=%d (filtered sentinels)", n.objID, len(keys))
+			}
 		}
 	}
 
 	// Cache miss, get from database
-	if lh, ok := n.fs.h.(*core.LocalHandler); ok {
-		ma := lh.MetadataAdapter()
-		if ma != nil {
-			var err error
-			keys, err = ma.ListAttrs(n.fs.c, n.fs.bktID, n.objID)
-			if err != nil {
-				DebugLog("[VFS Listxattr] ERROR: Failed to list attributes: objID=%d, error=%v", n.objID, err)
-				return 0, syscall.EIO
-			}
-			DebugLog("[VFS Listxattr] Retrieved keys from database: objID=%d, count=%d", n.objID, len(keys))
+	if !cacheHit {
+		if lh, ok := n.fs.h.(*core.LocalHandler); ok {
+			ma := lh.MetadataAdapter()
+			if ma != nil {
+				var err error
+				keys, err = ma.ListAttrs(n.fs.c, n.fs.bktID, n.objID)
+				if err != nil {
+					DebugLog("[VFS Listxattr] ERROR: Failed to list attributes: objID=%d, error=%v", n.objID, err)
+					return 0, syscall.EIO
+				}
+				DebugLog("[VFS Listxattr] Retrieved keys from database: objID=%d, count=%d", n.objID, len(keys))
 
-			// Update cache: merge database keys with existing cache entry
-			var entry *attrCacheEntry
-			if cached, ok := attrCache.Get(cacheKey); ok {
-				if e, ok := cached.(*attrCacheEntry); ok && e != nil {
-					entry = e
+				// Update cache: merge database keys with existing cache entry
+				var entry *attrCacheEntry
+				if cached, ok := attrCache.Get(cacheKey); ok {
+					if e, ok := cached.(*attrCacheEntry); ok && e != nil {
+						entry = e
+					}
 				}
-			}
-			if entry == nil {
-				entry = &attrCacheEntry{
-					attrs: make(map[string][]byte),
+				if entry == nil {
+					entry = &attrCacheEntry{
+						attrs: make(map[string][]byte),
+					}
 				}
-			}
-			// Merge keys: add any keys from database that aren't already in cache
-			entry.mu.Lock()
-			for _, key := range keys {
-				if _, exists := entry.attrs[key]; !exists {
-					entry.attrs[key] = nil // Mark key as known, value will be loaded on demand via Getxattr
+				// Merge keys: only update cache if entry doesn't exist or if we have actual values
+				// Don't set nil values here - only set actual values when Getxattr retrieves them
+				// For Listxattr, we only care about keys that exist in database
+				// The cache will be populated with actual values when Getxattr is called
+				// If a key is in database but not in cache, we don't set it to nil here
+				// because that would pollute the cache with sentinel values
+				entry.mu.Lock()
+				// Only keep keys that have actual values (not sentinel nil)
+				// Remove any sentinel values that don't exist in database
+				for key, value := range entry.attrs {
+					if value == nil {
+						// This is a sentinel value, check if it exists in database keys
+						found := false
+						for _, dbKey := range keys {
+							if dbKey == key {
+								found = true
+								break
+							}
+						}
+						// If sentinel key doesn't exist in database, remove it from cache
+						if !found {
+							delete(entry.attrs, key)
+						}
+					}
 				}
+				entry.mu.Unlock()
+				attrCache.Put(cacheKey, entry)
 			}
-			entry.mu.Unlock()
-			attrCache.Put(cacheKey, entry)
 		}
+	}
+
+	// If no attributes found, return ENODATA
+	if len(keys) == 0 {
+		DebugLog("[VFS Listxattr] No attributes found: objID=%d", n.objID)
+		return 0, syscall.ENODATA
 	}
 
 	// Format keys as null-terminated strings: "key1\0key2\0key3\0"
