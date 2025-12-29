@@ -2033,20 +2033,6 @@ func (n *OrcasNode) Rmdir(ctx context.Context, name string) syscall.Errno {
 		return syscall.ENOTDIR
 	}
 
-	// Check if trying to remove root node
-	// Root node's objID is bucketID
-	if n.isRoot {
-		DebugLog("[VFS Rmdir] Attempted to remove root node: objID=%d, name=%s", obj.ID, name)
-
-		// Call OnRootDeleted callback if set (root node deletion means entire bucket is deleted)
-		if n.fs.OnRootDeleted != nil {
-			DebugLog("[VFS Rmdir] Calling OnRootDeleted callback due to root node deletion")
-			n.fs.OnRootDeleted(n.fs)
-		}
-		// Allow root node removal, return success
-		return 0
-	}
-
 	// Check if KEY is required (only for non-root nodes)
 	if errno := n.fs.checkKey(); errno != 0 {
 		DebugLog("[VFS Rmdir] ERROR: checkKey failed: name=%s, parentID=%d, errno=%d", name, n.objID, errno)
@@ -2095,20 +2081,34 @@ func (n *OrcasNode) Rmdir(ctx context.Context, name string) syscall.Errno {
 			DebugLog("[VFS Rmdir] ERROR: Target directory not found: name=%s, parentID=%d", name, obj.ID)
 			return syscall.ENOENT
 		}
+	}
 
-		// Check if directory is empty
-		// If List fails (I/O error), assume directory is empty or already deleted
-		dirChildren, _, _, err := n.fs.h.List(n.fs.c, n.fs.bktID, targetID, core.ListOptions{
-			Count: 1,
-		})
-		if err != nil {
-			// I/O error occurred, assume directory is empty or already deleted
-			// Log warning but continue with deletion
-			DebugLog("[VFS Rmdir] WARNING: Failed to check if directory is empty (I/O error), assuming empty: dirID=%d, error=%v", targetID, err)
-		} else if len(dirChildren) > 0 {
-			DebugLog("[VFS Rmdir] ERROR: Directory is not empty: name=%s, dirID=%d, parentID=%d, childCount=%d", name, targetID, obj.ID, len(dirChildren))
-			return syscall.ENOTEMPTY
+	// Check if trying to remove root node (the target directory is the root node)
+	// Root node's ID is bucketID
+	if targetID == n.fs.bktID {
+		DebugLog("[VFS Rmdir] Attempted to remove root node: targetID=%d (bucketID), name=%s, parentID=%d", targetID, name, obj.ID)
+
+		// Call OnRootDeleted callback if set (root node deletion means entire bucket is deleted)
+		if n.fs.OnRootDeleted != nil {
+			DebugLog("[VFS Rmdir] Calling OnRootDeleted callback due to root node deletion")
+			n.fs.OnRootDeleted(n.fs)
 		}
+		// Allow root node removal, return success
+		return 0
+	}
+
+	// Check if directory is empty
+	// If List fails (I/O error), assume directory is empty or already deleted
+	dirChildren, _, _, err := n.fs.h.List(n.fs.c, n.fs.bktID, targetID, core.ListOptions{
+		Count: 1,
+	})
+	if err != nil {
+		// I/O error occurred, assume directory is empty or already deleted
+		// Log warning but continue with deletion
+		DebugLog("[VFS Rmdir] WARNING: Failed to check if directory is empty (I/O error), assuming empty: dirID=%d, error=%v", targetID, err)
+	} else if len(dirChildren) > 0 {
+		DebugLog("[VFS Rmdir] ERROR: Directory is not empty: name=%s, dirID=%d, parentID=%d, childCount=%d", name, targetID, obj.ID, len(dirChildren))
+		return syscall.ENOTEMPTY
 	}
 
 	// Step 1: Remove from parent directory first (mark as deleted)
