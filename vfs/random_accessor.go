@@ -553,7 +553,14 @@ func (ra *RandomAccessor) getOrCreateTempWriter() (*TempFileWriter, error) {
 	// Fast path: check if already exists (lock-free read)
 	if val := ra.tempWriter.Load(); val != nil {
 		if tw, ok := val.(*TempFileWriter); ok && tw != nil {
-			return tw, nil
+			// Verify TempFileWriter is valid (has LocalHandler)
+			if tw.lh != nil && tw.fileID > 0 && tw.dataID > 0 {
+				return tw, nil
+			}
+			// TempFileWriter exists but is invalid, clear it and recreate
+			DebugLog("[VFS RandomAccessor getOrCreateTempWriter] WARNING: Existing TempFileWriter is invalid (lh=%v, fileID=%d, dataID=%d), will recreate: fileID=%d",
+				tw.lh != nil, tw.fileID, tw.dataID, ra.fileID)
+			ra.tempWriter.Store(nil) // Clear invalid TempFileWriter
 		}
 	}
 
@@ -565,7 +572,14 @@ func (ra *RandomAccessor) getOrCreateTempWriter() (*TempFileWriter, error) {
 	// Double-check after acquiring lock
 	if val := ra.tempWriter.Load(); val != nil {
 		if tw, ok := val.(*TempFileWriter); ok && tw != nil {
-			return tw, nil
+			// Verify TempFileWriter is valid (has LocalHandler)
+			if tw.lh != nil && tw.fileID > 0 && tw.dataID > 0 {
+				return tw, nil
+			}
+			// TempFileWriter exists but is invalid, clear it and recreate
+			DebugLog("[VFS RandomAccessor getOrCreateTempWriter] WARNING: Existing TempFileWriter is invalid after lock (lh=%v, fileID=%d, dataID=%d), will recreate: fileID=%d",
+				tw.lh != nil, tw.fileID, tw.dataID, ra.fileID)
+			ra.tempWriter.Store(nil) // Clear invalid TempFileWriter
 		}
 	}
 
@@ -612,9 +626,13 @@ func (ra *RandomAccessor) getOrCreateTempWriter() (*TempFileWriter, error) {
 	}
 
 	// Cache LocalHandler if available
+	// IMPORTANT: TempFileWriter requires LocalHandler, return error if not available
 	var lh *core.LocalHandler
 	if handler, ok := ra.fs.h.(*core.LocalHandler); ok {
 		lh = handler
+	} else {
+		DebugLog("[VFS RandomAccessor getOrCreateTempWriter] ERROR: handler is not LocalHandler, cannot create TempFileWriter: fileID=%d", ra.fileID)
+		return nil, fmt.Errorf("handler is not LocalHandler, cannot create TempFileWriter")
 	}
 
 	tw := &TempFileWriter{

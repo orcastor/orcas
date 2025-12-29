@@ -4129,3 +4129,119 @@ func TestTruncateCreatesVersionAndWrite(t *testing.T) {
 		})
 	})
 }
+
+func TestRmdirShouldNotTriggerOnRootDeletedForSubdirectory(t *testing.T) {
+	Convey("Test Rmdir should not trigger OnRootDeleted when deleting subdirectory", t, func() {
+		ensureTestUser(t)
+		handler := core.NewLocalHandler("", "")
+		ctx := context.Background()
+		ctx, _, _, err := handler.Login(ctx, "orcas", "orcas")
+		So(err, ShouldBeNil)
+
+		ig := idgen.NewIDGen(nil, 0)
+		testBktID, _ := ig.New()
+		err = core.InitBucketDB(".", testBktID)
+		So(err, ShouldBeNil)
+
+		// Get user info for bucket creation
+		_, _, _, err = handler.Login(ctx, "orcas", "orcas")
+		So(err, ShouldBeNil)
+
+		// Create bucket
+		admin := core.NewLocalAdmin(".", ".")
+		bkt := &core.BucketInfo{
+			ID:        testBktID,
+			Name:      "test-rmdir-subdir-bucket",
+			Type:      1,
+			Quota:     -1,
+			ChunkSize: 4 * 1024 * 1024, // 4MB chunk size
+		}
+		err = admin.PutBkt(ctx, []*core.BucketInfo{bkt})
+		So(err, ShouldBeNil)
+
+		// Create filesystem
+		ofs := NewOrcasFS(handler, ctx, testBktID)
+
+		// Track if OnRootDeleted was called
+		onRootDeletedCalled := false
+		ofs.OnRootDeleted = func(fs *OrcasFS) {
+			onRootDeletedCalled = true
+		}
+
+		// Create a subdirectory
+		Convey("Create subdirectory and delete it", func() {
+			dirObj := &core.ObjectInfo{
+				ID:    core.NewID(),
+				PID:   testBktID, // Parent is root (bucketID)
+				Type:  core.OBJ_TYPE_DIR,
+				Name:  "test-subdir",
+				MTime: core.Now(),
+			}
+
+			_, err = handler.Put(ctx, testBktID, []*core.ObjectInfo{dirObj})
+			So(err, ShouldBeNil)
+
+			// Verify directory was created
+			objs, err := handler.Get(ctx, testBktID, []int64{dirObj.ID})
+			So(err, ShouldBeNil)
+			So(len(objs), ShouldEqual, 1)
+			So(objs[0].Type, ShouldEqual, core.OBJ_TYPE_DIR)
+			So(objs[0].Name, ShouldEqual, "test-subdir")
+
+			// Create root node (parent)
+			rootNode := &OrcasNode{
+				fs:     ofs,
+				objID:  testBktID,
+				isRoot: true,
+			}
+
+			// Attempt to delete the subdirectory
+			// This should NOT trigger OnRootDeleted because we're deleting a subdirectory, not the root
+			errno := rootNode.Rmdir(ctx, "test-subdir")
+			So(errno, ShouldEqual, syscall.Errno(0))
+
+			// Verify OnRootDeleted was NOT called
+			So(onRootDeletedCalled, ShouldBeFalse)
+
+			// Verify directory was actually deleted
+			objs, err = handler.Get(ctx, testBktID, []int64{dirObj.ID})
+			So(err, ShouldBeNil)
+			// Directory should be marked as deleted (PID < 0) or not found
+			if len(objs) > 0 {
+				So(objs[0].PID, ShouldBeLessThan, 0) // Deleted objects have negative PID
+			}
+		})
+
+		// Test with a directory name that might be confused with root
+		Convey("Delete subdirectory with special name should not trigger OnRootDeleted", func() {
+			dirObj := &core.ObjectInfo{
+				ID:    core.NewID(),
+				PID:   testBktID, // Parent is root (bucketID)
+				Type:  core.OBJ_TYPE_DIR,
+				Name:  "(A Document Being Saved By Xcode)",
+				MTime: core.Now(),
+			}
+
+			_, err = handler.Put(ctx, testBktID, []*core.ObjectInfo{dirObj})
+			So(err, ShouldBeNil)
+
+			// Reset the flag
+			onRootDeletedCalled = false
+
+			// Create root node (parent)
+			rootNode := &OrcasNode{
+				fs:     ofs,
+				objID:  testBktID,
+				isRoot: true,
+			}
+
+			// Attempt to delete the subdirectory with special name
+			// This should NOT trigger OnRootDeleted
+			errno := rootNode.Rmdir(ctx, "(A Document Being Saved By Xcode)")
+			So(errno, ShouldEqual, syscall.Errno(0))
+
+			// Verify OnRootDeleted was NOT called
+			So(onRootDeletedCalled, ShouldBeFalse)
+		})
+	})
+}
