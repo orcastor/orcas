@@ -27,6 +27,12 @@ import (
 	"golang.org/x/sync/singleflight"
 )
 
+// attrCacheEntry is a thread-safe wrapper for attribute map
+type attrCacheEntry struct {
+	mu    sync.RWMutex
+	attrs map[string][]byte
+}
+
 var (
 	// Object pool: reuse byte buffers to reduce memory allocation
 	// Optimization: use smaller initial capacity for small file operations
@@ -123,6 +129,11 @@ var (
 	// key: dirID (int64), value: *cachedDirStream (dirID is globally unique)
 	// This cache stores the final DirStream entries, avoiding data merging on every Readdir call
 	readdirCache = ecache2.NewLRUCache[int64](16, 512, 30*time.Second)
+
+	// ecache cache: cache extended attributes (xattr) to reduce database queries
+	// key: objID (int64), value: *attrCacheEntry (thread-safe map[string][]byte)
+	// This cache stores all attributes for an object, allowing efficient Getxattr and Listxattr
+	attrCache = ecache2.NewLRUCache[int64](16, 512, 30*time.Second)
 
 	// Map to track directories that need delayed cache refresh
 	// key: "<dirID>", value: true (if true, cache needs refresh on next access)

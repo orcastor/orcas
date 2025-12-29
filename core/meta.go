@@ -153,6 +153,7 @@ const (
 	BKT_TBL  = "bkt"
 	OBJ_TBL  = "obj"
 	DATA_TBL = "data"
+	ATTR_TBL = "attr" // Extended attributes (xattr) table
 )
 
 type UserMetadataAdapter interface {
@@ -241,6 +242,11 @@ type ObjectMetadataAdapter interface {
 	// Query all versions of a file (sorted by MTime descending, latest first)
 	// excludeWriting: if true, exclude writing versions (name="0")
 	ListVersions(c Ctx, bktID int64, fileID int64, excludeWriting bool) ([]*ObjectInfo, error)
+	// Extended attributes (xattr) operations
+	GetAttr(c Ctx, bktID int64, objID int64, key string) ([]byte, error)     // Get extended attribute value
+	SetAttr(c Ctx, bktID int64, objID int64, key string, value []byte) error // Set extended attribute value
+	RemoveAttr(c Ctx, bktID int64, objID int64, key string) error            // Remove extended attribute
+	ListAttrs(c Ctx, bktID int64, objID int64) ([]string, error)             // List all extended attribute keys for an object
 }
 
 // ACLMetadataAdapter provides ACL CRUD operations
@@ -556,6 +562,23 @@ func InitBucketDB(dataPath string, bktID int64, key ...string) error {
 	)`)
 	if err != nil {
 		return fmt.Errorf("%w: create data table: %v", ERR_EXEC_DB, err)
+	}
+
+	// Create attr table for extended attributes (xattr)
+	// Stores key-value pairs for objects (id, key, value)
+	_, err = db.Exec(`CREATE TABLE IF NOT EXISTS attr (
+		id BIGINT NOT NULL,
+		k TEXT NOT NULL,
+		v BLOB NOT NULL,
+		PRIMARY KEY (id, k)
+	)`)
+	if err != nil {
+		return fmt.Errorf("%w: create attr table: %v", ERR_EXEC_DB, err)
+	}
+	// Create index for efficient querying by id
+	_, err = db.Exec(`CREATE INDEX IF NOT EXISTS ix_attr_id ON attr (id)`)
+	if err != nil {
+		return fmt.Errorf("%w: create index ix_attr_id: %v", ERR_EXEC_DB, err)
 	}
 
 	_, err = db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS uk_pid_name on obj (pid, n)`)
@@ -2188,6 +2211,102 @@ func (dma *DefaultMetadataAdapter) ListVersions(c Ctx, bktID int64, fileID int64
 		return nil, fmt.Errorf("%w: ListVersions failed (bktID=%d, fileID=%d, excludeWriting=%v): %v", ERR_QUERY_DB, bktID, fileID, excludeWriting, err)
 	}
 	return versions, nil
+}
+
+// GetAttr gets an extended attribute value for an object
+func (dma *DefaultMetadataAdapter) GetAttr(c Ctx, bktID int64, objID int64, key string) ([]byte, error) {
+	// Use read connection for get operation
+	bktDirPath := filepath.Join(dma.DefaultDataMetadataAdapter.dataPath, fmt.Sprint(bktID))
+	db, err := GetReadDB(bktDirPath, "")
+	if err != nil {
+		return nil, ERR_OPEN_DB
+	}
+	// Note: Don't close the connection, it's from the pool
+
+	type AttrRow struct {
+		Value []byte `borm:"v"`
+	}
+	var attrRow AttrRow
+	_, err = b.TableContext(c, db, ATTR_TBL).Select(&attrRow,
+		b.Where(b.Eq("id", objID), b.Eq("k", key)))
+	if err != nil {
+		return nil, fmt.Errorf("%w: GetAttr failed (bktID=%d, objID=%d, key=%s): %v", ERR_QUERY_DB, bktID, objID, key, err)
+	}
+	if attrRow.Value == nil {
+		return nil, fmt.Errorf("%w: GetAttr attribute not found (bktID=%d, objID=%d, key=%s)", ERR_QUERY_DB, bktID, objID, key)
+	}
+	return attrRow.Value, nil
+}
+
+// SetAttr sets an extended attribute value for an object
+func (dma *DefaultMetadataAdapter) SetAttr(c Ctx, bktID int64, objID int64, key string, value []byte) error {
+	// Use write connection for set operation
+	bktDirPath := filepath.Join(dma.DefaultDataMetadataAdapter.dataPath, fmt.Sprint(bktID))
+	db, err := GetWriteDB(bktDirPath, "")
+	if err != nil {
+		return ERR_OPEN_DB
+	}
+	// Note: Don't close the connection, it's from the pool
+
+	type AttrRow struct {
+		ID    int64  `borm:"id"`
+		Key   string `borm:"k"`
+		Value []byte `borm:"v"`
+	}
+	attrRow := &AttrRow{
+		ID:    objID,
+		Key:   key,
+		Value: value,
+	}
+	// Use REPLACE INTO to insert or update
+	if _, err = b.TableContext(c, db, ATTR_TBL).ReplaceInto(attrRow); err != nil {
+		return fmt.Errorf("%w: SetAttr failed (bktID=%d, objID=%d, key=%s): %v", ERR_EXEC_DB, bktID, objID, key, err)
+	}
+	return nil
+}
+
+// RemoveAttr removes an extended attribute from an object
+func (dma *DefaultMetadataAdapter) RemoveAttr(c Ctx, bktID int64, objID int64, key string) error {
+	// Use write connection for remove operation
+	bktDirPath := filepath.Join(dma.DefaultDataMetadataAdapter.dataPath, fmt.Sprint(bktID))
+	db, err := GetWriteDB(bktDirPath, "")
+	if err != nil {
+		return ERR_OPEN_DB
+	}
+	// Note: Don't close the connection, it's from the pool
+
+	_, err = b.TableContext(c, db, ATTR_TBL).Delete(b.Where(b.Eq("id", objID), b.Eq("k", key)))
+	if err != nil {
+		return fmt.Errorf("%w: RemoveAttr failed (bktID=%d, objID=%d, key=%s): %v", ERR_EXEC_DB, bktID, objID, key, err)
+	}
+	return nil
+}
+
+// ListAttrs lists all extended attribute keys for an object
+func (dma *DefaultMetadataAdapter) ListAttrs(c Ctx, bktID int64, objID int64) ([]string, error) {
+	// Use read connection for list operation
+	bktDirPath := filepath.Join(dma.DefaultDataMetadataAdapter.dataPath, fmt.Sprint(bktID))
+	db, err := GetReadDB(bktDirPath, "")
+	if err != nil {
+		return nil, ERR_OPEN_DB
+	}
+	// Note: Don't close the connection, it's from the pool
+
+	type AttrRow struct {
+		Key string `borm:"k"`
+	}
+	var attrRows []*AttrRow
+	_, err = b.TableContext(c, db, ATTR_TBL).Select(&attrRows,
+		b.Where(b.Eq("id", objID)),
+		b.Fields("k"))
+	if err != nil {
+		return nil, fmt.Errorf("%w: ListAttrs failed (bktID=%d, objID=%d): %v", ERR_QUERY_DB, bktID, objID, err)
+	}
+	keys := make([]string, len(attrRows))
+	for i, row := range attrRows {
+		keys[i] = row.Key
+	}
+	return keys, nil
 }
 
 func (dma *DefaultMetadataAdapter) DeleteObj(c Ctx, bktID int64, id int64) error {

@@ -4450,19 +4450,86 @@ func (n *OrcasNode) queryFileByNameDirectly(parentID int64, fileName string) (in
 
 // Statfs implements NodeStatfser interface
 func (n *OrcasNode) Statfs(ctx context.Context, out *fuse.StatfsOut) syscall.Errno {
-	DebugLog("[VFS Statfs] Entry: objID=%d", n.objID)
-	// Default implementation: zero out the structure
-	// This is required for macOS filesystems
-	*out = fuse.StatfsOut{}
-	DebugLog("[VFS Statfs] Returning default (zeroed) statfs: objID=%d", n.objID)
+	DebugLog("[VFS Statfs] Entry: objID=%d, bktID=%d", n.objID, n.fs.bktID)
+
+	// Get bucket information to determine quota and used space
+	bucket, err := n.fs.h.GetBktInfo(n.fs.c, n.fs.bktID)
+	if err != nil {
+		DebugLog("[VFS Statfs] WARNING: Failed to get bucket info: bktID=%d, error=%v, using defaults", n.fs.bktID, err)
+		// If we can't get bucket info, use default values
+		*out = fuse.StatfsOut{}
+		return 0
+	}
+
+	// Calculate filesystem statistics based on bucket quota and usage
+	// Block size: use 4KB (4096 bytes) as standard block size
+	blockSize := uint64(4096)
+
+	// Total blocks: use quota if set, otherwise use a large default value
+	// If quota is negative, it means unlimited, use a very large value
+	var totalBlocks uint64
+	if bucket.Quota > 0 {
+		// Quota is set, convert to blocks
+		totalBlocks = uint64(bucket.Quota) / blockSize
+		if totalBlocks == 0 {
+			totalBlocks = 1 // At least 1 block
+		}
+	} else {
+		// Unlimited quota, use a very large value (1TB in blocks)
+		totalBlocks = (1 << 40) / blockSize // 1TB / 4KB = 268435456 blocks
+	}
+
+	// Used blocks: convert RealUsed (actual physical usage) to blocks
+	usedBlocks := uint64(bucket.RealUsed) / blockSize
+	if usedBlocks > totalBlocks {
+		usedBlocks = totalBlocks // Cap at total
+	}
+
+	// Free blocks: total - used
+	freeBlocks := totalBlocks - usedBlocks
+
+	// Available blocks: same as free blocks (no reserved space for now)
+	availBlocks := freeBlocks
+
+	// File count: use LogicalUsed as a proxy for file count (rough estimate)
+	// This is not exact, but provides a reasonable estimate
+	// Assume average file size of 1MB for estimation
+	estimatedFiles := uint64(bucket.LogicalUsed) / (1 << 20) // 1MB
+	if estimatedFiles == 0 {
+		estimatedFiles = 1 // At least 1 file
+	}
+	freeFiles := estimatedFiles // Assume we can create as many files as we have
+
+	// Fill StatfsOut structure
+	out.Blocks = totalBlocks       // Total data blocks in filesystem
+	out.Bfree = freeBlocks         // Free blocks in filesystem
+	out.Bavail = availBlocks       // Free blocks available to unprivileged user
+	out.Files = estimatedFiles     // Total file nodes in filesystem
+	out.Ffree = freeFiles          // Free file nodes in filesystem
+	out.Bsize = uint32(blockSize)  // Block size
+	out.Frsize = uint32(blockSize) // Fragment size (same as block size)
+
+	DebugLog("[VFS Statfs] Bucket stats: bktID=%d, quota=%d, used=%d, realUsed=%d, totalBlocks=%d, freeBlocks=%d, availBlocks=%d",
+		n.fs.bktID, bucket.Quota, bucket.Used, bucket.RealUsed, totalBlocks, freeBlocks, availBlocks)
+
 	return 0
 }
 
 // Access implements NodeAccesser interface
 func (n *OrcasNode) Access(ctx context.Context, mask uint32) syscall.Errno {
 	DebugLog("[VFS Access] Entry: objID=%d, mask=0x%x", n.objID, mask)
-	// Default implementation: allow access
-	// For precise permission checking, implement based on Getattr result
+
+	// Check if requireKey is set and key is missing
+	// Root node is exempt from key check (can be accessed without key)
+	if !n.isRoot {
+		if errno := n.fs.checkKey(); errno != 0 {
+			DebugLog("[VFS Access] ERROR: checkKey failed (requireKey set but no key): objID=%d, mask=0x%x, errno=%d", n.objID, mask, errno)
+			return errno // Returns EPERM if requireKey is set but EndecKey is empty
+		}
+	}
+
+	// For precise permission checking, could implement based on Getattr result
+	// For now, allow access if key check passes
 	DebugLog("[VFS Access] Allowing access: objID=%d, mask=0x%x", n.objID, mask)
 	return 0
 }
@@ -4477,36 +4544,243 @@ func (n *OrcasNode) OnAdd(ctx context.Context) {
 // Getxattr implements NodeGetxattrer interface
 func (n *OrcasNode) Getxattr(ctx context.Context, attr string, dest []byte) (uint32, syscall.Errno) {
 	DebugLog("[VFS Getxattr] Entry: objID=%d, attr=%s, destLen=%d", n.objID, attr, len(dest))
-	// Default implementation: return ENODATA (no such attribute)
-	// Note: ENODATA is Linux-compatible, ENOATTR is not available on Linux
-	DebugLog("[VFS Getxattr] ERROR: Attribute not found: objID=%d, attr=%s", n.objID, attr)
+	if errno := n.fs.checkKey(); errno != 0 {
+		DebugLog("[VFS Getxattr] ERROR: checkKey failed: objID=%d, attr=%s, errno=%d", n.objID, attr, errno)
+		return 0, errno
+	}
+
+	// Check cache first
+	cacheKey := n.objID
+	if cached, ok := attrCache.Get(cacheKey); ok {
+		if entry, ok := cached.(*attrCacheEntry); ok && entry != nil {
+			entry.mu.RLock()
+			value, exists := entry.attrs[attr]
+			entry.mu.RUnlock()
+			if exists {
+				if len(value) > len(dest) {
+					DebugLog("[VFS Getxattr] ERROR: Buffer too small (from cache): objID=%d, attr=%s, valueLen=%d, destLen=%d", n.objID, attr, len(value), len(dest))
+					return uint32(len(value)), syscall.ERANGE
+				}
+				copy(dest, value)
+				DebugLog("[VFS Getxattr] Successfully retrieved attribute from cache: objID=%d, attr=%s, valueLen=%d", n.objID, attr, len(value))
+				return uint32(len(value)), 0
+			}
+		}
+	}
+
+	// Cache miss, get from database
+	if lh, ok := n.fs.h.(*core.LocalHandler); ok {
+		ma := lh.MetadataAdapter()
+		if ma != nil {
+			value, err := ma.GetAttr(n.fs.c, n.fs.bktID, n.objID, attr)
+			if err != nil {
+				DebugLog("[VFS Getxattr] ERROR: Failed to get attribute: objID=%d, attr=%s, error=%v", n.objID, attr, err)
+				return 0, syscall.ENODATA
+			}
+			if len(value) > len(dest) {
+				DebugLog("[VFS Getxattr] ERROR: Buffer too small: objID=%d, attr=%s, valueLen=%d, destLen=%d", n.objID, attr, len(value), len(dest))
+				return uint32(len(value)), syscall.ERANGE
+			}
+			copy(dest, value)
+
+			// Update cache: get or create cache entry and update with lock
+			var entry *attrCacheEntry
+			if cached, ok := attrCache.Get(cacheKey); ok {
+				if e, ok := cached.(*attrCacheEntry); ok && e != nil {
+					entry = e
+				}
+			}
+			if entry == nil {
+				entry = &attrCacheEntry{
+					attrs: make(map[string][]byte),
+				}
+			}
+			entry.mu.Lock()
+			entry.attrs[attr] = value
+			entry.mu.Unlock()
+			attrCache.Put(cacheKey, entry)
+
+			DebugLog("[VFS Getxattr] Successfully retrieved attribute from database: objID=%d, attr=%s, valueLen=%d", n.objID, attr, len(value))
+			return uint32(len(value)), 0
+		}
+	}
+	DebugLog("[VFS Getxattr] ERROR: MetadataAdapter not available: objID=%d, attr=%s", n.objID, attr)
 	return 0, syscall.ENODATA
 }
 
 // Setxattr implements NodeSetxattrer interface
 func (n *OrcasNode) Setxattr(ctx context.Context, attr string, data []byte, flags uint32) syscall.Errno {
 	DebugLog("[VFS Setxattr] Entry: objID=%d, attr=%s, dataLen=%d, flags=0x%x", n.objID, attr, len(data), flags)
-	// Default implementation: return ENODATA (attribute not supported)
-	// Note: ENODATA is Linux-compatible, ENOATTR is not available on Linux
-	DebugLog("[VFS Setxattr] ERROR: Attribute not supported: objID=%d, attr=%s", n.objID, attr)
+	if errno := n.fs.checkKey(); errno != 0 {
+		DebugLog("[VFS Setxattr] ERROR: checkKey failed: objID=%d, attr=%s, errno=%d", n.objID, attr, errno)
+		return errno
+	}
+
+	// Get MetadataAdapter from handler
+	if lh, ok := n.fs.h.(*core.LocalHandler); ok {
+		ma := lh.MetadataAdapter()
+		if ma != nil {
+			err := ma.SetAttr(n.fs.c, n.fs.bktID, n.objID, attr, data)
+			if err != nil {
+				DebugLog("[VFS Setxattr] ERROR: Failed to set attribute: objID=%d, attr=%s, error=%v", n.objID, attr, err)
+				return syscall.EIO
+			}
+
+			// Update cache: get or create cache entry and update with lock
+			cacheKey := n.objID
+			var entry *attrCacheEntry
+			if cached, ok := attrCache.Get(cacheKey); ok {
+				if e, ok := cached.(*attrCacheEntry); ok && e != nil {
+					entry = e
+				}
+			}
+			if entry == nil {
+				entry = &attrCacheEntry{
+					attrs: make(map[string][]byte),
+				}
+			}
+			entry.mu.Lock()
+			entry.attrs[attr] = data
+			entry.mu.Unlock()
+			attrCache.Put(cacheKey, entry)
+
+			DebugLog("[VFS Setxattr] Successfully set attribute: objID=%d, attr=%s, dataLen=%d", n.objID, attr, len(data))
+			return 0
+		}
+	}
+	DebugLog("[VFS Setxattr] ERROR: MetadataAdapter not available: objID=%d, attr=%s", n.objID, attr)
 	return syscall.ENODATA
 }
 
 // Removexattr implements NodeRemovexattrer interface
 func (n *OrcasNode) Removexattr(ctx context.Context, attr string) syscall.Errno {
 	DebugLog("[VFS Removexattr] Entry: objID=%d, attr=%s", n.objID, attr)
-	// Default implementation: return ENODATA (no such attribute)
-	// Note: ENODATA is Linux-compatible, ENOATTR is not available on Linux
-	DebugLog("[VFS Removexattr] ERROR: Attribute not found: objID=%d, attr=%s", n.objID, attr)
+	if errno := n.fs.checkKey(); errno != 0 {
+		DebugLog("[VFS Removexattr] ERROR: checkKey failed: objID=%d, attr=%s, errno=%d", n.objID, attr, errno)
+		return errno
+	}
+
+	// Get MetadataAdapter from handler
+	if lh, ok := n.fs.h.(*core.LocalHandler); ok {
+		ma := lh.MetadataAdapter()
+		if ma != nil {
+			err := ma.RemoveAttr(n.fs.c, n.fs.bktID, n.objID, attr)
+			if err != nil {
+				DebugLog("[VFS Removexattr] ERROR: Failed to remove attribute: objID=%d, attr=%s, error=%v", n.objID, attr, err)
+				return syscall.ENODATA
+			}
+
+			// Update cache: remove attribute from cache with lock
+			cacheKey := n.objID
+			if cached, ok := attrCache.Get(cacheKey); ok {
+				if entry, ok := cached.(*attrCacheEntry); ok && entry != nil {
+					entry.mu.Lock()
+					delete(entry.attrs, attr)
+					empty := len(entry.attrs) == 0
+					entry.mu.Unlock()
+					// If cache is now empty, remove it; otherwise update it
+					if empty {
+						attrCache.Del(cacheKey)
+					} else {
+						attrCache.Put(cacheKey, entry)
+					}
+				}
+			}
+
+			DebugLog("[VFS Removexattr] Successfully removed attribute: objID=%d, attr=%s", n.objID, attr)
+			return 0
+		}
+	}
+	DebugLog("[VFS Removexattr] ERROR: MetadataAdapter not available: objID=%d, attr=%s", n.objID, attr)
 	return syscall.ENODATA
 }
 
 // Listxattr implements NodeListxattrer interface
 func (n *OrcasNode) Listxattr(ctx context.Context, dest []byte) (uint32, syscall.Errno) {
 	DebugLog("[VFS Listxattr] Entry: objID=%d, destLen=%d", n.objID, len(dest))
-	// Default implementation: return empty list
-	DebugLog("[VFS Listxattr] Returning empty attribute list: objID=%d", n.objID)
-	return 0, 0
+	if errno := n.fs.checkKey(); errno != 0 {
+		DebugLog("[VFS Listxattr] ERROR: checkKey failed: objID=%d, errno=%d", n.objID, errno)
+		return 0, errno
+	}
+
+	var keys []string
+	cacheKey := n.objID
+
+	// Try to get keys from cache first
+	if cached, ok := attrCache.Get(cacheKey); ok {
+		if entry, ok := cached.(*attrCacheEntry); ok && entry != nil {
+			entry.mu.RLock()
+			// Extract all keys from the cache entry
+			keys = make([]string, 0, len(entry.attrs))
+			for key := range entry.attrs {
+				keys = append(keys, key)
+			}
+			entry.mu.RUnlock()
+			DebugLog("[VFS Listxattr] Retrieved keys from cache: objID=%d, count=%d", n.objID, len(keys))
+		}
+	}
+
+	// Cache miss, get from database
+	if keys == nil {
+		if lh, ok := n.fs.h.(*core.LocalHandler); ok {
+			ma := lh.MetadataAdapter()
+			if ma != nil {
+				var err error
+				keys, err = ma.ListAttrs(n.fs.c, n.fs.bktID, n.objID)
+				if err != nil {
+					DebugLog("[VFS Listxattr] ERROR: Failed to list attributes: objID=%d, error=%v", n.objID, err)
+					return 0, syscall.EIO
+				}
+				DebugLog("[VFS Listxattr] Retrieved keys from database: objID=%d, count=%d", n.objID, len(keys))
+
+				// Update cache: merge database keys with existing cache entry
+				var entry *attrCacheEntry
+				if cached, ok := attrCache.Get(cacheKey); ok {
+					if e, ok := cached.(*attrCacheEntry); ok && e != nil {
+						entry = e
+					}
+				}
+				if entry == nil {
+					entry = &attrCacheEntry{
+						attrs: make(map[string][]byte),
+					}
+				}
+				// Merge keys: add any keys from database that aren't already in cache
+				entry.mu.Lock()
+				for _, key := range keys {
+					if _, exists := entry.attrs[key]; !exists {
+						entry.attrs[key] = nil // Mark key as known, value will be loaded on demand via Getxattr
+					}
+				}
+				entry.mu.Unlock()
+				attrCache.Put(cacheKey, entry)
+			}
+		}
+	}
+
+	if keys == nil {
+		DebugLog("[VFS Listxattr] ERROR: MetadataAdapter not available: objID=%d", n.objID)
+		return 0, 0
+	}
+
+	// Format keys as null-terminated strings: "key1\0key2\0key3\0"
+	totalLen := 0
+	for _, key := range keys {
+		totalLen += len(key) + 1 // +1 for null terminator
+	}
+	if totalLen > len(dest) {
+		DebugLog("[VFS Listxattr] ERROR: Buffer too small: objID=%d, totalLen=%d, destLen=%d", n.objID, totalLen, len(dest))
+		return uint32(totalLen), syscall.ERANGE
+	}
+	pos := 0
+	for _, key := range keys {
+		copy(dest[pos:], key)
+		pos += len(key)
+		dest[pos] = 0 // null terminator
+		pos++
+	}
+	DebugLog("[VFS Listxattr] Successfully listed attributes: objID=%d, count=%d, totalLen=%d", n.objID, len(keys), totalLen)
+	return uint32(totalLen), 0
 }
 
 // Readlink implements NodeReadlinker interface
