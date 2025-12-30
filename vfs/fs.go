@@ -4517,8 +4517,8 @@ func (n *OrcasNode) Getxattr(ctx context.Context, attr string, dest []byte) (uin
 			if exists {
 				// Check if this is a "not found" sentinel (nil)
 				if value == nil {
-					DebugLog("[VFS Getxattr] Cache hit (sentinel): objID=%d, attr=%s, returning ENODATA", n.objID, attr)
-					return 0, syscall.ENODATA
+					DebugLog("[VFS Getxattr] Cache hit (sentinel): objID=%d, attr=%s, returning 0", n.objID, attr)
+					return 0, 0
 				}
 				if len(value) > len(dest) {
 					DebugLog("[VFS Getxattr] Cache hit but buffer too small: objID=%d, attr=%s, valueLen=%d, destLen=%d, returning ERANGE", n.objID, attr, len(value), len(dest))
@@ -4572,7 +4572,7 @@ func (n *OrcasNode) Getxattr(ctx context.Context, attr string, dest []byte) (uin
 					entry.attrs[attr] = nil // Use nil as sentinel
 					entry.mu.Unlock()
 					attrCache.Put(cacheKey, entry)
-					return 0, syscall.ENODATA
+					return 0, 0
 				}
 				// For other errors (database errors, etc.), return EIO instead of ENODATA
 				DebugLog("[VFS Getxattr] ERROR: Failed to get attribute: objID=%d, attr=%s, error=%v", n.objID, attr, err)
@@ -4683,8 +4683,8 @@ func (n *OrcasNode) Removexattr(ctx context.Context, attr string) syscall.Errno 
 			if err != nil {
 				// Check if this is a "not found" error (attribute doesn't exist)
 				if strings.Contains(err.Error(), "attribute not found") || strings.Contains(err.Error(), "not found") {
-					DebugLog("[VFS Removexattr] Attribute not found: objID=%d, attr=%s, returning ENODATA", n.objID, attr)
-					return syscall.ENODATA
+					DebugLog("[VFS Removexattr] Attribute not found: objID=%d, attr=%s, returning 0", n.objID, attr)
+					return 0
 				}
 				// For other errors (database errors, etc.), return EIO
 				DebugLog("[VFS Removexattr] ERROR: Failed to remove attribute: objID=%d, attr=%s, error=%v", n.objID, attr, err)
