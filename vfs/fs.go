@@ -4683,7 +4683,24 @@ func (n *OrcasNode) Removexattr(ctx context.Context, attr string) syscall.Errno 
 			if err != nil {
 				// Check if this is a "not found" error (attribute doesn't exist)
 				if strings.Contains(err.Error(), "attribute not found") || strings.Contains(err.Error(), "not found") {
-					DebugLog("[VFS Removexattr] Attribute not found: objID=%d, attr=%s, returning 0", n.objID, attr)
+					DebugLog("[VFS Removexattr] Attribute not found: objID=%d, attr=%s, setting sentinel in cache", n.objID, attr)
+					// Attribute doesn't exist, set sentinel in cache to prevent repeated queries
+					cacheKey := n.objID
+					var entry *attrCacheEntry
+					if cached, ok := attrCache.Get(cacheKey); ok {
+						if e, ok := cached.(*attrCacheEntry); ok && e != nil {
+							entry = e
+						}
+					}
+					if entry == nil {
+						entry = &attrCacheEntry{
+							attrs: make(map[string][]byte),
+						}
+					}
+					entry.mu.Lock()
+					entry.attrs[attr] = nil // Set sentinel to indicate attribute doesn't exist
+					entry.mu.Unlock()
+					attrCache.Put(cacheKey, entry)
 					return 0
 				}
 				// For other errors (database errors, etc.), return EIO
@@ -4691,24 +4708,24 @@ func (n *OrcasNode) Removexattr(ctx context.Context, attr string) syscall.Errno 
 				return syscall.EIO
 			}
 
-			// Update cache: remove attribute from cache with lock
+			// Update cache: set sentinel (nil) to indicate attribute doesn't exist
 			cacheKey := n.objID
+			var entry *attrCacheEntry
 			if cached, ok := attrCache.Get(cacheKey); ok {
-				if entry, ok := cached.(*attrCacheEntry); ok && entry != nil {
-					entry.mu.Lock()
-					delete(entry.attrs, attr)
-					empty := len(entry.attrs) == 0
-					entry.mu.Unlock()
-					// If cache is now empty, remove it; otherwise update it
-					if empty {
-						attrCache.Del(cacheKey)
-						DebugLog("[VFS Removexattr] Removed from cache (cache now empty): objID=%d, attr=%s", n.objID, attr)
-					} else {
-						attrCache.Put(cacheKey, entry)
-						DebugLog("[VFS Removexattr] Removed from cache: objID=%d, attr=%s", n.objID, attr)
-					}
+				if e, ok := cached.(*attrCacheEntry); ok && e != nil {
+					entry = e
 				}
 			}
+			if entry == nil {
+				entry = &attrCacheEntry{
+					attrs: make(map[string][]byte),
+				}
+			}
+			entry.mu.Lock()
+			entry.attrs[attr] = nil // Set sentinel to indicate attribute doesn't exist
+			entry.mu.Unlock()
+			attrCache.Put(cacheKey, entry)
+			DebugLog("[VFS Removexattr] Removed from cache (set sentinel): objID=%d, attr=%s", n.objID, attr)
 			DebugLog("[VFS Removexattr] Success: objID=%d, attr=%s", n.objID, attr)
 			return 0
 		}

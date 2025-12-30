@@ -4245,3 +4245,87 @@ func TestRmdirShouldNotTriggerOnRootDeletedForSubdirectory(t *testing.T) {
 		})
 	})
 }
+
+// TestXattrSetGetRemove tests xattr operations: set, get, remove, and verify removal
+func TestXattrSetGetRemove(t *testing.T) {
+	Convey("Test xattr Setxattr, Getxattr, Removexattr operations", t, func() {
+		ensureTestUser(t)
+		handler := core.NewLocalHandler("", "")
+		ctx := context.Background()
+		ctx, _, _, err := handler.Login(ctx, "orcas", "orcas")
+		So(err, ShouldBeNil)
+
+		ig := idgen.NewIDGen(nil, 0)
+		testBktID, _ := ig.New()
+		err = core.InitBucketDB(".", testBktID)
+		So(err, ShouldBeNil)
+
+		// Get user info for bucket creation
+		_, _, _, err = handler.Login(ctx, "orcas", "orcas")
+		So(err, ShouldBeNil)
+
+		// Create bucket
+		admin := core.NewLocalAdmin(".", ".")
+		bkt := &core.BucketInfo{
+			ID:        testBktID,
+			Name:      "test-xattr-bucket",
+			Type:      1,
+			Quota:     -1,
+			ChunkSize: 4 * 1024 * 1024, // 4MB chunk size
+		}
+		err = admin.PutBkt(ctx, []*core.BucketInfo{bkt})
+		So(err, ShouldBeNil)
+
+		// Create filesystem
+		ofs := NewOrcasFS(handler, ctx, testBktID)
+
+		// Create a test file object
+		fileObj := &core.ObjectInfo{
+			ID:    core.NewID(),
+			PID:   testBktID,
+			Type:  core.OBJ_TYPE_FILE,
+			Name:  "test-xattr.txt",
+			Size:  0,
+			MTime: core.Now(),
+		}
+
+		_, err = handler.Put(ctx, testBktID, []*core.ObjectInfo{fileObj})
+		So(err, ShouldBeNil)
+
+		// Create file node
+		fileNode := &OrcasNode{
+			fs:    ofs,
+			objID: fileObj.ID,
+		}
+		fileNode.obj.Store(fileObj)
+
+		// Test attribute name and value
+		attrName := "user.test.attribute"
+		attrValue := []byte("test-value-123")
+
+		Convey("Complete flow: Set -> Get -> Remove -> Get (should not exist after removal)", func() {
+			// Set attribute
+			errno := fileNode.Setxattr(ctx, attrName, attrValue, 0)
+			So(errno, ShouldEqual, syscall.Errno(0))
+
+			// Get attribute - should exist
+			dest := make([]byte, 1024)
+			size, errno := fileNode.Getxattr(ctx, attrName, dest)
+			So(errno, ShouldEqual, syscall.Errno(0))
+			So(size, ShouldEqual, uint32(len(attrValue)))
+			So(dest[:size], ShouldResemble, attrValue)
+
+			// Remove attribute
+			errno = fileNode.Removexattr(ctx, attrName)
+			So(errno, ShouldEqual, syscall.Errno(0))
+
+			// Get attribute again - should not exist (return 0, 0)
+			// This is the key test: after removal, Getxattr should return 0, 0
+			// instead of ENODATA, indicating the attribute doesn't exist
+			dest2 := make([]byte, 1024)
+			size2, errno2 := fileNode.Getxattr(ctx, attrName, dest2)
+			So(errno2, ShouldEqual, syscall.Errno(0))
+			So(size2, ShouldEqual, uint32(0))
+		})
+	})
+}
