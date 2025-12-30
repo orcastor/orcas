@@ -7,7 +7,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -4347,92 +4346,93 @@ func (n *OrcasNode) queryFileByNameDirectly(parentID int64, fileName string) (in
 func (n *OrcasNode) Statfs(ctx context.Context, out *fuse.StatfsOut) syscall.Errno {
 	DebugLog("[VFS Statfs] Entry: objID=%d, bktID=%d", n.objID, n.fs.bktID)
 
-	// Get bucket information to determine quota and used space
-	bucket, err := n.fs.h.GetBktInfo(n.fs.c, n.fs.bktID)
-	if err != nil {
-		DebugLog("[VFS Statfs] ERROR: Failed to get bucket info: bktID=%d, error=%v, using defaults", n.fs.bktID, err)
-		// If we can't get bucket info, use default values
-		*out = fuse.StatfsOut{}
-		DebugLog("[VFS Statfs] Returning default (zeroed) statfs: objID=%d, bktID=%d, error=%v", n.objID, n.fs.bktID, err)
-		return 0
-	}
-
-	// Calculate filesystem statistics based on bucket quota and usage
-	// Block size: use 4KB (4096 bytes) as standard block size
-	blockSize := uint64(4096)
-
-	// Total blocks: use quota if set, otherwise use a large default value
-	// If quota is negative, it means unlimited, use a very large value
-	var totalBlocks uint64
-	if bucket.Quota > 0 {
-		// Quota is set, convert to blocks
-		totalBlocks = uint64(bucket.Quota) / blockSize
-		if totalBlocks == 0 {
-			totalBlocks = 1 // At least 1 block
+	/*
+		// Get bucket information to determine quota and used space
+		bucket, err := n.fs.h.GetBktInfo(n.fs.c, n.fs.bktID)
+		if err != nil {
+			DebugLog("[VFS Statfs] ERROR: Failed to get bucket info: bktID=%d, error=%v, using defaults", n.fs.bktID, err)
+			// If we can't get bucket info, use default values
+			*out = fuse.StatfsOut{}
+			DebugLog("[VFS Statfs] Returning default (zeroed) statfs: objID=%d, bktID=%d, error=%v", n.objID, n.fs.bktID, err)
+			return 0
 		}
-	} else {
-		// Unlimited quota, get actual disk size from DataPath
-		// Use syscall.Statfs to get filesystem statistics
-		var stat syscall.Statfs_t
-		dataPath := n.fs.GetDataPath()
-		if _, err := os.Stat(dataPath); os.IsNotExist(err) {
-			// Path doesn't exist, use parent directory
-			dataPath = filepath.Dir(dataPath)
-			// If parent also doesn't exist, use the path as-is (Statfs may still work)
-		}
-		if err := syscall.Statfs(dataPath, &stat); err == nil {
-			// Get total blocks from filesystem
-			// stat.Blocks is total data blocks in filesystem
-			// stat.Bsize is filesystem block size
-			fsBlockSize := uint64(stat.Bsize)
-			if fsBlockSize == 0 {
-				fsBlockSize = blockSize // Fallback to 4KB if bsize is 0
+
+		// Calculate filesystem statistics based on bucket quota and usage
+		// Block size: use 4KB (4096 bytes) as standard block size
+		blockSize := uint64(4096)
+
+		// Total blocks: use quota if set, otherwise use a large default value
+		// If quota is negative, it means unlimited, use a very large value
+		var totalBlocks uint64
+		if bucket.Quota > 0 {
+			// Quota is set, convert to blocks
+			totalBlocks = uint64(bucket.Quota) / blockSize
+			if totalBlocks == 0 {
+				totalBlocks = 1 // At least 1 block
 			}
-			// Calculate total size: stat.Blocks * stat.Bsize
-			totalSize := uint64(stat.Blocks) * fsBlockSize
-			// Convert to our block size (4KB)
-			totalBlocks = totalSize / blockSize
-			DebugLog("[VFS Statfs] Got disk size from DataPath: path=%s, fsBlocks=%d, fsBlockSize=%d, totalSize=%d, totalBlocks=%d",
-				dataPath, stat.Blocks, fsBlockSize, totalSize, totalBlocks)
 		} else {
-			// Failed to get disk size, use a large default value (1TB in blocks)
-			totalBlocks = (1 << 40) / blockSize // 1TB / 4KB = 268435456 blocks
-			DebugLog("[VFS Statfs] WARNING: Failed to get disk size from DataPath: path=%s, error=%v, using default 1TB", dataPath, err)
+			// Unlimited quota, get actual disk size from DataPath
+			// Use syscall.Statfs to get filesystem statistics
+			var stat syscall.Statfs_t
+			dataPath := n.fs.GetDataPath()
+			if _, err := os.Stat(dataPath); os.IsNotExist(err) {
+				// Path doesn't exist, use parent directory
+				dataPath = filepath.Dir(dataPath)
+				// If parent also doesn't exist, use the path as-is (Statfs may still work)
+			}
+			if err := syscall.Statfs(dataPath, &stat); err == nil {
+				// Get total blocks from filesystem
+				// stat.Blocks is total data blocks in filesystem
+				// stat.Bsize is filesystem block size
+				fsBlockSize := uint64(stat.Bsize)
+				if fsBlockSize == 0 {
+					fsBlockSize = blockSize // Fallback to 4KB if bsize is 0
+				}
+				// Calculate total size: stat.Blocks * stat.Bsize
+				totalSize := uint64(stat.Blocks) * fsBlockSize
+				// Convert to our block size (4KB)
+				totalBlocks = totalSize / blockSize
+				DebugLog("[VFS Statfs] Got disk size from DataPath: path=%s, fsBlocks=%d, fsBlockSize=%d, totalSize=%d, totalBlocks=%d",
+					dataPath, stat.Blocks, fsBlockSize, totalSize, totalBlocks)
+			} else {
+				// Failed to get disk size, use a large default value (1TB in blocks)
+				totalBlocks = (1 << 40) / blockSize // 1TB / 4KB = 268435456 blocks
+				DebugLog("[VFS Statfs] WARNING: Failed to get disk size from DataPath: path=%s, error=%v, using default 1TB", dataPath, err)
+			}
 		}
-	}
 
-	// Used blocks: convert RealUsed (actual physical usage) to blocks
-	usedBlocks := uint64(bucket.RealUsed) / blockSize
-	if usedBlocks > totalBlocks {
-		usedBlocks = totalBlocks // Cap at total
-	}
+		// Used blocks: convert RealUsed (actual physical usage) to blocks
+		usedBlocks := uint64(bucket.RealUsed) / blockSize
+		if usedBlocks > totalBlocks {
+			usedBlocks = totalBlocks // Cap at total
+		}
 
-	// Free blocks: total - used
-	freeBlocks := totalBlocks - usedBlocks
+		// Free blocks: total - used
+		freeBlocks := totalBlocks - usedBlocks
 
-	// Available blocks: same as free blocks (no reserved space for now)
-	availBlocks := freeBlocks
+		// Available blocks: same as free blocks (no reserved space for now)
+		availBlocks := freeBlocks
 
-	// File count: use LogicalUsed as a proxy for file count (rough estimate)
-	// This is not exact, but provides a reasonable estimate
-	// Assume average file size of 1MB for estimation
-	estimatedFiles := uint64(bucket.LogicalUsed) / (1 << 20) // 1MB
-	if estimatedFiles == 0 {
-		estimatedFiles = 1 // At least 1 file
-	}
-	freeFiles := estimatedFiles // Assume we can create as many files as we have
+		// File count: use LogicalUsed as a proxy for file count (rough estimate)
+		// This is not exact, but provides a reasonable estimate
+		// Assume average file size of 1MB for estimation
+		estimatedFiles := uint64(bucket.LogicalUsed) / (1 << 20) // 1MB
+		if estimatedFiles == 0 {
+			estimatedFiles = 1 // At least 1 file
+		}
+		freeFiles := estimatedFiles // Assume we can create as many files as we have
 
-	// Fill StatfsOut structure
-	out.Blocks = totalBlocks       // Total data blocks in filesystem
-	out.Bfree = freeBlocks         // Free blocks in filesystem
-	out.Bavail = availBlocks       // Free blocks available to unprivileged user
-	out.Files = estimatedFiles     // Total file nodes in filesystem
-	out.Ffree = freeFiles          // Free file nodes in filesystem
-	out.Bsize = uint32(blockSize)  // Block size
-	out.Frsize = uint32(blockSize) // Fragment size (same as block size)
+		// Fill StatfsOut structure
+		out.Blocks = totalBlocks       // Total data blocks in filesystem
+		out.Bfree = freeBlocks         // Free blocks in filesystem
+		out.Bavail = availBlocks       // Free blocks available to unprivileged user
+		out.Files = estimatedFiles     // Total file nodes in filesystem
+		out.Ffree = freeFiles          // Free file nodes in filesystem
+		out.Bsize = uint32(blockSize)  // Block size
+		out.Frsize = uint32(blockSize) // Fragment size (same as block size)
 
-	DebugLog("[VFS Statfs] Bucket stats: bktID=%d, quota=%d, used=%d, realUsed=%d, totalBlocks=%d, freeBlocks=%d, availBlocks=%d",
-		n.fs.bktID, bucket.Quota, bucket.Used, bucket.RealUsed, totalBlocks, freeBlocks, availBlocks)
+		DebugLog("[VFS Statfs] Bucket stats: bktID=%d, quota=%d, used=%d, realUsed=%d, totalBlocks=%d, freeBlocks=%d, availBlocks=%d",
+			n.fs.bktID, bucket.Quota, bucket.Used, bucket.RealUsed, totalBlocks, freeBlocks, availBlocks)*/
 
 	return 0
 }
@@ -4492,6 +4492,19 @@ func (n *OrcasNode) Getxattr(ctx context.Context, attr string, dest []byte) (uin
 	if lh, ok := n.fs.h.(*core.LocalHandler); ok {
 		ma := lh.MetadataAdapter()
 		if ma != nil {
+			// First, verify that the object exists
+			obj, err := n.getObj()
+			if err != nil {
+				// Object doesn't exist, return ENOENT
+				DebugLog("[VFS Getxattr] ERROR: Object doesn't exist: objID=%d, error=%v", n.objID, err)
+				return 0, syscall.ENOENT
+			}
+			if obj == nil {
+				// Object is nil, return ENOENT
+				DebugLog("[VFS Getxattr] ERROR: Object is nil: objID=%d", n.objID)
+				return 0, syscall.ENOENT
+			}
+
 			value, err := ma.GetAttr(n.fs.c, n.fs.bktID, n.objID, attr)
 			if err != nil {
 				// Check if this is a "not found" error (attribute doesn't exist)
@@ -4515,7 +4528,9 @@ func (n *OrcasNode) Getxattr(ctx context.Context, attr string, dest []byte) (uin
 					attrCache.Put(cacheKey, entry)
 					return 0, syscall.ENODATA
 				}
-				return 0, syscall.ENODATA
+				// For other errors (database errors, etc.), return EIO instead of ENODATA
+				DebugLog("[VFS Getxattr] ERROR: Failed to get attribute: objID=%d, attr=%s, error=%v", n.objID, attr, err)
+				return 0, syscall.EIO
 			}
 			if len(value) > len(dest) {
 				return uint32(len(value)), syscall.ERANGE
@@ -4542,9 +4557,11 @@ func (n *OrcasNode) Getxattr(ctx context.Context, attr string, dest []byte) (uin
 			return uint32(len(value)), 0
 		}
 	}
-	// If MetadataAdapter is not available, return ENODATA (attribute doesn't exist)
-	// This is acceptable for Getxattr - the attribute simply doesn't exist
-	return 0, syscall.ENODATA
+	// If MetadataAdapter is not available, return ENOTSUP (operation not supported)
+	// This indicates that extended attributes are not supported at all,
+	// rather than that a specific attribute doesn't exist (ENODATA)
+	// This prevents "No data available" errors in ls and other tools
+	return 0, syscall.ENOTSUP
 }
 
 // Setxattr implements NodeSetxattrer interface
@@ -4602,7 +4619,13 @@ func (n *OrcasNode) Removexattr(ctx context.Context, attr string) syscall.Errno 
 		if ma != nil {
 			err := ma.RemoveAttr(n.fs.c, n.fs.bktID, n.objID, attr)
 			if err != nil {
-				return syscall.ENODATA
+				// Check if this is a "not found" error (attribute doesn't exist)
+				if strings.Contains(err.Error(), "attribute not found") || strings.Contains(err.Error(), "not found") {
+					return syscall.ENODATA
+				}
+				// For other errors (database errors, etc.), return EIO
+				DebugLog("[VFS Removexattr] ERROR: Failed to remove attribute: objID=%d, attr=%s, error=%v", n.objID, attr, err)
+				return syscall.EIO
 			}
 
 			// Update cache: remove attribute from cache with lock
@@ -4624,7 +4647,8 @@ func (n *OrcasNode) Removexattr(ctx context.Context, attr string) syscall.Errno 
 			return 0
 		}
 	}
-	return syscall.ENODATA
+	// If MetadataAdapter is not available, return ENOTSUP (operation not supported)
+	return syscall.ENOTSUP
 }
 
 // Listxattr implements NodeListxattrer interface
