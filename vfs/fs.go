@@ -4599,33 +4599,33 @@ func (n *OrcasNode) Removexattr(ctx context.Context, attr string) syscall.Errno 
 		return errno
 	}
 
-		// Get MetadataAdapter from handler
-		if lh, ok := n.fs.h.(*core.LocalHandler); ok {
-			ma := lh.MetadataAdapter()
-			if ma != nil {
-				// Check if attribute exists before removing
-				_, err := ma.GetAttr(n.fs.c, n.fs.bktID, n.objID, attr)
-				if err != nil {
-					// Check if this is a "not found" error (attribute doesn't exist)
-					if strings.Contains(err.Error(), "attribute not found") || strings.Contains(err.Error(), "not found") {
-						DebugLog("[VFS Removexattr] Attribute not found: objID=%d, attr=%s, returning ENODATA", n.objID, attr)
-						return syscall.ENODATA
-					}
-					// For other errors (database errors, etc.), return EIO
-					DebugLog("[VFS Removexattr] ERROR: Failed to check attribute: objID=%d, attr=%s, error=%v", n.objID, attr, err)
-					return syscall.EIO
+	// Get MetadataAdapter from handler
+	if lh, ok := n.fs.h.(*core.LocalHandler); ok {
+		ma := lh.MetadataAdapter()
+		if ma != nil {
+			// Check if attribute exists before removing
+			_, err := ma.GetAttr(n.fs.c, n.fs.bktID, n.objID, attr)
+			if err != nil {
+				// Check if this is a "not found" error (attribute doesn't exist)
+				if strings.Contains(err.Error(), "attribute not found") || strings.Contains(err.Error(), "not found") {
+					DebugLog("[VFS Removexattr] Attribute not found: objID=%d, attr=%s, returning ENODATA", n.objID, attr)
+					return syscall.ENODATA
 				}
+				// For other errors (database errors, etc.), return EIO
+				DebugLog("[VFS Removexattr] ERROR: Failed to check attribute: objID=%d, attr=%s, error=%v", n.objID, attr, err)
+				return syscall.EIO
+			}
 
-				// Attribute exists, remove it
-				DebugLog("[VFS Removexattr] Removing attribute from database: objID=%d, attr=%s", n.objID, attr)
-				err = ma.RemoveAttr(n.fs.c, n.fs.bktID, n.objID, attr)
-				if err != nil {
-					DebugLog("[VFS Removexattr] ERROR: Failed to remove attribute: objID=%d, attr=%s, error=%v", n.objID, attr, err)
-					return syscall.EIO
-				}
+			// Attribute exists, remove it
+			DebugLog("[VFS Removexattr] Removing attribute from database: objID=%d, attr=%s", n.objID, attr)
+			err = ma.RemoveAttr(n.fs.c, n.fs.bktID, n.objID, attr)
+			if err != nil {
+				DebugLog("[VFS Removexattr] ERROR: Failed to remove attribute: objID=%d, attr=%s, error=%v", n.objID, attr, err)
+				return syscall.EIO
+			}
 
-				DebugLog("[VFS Removexattr] Success: objID=%d, attr=%s", n.objID, attr)
-				return 0
+			DebugLog("[VFS Removexattr] Success: objID=%d, attr=%s", n.objID, attr)
+			return 0
 		}
 		DebugLog("[VFS Removexattr] MetadataAdapter is nil: objID=%d, attr=%s, returning ENOTSUP", n.objID, attr)
 	} else {
