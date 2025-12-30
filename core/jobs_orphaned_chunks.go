@@ -1,0 +1,241 @@
+package core
+
+import (
+	"crypto/md5"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"time"
+)
+
+// ScanOrphanedChunks scans orphaned chunks (chunks without metadata)
+// Scans all chunk files in the data directory, checks if metadata exists
+// Every 1000 chunks, checks metadata. If metadata doesn't exist, delays and re-checks
+// If still doesn't exist after delay, deletes the chunk
+// delaySeconds: delay time in seconds before re-checking and deleting orphaned chunks
+func ScanOrphanedChunks(c Ctx, bktID int64, ma MetadataAdapter, da DataAdapter, delaySeconds int) (*ScanOrphanedChunksResult, error) {
+	result := &ScanOrphanedChunksResult{
+		OrphanedChunks: []int64{},
+		Errors:         []string{},
+	}
+
+	// Get data path
+	dataPath := getDataPathFromAdapter(ma)
+	// Check if dataPath already contains bktID as the last component
+	// If the dataPath ends with bktID, use it directly; otherwise join with bktID
+	bktDataPath := dataPath
+	if filepath.Base(dataPath) != fmt.Sprint(bktID) {
+		bktDataPath = filepath.Join(dataPath, fmt.Sprint(bktID))
+	}
+
+	// Check if bucket data directory exists
+	if _, err := os.Stat(bktDataPath); os.IsNotExist(err) {
+		return result, nil // No data directory, nothing to scan
+	}
+
+	// Initialize resource controller
+	rc := NewResourceController(GetResourceControlConfig())
+
+	// Map to track all chunks by dataID: dataID -> []chunkInfo
+	type chunkInfo struct {
+		path string
+		size int64
+	}
+	chunksByDataID := make(map[int64][]chunkInfo)
+	// Map to track which dataIDs we've already checked
+	checkedDataIDs := make(map[int64]bool)
+	// Map to track orphaned dataIDs (metadata doesn't exist)
+	orphanedDataIDs := make(map[int64]bool)
+
+	// Scan all chunk files in the bucket directory
+	// Chunk files are stored in: dataPath/bktID/hash[21:24]/hash[8:24]/dataID_sn
+	scanCount := 0
+	batchSize := 1000
+
+	// Recursive function to scan directory using os.ReadDir
+	var scanDir func(dirPath string) error
+	scanDir = func(dirPath string) error {
+		// Check if should stop
+		if rc.ShouldStop() {
+			return fmt.Errorf("resource controller requested stop")
+		}
+
+		entries, err := os.ReadDir(dirPath)
+		if err != nil {
+			result.Errors = append(result.Errors, fmt.Sprintf("error reading directory %s: %v", dirPath, err))
+			return nil // Continue with other directories
+		}
+
+		for _, entry := range entries {
+			// Check if should stop
+			if rc.ShouldStop() {
+				return fmt.Errorf("resource controller requested stop")
+			}
+
+			fullPath := filepath.Join(dirPath, entry.Name())
+
+			// If it's a directory, recurse into it
+			if entry.IsDir() {
+				if err := scanDir(fullPath); err != nil {
+					return err
+				}
+				continue
+			}
+
+			// It's a file, process it
+			info, err := entry.Info()
+			if err != nil {
+				result.Errors = append(result.Errors, fmt.Sprintf("error getting file info for %s: %v", fullPath, err))
+				continue
+			}
+
+			// Extract dataID and sn from filename
+			// Filename format: dataID_sn
+			fileName := info.Name()
+			// Skip database files and other non-chunk files
+			if fileName == ".db" || fileName == ".db-shm" || fileName == ".db-wal" {
+				continue
+			}
+			if !strings.Contains(fileName, "_") {
+				continue // Not a chunk file, skip
+			}
+
+			parts := strings.Split(fileName, "_")
+			if len(parts) != 2 {
+				continue // Invalid format, skip
+			}
+
+			dataID, err := strconv.ParseInt(parts[0], 10, 64)
+			if err != nil {
+				continue // Invalid dataID, skip
+			}
+
+			_, err = strconv.ParseInt(parts[1], 10, 64)
+			if err != nil {
+				continue // Invalid sn, skip
+			}
+
+			// Verify this is actually a chunk file by checking path structure
+			// Path should be: dataPath/bktID/hash[21:24]/hash[8:24]/dataID_sn
+			expectedHash := fmt.Sprintf("%X", md5.Sum([]byte(fileName)))
+			if len(expectedHash) < 24 {
+				continue // Invalid hash length, skip
+			}
+			expectedSubDir1 := expectedHash[21:24]
+			expectedSubDir2 := expectedHash[8:24]
+			dir := filepath.Dir(fullPath)
+			// Check if path contains expected hash subdirectories
+			// The path structure is: .../hash[21:24]/hash[8:24]/filename
+			// So we check if the directory path contains both subdirectories
+			// Use a more lenient check: verify the directory path contains both hash parts
+			dirStr := dir
+			if !strings.Contains(dirStr, expectedSubDir1) || !strings.Contains(dirStr, expectedSubDir2) {
+				continue // Path doesn't match expected structure, skip
+			}
+
+			scanCount++
+			result.TotalScanned++
+
+			// Add chunk to dataID mapping
+			if chunksByDataID[dataID] == nil {
+				chunksByDataID[dataID] = []chunkInfo{}
+			}
+			chunksByDataID[dataID] = append(chunksByDataID[dataID], chunkInfo{
+				path: fullPath,
+				size: info.Size(),
+			})
+
+			// Every batchSize chunks, check metadata for collected dataIDs
+			if scanCount%batchSize == 0 {
+				// Get unique dataIDs that haven't been checked yet
+				batchDataIDs := make([]int64, 0)
+				for dataID := range chunksByDataID {
+					if !checkedDataIDs[dataID] {
+						batchDataIDs = append(batchDataIDs, dataID)
+						checkedDataIDs[dataID] = true
+					}
+				}
+
+				// Check metadata for all dataIDs in this batch
+				for _, checkDataID := range batchDataIDs {
+					_, err := ma.GetData(c, bktID, checkDataID)
+					if err != nil {
+						// Metadata doesn't exist, mark as orphaned
+						orphanedDataIDs[checkDataID] = true
+					}
+				}
+
+				// Batch processing interval
+				rc.WaitIfNeeded(batchSize)
+			}
+		}
+
+		return nil
+	}
+
+	// Start scanning from bucket data directory
+	err := scanDir(bktDataPath)
+	if err != nil {
+		result.Errors = append(result.Errors, fmt.Sprintf("error scanning directory: %v", err))
+	}
+
+	// Check remaining dataIDs that weren't checked in batches
+	for dataID := range chunksByDataID {
+		if !checkedDataIDs[dataID] {
+			_, err := ma.GetData(c, bktID, dataID)
+			if err != nil {
+				orphanedDataIDs[dataID] = true
+			}
+			checkedDataIDs[dataID] = true
+		}
+	}
+
+	// Collect all orphaned chunks
+	orphanedChunkPaths := make(map[int64][]chunkInfo)
+	for dataID := range orphanedDataIDs {
+		if chunks, ok := chunksByDataID[dataID]; ok {
+			orphanedChunkPaths[dataID] = chunks
+		}
+		result.OrphanedChunks = append(result.OrphanedChunks, dataID)
+	}
+
+	// After scanning, check delayed chunks if delay is configured
+	if len(orphanedChunkPaths) > 0 && delaySeconds > 0 {
+		result.DelayedChunks = len(orphanedChunkPaths)
+		fmt.Printf("Found %d orphaned dataIDs, waiting %d seconds before re-checking...\n", len(orphanedChunkPaths), delaySeconds)
+		time.Sleep(time.Duration(delaySeconds) * time.Second)
+
+		// Re-check metadata for delayed chunks
+		for checkDataID, chunks := range orphanedChunkPaths {
+			_, err := ma.GetData(c, bktID, checkDataID)
+			if err != nil {
+				// Still orphaned, delete all chunks for this dataID
+				result.StillOrphaned++
+				for _, chunk := range chunks {
+					result.FreedSize += chunk.size
+					if err := os.Remove(chunk.path); err != nil {
+						result.Errors = append(result.Errors, fmt.Sprintf("failed to delete chunk %s: %v", chunk.path, err))
+					} else {
+						result.DeletedChunks++
+					}
+				}
+			}
+		}
+	} else if len(orphanedChunkPaths) > 0 {
+		// No delay configured, delete immediately
+		for _, chunks := range orphanedChunkPaths {
+			for _, chunk := range chunks {
+				result.FreedSize += chunk.size
+				if err := os.Remove(chunk.path); err != nil {
+					result.Errors = append(result.Errors, fmt.Sprintf("failed to delete chunk %s: %v", chunk.path, err))
+				} else {
+					result.DeletedChunks++
+				}
+			}
+		}
+	}
+
+	return result, nil
+}

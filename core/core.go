@@ -86,6 +86,16 @@ type DefragmentResult struct {
 	SkippedInUse  int64 `json:"skipped_in_use"` // 跳过正在使用的数据数
 }
 
+type ScanOrphanedChunksResult struct {
+	TotalScanned   int64    `json:"total_scanned"`   // 扫描的chunk总数
+	OrphanedChunks []int64  `json:"orphaned_chunks"` // 孤立的chunk（dataID列表，去重）
+	DeletedChunks  int      `json:"deleted_chunks"`  // 删除的chunk数量
+	FreedSize      int64    `json:"freed_size"`      // 释放的空间大小（字节）
+	DelayedChunks  int      `json:"delayed_chunks"`  // 延迟检查的chunk数量
+	StillOrphaned  int      `json:"still_orphaned"`  // 延迟后仍然孤立的chunk数量
+	Errors         []string `json:"errors"`          // 扫描过程中的错误信息
+}
+
 type FixScrubIssuesResult struct {
 	FixedCorrupted          int      `json:"fixed_corrupted"`           // 修复的损坏数据数
 	FixedOrphaned           int      `json:"fixed_orphaned"`            // 修复的孤立数据数
@@ -151,6 +161,10 @@ type Handler interface {
 
 	// GetBkt Get bucket information (for getting bucket configuration)
 	GetBktInfo(c Ctx, bktID int64) (*BucketInfo, error)
+	// ScanOrphanedChunks scans orphaned chunks (chunks without metadata)
+	// delaySeconds: delay time in seconds before re-checking and deleting orphaned chunks
+	// Returns result with orphaned chunks found and deleted
+	ScanOrphanedChunks(c Ctx, bktID int64, delaySeconds int) (*ScanOrphanedChunksResult, error)
 }
 
 type Admin interface {
@@ -170,6 +184,9 @@ type Admin interface {
 	MergeDuplicateData(c Ctx, bktID int64) (*MergeDuplicateResult, error)
 	// 碎片整理：小文件离线归并打包，打包中被删除的数据块前移
 	Defragment(c Ctx, bktID int64) (*DefragmentResult, error)
+	// 扫描孤立chunk：扫描文件系统中的chunk文件，检查元数据是否存在
+	// delaySeconds: 延迟时间（秒），在删除前再次检查元数据
+	ScanOrphanedChunks(c Ctx, bktID int64, delaySeconds int) (*ScanOrphanedChunksResult, error)
 
 	// 用户管理
 	CreateUser(c Ctx, username, password, name string, role uint32) (*UserInfo, error)
@@ -1082,6 +1099,13 @@ func (lh *LocalHandler) UpdateFileLatestVersion(c Ctx, bktID int64) error {
 	return UpdateFileLatestVersion(c, bktID, lh.ma)
 }
 
+func (lh *LocalHandler) ScanOrphanedChunks(c Ctx, bktID int64, delaySeconds int) (*ScanOrphanedChunksResult, error) {
+	if err := lh.acm.CheckPermission(c, ALL, bktID); err != nil {
+		return nil, err
+	}
+	return ScanOrphanedChunks(c, bktID, lh.ma, lh.da, delaySeconds)
+}
+
 type LocalAdmin struct {
 	ma  MetadataAdapter
 	da  DataAdapter
@@ -1238,6 +1262,13 @@ func (la *LocalAdmin) Defragment(c Ctx, bktID int64) (*DefragmentResult, error) 
 		return nil, err
 	}
 	return Defragment(c, bktID, la, la.ma, la.da)
+}
+
+func (la *LocalAdmin) ScanOrphanedChunks(c Ctx, bktID int64, delaySeconds int) (*ScanOrphanedChunksResult, error) {
+	if err := la.acm.CheckPermission(c, ALL, bktID); err != nil {
+		return nil, err
+	}
+	return ScanOrphanedChunks(c, bktID, la.ma, la.da, delaySeconds)
 }
 
 func (la *LocalAdmin) CreateUser(c Ctx, username, password, name string, role uint32) (*UserInfo, error) {
