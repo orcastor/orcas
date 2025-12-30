@@ -1,6 +1,7 @@
 package vfs
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/binary"
@@ -716,28 +717,32 @@ func TestRandomAccessorReadWithEncryption(t *testing.T) {
 		dma.DefaultDataMetadataAdapter.SetPath(".")
 		dda := &core.DefaultDataAdapter{}
 
-		// 创建LocalHandler
-		lh := core.NewLocalHandler("", "").(*core.LocalHandler)
-		lh.SetAdapter(dma, dda)
+	// 创建LocalHandler
+	lh := core.NewLocalHandler("", "").(*core.LocalHandler)
+	lh.SetAdapter(dma, dda)
 
-		// 登录以获取上下文
-		testCtx, _, _, err := lh.Login(c, "orcas", "orcas")
-		So(err, ShouldBeNil)
+	// 登录以获取上下文
+	testCtx, userInfo, _, err := lh.Login(c, "orcas", "orcas")
+	So(err, ShouldBeNil)
 
-		// 创建桶（使用登录用户的UID）
-		bucket := &core.BucketInfo{
-			ID:       testBktID,
-			Name:     "test_bucket",
-			Type:     1,
-			Quota:    1000000,
-			Used:     0,
-			RealUsed: 0,
-		}
-		So(dma.PutBkt(testCtx, []*core.BucketInfo{bucket}), ShouldBeNil)
+	// 创建桶（使用登录用户的UID）
+	bucket := &core.BucketInfo{
+		ID:       testBktID,
+		Name:     "test_bucket",
+		Type:     1,
+		Quota:    1000000,
+		Used:     0,
+		RealUsed: 0,
+	}
+	So(dma.PutBkt(testCtx, []*core.BucketInfo{bucket}), ShouldBeNil)
 
-		// 创建加密的数据
-		dataID, _ := ig.New()
-		testData := []byte("This is encrypted test data")
+	// 添加ACL权限，确保用户可以访问bucket
+	err = dma.PutACL(testCtx, testBktID, userInfo.ID, core.ALL)
+	So(err, ShouldBeNil)
+
+	// 创建加密的数据
+	dataID, _ := ig.New()
+	testData := []byte("This is encrypted test data")
 		xxh3Value := xxh3.Hash(testData)
 		sha256Hash := sha256.Sum256(testData)
 		sha256_0 := int64(binary.BigEndian.Uint64(sha256Hash[0:8]))
@@ -811,7 +816,7 @@ func TestRandomAccessorReadOptimization(t *testing.T) {
 		lh.SetAdapter(dma, dda)
 
 		// 登录以获取上下文
-		testCtx, _, _, err := lh.Login(c, "orcas", "orcas")
+		testCtx, userInfo, _, err := lh.Login(c, "orcas", "orcas")
 		So(err, ShouldBeNil)
 
 		// 创建桶
@@ -824,6 +829,11 @@ func TestRandomAccessorReadOptimization(t *testing.T) {
 			RealUsed: 0,
 		}
 		So(dma.PutBkt(testCtx, []*core.BucketInfo{bucket}), ShouldBeNil)
+
+		admin := core.NewLocalAdmin(".", ".")
+		if userInfo != nil && userInfo.ID > 0 {
+			So(admin.PutACL(testCtx, testBktID, userInfo.ID, core.ALL), ShouldBeNil)
+		}
 
 		Convey("test read exact size (no more than requested)", func() {
 			// 创建文件对象
@@ -2761,6 +2771,127 @@ func TestSequentialWriteBufferConcurrent(t *testing.T) {
 				if err == nil {
 					So(fileObj3.Size, ShouldBeGreaterThan, 0)
 				}
+			}
+		})
+	})
+}
+
+// TestWriteToExistingFileSizePreservation 测试写入已存在文件时保持原文件大小
+// 场景：打开84KB的文件，写入4KB（从offset 0），关闭后应该还是84KB，而不是4KB
+func TestWriteToExistingFileSizePreservation(t *testing.T) {
+	Convey("Write to existing file size preservation", t, func() {
+		ig := idgen.NewIDGen(nil, 0)
+		testBktID, _ := ig.New()
+		err := core.InitBucketDB(".", testBktID)
+		So(err, ShouldBeNil)
+
+		dma := &core.DefaultMetadataAdapter{
+			DefaultBaseMetadataAdapter: &core.DefaultBaseMetadataAdapter{},
+			DefaultDataMetadataAdapter: &core.DefaultDataMetadataAdapter{},
+		}
+		dma.DefaultBaseMetadataAdapter.SetPath(".")
+		dma.DefaultDataMetadataAdapter.SetPath(".")
+		dda := &core.DefaultDataAdapter{}
+
+		lh := core.NewLocalHandler("", "").(*core.LocalHandler)
+		lh.SetAdapter(dma, dda)
+
+		testCtx, userInfo, _, err := lh.Login(c, "orcas", "orcas")
+		So(err, ShouldBeNil)
+
+		bucket := &core.BucketInfo{
+			ID:       testBktID,
+			Name:     "test_bucket",
+			Type:     1,
+			Quota:    10000000,
+			Used:     0,
+			RealUsed: 0,
+		}
+		admin := core.NewLocalAdmin(".", ".")
+		So(admin.PutBkt(testCtx, []*core.BucketInfo{bucket}), ShouldBeNil)
+
+		// Ensure user has ALL permission to write to the bucket
+		if userInfo != nil && userInfo.ID > 0 {
+			So(admin.PutACL(testCtx, testBktID, userInfo.ID, core.ALL), ShouldBeNil)
+		}
+
+		ofs := NewOrcasFS(lh, testCtx, testBktID)
+
+		Convey("test write small data to existing large file preserves size", func() {
+			fileID, _ := ig.New()
+			fileObj := &core.ObjectInfo{
+				ID:    fileID,
+				PID:   testBktID,
+				Type:  core.OBJ_TYPE_FILE,
+				Name:  "large_file.txt",
+				Size:  0,
+				MTime: core.Now(),
+			}
+			_, err = dma.PutObj(testCtx, testBktID, []*core.ObjectInfo{fileObj})
+			So(err, ShouldBeNil)
+
+			// 第一次写入：创建84KB的文件
+			ra1, err := NewRandomAccessor(ofs, fileID)
+			So(err, ShouldBeNil)
+
+			originalSize := 84 * 1024 // 84KB
+			originalData := make([]byte, originalSize)
+			for i := range originalData {
+				originalData[i] = byte('A' + (i % 26))
+			}
+
+			// 写入84KB数据
+			err = ra1.Write(0, originalData)
+			So(err, ShouldBeNil)
+			_, err = ra1.Flush()
+			So(err, ShouldBeNil)
+			ra1.Close()
+
+			// 验证文件大小是84KB
+			fileObj1, err := ra1.getFileObj()
+			So(err, ShouldBeNil)
+			So(fileObj1.Size, ShouldEqual, int64(originalSize))
+
+			// 第二次写入：打开已存在的文件，写入4KB（从offset 0开始，会触发顺序写入）
+			ra2, err := NewRandomAccessor(ofs, fileID)
+			So(err, ShouldBeNil)
+			defer ra2.Close()
+
+			smallData := make([]byte, 4*1024) // 4KB
+			for i := range smallData {
+				smallData[i] = byte('X')
+			}
+
+			// 从offset 0写入4KB（这会触发顺序写入路径）
+			err = ra2.Write(0, smallData)
+			So(err, ShouldBeNil)
+
+			// 关闭文件（会触发Flush）
+			_, err = ra2.Flush()
+			So(err, ShouldBeNil)
+
+			// 验证文件大小应该还是84KB，而不是4KB
+			fileObj2, err := ra2.getFileObj()
+			So(err, ShouldBeNil)
+			So(fileObj2.Size, ShouldEqual, int64(originalSize))
+
+			// 验证前4KB是新数据
+			readData, err := ra2.Read(0, 4*1024)
+			So(err, ShouldBeNil)
+			So(len(readData), ShouldEqual, 4*1024)
+			So(bytes.Equal(readData, smallData), ShouldBeTrue)
+
+			// 验证后面的数据是原来的数据
+			if fileObj2.Size > 4*1024 {
+				readData2, err := ra2.Read(4*1024, 4*1024)
+				So(err, ShouldBeNil)
+				So(len(readData2), ShouldBeGreaterThan, 0)
+				// 验证数据是原来的（不是'X'）
+				expectedData := originalData[4*1024:]
+				if len(expectedData) > len(readData2) {
+					expectedData = expectedData[:len(readData2)]
+				}
+				So(bytes.Equal(readData2, expectedData), ShouldBeTrue)
 			}
 		})
 	})

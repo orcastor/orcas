@@ -2550,18 +2550,15 @@ func (ra *RandomAccessor) flushSequentialChunkLocked() error {
 	processedChunkSize := len(processedChunk)
 	encodedChunkSize := len(encodedChunk)
 
+	// IMPORTANT: Only accumulate Size once (not twice as before)
+	// Size represents the actual stored size (after compression/encryption)
 	ra.seqBuffer.dataInfo.Size += int64(encodedChunkSize)
 	DebugLog("[VFS flushSequentialChunk] Chunk sizes: fileID=%d, original=%d, processed=%d, encoded=%d, Kind=0x%x",
 		ra.fileID, originalChunkSize, processedChunkSize, encodedChunkSize, ra.seqBuffer.dataInfo.Kind)
-
-	if ra.seqBuffer.dataInfo.Kind&core.DATA_CMPR_MASK != 0 || ra.seqBuffer.dataInfo.Kind&core.DATA_ENDEC_MASK != 0 {
-		ra.seqBuffer.dataInfo.Size += int64(len(encodedChunk))
-		DebugLog("[VFS flushSequentialChunk] Updated Size (compressed/encrypted): fileID=%d, Size=%d, OrigSize=%d",
-			ra.fileID, ra.seqBuffer.dataInfo.Size, ra.seqBuffer.dataInfo.OrigSize)
-	} else {
-		DebugLog("[VFS flushSequentialChunk] No compression/encryption, Size not updated: fileID=%d, Size=%d, OrigSize=%d",
-			ra.fileID, ra.seqBuffer.dataInfo.Size, ra.seqBuffer.dataInfo.OrigSize)
-	}
+	DebugLog("[VFS flushSequentialChunk] Updated Size: fileID=%d, Size=%d, OrigSize=%d (CMPR=%v, ENDEC=%v)",
+		ra.fileID, ra.seqBuffer.dataInfo.Size, ra.seqBuffer.dataInfo.OrigSize,
+		ra.seqBuffer.dataInfo.Kind&core.DATA_CMPR_MASK != 0,
+		ra.seqBuffer.dataInfo.Kind&core.DATA_ENDEC_MASK != 0)
 
 	// Write data block
 	DebugLog("[VFS flushSequentialChunk] Writing chunk: fileID=%d, dataID=%d, sn=%d, size=%d", ra.fileID, ra.seqBuffer.dataID, ra.seqBuffer.sn, len(encodedChunk))
@@ -2595,13 +2592,12 @@ func (ra *RandomAccessor) flushSequentialBuffer() error {
 
 	// Check if it's a small file (total size < 1MB) and no chunks have been written yet
 	// If sn > 0, it means at least one chunk (typically 10MB) has been written, so it's not a small file
-	// Use buffer length as total size if OrigSize hasn't been updated yet
+	// IMPORTANT: Calculate total size correctly by considering both OrigSize and current buffer
+	// OrigSize accumulates size of flushed chunks, buffer contains unflushed data
 	bufferSize := int64(len(ra.seqBuffer.buffer))
-	totalSize := ra.seqBuffer.dataInfo.OrigSize
-	if totalSize == 0 && bufferSize > 0 {
-		// OrigSize not updated yet, use buffer size
-		totalSize = bufferSize
-	}
+	totalSize := ra.seqBuffer.dataInfo.OrigSize + bufferSize
+	DebugLog("[VFS flushSequentialBuffer] Checking instant upload eligibility: fileID=%d, totalSize=%d (OrigSize=%d + bufferSize=%d), sn=%d",
+		ra.fileID, totalSize, ra.seqBuffer.dataInfo.OrigSize, bufferSize, ra.seqBuffer.sn)
 	if totalSize > 0 && totalSize < 1<<20 && ra.seqBuffer.sn == 0 {
 		// Small file and all data is still in buffer (no chunks written yet)
 		// Try instant upload first (before batch write) if enabled
@@ -2681,11 +2677,109 @@ func (ra *RandomAccessor) flushSequentialBuffer() error {
 		return err
 	}
 
+	// IMPORTANT: If file already had data, we need to read and merge existing data before flushing
+	// This prevents data loss when sequential write is incorrectly used for existing files
+	oldSize := fileObj.Size
+	oldDataID := fileObj.DataID
+	newSize := ra.seqBuffer.dataInfo.OrigSize
+
+	if oldDataID > 0 && oldDataID != core.EmptyDataID && oldSize > 0 {
+		// File already had data, need to merge new writes with existing data
+		// Use streaming processing to avoid loading entire file into memory
+		DebugLog("[VFS flushSequentialBuffer] File already had data (oldDataID=%d, oldSize=%d), merging with new writes (newSize=%d) using streaming: fileID=%d", oldDataID, oldSize, newSize, ra.fileID)
+
+		// Get new write data and offset from sequential buffer
+		ra.seqBuffer.mu.Lock()
+		newData := make([]byte, len(ra.seqBuffer.buffer))
+		copy(newData, ra.seqBuffer.buffer)
+		writeOffset := ra.seqBuffer.offset - int64(len(ra.seqBuffer.buffer))
+		ra.seqBuffer.mu.Unlock()
+
+		// Restore old DataID and size so applyRandomWritesWithSDK can read existing data
+		// applyRandomWritesWithSDK will use streaming processing to read existing data chunk by chunk
+		// and merge with new writes, avoiding loading entire file into memory
+		fileObj.DataID = oldDataID
+		fileObj.Size = oldSize
+
+		// Update cache to ensure applyRandomWritesWithSDK uses correct old DataID
+		fileObjCache.Put(ra.fileObjKey, fileObj)
+		ra.fileObj.Store(fileObj)
+
+		// Convert sequential buffer data to write operations
+		writeOps := []WriteOperation{
+			{
+				Offset: writeOffset,
+				Data:   newData,
+			},
+		}
+
+		// Clear sequential buffer before using random write path
+		ra.seqBuffer.mu.Lock()
+		ra.seqBuffer.closed = true
+		ra.seqBuffer.mu.Unlock()
+		ra.seqBuffer = nil
+
+		// Use applyRandomWritesWithSDK to handle the merge properly
+		// This function uses streaming processing to read existing data chunk by chunk
+		// and merge with new writes, avoiding large memory usage
+		versionID, err := ra.applyRandomWritesWithSDK(fileObj, writeOps)
+		if err != nil {
+			DebugLog("[VFS flushSequentialBuffer] ERROR: Failed to apply random writes after merging: fileID=%d, error=%v", ra.fileID, err)
+			return err
+		}
+
+		// Calculate final size: preserve original size if new writes don't extend beyond it
+		// This ensures that writing 4KB to an 84KB file doesn't truncate it to 4KB
+		finalSize := oldSize
+		if writeOffset+int64(len(newData)) > oldSize {
+			finalSize = writeOffset + int64(len(newData))
+		}
+
+		// Check if file size was incorrectly truncated by applyRandomWritesWithSDK
+		// (This can happen when writing from offset 0, as it may set size to maxEnd)
+		// Get file object from database to ensure we have the latest size
+		updatedObjs, err := ra.fs.h.Get(ra.fs.c, ra.fs.bktID, []int64{ra.fileID})
+		if err == nil && len(updatedObjs) > 0 {
+			updatedFileObj := updatedObjs[0]
+			DebugLog("[VFS flushSequentialBuffer] Checking file size after merge: fileID=%d, updatedSize=%d, finalSize=%d, oldSize=%d", ra.fileID, updatedFileObj.Size, finalSize, oldSize)
+			if updatedFileObj.Size < finalSize {
+				// File size was incorrectly truncated, fix it
+				DebugLog("[VFS flushSequentialBuffer] File size was incorrectly truncated (%d < %d), fixing: fileID=%d", updatedFileObj.Size, finalSize, ra.fileID)
+				updateFileObj := &core.ObjectInfo{
+					ID:     updatedFileObj.ID,
+					PID:    updatedFileObj.PID,
+					Type:   updatedFileObj.Type,
+					Name:   updatedFileObj.Name,
+					Size:   finalSize,
+					DataID: updatedFileObj.DataID,
+					MTime:  core.Now(),
+				}
+				_, err := ra.fs.h.Put(ra.fs.c, ra.fs.bktID, []*core.ObjectInfo{updateFileObj})
+				if err != nil {
+					DebugLog("[VFS flushSequentialBuffer] ERROR: Failed to fix file size: fileID=%d, error=%v", ra.fileID, err)
+					return err
+				}
+				// Update cache
+				fileObjCache.Put(ra.fileObjKey, updateFileObj)
+				ra.fileObj.Store(updateFileObj)
+				DebugLog("[VFS flushSequentialBuffer] Fixed file size: fileID=%d, newSize=%d", ra.fileID, finalSize)
+			} else {
+				DebugLog("[VFS flushSequentialBuffer] File size is correct: fileID=%d, size=%d", ra.fileID, updatedFileObj.Size)
+			}
+		} else {
+			DebugLog("[VFS flushSequentialBuffer] WARNING: Failed to get updated file object: fileID=%d, error=%v", ra.fileID, err)
+		}
+
+		DebugLog("[VFS flushSequentialBuffer] Successfully merged existing data with new writes using streaming: fileID=%d, oldSize=%d, finalSize=%d, versionID=%d", ra.fileID, oldSize, finalSize, versionID)
+		return nil
+	}
+
+	// File had no data, proceed with normal sequential flush
 	fileObj.DataID = ra.seqBuffer.dataID
 	// IMPORTANT: Use OrigSize as file size, which is the total size of data written so far
 	// This includes all chunks that have been written (sn=0, sn=1, etc.)
 	// The offset might not reflect the actual file size if sequential write was interrupted
-	fileObj.Size = ra.seqBuffer.dataInfo.OrigSize
+	fileObj.Size = newSize
 
 	// Optimization: Use PutDataInfoAndObj to write DataInfo and ObjectInfo together in a single transaction
 	// This reduces database round trips and improves performance
@@ -3695,47 +3789,36 @@ func (ra *RandomAccessor) applyRandomWritesWithSDK(fileObj *core.ObjectInfo, wri
 	}
 
 	// Calculate new file size
-	// Find the maximum end position of all write operations
-	// If any write starts at offset 0, the file is being overwritten from the beginning,
-	// so the new size should be the maximum end position (even if it's shorter than original)
-	// Otherwise, the new size should be the maximum of original size and maximum end position
-	// IMPORTANT: Use fileObj.Size as the base, but if writes extend beyond it, use maxEnd
-	// For truncated files, fileObj.Size may be smaller than oldDataInfo.OrigSize
+	// Strategy: Use the maximum of current file size and the end position of all writes
+	// This ensures:
+	// 1. File extends if writes go beyond current size
+	// 2. File preserves existing data beyond write regions
+	// 3. Partial overwrites don't truncate the file
 	oldSize := fileObj.Size
-	newSize := fileObj.Size
 	maxEnd := int64(0)
-	hasWriteFromZero := false
+	minOffset := int64(-1)
+
 	for _, write := range writes {
 		writeEnd := write.Offset + int64(len(write.Data))
 		if writeEnd > maxEnd {
 			maxEnd = writeEnd
 		}
-		if write.Offset == 0 {
-			hasWriteFromZero = true
+		if minOffset < 0 || write.Offset < minOffset {
+			minOffset = write.Offset
 		}
 	}
 
-	// Always use maxEnd if it's larger than current file size
-	// This ensures that all writes are included in the new file size
+	// Determine new file size based on write pattern
+	var newSize int64
 	if maxEnd > fileObj.Size {
+		// Writes extend beyond current file size, use maxEnd
 		newSize = maxEnd
-		DebugLog("[VFS applyRandomWritesWithSDK] File size extended: fileID=%d, oldSize=%d, newSize=%d, maxEnd=%d, fileObj.DataID=%d", ra.fileID, oldSize, newSize, maxEnd, fileObj.DataID)
-	} else if hasWriteFromZero {
-		// File is being overwritten from the beginning, use maxEnd (even if shorter than original)
-		newSize = maxEnd
-		DebugLog("[VFS applyRandomWritesWithSDK] File overwritten from beginning: fileID=%d, oldSize=%d, newSize=%d", ra.fileID, oldSize, newSize)
+		DebugLog("[VFS applyRandomWritesWithSDK] File size extended: fileID=%d, oldSize=%d, newSize=%d, maxEnd=%d", ra.fileID, oldSize, newSize, maxEnd)
 	} else {
-		// File size doesn't change (writes are within existing file)
-		// But if file was truncated, we should still use maxEnd to ensure correct size
-		// This handles the case where file was truncated to 5 bytes, then written at offset 5
-		if maxEnd > 0 {
-			newSize = maxEnd
-			DebugLog("[VFS applyRandomWritesWithSDK] File size updated based on writes: fileID=%d, oldSize=%d, newSize=%d", ra.fileID, oldSize, newSize)
-		} else {
-			// Keep existing size if no writes
-			newSize = fileObj.Size
-			DebugLog("[VFS applyRandomWritesWithSDK] File size unchanged: fileID=%d, size=%d", ra.fileID, fileObj.Size)
-		}
+		// Writes are within current file bounds
+		// Preserve existing file size to avoid truncation
+		newSize = fileObj.Size
+		DebugLog("[VFS applyRandomWritesWithSDK] File size preserved (writes within bounds): fileID=%d, size=%d, maxEnd=%d", ra.fileID, newSize, maxEnd)
 	}
 
 	// Check if original data is compressed or encrypted (optimized: use cache)
@@ -3779,11 +3862,15 @@ func (ra *RandomAccessor) applyRandomWritesWithSDK(fileObj *core.ObjectInfo, wri
 	if endecWay > 0 {
 		kind |= endecWay
 	}
+	// IMPORTANT: DataInfo.OrigSize should match the actual file size (newSize)
+	// newSize already considers whether to extend or preserve based on write pattern
+	// So we should use newSize directly, not try to preserve old size again
 	dataInfo := &core.DataInfo{
 		ID:       newDataID,
-		OrigSize: newSize,
+		OrigSize: newSize, // Use newSize which already handles size logic correctly
 		Kind:     kind,
 	}
+	DebugLog("[VFS applyRandomWritesWithSDK] DataInfo.OrigSize set to: fileID=%d, OrigSize=%d, oldSize=%d", ra.fileID, newSize, oldSize)
 
 	// Check if this is a .tmp file with TempFileWriter
 	// If so, TempFileWriter already handles compression/encryption, so don't use applyWritesStreamingCompressed
@@ -4192,30 +4279,33 @@ func (ra *RandomAccessor) applyWritesStreamingCompressed(oldDataInfo *core.DataI
 	chunkSize := ra.fs.chunkSize
 
 	// Create a reader to read, decrypt, and decompress by chunk
-	// IMPORTANT: If file was truncated, oldDataInfo.OrigSize may be larger than newSize
-	// Create a modified DataInfo with OrigSize limited to newSize to prevent reading beyond truncated size
+	// IMPORTANT: For compressed/encrypted data, we need to read from the old file
+	// Use the larger of oldDataInfo.OrigSize and newSize to ensure we can read all necessary data
 	var dataInfoForReader *core.DataInfo
+	var processingSize int64 = newSize
 	if oldDataInfo != nil {
+		// Use original file size for reading if it's larger than newSize
+		// This ensures we can preserve data beyond the write regions
+		readerSize := newSize
+		if oldDataInfo.OrigSize > newSize {
+			readerSize = oldDataInfo.OrigSize
+			processingSize = oldDataInfo.OrigSize
+			DebugLog("[VFS applyWritesStreamingCompressed] Using old file size for reading: fileID=%d, oldOrigSize=%d, newSize=%d", ra.fileID, oldDataInfo.OrigSize, newSize)
+		}
 		dataInfoForReader = &core.DataInfo{
 			ID:        oldDataInfo.ID,
-			OrigSize:  newSize, // Limit to newSize to prevent reading beyond truncated size
+			OrigSize:  readerSize, // Use larger size to read all necessary data
 			Size:      oldDataInfo.Size,
 			Kind:      oldDataInfo.Kind,
 			PkgID:     oldDataInfo.PkgID,
 			PkgOffset: oldDataInfo.PkgOffset,
 		}
-		// If newSize is smaller than oldDataInfo.OrigSize, we need to limit the compressed size too
-		// For compressed data, we can't easily calculate the compressed size for truncated data
-		// So we keep the original compressed size, but limit OrigSize
-		// The reader will handle the truncation when reading
-		if newSize < oldDataInfo.OrigSize {
-			DebugLog("[VFS applyWritesStreamingCompressed] Limiting reader OrigSize to newSize: fileID=%d, oldOrigSize=%d, newSize=%d", ra.fileID, oldDataInfo.OrigSize, newSize)
-		}
 	}
 	reader := newChunkReader(ra.fs.c, ra.fs.h, ra.fs.bktID, dataInfoForReader, endecKey, chunkSize)
 
 	// Pre-calculate write operation indices for each chunk
-	chunkCount := int((newSize + chunkSize - 1) / chunkSize)
+	// Use processingSize for chunk count to ensure we process all necessary chunks
+	chunkCount := int((processingSize + chunkSize - 1) / chunkSize)
 	if chunkCount == 0 {
 		// Empty file, no chunks needed
 		chunkCount = 1
@@ -4252,7 +4342,8 @@ func (ra *RandomAccessor) applyWritesStreamingCompressed(oldDataInfo *core.DataI
 	}
 
 	// Stream processing: read, process, and write by chunk
-	return ra.processWritesStreaming(reader, writesByChunk, writes, dataInfo, newSize, chunkCount)
+	// Pass processingSize for chunk processing, but dataInfo.OrigSize will be set to newSize in the caller
+	return ra.processWritesStreaming(reader, writesByChunk, writes, dataInfo, processingSize, chunkCount)
 }
 
 // applyWritesStreamingUncompressed handles uncompressed and unencrypted data
@@ -4266,7 +4357,21 @@ func (ra *RandomAccessor) applyWritesStreamingUncompressed(fileObj *core.ObjectI
 	chunkSize := ra.fs.chunkSize
 	// Stream processing: read original data by chunk, apply write operations, process and write to new object immediately
 	// Pre-calculate write operation indices for each chunk
-	chunkCount := int((newSize + chunkSize - 1) / chunkSize)
+	// IMPORTANT: newSize already reflects the correct final file size from applyRandomWritesWithSDK
+	// We should use newSize directly for the final file size
+	// However, for chunk processing, we need to read from old file if it's larger (to preserve data)
+	oldFileSize := fileObj.Size
+	if oldDataInfo != nil && oldDataInfo.OrigSize > 0 {
+		oldFileSize = oldDataInfo.OrigSize
+	}
+	// For chunk count calculation, use the larger size to ensure we process all necessary chunks
+	// But the final file size will be newSize (set later)
+	totalSize := newSize
+	if oldFileSize > newSize {
+		totalSize = oldFileSize
+		DebugLog("[VFS applyWritesStreamingUncompressed] Need to read from old file (larger than new): fileID=%d, oldSize=%d, newSize=%d, processingSize=%d", ra.fileID, oldFileSize, newSize, totalSize)
+	}
+	chunkCount := int((totalSize + chunkSize - 1) / chunkSize)
 	if chunkCount == 0 {
 		// Empty file, no chunks needed
 		chunkCount = 1
@@ -4316,32 +4421,45 @@ func (ra *RandomAccessor) applyWritesStreamingUncompressed(fileObj *core.ObjectI
 	oldDataID := fileObj.DataID
 	if oldDataID > 0 && oldDataID != core.EmptyDataID {
 		// Use oldDataInfo if available (has full metadata), otherwise create minimal one
-		// IMPORTANT: If file was truncated, oldDataInfo.OrigSize may be larger than newSize
-		// Create a modified DataInfo with OrigSize limited to newSize to prevent reading beyond truncated size
+		// IMPORTANT: Use original file size (oldDataInfo.OrigSize or fileObj.Size) to read all data
+		// This ensures that when writing 4KB to an 84KB file, we can copy the remaining 80KB
+		// Only limit to newSize if file was actually truncated (newSize < oldSize)
 		var dataInfoForReader *core.DataInfo
+		oldFileSize := fileObj.Size
+		if oldDataInfo != nil && oldDataInfo.OrigSize > 0 {
+			oldFileSize = oldDataInfo.OrigSize
+		}
+		// Use the larger of oldFileSize and newSize to ensure we can read all remaining data
+		readerSize := oldFileSize
+		if newSize > oldFileSize {
+			readerSize = newSize
+		}
+
 		if oldDataInfo != nil {
 			dataInfoForReader = &core.DataInfo{
 				ID:        oldDataInfo.ID,
-				OrigSize:  newSize, // Limit to newSize to prevent reading beyond truncated size
+				OrigSize:  readerSize, // Use original size to read all remaining data
 				Size:      oldDataInfo.Size,
 				Kind:      oldDataInfo.Kind,
 				PkgID:     oldDataInfo.PkgID,
 				PkgOffset: oldDataInfo.PkgOffset,
 			}
-			if newSize < oldDataInfo.OrigSize {
-				DebugLog("[VFS applyWritesStreamingUncompressed] Limiting reader OrigSize to newSize: fileID=%d, oldOrigSize=%d, newSize=%d", ra.fileID, oldDataInfo.OrigSize, newSize)
+			if readerSize > newSize {
+				DebugLog("[VFS applyWritesStreamingUncompressed] Using original file size for reader to preserve remaining data: fileID=%d, oldOrigSize=%d, newSize=%d, readerSize=%d", ra.fileID, oldDataInfo.OrigSize, newSize, readerSize)
 			}
 		} else {
 			// Fallback: create minimal DataInfo (should not happen for existing files, but handle for safety)
-			dataInfoForReader = &core.DataInfo{ID: oldDataID, OrigSize: newSize} // Use newSize instead of fileObj.Size
+			dataInfoForReader = &core.DataInfo{ID: oldDataID, OrigSize: readerSize}
 		}
 		// Create chunkReader to support reading by chunk
 		reader = newChunkReader(ra.fs.c, ra.fs.h, ra.fs.bktID, dataInfoForReader, "", chunkSize)
 	}
 
 	// Stream processing: read, process, and write by chunk
-	DebugLog("[VFS applyWritesStreamingUncompressed] Calling processWritesStreaming: fileID=%d, dataID=%d, newSize=%d, chunkCount=%d, writes count=%d", ra.fileID, dataInfo.ID, newSize, chunkCount, len(writes))
-	newVersionID, err := ra.processWritesStreaming(reader, writesByChunk, writes, dataInfo, newSize, chunkCount)
+	// IMPORTANT: Pass totalSize for chunk processing (to read all necessary data from old file)
+	// But the final file size will be newSize (set below)
+	DebugLog("[VFS applyWritesStreamingUncompressed] Calling processWritesStreaming: fileID=%d, dataID=%d, newSize=%d, processingSize=%d, chunkCount=%d, writes count=%d", ra.fileID, dataInfo.ID, newSize, totalSize, chunkCount, len(writes))
+	newVersionID, err := ra.processWritesStreaming(reader, writesByChunk, writes, dataInfo, totalSize, chunkCount)
 	if err != nil {
 		DebugLog("[VFS applyWritesStreamingUncompressed] ERROR: processWritesStreaming failed: fileID=%d, error=%v", ra.fileID, err)
 		return 0, err
@@ -4349,14 +4467,19 @@ func (ra *RandomAccessor) applyWritesStreamingUncompressed(fileObj *core.ObjectI
 
 	// Update fileObj with new DataID and size
 	// This ensures subsequent operations use the correct DataID
+	// IMPORTANT: Use newSize (not totalSize) as the final file size
+	// newSize already reflects the correct size based on write operations
 	updateFileObj, err := ra.getFileObj()
 	if err == nil && updateFileObj != nil {
 		oldDataID := updateFileObj.DataID
 		oldSize := updateFileObj.Size
 		updateFileObj.DataID = dataInfo.ID
-		updateFileObj.Size = dataInfo.OrigSize
+		// Use newSize as the final file size (already calculated correctly in applyRandomWritesWithSDK)
+		updateFileObj.Size = newSize
+		// Update dataInfo.OrigSize to match the actual file size
+		dataInfo.OrigSize = newSize
 		updateFileObj.MTime = core.Now()
-		DebugLog("[VFS applyWritesStreamingUncompressed] Updating fileObj: fileID=%d, oldDataID=%d, newDataID=%d, oldSize=%d, newSize=%d", ra.fileID, oldDataID, dataInfo.ID, oldSize, dataInfo.OrigSize)
+		DebugLog("[VFS applyWritesStreamingUncompressed] Updating fileObj: fileID=%d, oldDataID=%d, newDataID=%d, oldSize=%d, newSize=%d", ra.fileID, oldDataID, dataInfo.ID, oldSize, newSize)
 		_, err = ra.fs.h.Put(ra.fs.c, ra.fs.bktID, []*core.ObjectInfo{updateFileObj})
 		if err != nil {
 			DebugLog("[VFS applyWritesStreamingUncompressed] ERROR: Failed to update fileObj: fileID=%d, dataID=%d, error=%v", ra.fileID, dataInfo.ID, err)
@@ -4421,10 +4544,19 @@ func (ra *RandomAccessor) processWritesStreaming(
 	for chunkIdx := 0; chunkIdx < chunkCount; chunkIdx++ {
 		pos := int64(chunkIdx * chunkSizeInt)
 		chunkEnd := pos + int64(chunkSizeInt)
+		// IMPORTANT: newSize parameter now represents totalSize (max of oldSize and newSize)
+		// This ensures we process all chunks, including those beyond the original newSize
+		// Only limit chunkEnd if it exceeds totalSize (which should not happen if chunkCount is correct)
 		if chunkEnd > newSize {
 			chunkEnd = newSize
 		}
 		actualChunkSize := int(chunkEnd - pos)
+		if actualChunkSize == 0 {
+			// Skip empty chunks
+			continue
+		}
+		// IMPORTANT: For chunks beyond the original newSize, we need to read the full chunk from original file
+		// actualChunkSize is already correct based on totalSize
 		DebugLog("[VFS processWritesStreaming] Processing chunk: fileID=%d, dataID=%d, chunkIdx=%d, sn=%d, pos=%d, chunkEnd=%d, actualChunkSize=%d, writesCount=%d", ra.fileID, dataInfo.ID, chunkIdx, sn, pos, chunkEnd, actualChunkSize, len(writesByChunk[chunkIdx]))
 
 		// Get chunk buffer from object pool
@@ -4438,6 +4570,7 @@ func (ra *RandomAccessor) processWritesStreaming(
 		// 1. Read this chunk of original data from reader (using Read(buf, offset))
 		if reader != nil {
 			// Read current chunk data directly from offset
+			// IMPORTANT: Read the full actualChunkSize to ensure we get all data from original file
 			n, err := reader.Read(chunkData, pos)
 			if err != nil && err != io.EOF {
 				// If chunk doesn't exist (e.g., file was extended), treat as zero-filled
@@ -4458,8 +4591,12 @@ func (ra *RandomAccessor) processWritesStreaming(
 				}
 			}
 			// If read data is less than chunk size, remaining part stays as 0 (new data)
+			// IMPORTANT: For chunks beyond original write size, we should have read all data
+			// If n < actualChunkSize, it means we're at the end of the file or there's an issue
 			if n < actualChunkSize {
-				// Zero remaining part
+				// Zero remaining part only if we're beyond the original file size
+				// Otherwise, this might indicate a problem
+				DebugLog("[VFS processWritesStreaming] Read less data than expected: fileID=%d, dataID=%d, chunkIdx=%d, pos=%d, n=%d, actualChunkSize=%d", ra.fileID, dataInfo.ID, chunkIdx, pos, n, actualChunkSize)
 				for i := n; i < actualChunkSize; i++ {
 					chunkData[i] = 0
 				}
