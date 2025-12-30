@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -4566,8 +4567,34 @@ func (n *OrcasNode) Statfs(ctx context.Context, out *fuse.StatfsOut) syscall.Err
 			totalBlocks = 1 // At least 1 block
 		}
 	} else {
-		// Unlimited quota, use a very large value (1TB in blocks)
-		totalBlocks = (1 << 40) / blockSize // 1TB / 4KB = 268435456 blocks
+		// Unlimited quota, get actual disk size from DataPath
+		// Use syscall.Statfs to get filesystem statistics
+		var stat syscall.Statfs_t
+		dataPath := n.fs.GetDataPath()
+		if _, err := os.Stat(dataPath); os.IsNotExist(err) {
+			// Path doesn't exist, use parent directory
+			dataPath = filepath.Dir(dataPath)
+			// If parent also doesn't exist, use the path as-is (Statfs may still work)
+		}
+		if err := syscall.Statfs(dataPath, &stat); err == nil {
+			// Get total blocks from filesystem
+			// stat.Blocks is total data blocks in filesystem
+			// stat.Bsize is filesystem block size
+			fsBlockSize := uint64(stat.Bsize)
+			if fsBlockSize == 0 {
+				fsBlockSize = blockSize // Fallback to 4KB if bsize is 0
+			}
+			// Calculate total size: stat.Blocks * stat.Bsize
+			totalSize := uint64(stat.Blocks) * fsBlockSize
+			// Convert to our block size (4KB)
+			totalBlocks = totalSize / blockSize
+			DebugLog("[VFS Statfs] Got disk size from DataPath: path=%s, fsBlocks=%d, fsBlockSize=%d, totalSize=%d, totalBlocks=%d",
+				dataPath, stat.Blocks, fsBlockSize, totalSize, totalBlocks)
+		} else {
+			// Failed to get disk size, use a large default value (1TB in blocks)
+			totalBlocks = (1 << 40) / blockSize // 1TB / 4KB = 268435456 blocks
+			DebugLog("[VFS Statfs] WARNING: Failed to get disk size from DataPath: path=%s, error=%v, using default 1TB", dataPath, err)
+		}
 	}
 
 	// Used blocks: convert RealUsed (actual physical usage) to blocks

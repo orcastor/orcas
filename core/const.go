@@ -243,6 +243,12 @@ type CronJobConfig struct {
 	ScrubEnabled bool
 	// ScrubSchedule Cron expression for ScrubData (format: minute hour day month weekday)
 	ScrubSchedule string
+	// ScrubFixOrphaned Whether to automatically fix orphaned data (files without metadata references)
+	ScrubFixOrphaned bool
+	// ScrubFixCorrupted Whether to automatically fix corrupted data (metadata without files)
+	ScrubFixCorrupted bool
+	// ScrubFixMismatchedChecksum Whether to automatically fix mismatched checksum data
+	ScrubFixMismatchedChecksum bool
 
 	// MergeEnabled Whether to enable MergeDuplicateData scheduled task
 	MergeEnabled bool
@@ -272,6 +278,9 @@ func GetCronJobConfig() CronJobConfig {
 	config := CronJobConfig{
 		ScrubEnabled:                   false,
 		ScrubSchedule:                  "0 2 * * *", // Daily at 2 AM
+		ScrubFixOrphaned:               false,      // Default: don't auto-fix orphaned data
+		ScrubFixCorrupted:              false,      // Default: don't auto-fix corrupted data
+		ScrubFixMismatchedChecksum:     false,      // Default: don't auto-fix mismatched checksum
 		MergeEnabled:                   false,
 		MergeSchedule:                  "0 3 * * *", // Daily at 3 AM
 		DefragmentEnabled:              false,
@@ -289,6 +298,15 @@ func GetCronJobConfig() CronJobConfig {
 	}
 	if schedule := os.Getenv("ORCAS_CRON_SCRUB_SCHEDULE"); schedule != "" {
 		config.ScrubSchedule = schedule
+	}
+	if fixOrphaned := os.Getenv("ORCAS_CRON_SCRUB_FIX_ORPHANED"); fixOrphaned != "" {
+		config.ScrubFixOrphaned = fixOrphaned == "true" || fixOrphaned == "1"
+	}
+	if fixCorrupted := os.Getenv("ORCAS_CRON_SCRUB_FIX_CORRUPTED"); fixCorrupted != "" {
+		config.ScrubFixCorrupted = fixCorrupted == "true" || fixCorrupted == "1"
+	}
+	if fixMismatched := os.Getenv("ORCAS_CRON_SCRUB_FIX_MISMATCHED"); fixMismatched != "" {
+		config.ScrubFixMismatchedChecksum = fixMismatched == "true" || fixMismatched == "1"
 	}
 
 	if merge := os.Getenv("ORCAS_CRON_MERGE_ENABLED"); merge != "" {

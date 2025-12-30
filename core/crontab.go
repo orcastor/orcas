@@ -288,10 +288,35 @@ func (cs *CronScheduler) runScrubJob(ctx context.Context) error {
 		case <-ctx.Done():
 			return ctx.Err()
 		default:
-			_, err := ScrubData(ctx, bkt.ID, cs.ma, cs.da)
+			// 运行 ScrubData 检测问题
+			result, err := ScrubData(ctx, bkt.ID, cs.ma, cs.da)
 			if err != nil {
 				// 记录错误但继续处理其他bucket
 				continue
+			}
+
+			// 如果配置了自动修复，则调用 FixScrubIssues
+			if cs.config.ScrubFixOrphaned || cs.config.ScrubFixCorrupted || cs.config.ScrubFixMismatchedChecksum {
+				// 检查是否有需要修复的问题
+				hasIssues := len(result.OrphanedData) > 0 || len(result.CorruptedData) > 0 || len(result.MismatchedChecksum) > 0
+				if hasIssues {
+					// 调用 FixScrubIssues 进行自动修复
+					fixOptions := struct {
+						FixCorrupted          bool
+						FixOrphaned           bool
+						FixMismatchedChecksum bool
+					}{
+						FixCorrupted:          cs.config.ScrubFixCorrupted,
+						FixOrphaned:           cs.config.ScrubFixOrphaned,
+						FixMismatchedChecksum: cs.config.ScrubFixMismatchedChecksum,
+					}
+
+					_, err := FixScrubIssues(ctx, bkt.ID, result, cs.ma, cs.da, fixOptions)
+					if err != nil {
+						// 记录错误但继续处理其他bucket
+						continue
+					}
+				}
 			}
 		}
 	}

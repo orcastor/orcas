@@ -593,6 +593,10 @@ func InitBucketDB(dataPath string, bktID int64, key ...string) error {
 	if err != nil {
 		return fmt.Errorf("%w: set pragma: %v", ERR_EXEC_DB, err)
 	}
+	_, err = db.Exec(`PRAGMA wal_autocheckpoint = 1000`)
+	if err != nil {
+		return fmt.Errorf("%w: set pragma wal_autocheckpoint: %v", ERR_EXEC_DB, err)
+	}
 	return nil
 }
 

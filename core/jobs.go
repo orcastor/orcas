@@ -1153,7 +1153,7 @@ func calculateDataSize(basePath string, bktID, dataID int64) int64 {
 // deleteDataFiles deletes data files
 // If it's packaged data (PkgID > 0), don't delete package file itself, package file regions will be handled during defragmentation
 // If it's not packaged data, delete all chunk files
-func deleteDataFiles(basePath string, bktID, dataID int64, ma MetadataAdapter, c Ctx) {
+func deleteDataFiles(dataPath string, bktID, dataID int64, ma MetadataAdapter, c Ctx) {
 	// If MetadataAdapter and Ctx are provided, query DataInfo to determine if it's packaged data
 	if ma != nil && c != nil {
 		dataInfo, err := ma.GetData(c, bktID, dataID)
@@ -1171,7 +1171,7 @@ func deleteDataFiles(basePath string, bktID, dataID int64, ma MetadataAdapter, c
 	for {
 		fileName := fmt.Sprintf("%d_%d", dataID, sn)
 		hash := fmt.Sprintf("%X", md5.Sum([]byte(fileName)))
-		path := filepath.Join(basePath, fmt.Sprint(bktID), hash[21:24], hash[8:24], fileName)
+		path := filepath.Join(dataPath, fmt.Sprint(bktID), hash[21:24], hash[8:24], fileName)
 
 		if _, err := os.Stat(path); os.IsNotExist(err) {
 			break // File doesn't exist, deletion complete
