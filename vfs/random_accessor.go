@@ -767,16 +767,20 @@ func (tw *TempFileWriter) Write(offset int64, data []byte) error {
 			var readErr error
 			if writeStartInChunk > 0 {
 				// Writing to middle/end of chunk, might need to read existing data
+				DebugLog("[VFS TempFileWriter Write] Reading chunk from disk: fileID=%d, dataID=%d, sn=%d, offsetInChunk=%d", tw.fileID, tw.dataID, sn, writeStartInChunk)
 				existingChunkData, readErr = tw.fs.h.GetData(tw.fs.c, tw.fs.bktID, tw.dataID, sn)
 				if readErr == nil && len(existingChunkData) > 0 {
 					DebugLog("[VFS TempFileWriter Write] READ from disk successful: fileID=%d, dataID=%d, sn=%d, size=%d",
 						tw.fileID, tw.dataID, sn, len(existingChunkData))
 				} else {
+					DebugLog("[VFS TempFileWriter Write] READ from disk failed or empty: fileID=%d, dataID=%d, sn=%d, error=%v, size=%d",
+						tw.fileID, tw.dataID, sn, readErr, len(existingChunkData))
 				}
 			} else {
 				// Writing from beginning, chunk shouldn't exist (pure append)
 				// Skip read to avoid unnecessary disk I/O
 				readErr = fmt.Errorf("chunk not found (expected for new chunk)")
+				DebugLog("[VFS TempFileWriter Write] Skipping disk read for new chunk: fileID=%d, dataID=%d, sn=%d", tw.fileID, tw.dataID, sn)
 			}
 			if readErr == nil && len(existingChunkData) > 0 {
 				// Chunk exists on disk, re-acquire lock and create buffer
@@ -785,15 +789,19 @@ func (tw *TempFileWriter) Write(offset int64, data []byte) error {
 				buf, exists = tw.chunks[sn]
 				if exists {
 					// Chunk was added to memory by another goroutine, use it
+					DebugLog("[VFS TempFileWriter Write] Chunk was added to memory by another goroutine: fileID=%d, dataID=%d, sn=%d", tw.fileID, tw.dataID, sn)
 					tw.mu.Unlock()
 				} else {
 					// Chunk doesn't exist in memory, create buffer and load from disk
 					// Always use 10MB buffer from pool (capacity is 10MB, length will be set to chunk size)
+					DebugLog("[VFS TempFileWriter Write] Getting DataInfo for chunk decode: fileID=%d, dataID=%d, sn=%d", tw.fileID, tw.dataID, sn)
 					var processedChunk []byte
 					dataInfoFromDB, dataInfoErr := tw.fs.h.GetDataInfo(tw.fs.c, tw.fs.bktID, tw.dataID)
 					if dataInfoErr == nil && dataInfoFromDB != nil {
+						DebugLog("[VFS TempFileWriter Write] Got DataInfo, decoding chunk with Kind: fileID=%d, dataID=%d, sn=%d, kind=0x%x", tw.fileID, tw.dataID, sn, dataInfoFromDB.Kind)
 						processedChunk = tw.decodeChunkDataWithKind(existingChunkData, dataInfoFromDB.Kind)
 					} else {
+						DebugLog("[VFS TempFileWriter Write] Failed to get DataInfo or nil, using default decode: fileID=%d, dataID=%d, sn=%d, error=%v", tw.fileID, tw.dataID, sn, dataInfoErr)
 						processedChunk = tw.decodeChunkData(existingChunkData)
 					}
 					existingChunkSize := int64(len(processedChunk))

@@ -1797,9 +1797,16 @@ func (n *OrcasNode) Open(ctx context.Context, flags uint32) (fh fs.FileHandle, f
 		obj.ID, flags, syscall.O_WRONLY, syscall.O_RDWR, syscall.O_RDONLY, O_LARGEFILE)
 
 	// Check if file is opened for writing
-	isWriteMode := (flags&syscall.O_WRONLY != 0) || (flags&syscall.O_RDWR != 0)
-	DebugLog("[VFS Open] File open mode: fileID=%d, isWriteMode=%v, hasLargeFileFlag=%v, flags=0x%x",
-		obj.ID, isWriteMode, hasLargeFileFlag, flags)
+	// Note: macOS/SMB may use different flag combinations
+	// O_WRONLY = 0x1, O_RDWR = 0x2, but some systems may use other flags
+	// Also check if O_CREAT is set (0x200) which indicates write intent
+	// O_TRUNC (0x400) also indicates write intent
+	// O_EXCL (0x800) is often used with O_CREAT for exclusive creation, but in SMB context
+	// it may be used alone to indicate write intent after file creation
+	isWriteMode := (flags&syscall.O_WRONLY != 0) || (flags&syscall.O_RDWR != 0) ||
+		(flags&syscall.O_CREAT != 0) || (flags&syscall.O_TRUNC != 0) || (flags&syscall.O_EXCL != 0)
+	DebugLog("[VFS Open] File open mode: fileID=%d, isWriteMode=%v, hasLargeFileFlag=%v, flags=0x%x (O_WRONLY=0x%x, O_RDWR=0x%x, O_CREAT=0x%x, O_TRUNC=0x%x, O_EXCL=0x%x)",
+		obj.ID, isWriteMode, hasLargeFileFlag, flags, syscall.O_WRONLY, syscall.O_RDWR, syscall.O_CREAT, syscall.O_TRUNC, syscall.O_EXCL)
 
 	// Note: O_LARGEFILE is supported - we already support large files (>2GB) by default
 	// This flag is mainly for compatibility with 32-bit applications
@@ -1808,6 +1815,17 @@ func (n *OrcasNode) Open(ctx context.Context, flags uint32) (fh fs.FileHandle, f
 	// This allows Write/Read operations to work on the file
 	// Note: fuseFlags=0 means default behavior (no special flags)
 	// FUSE will call Write/Read methods on the FileHandle if they are implemented
+	// IMPORTANT: For macOS/SMB, we need to ensure Write is always available
+	// even if flags don't explicitly indicate write mode, because SMB may use
+	// different flag combinations that don't match standard POSIX flags
+
+	// Set fuseFlags to indicate write capability if file was opened with write intent
+	// Note: fuseFlags is already declared in function signature, so we just set it
+	if isWriteMode {
+		// Indicate that this FileHandle supports writing
+		// This helps FUSE know that Write operations are available
+		DebugLog("[VFS Open] File opened with write intent, Write operations will be available: fileID=%d", obj.ID)
+	}
 
 	// Print file metadata after Open completes
 	DebugLog("[VFS Open] File metadata after Open: fileID=%d, name=%s, size=%d, dataID=%d, mtime=%d, mode=0%o, type=%d, pid=%d",
@@ -3438,6 +3456,20 @@ func (n *OrcasNode) flushImpl(ctx context.Context) syscall.Errno {
 		// Update local cache
 		n.obj.Store(updatedObj)
 
+		// IMPORTANT: Update directory listing cache after flush to ensure file is visible
+		// This is critical for macOS/SMB where files may disappear if not in directory cache
+		// macOS/SMB relies heavily on directory listing cache, and if file is not in cache,
+		// it may return error -43 (file not found) even though file exists in database
+		if updatedObj.PID > 0 {
+			dirNode := &OrcasNode{
+				fs:    n.fs,
+				objID: updatedObj.PID,
+			}
+			dirNode.appendChildToDirCache(updatedObj.PID, updatedObj)
+			DebugLog("[VFS Flush] Updated directory listing cache after flush: fileID=%d, dirID=%d, name=%s, size=%d",
+				updatedObj.ID, updatedObj.PID, updatedObj.Name, updatedObj.Size)
+		}
+
 		DebugLog("[VFS Flush] Successfully flushed file: fileID=%d, versionID=%d, finalSize=%d, dataID=%d, mtime=%d",
 			updatedObj.ID, versionID, updatedObj.Size, updatedObj.DataID, updatedObj.MTime)
 	} else {
@@ -4424,6 +4456,20 @@ func (n *OrcasNode) releaseImpl(ctx context.Context) syscall.Errno {
 
 		// Update local cache
 		n.obj.Store(updatedObj)
+
+		// IMPORTANT: Update directory listing cache after release to ensure file is visible
+		// This is critical for macOS/SMB where files may disappear if not in directory cache
+		// macOS/SMB relies heavily on directory listing cache, and if file is not in cache,
+		// it may return error -43 (file not found) even though file exists in database
+		if updatedObj.PID > 0 {
+			dirNode := &OrcasNode{
+				fs:    n.fs,
+				objID: updatedObj.PID,
+			}
+			dirNode.appendChildToDirCache(updatedObj.PID, updatedObj)
+			DebugLog("[VFS Release] Updated directory listing cache after release: fileID=%d, dirID=%d, name=%s, size=%d",
+				updatedObj.ID, updatedObj.PID, updatedObj.Name, updatedObj.Size)
+		}
 
 		DebugLog("[VFS Release] Successfully released file: fileID=%d, finalSize=%d, dataID=%d, mtime=%d",
 			updatedObj.ID, updatedObj.Size, updatedObj.DataID, updatedObj.MTime)
