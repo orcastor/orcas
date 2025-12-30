@@ -10,10 +10,10 @@ import (
 	"time"
 )
 
-// ScanOrphanedChunks scans orphaned chunks (chunks without metadata)
-// Scans all chunk files in the data directory, checks if metadata exists
-// Every 1000 chunks, checks metadata. If metadata doesn't exist, delays and re-checks
-// If still doesn't exist after delay, deletes the chunk
+// ScanOrphanedChunks scans orphaned chunks (chunks without metadata or without object references)
+// Scans all chunk files in the data directory, checks if DataInfo exists and if it's referenced by any ObjectInfo
+// Every 1000 chunks, checks metadata and reference counts. If DataInfo doesn't exist or has no object references,
+// delays and re-checks. If still orphaned after delay, deletes the chunk
 // delaySeconds: delay time in seconds before re-checking and deleting orphaned chunks
 func ScanOrphanedChunks(c Ctx, bktID int64, ma MetadataAdapter, da DataAdapter, delaySeconds int) (*ScanOrphanedChunksResult, error) {
 	result := &ScanOrphanedChunksResult{
@@ -158,12 +158,37 @@ func ScanOrphanedChunks(c Ctx, bktID int64, ma MetadataAdapter, da DataAdapter, 
 					}
 				}
 
-				// Check metadata for all dataIDs in this batch
-				for _, checkDataID := range batchDataIDs {
-					_, err := ma.GetData(c, bktID, checkDataID)
-					if err != nil {
-						// Metadata doesn't exist, mark as orphaned
-						orphanedDataIDs[checkDataID] = true
+				// Check metadata and references for all dataIDs in this batch
+				if len(batchDataIDs) > 0 {
+					// First, check which DataInfo exist
+					existingDataIDs := make([]int64, 0)
+					for _, checkDataID := range batchDataIDs {
+						_, err := ma.GetData(c, bktID, checkDataID)
+						if err != nil {
+							// DataInfo doesn't exist, mark as orphaned
+							orphanedDataIDs[checkDataID] = true
+						} else {
+							// DataInfo exists, need to check if it's referenced by any ObjectInfo
+							existingDataIDs = append(existingDataIDs, checkDataID)
+						}
+					}
+
+					// Check reference counts for existing DataInfo
+					if len(existingDataIDs) > 0 {
+						refCounts, err := ma.CountDataRefs(c, bktID, existingDataIDs)
+						if err != nil {
+							// If query fails, mark all as potentially orphaned (safer to re-check later)
+							for _, dataID := range existingDataIDs {
+								orphanedDataIDs[dataID] = true
+							}
+						} else {
+							// Mark dataIDs with refCount == 0 as orphaned
+							for _, dataID := range existingDataIDs {
+								if refCounts[dataID] == 0 {
+									orphanedDataIDs[dataID] = true
+								}
+							}
+						}
 					}
 				}
 
@@ -182,13 +207,45 @@ func ScanOrphanedChunks(c Ctx, bktID int64, ma MetadataAdapter, da DataAdapter, 
 	}
 
 	// Check remaining dataIDs that weren't checked in batches
+	remainingDataIDs := make([]int64, 0)
 	for dataID := range chunksByDataID {
 		if !checkedDataIDs[dataID] {
+			remainingDataIDs = append(remainingDataIDs, dataID)
+			checkedDataIDs[dataID] = true
+		}
+	}
+
+	// Check remaining dataIDs
+	if len(remainingDataIDs) > 0 {
+		// First, check which DataInfo exist
+		existingDataIDs := make([]int64, 0)
+		for _, dataID := range remainingDataIDs {
 			_, err := ma.GetData(c, bktID, dataID)
 			if err != nil {
+				// DataInfo doesn't exist, mark as orphaned
 				orphanedDataIDs[dataID] = true
+			} else {
+				// DataInfo exists, need to check if it's referenced by any ObjectInfo
+				existingDataIDs = append(existingDataIDs, dataID)
 			}
-			checkedDataIDs[dataID] = true
+		}
+
+		// Check reference counts for existing DataInfo
+		if len(existingDataIDs) > 0 {
+			refCounts, err := ma.CountDataRefs(c, bktID, existingDataIDs)
+			if err != nil {
+				// If query fails, mark all as potentially orphaned (safer to re-check later)
+				for _, dataID := range existingDataIDs {
+					orphanedDataIDs[dataID] = true
+				}
+			} else {
+				// Mark dataIDs with refCount == 0 as orphaned
+				for _, dataID := range existingDataIDs {
+					if refCounts[dataID] == 0 {
+						orphanedDataIDs[dataID] = true
+					}
+				}
+			}
 		}
 	}
 
@@ -207,19 +264,56 @@ func ScanOrphanedChunks(c Ctx, bktID int64, ma MetadataAdapter, da DataAdapter, 
 		fmt.Printf("Found %d orphaned dataIDs, waiting %d seconds before re-checking...\n", len(orphanedChunkPaths), delaySeconds)
 		time.Sleep(time.Duration(delaySeconds) * time.Second)
 
-		// Re-check metadata for delayed chunks
-		for checkDataID, chunks := range orphanedChunkPaths {
+		// Re-check metadata and references for delayed chunks
+		recheckDataIDs := make([]int64, 0, len(orphanedChunkPaths))
+		for checkDataID := range orphanedChunkPaths {
+			recheckDataIDs = append(recheckDataIDs, checkDataID)
+		}
+
+		// Check which DataInfo exist
+		existingDataIDs := make([]int64, 0)
+		missingDataIDs := make([]int64, 0)
+		for _, checkDataID := range recheckDataIDs {
 			_, err := ma.GetData(c, bktID, checkDataID)
 			if err != nil {
-				// Still orphaned, delete all chunks for this dataID
-				result.StillOrphaned++
-				for _, chunk := range chunks {
-					result.FreedSize += chunk.size
-					if err := os.Remove(chunk.path); err != nil {
-						result.Errors = append(result.Errors, fmt.Sprintf("failed to delete chunk %s: %v", chunk.path, err))
-					} else {
-						result.DeletedChunks++
+				// DataInfo still doesn't exist, mark for deletion
+				missingDataIDs = append(missingDataIDs, checkDataID)
+			} else {
+				// DataInfo exists, need to check references
+				existingDataIDs = append(existingDataIDs, checkDataID)
+			}
+		}
+
+		// Check reference counts for existing DataInfo
+		if len(existingDataIDs) > 0 {
+			refCounts, err := ma.CountDataRefs(c, bktID, existingDataIDs)
+			if err != nil {
+				// If query fails, mark all as potentially orphaned (safer to re-check later)
+				missingDataIDs = append(missingDataIDs, existingDataIDs...)
+			} else {
+				// Mark dataIDs with refCount == 0 as orphaned
+				for _, dataID := range existingDataIDs {
+					if refCounts[dataID] == 0 {
+						missingDataIDs = append(missingDataIDs, dataID)
 					}
+				}
+			}
+		}
+
+		// Delete chunks for dataIDs that are still orphaned
+		for _, checkDataID := range missingDataIDs {
+			chunks, ok := orphanedChunkPaths[checkDataID]
+			if !ok {
+				continue
+			}
+			// Still orphaned, delete all chunks for this dataID
+			result.StillOrphaned++
+			for _, chunk := range chunks {
+				result.FreedSize += chunk.size
+				if err := os.Remove(chunk.path); err != nil {
+					result.Errors = append(result.Errors, fmt.Sprintf("failed to delete chunk %s: %v", chunk.path, err))
+				} else {
+					result.DeletedChunks++
 				}
 			}
 		}

@@ -2071,7 +2071,7 @@ func (dma *DefaultMetadataAdapter) CountDataRefs(c Ctx, bktID int64, dataIDs []i
 	}
 	var counts []refCount
 	// 排除已删除的对象（pid >= 0，因为删除时PID会被翻转成负数）
-	whereConds := []interface{}{b.In("did", dataIDs), "pid >= 0"}
+	whereConds := []interface{}{b.In("did", dataIDs), b.Gte("pid", 0)}
 	if _, err = b.TableContext(c, db, OBJ_TBL).Select(&counts,
 		b.Fields("did", "count(1)"),
 		b.Where(whereConds...),

@@ -280,119 +280,15 @@ func getDirListCacheMutex(dirID int64) *sync.RWMutex {
 	return mu
 }
 
-// appendChildToDirCache appends a newly created child object into the
-// cached directory listing instead of invalidating the entire cache.
-// If cache doesn't exist, creates a new cache entry with the child.
-// If child already exists, updates it with latest information (especially size for files).
-// Thread-safe: uses per-directory mutex to prevent race conditions.
-func (n *OrcasNode) appendChildToDirCache(dirID int64, child *core.ObjectInfo) {
-	if child == nil {
-		return
-	}
+// invalidateDirListCache invalidates directory listing cache for a directory
+// This should be called whenever directory contents change (Create, Mkdir, Unlink, Rmdir, Rename)
+// Cache will be rebuilt on next readdir/list operation
+func (n *OrcasNode) invalidateDirListCache(dirID int64) {
 	cacheKey := n.getDirListCacheKey(dirID)
-	mu := getDirListCacheMutex(cacheKey)
-	mu.Lock()
-	defer mu.Unlock()
-
-	if cached, ok := dirListCache.Get(cacheKey); ok {
-		if children, ok := cached.([]*core.ObjectInfo); ok && children != nil {
-			// Check if child already exists, and update it if found
-			found := false
-			for i, existing := range children {
-				if existing != nil && existing.ID == child.ID {
-					// Child already exists, update it with latest information
-					// This is important for files where size may have changed
-					// Create a new slice to avoid modifying the cached slice directly
-					newChildren := make([]*core.ObjectInfo, len(children))
-					copy(newChildren, children)
-					newChildren[i] = child
-					dirListCache.Put(cacheKey, newChildren)
-					DebugLog("[VFS appendChildToDirCache] Updated existing child in cache: dirID=%d, childID=%d, size=%d", dirID, child.ID, child.Size)
-					return
-				}
-			}
-			if !found {
-				// Append child to existing cache
-				newChildren := make([]*core.ObjectInfo, len(children)+1)
-				copy(newChildren, children)
-				newChildren[len(children)] = child
-				dirListCache.Put(cacheKey, newChildren)
-				DebugLog("[VFS appendChildToDirCache] Appended child to existing cache: dirID=%d, childID=%d", dirID, child.ID)
-				return
-			}
-		}
-	}
-	// Cache doesn't exist, create new cache entry with the child
-	newChildren := []*core.ObjectInfo{child}
-	dirListCache.Put(cacheKey, newChildren)
-	DebugLog("[VFS appendChildToDirCache] Created new cache entry with child: dirID=%d, childID=%d", dirID, child.ID)
-}
-
-// removeChildFromDirCache removes a child object from the cached directory listing
-// instead of invalidating the entire cache. This preserves other cached children.
-// Thread-safe: uses per-directory mutex to prevent race conditions.
-func (n *OrcasNode) removeChildFromDirCache(dirID int64, childID int64) {
-	cacheKey := n.getDirListCacheKey(dirID)
-	mu := getDirListCacheMutex(cacheKey)
-	mu.Lock()
-	defer mu.Unlock()
-
-	if cached, ok := dirListCache.Get(cacheKey); ok {
-		if children, ok := cached.([]*core.ObjectInfo); ok && children != nil {
-			updatedChildren := make([]*core.ObjectInfo, 0, len(children))
-			found := false
-			for _, child := range children {
-				if child != nil && child.ID == childID {
-					found = true
-					continue // Skip this child
-				}
-				updatedChildren = append(updatedChildren, child)
-			}
-			if found {
-				dirListCache.Put(cacheKey, updatedChildren)
-				DebugLog("[VFS removeChildFromDirCache] Removed child from cache: dirID=%d, childID=%d", dirID, childID)
-			}
-		}
-	}
-}
-
-// updateChildInDirCache updates a child object in the cached directory listing
-// instead of invalidating the entire cache. This preserves other cached children.
-// If the child is not found in cache, it will append it instead (for newly created files).
-// Also marks Readdir cache as stale for delayed refresh.
-// Thread-safe: uses per-directory mutex to prevent race conditions.
-func (n *OrcasNode) updateChildInDirCache(dirID int64, updatedChild *core.ObjectInfo) {
-	if updatedChild == nil {
-		return
-	}
-	cacheKey := n.getDirListCacheKey(dirID)
-	mu := getDirListCacheMutex(cacheKey)
-	mu.Lock()
-	defer mu.Unlock()
-
-	if cached, ok := dirListCache.Get(cacheKey); ok {
-		if children, ok := cached.([]*core.ObjectInfo); ok && children != nil {
-			for i, child := range children {
-				if child != nil && child.ID == updatedChild.ID {
-					// Update the child in place
-					// Create a new slice to avoid modifying the cached slice directly
-					newChildren := make([]*core.ObjectInfo, len(children))
-					copy(newChildren, children)
-					newChildren[i] = updatedChild
-					dirListCache.Put(cacheKey, newChildren)
-					// Mark Readdir cache as stale (delayed refresh)
-					readdirCacheStale.Store(dirID, true)
-					// DebugLog("[VFS updateChildInDirCache] Updated child in cache: dirID=%d, childID=%d, newName=%s", dirID, updatedChild.ID, updatedChild.Name)
-					return
-				}
-			}
-		}
-	}
-	// If child not found in cache (e.g., newly created file), append it instead
-	// Note: We need to unlock before calling appendChildToDirCache to avoid deadlock
-	// since appendChildToDirCache will try to acquire the same lock
-	mu.Unlock()
-	n.appendChildToDirCache(dirID, updatedChild)
+	dirListCache.Del(cacheKey)
+	readdirCache.Del(dirID)
+	readdirCacheStale.Delete(dirID)
+	DebugLog("[VFS invalidateDirListCache] Invalidated directory cache: dirID=%d", dirID)
 }
 
 // Getattr gets file/directory attributes
@@ -1186,7 +1082,7 @@ func (n *OrcasNode) Create(ctx context.Context, name string, flags uint32, mode 
 
 				// Remove from caches
 				fileObjCache.Del(existingFileID)
-				n.removeChildFromDirCache(obj.ID, existingFileID)
+				n.invalidateDirListCache(obj.ID)
 
 				// File was deleted, continue to create new file below
 				existingFileID = 0
@@ -1540,7 +1436,7 @@ func (n *OrcasNode) Create(ctx context.Context, name string, flags uint32, mode 
 
 				// Remove from caches
 				fileObjCache.Del(existingFileID)
-				n.removeChildFromDirCache(obj.ID, existingFileID)
+				n.invalidateDirListCache(obj.ID)
 
 				// File was deleted, continue to create new file below
 				existingFileID = 0
@@ -1684,7 +1580,7 @@ func (n *OrcasNode) Create(ctx context.Context, name string, flags uint32, mode 
 	// Cache new file object for GetAttr optimization
 	cacheKey := fileObj.ID
 	fileObjCache.Put(cacheKey, fileObj)
-	n.appendChildToDirCache(obj.ID, fileObj)
+	n.invalidateDirListCache(obj.ID)
 
 	// Create file node
 	fileNode := &OrcasNode{
@@ -1903,8 +1799,8 @@ func (n *OrcasNode) Mkdir(ctx context.Context, name string, mode uint32, out *fu
 	cacheKey := dirObj.ID
 	fileObjCache.Put(cacheKey, dirObj)
 
-	// Update parent directory listing cache with new directory
-	n.appendChildToDirCache(obj.ID, dirObj)
+	// Invalidate parent directory listing cache
+	n.invalidateDirListCache(obj.ID)
 
 	// IMPORTANT: Clear readdirCache and mark as stale to ensure Readdir sees the new directory
 	// This is critical because Readdir checks readdirCache first, and if it exists,
@@ -2039,7 +1935,7 @@ func (n *OrcasNode) Unlink(ctx context.Context, name string) syscall.Errno {
 	// CRITICAL: Clear all caches for the deleted file to prevent data corruption
 	// If a file with the same name is recreated, it should get a new DataID and DataInfo
 	// Clearing caches ensures we don't reuse old DataID or DataInfo from deleted file
-	n.removeChildFromDirCache(obj.ID, targetID)
+	n.invalidateDirListCache(obj.ID)
 
 	// Get file object to get DataID before clearing cache
 	// Use targetObj from above if available, otherwise fetch from database
@@ -2182,10 +2078,8 @@ func (n *OrcasNode) Rmdir(ctx context.Context, name string) syscall.Errno {
 		DebugLog("[VFS Rmdir] WARNING: Failed to mark directory as deleted (may already be deleted): dirID=%d, error=%v", targetID, err)
 	}
 
-	// Step 2: Update cache immediately
-	// Only update directory listing cache, don't delete fileObjCache
-	// This preserves the directory object cache for potential future use
-	n.removeChildFromDirCache(obj.ID, targetID)
+	// Step 2: Invalidate directory listing cache
+	n.invalidateDirListCache(obj.ID)
 
 	// Invalidate parent directory cache
 	n.invalidateObj()
@@ -2658,33 +2552,12 @@ func (n *OrcasNode) Rename(ctx context.Context, name string, newParent fs.InodeE
 			cacheKey := sourceID
 			fileObjCache.Del(cacheKey)
 			// Remove from parent directory cache using sourceObj.ID (the actual .tmp file ID)
-			// Use delayed double delete to prevent dirty read
+			// Invalidate directory cache
 			if sourceObj.PID > 0 {
-				// First delete: immediate removal
-				n.removeChildFromDirCache(sourceObj.PID, sourceObj.ID)
-				// Delayed second delete: remove again after delay to prevent dirty read
-				go func(dirID int64, fileID int64) {
-					time.Sleep(200 * time.Millisecond)
-					if n.fs != nil {
-						tempNode := &OrcasNode{fs: n.fs, objID: dirID}
-						tempNode.removeChildFromDirCache(dirID, fileID)
-						DebugLog("[VFS Rename] Delayed second delete: Removed empty .tmp file from parent directory cache again: tmpFileID=%d, parentDirID=%d", fileID, dirID)
-					}
-				}(sourceObj.PID, sourceObj.ID)
+				n.invalidateDirListCache(sourceObj.PID)
 			}
-			// Also remove from obj.ID if different
 			if obj.ID != sourceObj.PID && obj.ID > 0 {
-				// First delete: immediate removal
-				n.removeChildFromDirCache(obj.ID, sourceObj.ID)
-				// Delayed second delete: remove again after delay to prevent dirty read
-				go func(dirID int64, fileID int64) {
-					time.Sleep(200 * time.Millisecond)
-					if n.fs != nil {
-						tempNode := &OrcasNode{fs: n.fs, objID: dirID}
-						tempNode.removeChildFromDirCache(dirID, fileID)
-						DebugLog("[VFS Rename] Delayed second delete: Removed empty .tmp file from obj.ID cache again: tmpFileID=%d, objDirID=%d", fileID, dirID)
-					}
-				}(obj.ID, sourceObj.ID)
+				n.invalidateDirListCache(obj.ID)
 			}
 			DebugLog("[VFS Rename] Successfully deleted empty source .tmp file: sourceID=%d", sourceID)
 			return 0
@@ -2811,53 +2684,19 @@ func (n *OrcasNode) Rename(ctx context.Context, name string, newParent fs.InodeE
 			DebugLog("[VFS Rename] Successfully deleted source .tmp file after merge: sourceID=%d", sourceID)
 		}
 
-		// Update directory listing cache for both directories
-		// Use delayed double delete to prevent dirty read:
-		// 1. First delete: Remove immediately from cache
-		// 2. Delayed delete: Remove again after a delay to catch any cache repopulation from stale database reads
-		// This prevents race condition where another thread reads from database (before delete completes)
-		// and repopulates the cache with the .tmp file
+		// Invalidate directory listing cache for both directories
 		if sourceObj.PID > 0 {
-			// First delete: immediate removal
-			n.removeChildFromDirCache(sourceObj.PID, sourceObj.ID)
-			DebugLog("[VFS Rename] First delete: Removed source .tmp file from parent directory cache: tmpFileID=%d, parentDirID=%d", sourceObj.ID, sourceObj.PID)
-
-			// Delayed second delete: remove again after delay to prevent dirty read
-			go func(dirID int64, fileID int64) {
-				time.Sleep(200 * time.Millisecond) // Wait for potential cache repopulation
-				// Get fresh node reference (n may be invalid after delay)
-				if n.fs != nil {
-					// Create a temporary node to access cache removal method
-					tempNode := &OrcasNode{fs: n.fs, objID: dirID}
-					tempNode.removeChildFromDirCache(dirID, fileID)
-					DebugLog("[VFS Rename] Delayed second delete: Removed source .tmp file from parent directory cache again: tmpFileID=%d, parentDirID=%d", fileID, dirID)
-				}
-			}(sourceObj.PID, sourceObj.ID)
+			n.invalidateDirListCache(sourceObj.PID)
 		}
-		// Also remove from obj.ID if different (in case obj is not the direct parent)
 		if obj.ID != sourceObj.PID && obj.ID > 0 {
-			// First delete: immediate removal
-			n.removeChildFromDirCache(obj.ID, sourceObj.ID)
-			DebugLog("[VFS Rename] First delete: Also removed source .tmp file from obj.ID cache: tmpFileID=%d, objDirID=%d", sourceObj.ID, obj.ID)
-
-			// Delayed second delete: remove again after delay to prevent dirty read
-			go func(dirID int64, fileID int64) {
-				time.Sleep(200 * time.Millisecond) // Wait for potential cache repopulation
-				// Get fresh node reference (n may be invalid after delay)
-				if n.fs != nil {
-					// Create a temporary node to access cache removal method
-					tempNode := &OrcasNode{fs: n.fs, objID: dirID}
-					tempNode.removeChildFromDirCache(dirID, fileID)
-					DebugLog("[VFS Rename] Delayed second delete: Removed source .tmp file from obj.ID cache again: tmpFileID=%d, objDirID=%d", fileID, dirID)
-				}
-			}(obj.ID, sourceObj.ID)
+			n.invalidateDirListCache(obj.ID)
 		}
 		// Update target file in new parent directory listing (if target exists)
 		// Note: Target file is updated with new data, so we need to update it in cache
 		targetObjs, err := n.fs.h.Get(n.fs.c, n.fs.bktID, []int64{existingTargetID})
 		if err == nil && len(targetObjs) > 0 {
-			// Update target file in directory listing cache
-			n.updateChildInDirCache(newParentObj.ID, targetObjs[0])
+			// Invalidate directory listing cache
+			n.invalidateDirListCache(newParentObj.ID)
 			// Also update fileObjCache with latest data
 			targetCacheKey := existingTargetID
 			fileObjCache.Put(targetCacheKey, targetObjs[0])
@@ -3081,46 +2920,11 @@ func (n *OrcasNode) Rename(ctx context.Context, name string, newParent fs.InodeE
 		sourceObj.Name = newName
 	}
 
-	// Update directory listing cache instead of invalidating
-	// Remove source from old parent directory listing (only if moving to different parent)
+	// Invalidate directory listing cache for both old and new parent directories
 	if obj.ID != newParentObj.ID {
-		n.removeChildFromDirCache(obj.ID, sourceID)
+		n.invalidateDirListCache(obj.ID)
 	}
-
-	// Add/update source in new parent directory listing
-	// Re-fetch source object from database to get latest data (including updated name and PID)
-	cacheKey := sourceID
-	fileObjCache.Del(cacheKey)
-	objs, err := n.fs.h.Get(n.fs.c, n.fs.bktID, []int64{sourceID})
-	if err == nil && len(objs) > 0 {
-		updatedSourceObj := objs[0]
-		fileObjCache.Put(cacheKey, updatedSourceObj)
-		// Check if source already exists in new parent's listing (for move within same directory with name change)
-		// If moving to different parent, just add it
-		if obj.ID == newParentObj.ID {
-			// Same parent, just update the name in listing
-			// updateChildInDirCache will append if not found (for newly created files)
-			n.updateChildInDirCache(newParentObj.ID, updatedSourceObj)
-			DebugLog("[VFS Rename] Updated child in same directory cache: fileID=%d, dirID=%d, newName=%s", sourceID, newParentObj.ID, newName)
-		} else {
-			// Different parent, remove from old and add to new
-			// Note: appendChildToDirCache will check for duplicates
-			n.appendChildToDirCache(newParentObj.ID, updatedSourceObj)
-			DebugLog("[VFS Rename] Added child to new directory cache: fileID=%d, oldDirID=%d, newDirID=%d, newName=%s", sourceID, obj.ID, newParentObj.ID, newName)
-		}
-	} else {
-		// Fallback: use cached sourceObj with updated name
-		updatedSourceObj := sourceObj
-		updatedSourceObj.Name = newName
-		updatedSourceObj.PID = newParentObj.ID
-		if obj.ID == newParentObj.ID {
-			// updateChildInDirCache will append if not found (for newly created files)
-			n.updateChildInDirCache(newParentObj.ID, updatedSourceObj)
-		} else {
-			n.appendChildToDirCache(newParentObj.ID, updatedSourceObj)
-		}
-		DebugLog("[VFS Rename] WARNING: Failed to re-fetch source object after rename, using cached data: fileID=%d, error=%v", sourceID, err)
-	}
+	n.invalidateDirListCache(newParentObj.ID)
 
 	// Invalidate both directories' cache (for GetAttr)
 	n.invalidateObj()
@@ -3466,7 +3270,7 @@ func (n *OrcasNode) flushImpl(ctx context.Context) syscall.Errno {
 				fs:    n.fs,
 				objID: updatedObj.PID,
 			}
-			dirNode.appendChildToDirCache(updatedObj.PID, updatedObj)
+			dirNode.invalidateDirListCache(updatedObj.PID)
 			DebugLog("[VFS Flush] Updated directory listing cache after flush: fileID=%d, dirID=%d, name=%s, size=%d",
 				updatedObj.ID, updatedObj.PID, updatedObj.Name, updatedObj.Size)
 		}
@@ -4054,7 +3858,7 @@ func (n *OrcasNode) forceFlushTempFileBeforeRename(fileID int64, oldName, newNam
 						fs:    n.fs,
 						objID: fileObj.PID,
 					}
-					dirNode.appendChildToDirCache(fileObj.PID, fileObj)
+					dirNode.invalidateDirListCache(fileObj.PID)
 					DebugLog("[VFS Rename] Appended file to directory listing cache after sync flush: fileID=%d, dirID=%d, name=%s", fileID, fileObj.PID, fileObj.Name)
 				}
 			}
@@ -4265,7 +4069,7 @@ func (n *OrcasNode) forceFlushTempFileBeforeRename(fileID int64, oldName, newNam
 						fs:    n.fs,
 						objID: fileObj.PID,
 					}
-					dirNode.appendChildToDirCache(fileObj.PID, fileObj)
+					dirNode.invalidateDirListCache(fileObj.PID)
 					DebugLog("[VFS Rename] Updated directory listing cache after temporary flush: fileID=%d, dirID=%d, name=%s", fileID, fileObj.PID, fileObj.Name)
 				}
 			}
@@ -4337,7 +4141,7 @@ func (n *OrcasNode) forceFlushTempFileBeforeRename(fileID int64, oldName, newNam
 				fs:    n.fs,
 				objID: fileObj.PID,
 			}
-			dirNode.appendChildToDirCache(fileObj.PID, fileObj)
+			dirNode.invalidateDirListCache(fileObj.PID)
 			DebugLog("[VFS Rename] Updated directory listing cache after flush: fileID=%d, dirID=%d, name=%s", fileID, fileObj.PID, fileObj.Name)
 		}
 	} else {
@@ -4467,7 +4271,7 @@ func (n *OrcasNode) releaseImpl(ctx context.Context) syscall.Errno {
 				fs:    n.fs,
 				objID: updatedObj.PID,
 			}
-			dirNode.appendChildToDirCache(updatedObj.PID, updatedObj)
+			dirNode.invalidateDirListCache(updatedObj.PID)
 			DebugLog("[VFS Release] Updated directory listing cache after release: fileID=%d, dirID=%d, name=%s, size=%d",
 				updatedObj.ID, updatedObj.PID, updatedObj.Name, updatedObj.Size)
 		}

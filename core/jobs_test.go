@@ -2267,3 +2267,291 @@ func TestDefragment(t *testing.T) {
 		})
 	})
 }
+
+func TestScanOrphanedChunks(t *testing.T) {
+	Convey("Scan orphaned chunks", t, func() {
+		baseDir, dataDir, cleanup := SetupTestDirs("test_scan_orphaned_chunks")
+		defer cleanup()
+
+		ig := idgen.NewIDGen(nil, 0)
+		testBktID, _ := ig.New()
+		InitDB(baseDir, "")
+		err := InitBucketDB(dataDir, testBktID)
+		So(err, ShouldBeNil)
+
+		dma := &DefaultMetadataAdapter{
+			DefaultBaseMetadataAdapter: &DefaultBaseMetadataAdapter{},
+			DefaultDataMetadataAdapter: &DefaultDataMetadataAdapter{},
+		}
+		dma.DefaultBaseMetadataAdapter.SetPath(baseDir)
+		dma.DefaultDataMetadataAdapter.SetPath(dataDir)
+		dda := &DefaultDataAdapter{}
+		dda.SetDataPath(dataDir)
+
+		Convey("scan chunks without DataInfo (orphaned)", func() {
+			// 创建 chunk 文件但没有 DataInfo（模拟元数据丢失）
+			orphanedDataID, _ := ig.New()
+			testData := []byte("orphaned chunk data")
+			So(dda.Write(c, testBktID, orphanedDataID, 0, testData), ShouldBeNil)
+
+			// 不创建 DataInfo，直接扫描
+			result, err := ScanOrphanedChunks(c, testBktID, dma, dda, 0)
+			So(err, ShouldBeNil)
+			So(result, ShouldNotBeNil)
+			So(result.TotalScanned, ShouldBeGreaterThan, 0)
+
+			// 应该检测到孤立的 chunk
+			found := false
+			for _, dataID := range result.OrphanedChunks {
+				if dataID == orphanedDataID {
+					found = true
+					break
+				}
+			}
+			So(found, ShouldBeTrue)
+			So(result.DeletedChunks, ShouldBeGreaterThan, 0)
+		})
+
+		Convey("scan chunks with DataInfo but no ObjectInfo reference (orphaned)", func() {
+			// 创建 DataInfo 但没有 ObjectInfo 引用
+			unreferencedDataID, _ := ig.New()
+			testData := []byte("unreferenced chunk data")
+			So(dda.Write(c, testBktID, unreferencedDataID, 0, testData), ShouldBeNil)
+
+			// 创建 DataInfo
+			readData, err := dda.Read(c, testBktID, unreferencedDataID, 0)
+			So(err, ShouldBeNil)
+			xxh3Value := xxh3.Hash(readData)
+			sha256Hash := sha256.Sum256(readData)
+			sha256_0 := int64(binary.BigEndian.Uint64(sha256Hash[0:8]))
+			sha256_1 := int64(binary.BigEndian.Uint64(sha256Hash[8:16]))
+			sha256_2 := int64(binary.BigEndian.Uint64(sha256Hash[16:24]))
+			sha256_3 := int64(binary.BigEndian.Uint64(sha256Hash[24:32]))
+
+			dataInfo := &DataInfo{
+				ID:       unreferencedDataID,
+				Size:     int64(len(readData)),
+				OrigSize: int64(len(readData)),
+				XXH3:     int64(xxh3Value),
+				Cksum:    int64(xxh3Value),
+				SHA256_0: sha256_0,
+				SHA256_1: sha256_1,
+				SHA256_2: sha256_2,
+				SHA256_3: sha256_3,
+				Kind:     DATA_NORMAL,
+			}
+			So(dma.PutData(c, testBktID, []*DataInfo{dataInfo}), ShouldBeNil)
+
+			// 不创建 ObjectInfo，直接扫描
+			result, err := ScanOrphanedChunks(c, testBktID, dma, dda, 0)
+			So(err, ShouldBeNil)
+			So(result, ShouldNotBeNil)
+
+			// 应该检测到孤立的 chunk（有 DataInfo 但没有 ObjectInfo 引用）
+			found := false
+			for _, dataID := range result.OrphanedChunks {
+				if dataID == unreferencedDataID {
+					found = true
+					break
+				}
+			}
+			So(found, ShouldBeTrue)
+			So(result.DeletedChunks, ShouldBeGreaterThan, 0)
+		})
+
+		Convey("scan chunks with DataInfo and ObjectInfo reference (not orphaned)", func() {
+			// 创建有 ObjectInfo 引用的正常 chunk
+			referencedDataID, _ := ig.New()
+			testData := []byte("referenced chunk data")
+			So(dda.Write(c, testBktID, referencedDataID, 0, testData), ShouldBeNil)
+
+			// 创建 DataInfo
+			readData, err := dda.Read(c, testBktID, referencedDataID, 0)
+			So(err, ShouldBeNil)
+			xxh3Value := xxh3.Hash(readData)
+			sha256Hash := sha256.Sum256(readData)
+			sha256_0 := int64(binary.BigEndian.Uint64(sha256Hash[0:8]))
+			sha256_1 := int64(binary.BigEndian.Uint64(sha256Hash[8:16]))
+			sha256_2 := int64(binary.BigEndian.Uint64(sha256Hash[16:24]))
+			sha256_3 := int64(binary.BigEndian.Uint64(sha256Hash[24:32]))
+
+			dataInfo := &DataInfo{
+				ID:       referencedDataID,
+				Size:     int64(len(readData)),
+				OrigSize: int64(len(readData)),
+				XXH3:     int64(xxh3Value),
+				Cksum:    int64(xxh3Value),
+				SHA256_0: sha256_0,
+				SHA256_1: sha256_1,
+				SHA256_2: sha256_2,
+				SHA256_3: sha256_3,
+				Kind:     DATA_NORMAL,
+			}
+			So(dma.PutData(c, testBktID, []*DataInfo{dataInfo}), ShouldBeNil)
+
+			// 创建 ObjectInfo 引用这个 DataID
+			objID, _ := ig.New()
+			obj := &ObjectInfo{
+				ID:     objID,
+				PID:    testBktID,
+				DataID: referencedDataID,
+				Type:   OBJ_TYPE_FILE,
+				Name:   "test_file.txt",
+				Size:   int64(len(testData)),
+				MTime:  Now(),
+			}
+			_, err = dma.PutObj(c, testBktID, []*ObjectInfo{obj})
+			So(err, ShouldBeNil)
+
+			// 验证引用计数是否正确（如果查询失败，不影响主要测试）
+			refCounts, err := dma.CountDataRefs(c, testBktID, []int64{referencedDataID})
+			if err == nil {
+				So(refCounts[referencedDataID], ShouldBeGreaterThan, 0)
+			}
+
+			// 扫描
+			result, err := ScanOrphanedChunks(c, testBktID, dma, dda, 0)
+			So(err, ShouldBeNil)
+			So(result, ShouldNotBeNil)
+
+			// 不应该检测到孤立的 chunk（有 ObjectInfo 引用）
+			found := false
+			for _, dataID := range result.OrphanedChunks {
+				if dataID == referencedDataID {
+					found = true
+					break
+				}
+			}
+			So(found, ShouldBeFalse)
+		})
+
+		Convey("scan with delay and re-check", func() {
+			// 创建孤立的 chunk
+			orphanedDataID, _ := ig.New()
+			testData := []byte("delayed orphaned chunk data")
+			So(dda.Write(c, testBktID, orphanedDataID, 0, testData), ShouldBeNil)
+
+			// 不创建 DataInfo，使用延迟扫描
+			result, err := ScanOrphanedChunks(c, testBktID, dma, dda, 1)
+			So(err, ShouldBeNil)
+			So(result, ShouldNotBeNil)
+			So(result.DelayedChunks, ShouldBeGreaterThan, 0)
+
+			// 应该检测到孤立的 chunk
+			found := false
+			for _, dataID := range result.OrphanedChunks {
+				if dataID == orphanedDataID {
+					found = true
+					break
+				}
+			}
+			So(found, ShouldBeTrue)
+			So(result.StillOrphaned, ShouldBeGreaterThan, 0)
+			So(result.DeletedChunks, ShouldBeGreaterThan, 0)
+		})
+
+		Convey("scan multiple chunks (batch processing)", func() {
+			// 创建多个孤立的 chunk（测试批量处理）
+			numOrphaned := 5
+			orphanedDataIDs := make([]int64, numOrphaned)
+			for i := 0; i < numOrphaned; i++ {
+				dataID, _ := ig.New()
+				orphanedDataIDs[i] = dataID
+				testData := []byte(fmt.Sprintf("orphaned chunk %d", i))
+				So(dda.Write(c, testBktID, dataID, 0, testData), ShouldBeNil)
+			}
+
+			// 创建一个有引用的 chunk
+			referencedDataID, _ := ig.New()
+			testData := []byte("referenced chunk")
+			So(dda.Write(c, testBktID, referencedDataID, 0, testData), ShouldBeNil)
+
+			readData, err := dda.Read(c, testBktID, referencedDataID, 0)
+			So(err, ShouldBeNil)
+			xxh3Value := xxh3.Hash(readData)
+			dataInfo := &DataInfo{
+				ID:       referencedDataID,
+				Size:     int64(len(readData)),
+				OrigSize: int64(len(readData)),
+				XXH3:     int64(xxh3Value),
+				Cksum:    int64(xxh3Value),
+				Kind:     DATA_NORMAL,
+			}
+			So(dma.PutData(c, testBktID, []*DataInfo{dataInfo}), ShouldBeNil)
+
+			objID, _ := ig.New()
+			obj := &ObjectInfo{
+				ID:     objID,
+				PID:    testBktID,
+				DataID: referencedDataID,
+				Type:   OBJ_TYPE_FILE,
+				Name:   "referenced_file.txt",
+				Size:   int64(len(testData)),
+				MTime:  Now(),
+			}
+			_, err = dma.PutObj(c, testBktID, []*ObjectInfo{obj})
+			So(err, ShouldBeNil)
+
+			// 验证引用计数是否正确（如果查询失败，不影响主要测试）
+			refCounts, err := dma.CountDataRefs(c, testBktID, []int64{referencedDataID})
+			if err == nil {
+				So(refCounts[referencedDataID], ShouldBeGreaterThan, 0)
+			}
+
+			// 扫描
+			result, err := ScanOrphanedChunks(c, testBktID, dma, dda, 0)
+			So(err, ShouldBeNil)
+			So(result, ShouldNotBeNil)
+			So(result.TotalScanned, ShouldBeGreaterThanOrEqualTo, numOrphaned+1)
+
+			// 检查所有孤立的 chunk 都被检测到
+			foundCount := 0
+			for _, orphanedID := range orphanedDataIDs {
+				for _, dataID := range result.OrphanedChunks {
+					if dataID == orphanedID {
+						foundCount++
+						break
+					}
+				}
+			}
+			So(foundCount, ShouldEqual, numOrphaned)
+
+			// 检查有引用的 chunk 没有被检测为孤立
+			found := false
+			for _, dataID := range result.OrphanedChunks {
+				if dataID == referencedDataID {
+					found = true
+					break
+				}
+			}
+			So(found, ShouldBeFalse)
+		})
+
+		Convey("scan chunks with multiple chunks per dataID", func() {
+			// 创建有多个 chunk 的孤立 dataID
+			orphanedDataID, _ := ig.New()
+			chunk1 := []byte("chunk 1 data")
+			chunk2 := []byte("chunk 2 data")
+			So(dda.Write(c, testBktID, orphanedDataID, 0, chunk1), ShouldBeNil)
+			So(dda.Write(c, testBktID, orphanedDataID, 1, chunk2), ShouldBeNil)
+
+			// 不创建 DataInfo，直接扫描
+			result, err := ScanOrphanedChunks(c, testBktID, dma, dda, 0)
+			So(err, ShouldBeNil)
+			So(result, ShouldNotBeNil)
+
+			// 应该检测到孤立的 dataID
+			found := false
+			for _, dataID := range result.OrphanedChunks {
+				if dataID == orphanedDataID {
+					found = true
+					break
+				}
+			}
+			So(found, ShouldBeTrue)
+
+			// 应该删除所有相关的 chunk（2 个）
+			So(result.DeletedChunks, ShouldBeGreaterThanOrEqualTo, 2)
+		})
+	})
+}

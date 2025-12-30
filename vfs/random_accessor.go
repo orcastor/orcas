@@ -1910,7 +1910,7 @@ func (tw *TempFileWriter) Flush() error {
 			fs:    tw.fs,
 			objID: obj.PID,
 		}
-		dirNode.appendChildToDirCache(obj.PID, obj)
+		dirNode.invalidateDirListCache(obj.PID)
 		DebugLog("[VFS TempFileWriter Flush] Appended file to directory listing cache after sync flush: fileID=%d, dirID=%d, name=%s", tw.fileID, obj.PID, obj.Name)
 	}
 
@@ -2610,7 +2610,7 @@ func (ra *RandomAccessor) flushSequentialBuffer() error {
 									fs:    ra.fs,
 									objID: updateFileObj.PID,
 								}
-								dirNode.appendChildToDirCache(updateFileObj.PID, updateFileObj)
+								dirNode.invalidateDirListCache(updateFileObj.PID)
 								DebugLog("[VFS RandomAccessor flushSequentialBuffer] Appended file to directory listing cache (instant upload): fileID=%d, dirID=%d, name=%s", ra.fileID, updateFileObj.PID, updateFileObj.Name)
 							}
 							// Clear sequential buffer
@@ -2684,7 +2684,7 @@ func (ra *RandomAccessor) flushSequentialBuffer() error {
 			fs:    ra.fs,
 			objID: fileObj.PID,
 		}
-		dirNode.appendChildToDirCache(fileObj.PID, fileObj)
+		dirNode.invalidateDirListCache(fileObj.PID)
 		DebugLog("[VFS flushSequentialBuffer] Appended file to directory listing cache after sync flush: fileID=%d, dirID=%d, name=%s", ra.fileID, fileObj.PID, fileObj.Name)
 	}
 
@@ -3279,7 +3279,7 @@ func (ra *RandomAccessor) flushInternal(force bool) (int64, error) {
 						fs:    ra.fs,
 						objID: updatedFileObj.PID,
 					}
-					dirNode.appendChildToDirCache(updatedFileObj.PID, updatedFileObj)
+					dirNode.invalidateDirListCache(updatedFileObj.PID)
 					DebugLog("[VFS RandomAccessor Flush] Appended file to directory listing cache after TempFileWriter flush (non-tmp): fileID=%d, dirID=%d, name=%s", ra.fileID, updatedFileObj.PID, updatedFileObj.Name)
 				}
 			}
@@ -3795,7 +3795,7 @@ func (ra *RandomAccessor) applyRandomWritesWithSDK(fileObj *core.ObjectInfo, wri
 					fs:    ra.fs,
 					objID: updateFileObj.PID,
 				}
-				dirNode.appendChildToDirCache(updateFileObj.PID, updateFileObj)
+				dirNode.invalidateDirListCache(updateFileObj.PID)
 				DebugLog("[VFS applyRandomWritesWithSDK] Appended file to directory listing cache: fileID=%d, dirID=%d, name=%s", ra.fileID, updateFileObj.PID, updateFileObj.Name)
 			}
 		} else {
@@ -3853,7 +3853,7 @@ func (ra *RandomAccessor) applyRandomWritesWithSDK(fileObj *core.ObjectInfo, wri
 				fs:    ra.fs,
 				objID: updateFileObj.PID,
 			}
-			dirNode.appendChildToDirCache(updateFileObj.PID, updateFileObj)
+			dirNode.invalidateDirListCache(updateFileObj.PID)
 			DebugLog("[VFS applyRandomWritesWithSDK] Appended file to directory listing cache: fileID=%d, dirID=%d, name=%s", ra.fileID, updateFileObj.PID, updateFileObj.Name)
 		}
 	} else {
@@ -6095,7 +6095,7 @@ func (ra *RandomAccessor) Truncate(newSize int64) (int64, error) {
 				fs:    ra.fs,
 				objID: updateFileObj.PID,
 			}
-			dirNode.appendChildToDirCache(updateFileObj.PID, updateFileObj)
+			dirNode.invalidateDirListCache(updateFileObj.PID)
 			DebugLog("[VFS applyRandomWritesWithSDK] Appended file to directory listing cache: fileID=%d, dirID=%d, name=%s", ra.fileID, updateFileObj.PID, updateFileObj.Name)
 		}
 	}
@@ -6110,7 +6110,7 @@ func (ra *RandomAccessor) Truncate(newSize int64) (int64, error) {
 			fs:    ra.fs,
 			objID: updateFileObj.PID,
 		}
-		dirNode.appendChildToDirCache(updateFileObj.PID, updateFileObj)
+		dirNode.invalidateDirListCache(updateFileObj.PID)
 		DebugLog("[VFS applyRandomWritesWithSDK] Appended file to directory listing cache: fileID=%d, dirID=%d, name=%s", ra.fileID, updateFileObj.PID, updateFileObj.Name)
 	}
 
