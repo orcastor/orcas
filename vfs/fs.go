@@ -4507,32 +4507,7 @@ func (n *OrcasNode) Getxattr(ctx context.Context, attr string, dest []byte) (uin
 		return 0, syscall.ENOTSUP
 	}
 
-	// Check cache first
-	cacheKey := n.objID
-	if cached, ok := attrCache.Get(cacheKey); ok {
-		if entry, ok := cached.(*attrCacheEntry); ok && entry != nil {
-			entry.mu.RLock()
-			value, exists := entry.attrs[attr]
-			entry.mu.RUnlock()
-			if exists {
-				// Check if this is a "not found" sentinel (nil)
-				if value == nil {
-					DebugLog("[VFS Getxattr] Cache hit (sentinel): objID=%d, attr=%s, returning ENODATA", n.objID, attr)
-					return 0, syscall.ENODATA
-				}
-				if len(value) > len(dest) {
-					DebugLog("[VFS Getxattr] Cache hit but buffer too small: objID=%d, attr=%s, valueLen=%d, destLen=%d, returning ERANGE", n.objID, attr, len(value), len(dest))
-					return uint32(len(value)), syscall.ERANGE
-				}
-				copy(dest, value)
-				DebugLog("[VFS Getxattr] Cache hit: objID=%d, attr=%s, valueLen=%d", n.objID, attr, len(value))
-				return uint32(len(value)), 0
-			}
-		}
-	}
-	DebugLog("[VFS Getxattr] Cache miss: objID=%d, attr=%s", n.objID, attr)
-
-	// Cache miss, get from database
+	// Get from database
 	if lh, ok := n.fs.h.(*core.LocalHandler); ok {
 		ma := lh.MetadataAdapter()
 		if ma != nil {
@@ -4553,28 +4528,12 @@ func (n *OrcasNode) Getxattr(ctx context.Context, attr string, dest []byte) (uin
 			value, err := ma.GetAttr(n.fs.c, n.fs.bktID, n.objID, attr)
 			if err != nil {
 				// Check if this is a "not found" error (attribute doesn't exist)
-				// If so, cache a sentinel value (nil) to prevent repeated database queries
 				if strings.Contains(err.Error(), "attribute not found") {
-					DebugLog("[VFS Getxattr] Attribute not found in database: objID=%d, attr=%s, caching sentinel", n.objID, attr)
-					// Update cache with sentinel value (nil)
-					var entry *attrCacheEntry
-					if cached, ok := attrCache.Get(cacheKey); ok {
-						if e, ok := cached.(*attrCacheEntry); ok && e != nil {
-							entry = e
-						}
-					}
-					if entry == nil {
-						entry = &attrCacheEntry{
-							attrs: make(map[string][]byte),
-						}
-					}
-					entry.mu.Lock()
-					entry.attrs[attr] = nil // Use nil as sentinel
-					entry.mu.Unlock()
-					attrCache.Put(cacheKey, entry)
+					DebugLog("[VFS Getxattr] Attribute not found in database: objID=%d, attr=%s, returning ENODATA", n.objID, attr)
+					// Don't cache sentinel values - just return ENODATA
 					return 0, syscall.ENODATA
 				}
-				// For other errors (database errors, etc.), return EIO instead of ENODATA
+				// For other errors (database errors, etc.), return EIO
 				DebugLog("[VFS Getxattr] ERROR: Failed to get attribute: objID=%d, attr=%s, error=%v", n.objID, attr, err)
 				return 0, syscall.EIO
 			}
@@ -4583,23 +4542,6 @@ func (n *OrcasNode) Getxattr(ctx context.Context, attr string, dest []byte) (uin
 				return uint32(len(value)), syscall.ERANGE
 			}
 			copy(dest, value)
-
-			// Update cache: get or create cache entry and update with lock
-			var entry *attrCacheEntry
-			if cached, ok := attrCache.Get(cacheKey); ok {
-				if e, ok := cached.(*attrCacheEntry); ok && e != nil {
-					entry = e
-				}
-			}
-			if entry == nil {
-				entry = &attrCacheEntry{
-					attrs: make(map[string][]byte),
-				}
-			}
-			entry.mu.Lock()
-			entry.attrs[attr] = value
-			entry.mu.Unlock()
-			attrCache.Put(cacheKey, entry)
 
 			DebugLog("[VFS Getxattr] Success: objID=%d, attr=%s, valueLen=%d", n.objID, attr, len(value))
 			return uint32(len(value)), 0
@@ -4635,23 +4577,6 @@ func (n *OrcasNode) Setxattr(ctx context.Context, attr string, data []byte, flag
 				return syscall.EIO
 			}
 
-			// Update cache: get or create cache entry and update with lock
-			cacheKey := n.objID
-			var entry *attrCacheEntry
-			if cached, ok := attrCache.Get(cacheKey); ok {
-				if e, ok := cached.(*attrCacheEntry); ok && e != nil {
-					entry = e
-				}
-			}
-			if entry == nil {
-				entry = &attrCacheEntry{
-					attrs: make(map[string][]byte),
-				}
-			}
-			entry.mu.Lock()
-			entry.attrs[attr] = data
-			entry.mu.Unlock()
-			attrCache.Put(cacheKey, entry)
 			DebugLog("[VFS Setxattr] Success: objID=%d, attr=%s, dataLen=%d", n.objID, attr, len(data))
 			return 0
 		}
@@ -4674,76 +4599,33 @@ func (n *OrcasNode) Removexattr(ctx context.Context, attr string) syscall.Errno 
 		return errno
 	}
 
-	// Get MetadataAdapter from handler
-	if lh, ok := n.fs.h.(*core.LocalHandler); ok {
-		ma := lh.MetadataAdapter()
-		if ma != nil {
-			// Check cache first to see if attribute already doesn't exist
-			cacheKey := n.objID
-			if cached, ok := attrCache.Get(cacheKey); ok {
-				if entry, ok := cached.(*attrCacheEntry); ok && entry != nil {
-					entry.mu.RLock()
-					value, exists := entry.attrs[attr]
-					entry.mu.RUnlock()
-					if exists && value == nil {
-						// Cache already has sentinel (attribute doesn't exist)
-						// Return ENODATA to prevent infinite loop
-						DebugLog("[VFS Removexattr] Attribute already marked as non-existent in cache: objID=%d, attr=%s, returning ENODATA", n.objID, attr)
+		// Get MetadataAdapter from handler
+		if lh, ok := n.fs.h.(*core.LocalHandler); ok {
+			ma := lh.MetadataAdapter()
+			if ma != nil {
+				// Check if attribute exists before removing
+				_, err := ma.GetAttr(n.fs.c, n.fs.bktID, n.objID, attr)
+				if err != nil {
+					// Check if this is a "not found" error (attribute doesn't exist)
+					if strings.Contains(err.Error(), "attribute not found") || strings.Contains(err.Error(), "not found") {
+						DebugLog("[VFS Removexattr] Attribute not found: objID=%d, attr=%s, returning ENODATA", n.objID, attr)
 						return syscall.ENODATA
 					}
+					// For other errors (database errors, etc.), return EIO
+					DebugLog("[VFS Removexattr] ERROR: Failed to check attribute: objID=%d, attr=%s, error=%v", n.objID, attr, err)
+					return syscall.EIO
 				}
-			}
 
-			DebugLog("[VFS Removexattr] Removing attribute from database: objID=%d, attr=%s", n.objID, attr)
-			err := ma.RemoveAttr(n.fs.c, n.fs.bktID, n.objID, attr)
-			if err != nil {
-				// Check if this is a "not found" error (attribute doesn't exist)
-				if strings.Contains(err.Error(), "attribute not found") || strings.Contains(err.Error(), "not found") {
-					DebugLog("[VFS Removexattr] Attribute not found: objID=%d, attr=%s, setting sentinel in cache", n.objID, attr)
-					// Attribute doesn't exist, set sentinel in cache to prevent repeated queries
-					var entry *attrCacheEntry
-					if cached, ok := attrCache.Get(cacheKey); ok {
-						if e, ok := cached.(*attrCacheEntry); ok && e != nil {
-							entry = e
-						}
-					}
-					if entry == nil {
-						entry = &attrCacheEntry{
-							attrs: make(map[string][]byte),
-						}
-					}
-					entry.mu.Lock()
-					entry.attrs[attr] = nil // Set sentinel to indicate attribute doesn't exist
-					entry.mu.Unlock()
-					attrCache.Put(cacheKey, entry)
-					// Return ENODATA to indicate attribute doesn't exist and prevent infinite loop
-					return syscall.ENODATA
+				// Attribute exists, remove it
+				DebugLog("[VFS Removexattr] Removing attribute from database: objID=%d, attr=%s", n.objID, attr)
+				err = ma.RemoveAttr(n.fs.c, n.fs.bktID, n.objID, attr)
+				if err != nil {
+					DebugLog("[VFS Removexattr] ERROR: Failed to remove attribute: objID=%d, attr=%s, error=%v", n.objID, attr, err)
+					return syscall.EIO
 				}
-				// For other errors (database errors, etc.), return EIO
-				DebugLog("[VFS Removexattr] ERROR: Failed to remove attribute: objID=%d, attr=%s, error=%v", n.objID, attr, err)
-				return syscall.EIO
-			}
 
-			// Update cache: set sentinel (nil) to indicate attribute doesn't exist
-			// cacheKey is already defined above
-			var entry *attrCacheEntry
-			if cached, ok := attrCache.Get(cacheKey); ok {
-				if e, ok := cached.(*attrCacheEntry); ok && e != nil {
-					entry = e
-				}
-			}
-			if entry == nil {
-				entry = &attrCacheEntry{
-					attrs: make(map[string][]byte),
-				}
-			}
-			entry.mu.Lock()
-			entry.attrs[attr] = nil // Set sentinel to indicate attribute doesn't exist
-			entry.mu.Unlock()
-			attrCache.Put(cacheKey, entry)
-			DebugLog("[VFS Removexattr] Removed from cache (set sentinel): objID=%d, attr=%s", n.objID, attr)
-			DebugLog("[VFS Removexattr] Success: objID=%d, attr=%s", n.objID, attr)
-			return 0
+				DebugLog("[VFS Removexattr] Success: objID=%d, attr=%s", n.objID, attr)
+				return 0
 		}
 		DebugLog("[VFS Removexattr] MetadataAdapter is nil: objID=%d, attr=%s, returning ENOTSUP", n.objID, attr)
 	} else {
@@ -4763,93 +4645,23 @@ func (n *OrcasNode) Listxattr(ctx context.Context, dest []byte) (uint32, syscall
 	}
 
 	var keys []string
-	cacheKey := n.objID
 
-	// Try to get keys from cache first
-	cacheHit := false
-	if cached, ok := attrCache.Get(cacheKey); ok {
-		if entry, ok := cached.(*attrCacheEntry); ok && entry != nil {
-			entry.mu.RLock()
-			// Extract all keys from the cache entry, but filter out sentinel values (nil)
-			keys = make([]string, 0, len(entry.attrs))
-			for key, value := range entry.attrs {
-				// Only include keys with actual values (not sentinel nil)
-				if value != nil {
-					keys = append(keys, key)
-				}
+	// Get from database
+	if lh, ok := n.fs.h.(*core.LocalHandler); ok {
+		ma := lh.MetadataAdapter()
+		if ma != nil {
+			var err error
+			keys, err = ma.ListAttrs(n.fs.c, n.fs.bktID, n.objID)
+			if err != nil {
+				DebugLog("[VFS Listxattr] ERROR: Failed to list attributes: objID=%d, error=%v", n.objID, err)
+				return 0, syscall.EIO
 			}
-			entry.mu.RUnlock()
-			if len(keys) > 0 {
-				cacheHit = true
-				DebugLog("[VFS Listxattr] Cache hit: objID=%d, keysCount=%d", n.objID, len(keys))
-			}
-		}
-	}
-
-	// Cache miss, get from database
-	if !cacheHit {
-		DebugLog("[VFS Listxattr] Cache miss, querying database: objID=%d", n.objID)
-		if lh, ok := n.fs.h.(*core.LocalHandler); ok {
-			ma := lh.MetadataAdapter()
-			if ma != nil {
-				var err error
-				keys, err = ma.ListAttrs(n.fs.c, n.fs.bktID, n.objID)
-				if err != nil {
-					DebugLog("[VFS Listxattr] ERROR: Failed to list attributes: objID=%d, error=%v", n.objID, err)
-					return 0, syscall.EIO
-				}
-				DebugLog("[VFS Listxattr] Database query result: objID=%d, keysCount=%d", n.objID, len(keys))
-
-				// Update cache: merge database keys with existing cache entry
-				var entry *attrCacheEntry
-				if cached, ok := attrCache.Get(cacheKey); ok {
-					if e, ok := cached.(*attrCacheEntry); ok && e != nil {
-						entry = e
-					}
-				}
-				if entry == nil {
-					entry = &attrCacheEntry{
-						attrs: make(map[string][]byte),
-					}
-				}
-				// Merge keys: only update cache if entry doesn't exist or if we have actual values
-				// Don't set nil values here - only set actual values when Getxattr retrieves them
-				// For Listxattr, we only care about keys that exist in database
-				// The cache will be populated with actual values when Getxattr is called
-				// If a key is in database but not in cache, we don't set it to nil here
-				// because that would pollute the cache with sentinel values
-				entry.mu.Lock()
-				// Only keep keys that have actual values (not sentinel nil)
-				// Remove any sentinel values that don't exist in database
-				removedCount := 0
-				for key, value := range entry.attrs {
-					if value == nil {
-						// This is a sentinel value, check if it exists in database keys
-						found := false
-						for _, dbKey := range keys {
-							if dbKey == key {
-								found = true
-								break
-							}
-						}
-						// If sentinel key doesn't exist in database, remove it from cache
-						if !found {
-							delete(entry.attrs, key)
-							removedCount++
-						}
-					}
-				}
-				entry.mu.Unlock()
-				attrCache.Put(cacheKey, entry)
-				if removedCount > 0 {
-					DebugLog("[VFS Listxattr] Cleaned cache: objID=%d, removedSentinelCount=%d", n.objID, removedCount)
-				}
-			} else {
-				DebugLog("[VFS Listxattr] MetadataAdapter is nil: objID=%d", n.objID)
-			}
+			DebugLog("[VFS Listxattr] Database query result: objID=%d, keysCount=%d", n.objID, len(keys))
 		} else {
-			DebugLog("[VFS Listxattr] Handler is not LocalHandler: objID=%d", n.objID)
+			DebugLog("[VFS Listxattr] MetadataAdapter is nil: objID=%d", n.objID)
 		}
+	} else {
+		DebugLog("[VFS Listxattr] Handler is not LocalHandler: objID=%d", n.objID)
 	}
 
 	// If no attributes found, return 0 (success with empty list)
