@@ -176,10 +176,11 @@ func (n *OrcasNode) getObj() (*core.ObjectInfo, error) {
 	// If root node, return virtual object with bucketID as ID
 	if n.isRoot {
 		return &core.ObjectInfo{
-			ID:   n.fs.bktID,
-			PID:  0,
-			Type: core.OBJ_TYPE_DIR,
-			Name: "/",
+			ID:    n.fs.bktID,
+			PID:   0,
+			Type:  core.OBJ_TYPE_DIR,
+			Name:  "/",
+			MTime: core.Now(),
 		}, nil
 	}
 
