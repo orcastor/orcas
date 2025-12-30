@@ -150,6 +150,11 @@ var (
 	// This ensures one file uses the same reader, sharing chunk cache
 	decodingReaderCache = ecache2.NewLRUCache[int64](4, 64, 5*time.Minute)
 
+	// ecache cache: cache Statfs results to reduce filesystem queries
+	// key: bktID (int64), value: *fuse.StatfsOut
+	// TTL is short (5 seconds) but will be refreshed on access (LRU behavior)
+	statfsCache = ecache2.NewLRUCache[int64](4, 16, 5*time.Second)
+
 	// singleflight group: prevent duplicate concurrent requests for the same directory
 	// key: "<dirID>", ensures only one request per directory at a time
 	dirListSingleFlight singleflight.Group
