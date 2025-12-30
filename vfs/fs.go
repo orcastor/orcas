@@ -4467,6 +4467,16 @@ func (n *OrcasNode) Getxattr(ctx context.Context, attr string, dest []byte) (uin
 		return 0, errno
 	}
 
+	// For system-specific attributes (like security.selinux, system.*, trusted.*),
+	// return ENOTSUP directly to avoid "No data available" errors in ls
+	// These attributes are system-specific and not supported by our filesystem
+	// Note: user.* attributes are user-defined and should be supported, so we allow them
+	if strings.HasPrefix(attr, "security.") || strings.HasPrefix(attr, "system.") || 
+		strings.HasPrefix(attr, "trusted.") {
+		// These are system-specific attributes that we don't support
+		return 0, syscall.ENOTSUP
+	}
+
 	// Check cache first
 	cacheKey := n.objID
 	if cached, ok := attrCache.Get(cacheKey); ok {
