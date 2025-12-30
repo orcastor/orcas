@@ -4517,8 +4517,8 @@ func (n *OrcasNode) Getxattr(ctx context.Context, attr string, dest []byte) (uin
 			if exists {
 				// Check if this is a "not found" sentinel (nil)
 				if value == nil {
-					DebugLog("[VFS Getxattr] Cache hit (sentinel): objID=%d, attr=%s, returning 0", n.objID, attr)
-					return 0, 0
+					DebugLog("[VFS Getxattr] Cache hit (sentinel): objID=%d, attr=%s, returning ENODATA", n.objID, attr)
+					return 0, syscall.ENODATA
 				}
 				if len(value) > len(dest) {
 					DebugLog("[VFS Getxattr] Cache hit but buffer too small: objID=%d, attr=%s, valueLen=%d, destLen=%d, returning ERANGE", n.objID, attr, len(value), len(dest))
@@ -4572,7 +4572,7 @@ func (n *OrcasNode) Getxattr(ctx context.Context, attr string, dest []byte) (uin
 					entry.attrs[attr] = nil // Use nil as sentinel
 					entry.mu.Unlock()
 					attrCache.Put(cacheKey, entry)
-					return 0, 0
+					return 0, syscall.ENODATA
 				}
 				// For other errors (database errors, etc.), return EIO instead of ENODATA
 				DebugLog("[VFS Getxattr] ERROR: Failed to get attribute: objID=%d, attr=%s, error=%v", n.objID, attr, err)
@@ -4678,6 +4678,22 @@ func (n *OrcasNode) Removexattr(ctx context.Context, attr string) syscall.Errno 
 	if lh, ok := n.fs.h.(*core.LocalHandler); ok {
 		ma := lh.MetadataAdapter()
 		if ma != nil {
+			// Check cache first to see if attribute already doesn't exist
+			cacheKey := n.objID
+			if cached, ok := attrCache.Get(cacheKey); ok {
+				if entry, ok := cached.(*attrCacheEntry); ok && entry != nil {
+					entry.mu.RLock()
+					value, exists := entry.attrs[attr]
+					entry.mu.RUnlock()
+					if exists && value == nil {
+						// Cache already has sentinel (attribute doesn't exist)
+						// Return ENODATA to prevent infinite loop
+						DebugLog("[VFS Removexattr] Attribute already marked as non-existent in cache: objID=%d, attr=%s, returning ENODATA", n.objID, attr)
+						return syscall.ENODATA
+					}
+				}
+			}
+
 			DebugLog("[VFS Removexattr] Removing attribute from database: objID=%d, attr=%s", n.objID, attr)
 			err := ma.RemoveAttr(n.fs.c, n.fs.bktID, n.objID, attr)
 			if err != nil {
@@ -4685,7 +4701,6 @@ func (n *OrcasNode) Removexattr(ctx context.Context, attr string) syscall.Errno 
 				if strings.Contains(err.Error(), "attribute not found") || strings.Contains(err.Error(), "not found") {
 					DebugLog("[VFS Removexattr] Attribute not found: objID=%d, attr=%s, setting sentinel in cache", n.objID, attr)
 					// Attribute doesn't exist, set sentinel in cache to prevent repeated queries
-					cacheKey := n.objID
 					var entry *attrCacheEntry
 					if cached, ok := attrCache.Get(cacheKey); ok {
 						if e, ok := cached.(*attrCacheEntry); ok && e != nil {
@@ -4701,7 +4716,8 @@ func (n *OrcasNode) Removexattr(ctx context.Context, attr string) syscall.Errno 
 					entry.attrs[attr] = nil // Set sentinel to indicate attribute doesn't exist
 					entry.mu.Unlock()
 					attrCache.Put(cacheKey, entry)
-					return 0
+					// Return ENODATA to indicate attribute doesn't exist and prevent infinite loop
+					return syscall.ENODATA
 				}
 				// For other errors (database errors, etc.), return EIO
 				DebugLog("[VFS Removexattr] ERROR: Failed to remove attribute: objID=%d, attr=%s, error=%v", n.objID, attr, err)
@@ -4709,7 +4725,7 @@ func (n *OrcasNode) Removexattr(ctx context.Context, attr string) syscall.Errno 
 			}
 
 			// Update cache: set sentinel (nil) to indicate attribute doesn't exist
-			cacheKey := n.objID
+			// cacheKey is already defined above
 			var entry *attrCacheEntry
 			if cached, ok := attrCache.Get(cacheKey); ok {
 				if e, ok := cached.(*attrCacheEntry); ok && e != nil {

@@ -4319,13 +4319,17 @@ func TestXattrSetGetRemove(t *testing.T) {
 			errno = fileNode.Removexattr(ctx, attrName)
 			So(errno, ShouldEqual, syscall.Errno(0))
 
-			// Get attribute again - should not exist (return 0, 0)
-			// This is the key test: after removal, Getxattr should return 0, 0
-			// instead of ENODATA, indicating the attribute doesn't exist
+			// Get attribute again - should not exist (return ENODATA)
+			// This is the key test: after removal, Getxattr should return ENODATA
+			// indicating the attribute doesn't exist
 			dest2 := make([]byte, 1024)
 			size2, errno2 := fileNode.Getxattr(ctx, attrName, dest2)
-			So(errno2, ShouldEqual, syscall.Errno(0))
+			So(errno2, ShouldEqual, syscall.ENODATA)
 			So(size2, ShouldEqual, uint32(0))
+
+			// Try to remove again - should return ENODATA to prevent infinite loop
+			errno3 := fileNode.Removexattr(ctx, attrName)
+			So(errno3, ShouldEqual, syscall.ENODATA)
 		})
 	})
 }
