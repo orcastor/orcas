@@ -165,10 +165,6 @@ func (l *listener) OnData(c core.Ctx, h core.Handler, dp *dataPkger, buf []byte)
 
 		// 3. Update checksum and size
 		if l.d.Kind&core.DATA_CMPR_MASK != 0 || l.d.Kind&core.DATA_ENDEC_MASK != 0 {
-			// Update Cksum using XXH3
-			xxh3Hash := xxh3.New()
-			xxh3Hash.Write(encodedBuf)
-			l.d.Cksum = int64(xxh3Hash.Sum64())
 			l.d.Size += int64(len(encodedBuf))
 		}
 
@@ -219,15 +215,10 @@ func (l *listener) OnFinish(c core.Ctx, h core.Handler) error {
 			fmt.Println(err)
 			return err
 		}
-		// Update Cksum using XXH3
-		xxh3Hash := xxh3.New()
-		xxh3Hash.Write(encodedBuf)
-		l.d.Cksum = int64(xxh3Hash.Sum64())
 		l.d.Size += int64(len(encodedBuf))
 	}
 	// If neither compressed nor encrypted, use original data's XXH3 and size
 	if l.d.Kind&core.DATA_CMPR_MASK == 0 && l.d.Kind&core.DATA_ENDEC_MASK == 0 {
-		l.d.Cksum = l.d.XXH3
 		l.d.Size = l.d.OrigSize
 	}
 	return nil

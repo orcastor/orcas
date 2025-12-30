@@ -27,7 +27,6 @@ import (
 	"golang.org/x/sync/singleflight"
 )
 
-
 var (
 	// Object pool: reuse byte buffers to reduce memory allocation
 	// Optimization: use smaller initial capacity for small file operations
@@ -124,7 +123,6 @@ var (
 	// key: dirID (int64), value: *cachedDirStream (dirID is globally unique)
 	// This cache stores the final DirStream entries, avoiding data merging on every Readdir call
 	readdirCache = ecache2.NewLRUCache[int64](16, 512, 30*time.Second)
-
 
 	// Per-directory mutexes for thread-safe directory listing cache operations
 	// key: dirID (int64), value: *sync.RWMutex
@@ -422,18 +420,18 @@ type WriteBuffer struct {
 
 // SequentialWriteBuffer sequential write buffer (optimized: sequential writes starting from 0)
 type SequentialWriteBuffer struct {
-	fileID     int64  // File object ID
-	dataID     int64  // Data object ID (created when creating new object)
-	sn         int    // Current data block sequence number
-	chunkSize  int64  // Chunk size
-	buffer     []byte // Current chunk buffer (at most one chunk size)
-	offset     int64  // Current write position (sequential write)
-	hasData    bool   // Whether data has been written
-	closed     bool   // Whether closed (becomes random write)
+	mu         sync.Mutex // Mutex for thread-safe writes and offset modifications
+	fileID     int64      // File object ID
+	dataID     int64      // Data object ID (created when creating new object)
+	sn         int        // Current data block sequence number
+	chunkSize  int64      // Chunk size
+	buffer     []byte     // Current chunk buffer (at most one chunk size)
+	offset     int64      // Current write position (sequential write)
+	hasData    bool       // Whether data has been written
+	closed     bool       // Whether closed (becomes random write)
 	dataInfo   *core.DataInfo
 	xxh3Hash   *xxh3.Hasher // XXH3 hasher for original data
 	sha256Hash hash.Hash    // SHA-256 hasher for original data
-	cksumHash  *xxh3.Hasher // XXH3 hasher for final data (Cksum)
 }
 
 // TempFileWriter handles efficient fragmented writes for .tmp files
@@ -1405,8 +1403,7 @@ func (tw *TempFileWriter) flushChunkWithBuffer(sn int, buf *chunkBuffer) error {
 			finalData = processedChunk
 		}
 
-		// Update Cksum (XXH3) and size of final data
-		// Note: Cksum is updated in the actual processing code using XXH3
+		// Update size of final data
 		DebugLog("[VFS TempFileWriter flushChunk] Compression/encryption applied: fileID=%d, dataID=%d, sn=%d, originalSize=%d, finalSize=%d, ratio=%.2f%%",
 			tw.fileID, tw.dataID, sn, len(chunkData), len(finalData), float64(len(finalData))*100.0/float64(len(chunkData)))
 	} else {
@@ -2080,29 +2077,40 @@ func (ra *RandomAccessor) Write(offset int64, data []byte) error {
 	}
 
 	// Check if in sequential write mode (only for non-.tmp files)
-	if ra.seqBuffer != nil && !ra.seqBuffer.closed {
-		// Check if still sequential write (continue from current position)
-		if offset == ra.seqBuffer.offset {
-			// Sequential write, use optimized path
-			return ra.writeSequential(offset, data)
-		} else if offset < ra.seqBuffer.offset {
-			// Write backwards, switch to random write mode
-			if flushErr := ra.flushSequentialBuffer(); flushErr != nil {
-				DebugLog("[VFS RandomAccessor Write] ERROR: Failed to flush sequential buffer (backwards write): fileID=%d, offset=%d, seqOffset=%d, size=%d, error=%v", ra.fileID, offset, ra.seqBuffer.offset, len(data), flushErr)
-				return flushErr
+	if ra.seqBuffer != nil {
+		ra.seqBuffer.mu.Lock()
+		seqOffset := ra.seqBuffer.offset
+		seqClosed := ra.seqBuffer.closed
+		ra.seqBuffer.mu.Unlock()
+
+		if !seqClosed {
+			// Check if still sequential write (continue from current position)
+			if offset == seqOffset {
+				// Sequential write, use optimized path
+				return ra.writeSequential(offset, data)
+			} else if offset < seqOffset {
+				// Write backwards, switch to random write mode
+				if flushErr := ra.flushSequentialBuffer(); flushErr != nil {
+					DebugLog("[VFS RandomAccessor Write] ERROR: Failed to flush sequential buffer (backwards write): fileID=%d, offset=%d, seqOffset=%d, size=%d, error=%v", ra.fileID, offset, seqOffset, len(data), flushErr)
+					return flushErr
+				}
+				ra.seqBuffer.mu.Lock()
+				ra.seqBuffer.closed = true
+				ra.seqBuffer.mu.Unlock()
+			} else {
+				// Skipped some positions, switch to random write mode
+				// IMPORTANT: Before flushing sequential buffer, we need to ensure all data is written
+				// But since we're switching to random write mode, we should flush the sequential buffer
+				// to ensure the data written so far is persisted, then continue with random writes
+				// The subsequent random writes will be merged with the sequential data during flush
+				if flushErr := ra.flushSequentialBuffer(); flushErr != nil {
+					DebugLog("[VFS RandomAccessor Write] ERROR: Failed to flush sequential buffer (skipped positions): fileID=%d, offset=%d, seqOffset=%d, size=%d, error=%v", ra.fileID, offset, seqOffset, len(data), flushErr)
+					return flushErr
+				}
+				ra.seqBuffer.mu.Lock()
+				ra.seqBuffer.closed = true
+				ra.seqBuffer.mu.Unlock()
 			}
-			ra.seqBuffer.closed = true
-		} else {
-			// Skipped some positions, switch to random write mode
-			// IMPORTANT: Before flushing sequential buffer, we need to ensure all data is written
-			// But since we're switching to random write mode, we should flush the sequential buffer
-			// to ensure the data written so far is persisted, then continue with random writes
-			// The subsequent random writes will be merged with the sequential data during flush
-			if flushErr := ra.flushSequentialBuffer(); flushErr != nil {
-				DebugLog("[VFS RandomAccessor Write] ERROR: Failed to flush sequential buffer (skipped positions): fileID=%d, offset=%d, seqOffset=%d, size=%d, error=%v", ra.fileID, offset, ra.seqBuffer.offset, len(data), flushErr)
-				return flushErr
-			}
-			ra.seqBuffer.closed = true
 		}
 	}
 
@@ -2338,7 +2346,6 @@ func (ra *RandomAccessor) initSequentialBufferWithNewData() error {
 		SHA256_1: 0,
 		SHA256_2: 0,
 		SHA256_3: 0,
-		Cksum:    0,
 		Kind:     0,
 	}
 
@@ -2373,7 +2380,14 @@ func (ra *RandomAccessor) initSequentialBufferWithNewData() error {
 
 // writeSequential writes data sequentially (optimized path)
 func (ra *RandomAccessor) writeSequential(offset int64, data []byte) error {
-	if ra.seqBuffer == nil || ra.seqBuffer.closed {
+	if ra.seqBuffer == nil {
+		return fmt.Errorf("sequential buffer not available")
+	}
+
+	ra.seqBuffer.mu.Lock()
+	defer ra.seqBuffer.mu.Unlock()
+
+	if ra.seqBuffer.closed {
 		return fmt.Errorf("sequential buffer not available")
 	}
 
@@ -2388,10 +2402,14 @@ func (ra *RandomAccessor) writeSequential(offset int64, data []byte) error {
 		remainingInChunk := ra.seqBuffer.chunkSize - int64(len(ra.seqBuffer.buffer))
 		if remainingInChunk <= 0 {
 			// Current chunk is full, write and clear
+			// Need to unlock before calling flushSequentialChunk (which will lock again)
+			ra.seqBuffer.mu.Unlock()
 			if err := ra.flushSequentialChunk(); err != nil {
 				DebugLog("[VFS RandomAccessor writeSequential] ERROR: Failed to flush sequential chunk (chunk full): fileID=%d, offset=%d, size=%d, error=%v", ra.fileID, offset, len(data), err)
+				ra.seqBuffer.mu.Lock()
 				return err
 			}
+			ra.seqBuffer.mu.Lock()
 			remainingInChunk = ra.seqBuffer.chunkSize
 		}
 
@@ -2409,10 +2427,14 @@ func (ra *RandomAccessor) writeSequential(offset int64, data []byte) error {
 
 		// If chunk is full, write immediately
 		if int64(len(ra.seqBuffer.buffer)) >= ra.seqBuffer.chunkSize {
+			// Need to unlock before calling flushSequentialChunk (which will lock again)
+			ra.seqBuffer.mu.Unlock()
 			if err := ra.flushSequentialChunk(); err != nil {
 				DebugLog("[VFS RandomAccessor writeSequential] ERROR: Failed to flush sequential chunk (immediate flush): fileID=%d, offset=%d, size=%d, error=%v", ra.fileID, offset, len(data), err)
+				ra.seqBuffer.mu.Lock()
 				return err
 			}
+			ra.seqBuffer.mu.Lock()
 		}
 	}
 
@@ -2421,6 +2443,18 @@ func (ra *RandomAccessor) writeSequential(offset int64, data []byte) error {
 
 // flushSequentialChunk flushes current sequential write chunk (writes a complete chunk)
 func (ra *RandomAccessor) flushSequentialChunk() error {
+	if ra.seqBuffer == nil {
+		return nil
+	}
+
+	ra.seqBuffer.mu.Lock()
+	defer ra.seqBuffer.mu.Unlock()
+
+	return ra.flushSequentialChunkLocked()
+}
+
+// flushSequentialChunkLocked flushes current sequential write chunk (assumes lock is already held)
+func (ra *RandomAccessor) flushSequentialChunkLocked() error {
 	if ra.seqBuffer == nil || len(ra.seqBuffer.buffer) == 0 {
 		return nil
 	}
@@ -2453,7 +2487,7 @@ func (ra *RandomAccessor) flushSequentialChunk() error {
 	ra.seqBuffer.dataInfo.SHA256_2 = int64(binary.BigEndian.Uint64(sha256Sum[16:24]))
 	ra.seqBuffer.dataInfo.SHA256_3 = int64(binary.BigEndian.Uint64(sha256Sum[24:32]))
 	ra.seqBuffer.dataInfo.OrigSize += int64(len(chunkData))
-	DebugLog("[VFS flushSequentialChunk] Original chunk: fileID=%d, chunkSize=%d, OrigSize=%d, Kind=0x%x (CMPR=%v, ENDEC=%v)",
+	DebugLog("[VFS flushSequentialChunk] Original chunk: fileID=%d, chunk=%d, OrigSize=%d, Kind=0x%x (CMPR=%v, ENDEC=%v)",
 		ra.fileID, len(chunkData), ra.seqBuffer.dataInfo.OrigSize, ra.seqBuffer.dataInfo.Kind,
 		ra.seqBuffer.dataInfo.Kind&core.DATA_CMPR_MASK != 0,
 		ra.seqBuffer.dataInfo.Kind&core.DATA_ENDEC_MASK != 0)
@@ -2511,13 +2545,6 @@ func (ra *RandomAccessor) flushSequentialChunk() error {
 		encodedChunk = processedChunk
 	}
 
-	// Update Cksum (XXH3) of final data
-	if ra.seqBuffer.cksumHash == nil {
-		ra.seqBuffer.cksumHash = xxh3.New()
-	}
-	ra.seqBuffer.cksumHash.Write(encodedChunk)
-	ra.seqBuffer.dataInfo.Cksum = int64(ra.seqBuffer.cksumHash.Sum64())
-
 	// Update size (if compressed or encrypted)
 	originalChunkSize := len(chunkData)
 	processedChunkSize := len(processedChunk)
@@ -2557,6 +2584,9 @@ func (ra *RandomAccessor) flushSequentialBuffer() error {
 	if ra.seqBuffer == nil {
 		return nil
 	}
+
+	ra.seqBuffer.mu.Lock()
+	defer ra.seqBuffer.mu.Unlock()
 
 	// If no data, return directly
 	if !ra.seqBuffer.hasData {
@@ -2623,7 +2653,7 @@ func (ra *RandomAccessor) flushSequentialBuffer() error {
 
 	// Write last chunk (if there's still data)
 	if len(ra.seqBuffer.buffer) > 0 {
-		if err := ra.flushSequentialChunk(); err != nil {
+		if err := ra.flushSequentialChunkLocked(); err != nil {
 			DebugLog("[VFS RandomAccessor flushSequentialBuffer] ERROR: Failed to flush last sequential chunk: fileID=%d, bufferSize=%d, error=%v", ra.fileID, len(ra.seqBuffer.buffer), err)
 			return err
 		}
@@ -2637,7 +2667,6 @@ func (ra *RandomAccessor) flushSequentialBuffer() error {
 
 	if ra.seqBuffer.dataInfo.Kind&core.DATA_CMPR_MASK == 0 && ra.seqBuffer.dataInfo.Kind&core.DATA_ENDEC_MASK == 0 {
 		ra.seqBuffer.dataInfo.Size = ra.seqBuffer.dataInfo.OrigSize
-		ra.seqBuffer.dataInfo.Cksum = ra.seqBuffer.dataInfo.XXH3
 		DebugLog("[VFS flushSequentialBuffer] No compression/encryption, set Size=OrigSize: fileID=%d, Size=%d",
 			ra.fileID, ra.seqBuffer.dataInfo.Size)
 	} else {
@@ -2742,38 +2771,50 @@ func (ra *RandomAccessor) Read(offset int64, size int) ([]byte, error) {
 	// Also check sequential buffer if it exists and has data
 	if fileObj.DataID == 0 || fileObj.DataID == core.EmptyDataID {
 		// First check sequential buffer if it exists and has data
-		if ra.seqBuffer != nil && ra.seqBuffer.hasData && !ra.seqBuffer.closed {
-			// Sequential buffer has data, read from it
-			// Sequential buffer contains data from offset 0, so we can read directly
-			// The buffer contains data up to ra.seqBuffer.offset
-			seqDataLen := ra.seqBuffer.offset
-			if offset < seqDataLen {
-				readEnd := offset + int64(size)
-				if readEnd > seqDataLen {
-					readEnd = seqDataLen
-				}
-				if offset < readEnd {
-					// Read from sequential buffer's buffer field
-					// The buffer contains data from offset 0 to seqDataLen
-					// But we need to read from the actual data, which may be in chunks
-					// For now, if offset is within the current chunk buffer, read from it
-					bufferStart := (ra.seqBuffer.offset / ra.seqBuffer.chunkSize) * ra.seqBuffer.chunkSize
-					bufferEnd := bufferStart + int64(len(ra.seqBuffer.buffer))
-					if offset >= bufferStart && offset < bufferEnd {
-						bufferOffset := offset - bufferStart
-						readEndInBuffer := readEnd - bufferStart
-						if readEndInBuffer > int64(len(ra.seqBuffer.buffer)) {
-							readEndInBuffer = int64(len(ra.seqBuffer.buffer))
-						}
-						if bufferOffset < readEndInBuffer {
-							result := make([]byte, readEndInBuffer-bufferOffset)
-							copy(result, ra.seqBuffer.buffer[bufferOffset:readEndInBuffer])
-							DebugLog("[VFS Read] Reading from sequential buffer: fileID=%d, offset=%d, size=%d, resultLen=%d", ra.fileID, offset, size, len(result))
-							return result, nil
-						}
+		if ra.seqBuffer != nil {
+			ra.seqBuffer.mu.Lock()
+			seqHasData := ra.seqBuffer.hasData
+			seqClosed := ra.seqBuffer.closed
+			seqOffset := ra.seqBuffer.offset
+			seqChunkSize := ra.seqBuffer.chunkSize
+			seqBufferLen := len(ra.seqBuffer.buffer)
+			seqBuffer := make([]byte, seqBufferLen)
+			copy(seqBuffer, ra.seqBuffer.buffer)
+			ra.seqBuffer.mu.Unlock()
+
+			if seqHasData && !seqClosed {
+				// Sequential buffer has data, read from it
+				// Sequential buffer contains data from offset 0, so we can read directly
+				// The buffer contains data up to seqOffset
+				seqDataLen := seqOffset
+				if offset < seqDataLen {
+					readEnd := offset + int64(size)
+					if readEnd > seqDataLen {
+						readEnd = seqDataLen
 					}
-					// If offset is not in current buffer, data may have been flushed
-					// Fall through to check random buffer
+					if offset < readEnd {
+						// Read from sequential buffer's buffer field
+						// The buffer contains data from offset 0 to seqDataLen
+						// But we need to read from the actual data, which may be in chunks
+						// For now, if offset is within the current chunk buffer, read from it
+						bufferStart := (seqOffset / seqChunkSize) * seqChunkSize
+						bufferEnd := bufferStart + int64(seqBufferLen)
+						if offset >= bufferStart && offset < bufferEnd {
+							bufferOffset := offset - bufferStart
+							readEndInBuffer := readEnd - bufferStart
+							if readEndInBuffer > int64(seqBufferLen) {
+								readEndInBuffer = int64(seqBufferLen)
+							}
+							if bufferOffset < readEndInBuffer {
+								result := make([]byte, readEndInBuffer-bufferOffset)
+								copy(result, seqBuffer[bufferOffset:readEndInBuffer])
+								DebugLog("[VFS Read] Reading from sequential buffer: fileID=%d, offset=%d, size=%d, resultLen=%d", ra.fileID, offset, size, len(result))
+								return result, nil
+							}
+						}
+						// If offset is not in current buffer, data may have been flushed
+						// Fall through to check random buffer
+					}
 				}
 			}
 		}
@@ -2812,29 +2853,38 @@ func (ra *RandomAccessor) Read(offset int64, size int) ([]byte, error) {
 	DebugLog("[VFS Read] After size limit: fileID=%d, offset=%d, size=%d, actualFileSize=%d", ra.fileID, offset, size, actualFileSize)
 
 	// If sequential write buffer has data, read from it first
-	if ra.seqBuffer != nil && ra.seqBuffer.hasData {
-		// Sequential write buffer has data, need to flush before reading
-		// But shouldn't flush when reading, so only handle data already in file object
-		// If sequential write buffer is not closed, data is still in buffer, need to flush first
-		if !ra.seqBuffer.closed {
-			// Sequential write not completed, flush to file object first
-			if flushErr := ra.flushSequentialBuffer(); flushErr != nil {
-				return nil, flushErr
-			}
-			ra.seqBuffer.closed = true
-			// Re-acquire file object
-			var objErr error
-			fileObj, objErr = ra.getFileObj()
-			if objErr != nil {
-				return nil, objErr
-			}
-		} else {
-			// Sequential write buffer is closed, data has been flushed
-			// Re-acquire file object (may have been updated by flush)
-			var objErr error
-			fileObj, objErr = ra.getFileObj()
-			if objErr != nil {
-				return nil, objErr
+	if ra.seqBuffer != nil {
+		ra.seqBuffer.mu.Lock()
+		seqHasData := ra.seqBuffer.hasData
+		seqClosed := ra.seqBuffer.closed
+		ra.seqBuffer.mu.Unlock()
+
+		if seqHasData {
+			// Sequential write buffer has data, need to flush before reading
+			// But shouldn't flush when reading, so only handle data already in file object
+			// If sequential write buffer is not closed, data is still in buffer, need to flush first
+			if !seqClosed {
+				// Sequential write not completed, flush to file object first
+				if flushErr := ra.flushSequentialBuffer(); flushErr != nil {
+					return nil, flushErr
+				}
+				ra.seqBuffer.mu.Lock()
+				ra.seqBuffer.closed = true
+				ra.seqBuffer.mu.Unlock()
+				// Re-acquire file object
+				var objErr error
+				fileObj, objErr = ra.getFileObj()
+				if objErr != nil {
+					return nil, objErr
+				}
+			} else {
+				// Sequential write buffer is closed, data has been flushed
+				// Re-acquire file object (may have been updated by flush)
+				var objErr error
+				fileObj, objErr = ra.getFileObj()
+				if objErr != nil {
+					return nil, objErr
+				}
 			}
 		}
 	}
@@ -3283,35 +3333,47 @@ func (ra *RandomAccessor) flushInternal(force bool) (int64, error) {
 	}
 
 	// If sequential write buffer has data, flush it first
-	if ra.seqBuffer != nil && ra.seqBuffer.hasData && !ra.seqBuffer.closed {
-		DebugLog("[VFS RandomAccessor Flush] Flushing sequential buffer: fileID=%d, dataID=%d, sn=%d, bufferSize=%d", ra.fileID, ra.seqBuffer.dataID, ra.seqBuffer.sn, len(ra.seqBuffer.buffer))
-		if err := ra.flushSequentialBuffer(); err != nil {
-			DebugLog("[VFS RandomAccessor Flush] ERROR: Failed to flush sequential buffer: fileID=%d, error=%v", ra.fileID, err)
-			return 0, err
-		}
-		// After sequential write completes, close sequential buffer
-		ra.seqBuffer.closed = true
-		// After sequential write completes, return new version ID (actually the version corresponding to current DataID)
-		fileObj, err := ra.getFileObj()
-		if err != nil {
-			DebugLog("[VFS RandomAccessor Flush] ERROR: Failed to get file object after sequential flush: fileID=%d, error=%v", ra.fileID, err)
-			return 0, err
-		}
-		DebugLog("[VFS RandomAccessor Flush] Sequential flush completed: fileID=%d, dataID=%d, size=%d", ra.fileID, fileObj.DataID, fileObj.Size)
+	if ra.seqBuffer != nil {
+		ra.seqBuffer.mu.Lock()
+		seqHasData := ra.seqBuffer.hasData
+		seqClosed := ra.seqBuffer.closed
+		seqDataID := ra.seqBuffer.dataID
+		seqSn := ra.seqBuffer.sn
+		seqBufferSize := len(ra.seqBuffer.buffer)
+		ra.seqBuffer.mu.Unlock()
 
-		// Update file object cache with latest metadata from database
-		updatedObjs, err := ra.fs.h.Get(ra.fs.c, ra.fs.bktID, []int64{ra.fileID})
-		if err == nil && len(updatedObjs) > 0 {
-			updatedObj := updatedObjs[0]
-			fileObjCache.Put(ra.fileObjKey, updatedObj)
-			ra.fileObj.Store(updatedObj)
-			DebugLog("[VFS RandomAccessor Flush] Updated file object cache after sequential flush: fileID=%d, size=%d, dataID=%d, mtime=%d",
-				updatedObj.ID, updatedObj.Size, updatedObj.DataID, updatedObj.MTime)
-			fileObj = updatedObj
-		}
+		if seqHasData && !seqClosed {
+			DebugLog("[VFS RandomAccessor Flush] Flushing sequential buffer: fileID=%d, dataID=%d, sn=%d, bufferSize=%d", ra.fileID, seqDataID, seqSn, seqBufferSize)
+			if err := ra.flushSequentialBuffer(); err != nil {
+				DebugLog("[VFS RandomAccessor Flush] ERROR: Failed to flush sequential buffer: fileID=%d, error=%v", ra.fileID, err)
+				return 0, err
+			}
+			// After sequential write completes, close sequential buffer
+			ra.seqBuffer.mu.Lock()
+			ra.seqBuffer.closed = true
+			ra.seqBuffer.mu.Unlock()
+			// After sequential write completes, return new version ID (actually the version corresponding to current DataID)
+			fileObj, err := ra.getFileObj()
+			if err != nil {
+				DebugLog("[VFS RandomAccessor Flush] ERROR: Failed to get file object after sequential flush: fileID=%d, error=%v", ra.fileID, err)
+				return 0, err
+			}
+			DebugLog("[VFS RandomAccessor Flush] Sequential flush completed: fileID=%d, dataID=%d, size=%d", ra.fileID, fileObj.DataID, fileObj.Size)
 
-		if fileObj.DataID > 0 {
-			return core.NewID(), nil // Return new version ID
+			// Update file object cache with latest metadata from database
+			updatedObjs, err := ra.fs.h.Get(ra.fs.c, ra.fs.bktID, []int64{ra.fileID})
+			if err == nil && len(updatedObjs) > 0 {
+				updatedObj := updatedObjs[0]
+				fileObjCache.Put(ra.fileObjKey, updatedObj)
+				ra.fileObj.Store(updatedObj)
+				DebugLog("[VFS RandomAccessor Flush] Updated file object cache after sequential flush: fileID=%d, size=%d, dataID=%d, mtime=%d",
+					updatedObj.ID, updatedObj.Size, updatedObj.DataID, updatedObj.MTime)
+				fileObj = updatedObj
+			}
+
+			if fileObj.DataID > 0 {
+				return core.NewID(), nil // Return new version ID
+			}
 		}
 	}
 
@@ -4544,9 +4606,6 @@ func (ra *RandomAccessor) processWritesStreaming(
 	dataInfo.SHA256_3 = int64(binary.BigEndian.Uint64(sha256Sum[24:32]))
 	if dataInfo.Kind&core.DATA_CMPR_MASK == 0 && dataInfo.Kind&core.DATA_ENDEC_MASK == 0 {
 		dataInfo.Size = dataInfo.OrigSize
-		dataInfo.Cksum = int64(dataXXH3)
-	} else {
-		dataInfo.Cksum = int64(cksumHash.Sum64())
 	}
 
 	// Save data metadata

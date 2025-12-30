@@ -58,7 +58,6 @@ func TestScrub(t *testing.T) {
 				Size:     int64(len(readData)),
 				OrigSize: int64(len(readData)),
 				XXH3:     int64(xxh3Value),
-				Cksum:    int64(xxh3Value),
 				SHA256_0: sha256_0,
 				SHA256_1: sha256_1,
 				SHA256_2: sha256_2,
@@ -86,7 +85,6 @@ func TestScrub(t *testing.T) {
 				Size:     100,
 				OrigSize: 100,
 				XXH3:     12345,
-				Cksum:    12345,
 				Kind:     DATA_NORMAL,
 			}
 			So(dma.PutData(c, testBktID, []*DataInfo{dataInfo}), ShouldBeNil)
@@ -143,7 +141,6 @@ func TestScrub(t *testing.T) {
 				Size:     int64(len(readData)),
 				OrigSize: int64(len(readData)),
 				XXH3:     int64(xxh3Value + 1), // 错误的XXHash3
-				Cksum:    int64(xxh3Value + 1),
 				SHA256_0: sha256_0,
 				SHA256_1: sha256_1,
 				SHA256_2: sha256_2,
@@ -194,7 +191,6 @@ func TestScrub(t *testing.T) {
 				Size:     int64(len(allData)),
 				OrigSize: int64(len(allData)),
 				XXH3:     int64(xxh3Value),
-				Cksum:    int64(xxh3Value),
 				SHA256_0: sha256_0,
 				SHA256_1: sha256_1,
 				SHA256_2: sha256_2,
@@ -239,7 +235,6 @@ func TestScrub(t *testing.T) {
 					Size:     int64(len(readData)),
 					OrigSize: int64(len(readData)),
 					XXH3:     int64(xxh3Value),
-					Cksum:    int64(xxh3Value),
 					SHA256_0: sha256_0,
 					SHA256_1: sha256_1,
 					SHA256_2: sha256_2,
@@ -825,7 +820,6 @@ func TestScanDirtyData(t *testing.T) {
 				Size:     int64(len(allData)),
 				OrigSize: int64(len(allData)),
 				XXH3:     int64(xxh3Value),
-				Cksum:    int64(xxh3Value),
 				SHA256_0: sha256_0,
 				SHA256_1: sha256_1,
 				SHA256_2: sha256_2,
@@ -867,7 +861,6 @@ func TestScanDirtyData(t *testing.T) {
 				Size:     int64(len(allData)) + 100, // 故意设置错误的size
 				OrigSize: int64(len(allData)) + 100,
 				XXH3:     int64(xxh3Value),
-				Cksum:    int64(xxh3Value),
 				Kind:     DATA_NORMAL,
 			}
 			So(dma.PutData(c, testBktID, []*DataInfo{dataInfo}), ShouldBeNil)
@@ -910,7 +903,6 @@ func TestScanDirtyData(t *testing.T) {
 				Size:     int64(len(allData)),
 				OrigSize: int64(len(allData)),
 				XXH3:     int64(xxh3Value),
-				Cksum:    int64(xxh3Value),
 				SHA256_0: sha256_0,
 				SHA256_1: sha256_1,
 				SHA256_2: sha256_2,
@@ -2333,7 +2325,6 @@ func TestScanOrphanedChunks(t *testing.T) {
 				Size:     int64(len(readData)),
 				OrigSize: int64(len(readData)),
 				XXH3:     int64(xxh3Value),
-				Cksum:    int64(xxh3Value),
 				SHA256_0: sha256_0,
 				SHA256_1: sha256_1,
 				SHA256_2: sha256_2,
@@ -2380,7 +2371,6 @@ func TestScanOrphanedChunks(t *testing.T) {
 				Size:     int64(len(readData)),
 				OrigSize: int64(len(readData)),
 				XXH3:     int64(xxh3Value),
-				Cksum:    int64(xxh3Value),
 				SHA256_0: sha256_0,
 				SHA256_1: sha256_1,
 				SHA256_2: sha256_2,
@@ -2474,7 +2464,6 @@ func TestScanOrphanedChunks(t *testing.T) {
 				Size:     int64(len(readData)),
 				OrigSize: int64(len(readData)),
 				XXH3:     int64(xxh3Value),
-				Cksum:    int64(xxh3Value),
 				Kind:     DATA_NORMAL,
 			}
 			So(dma.PutData(c, testBktID, []*DataInfo{dataInfo}), ShouldBeNil)
