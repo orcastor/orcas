@@ -4346,6 +4346,8 @@ func (n *OrcasNode) queryFileByNameDirectly(parentID int64, fileName string) (in
 func (n *OrcasNode) Statfs(ctx context.Context, out *fuse.StatfsOut) syscall.Errno {
 	DebugLog("[VFS Statfs] Entry: objID=%d, bktID=%d", n.objID, n.fs.bktID)
 
+	return syscall.ENOTSUP
+
 	/*
 		// Get bucket information to determine quota and used space
 		bucket, err := n.fs.h.GetBktInfo(n.fs.c, n.fs.bktID)
@@ -4432,9 +4434,9 @@ func (n *OrcasNode) Statfs(ctx context.Context, out *fuse.StatfsOut) syscall.Err
 		out.Frsize = uint32(blockSize) // Fragment size (same as block size)
 
 		DebugLog("[VFS Statfs] Bucket stats: bktID=%d, quota=%d, used=%d, realUsed=%d, totalBlocks=%d, freeBlocks=%d, availBlocks=%d",
-			n.fs.bktID, bucket.Quota, bucket.Used, bucket.RealUsed, totalBlocks, freeBlocks, availBlocks)*/
+			n.fs.bktID, bucket.Quota, bucket.Used, bucket.RealUsed, totalBlocks, freeBlocks, availBlocks)
 
-	return 0
+	return 0*/
 }
 
 // Access implements NodeAccesser interface
