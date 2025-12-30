@@ -468,7 +468,6 @@ func getMode(objType int) uint32 {
 
 // Lookup looks up child node
 func (n *OrcasNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
-	DebugLog("[VFS Lookup] Entry: name=%s, parentID=%d", name, n.objID)
 	if errno := n.fs.checkKey(); errno != 0 {
 		DebugLog("[VFS Lookup] ERROR: checkKey failed: parentID=%d, name=%s, errno=%d", n.objID, name, errno)
 		return nil, errno
@@ -516,18 +515,6 @@ func (n *OrcasNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut)
 	}
 
 	if matchedChild == nil {
-		// Check if this is a macOS-specific file (Save Bundle or resource fork)
-		// macOS creates these files during file modification:
-		// - .sb-xxx suffix: Save Bundle temporary file
-		// - ._ prefix: Resource fork file (AppleDouble format)
-		// These files don't exist yet, but macOS will try to create them
-		// Returning ENOENT is correct - macOS will then call Create to create them
-		isMacOSFile := strings.HasPrefix(name, "._") || strings.Contains(name, ".sb-")
-		if isMacOSFile {
-			DebugLog("[VFS Lookup] macOS-specific file not found (will be created): parentID=%d, name=%s", n.objID, name)
-		} else {
-			DebugLog("[VFS Lookup] ERROR: Child not found: parentID=%d, name=%s", n.objID, name)
-		}
 		return nil, syscall.ENOENT
 	}
 
@@ -621,7 +608,6 @@ func (n *OrcasNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut)
 // Optimized: uses interface-level cache to avoid rebuilding entries every time
 // Implements delayed cache refresh: marks cache as stale instead of immediately deleting
 func (n *OrcasNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
-	DebugLog("[VFS Readdir] Entry: objID=%d, isRoot=%v", n.objID, n.isRoot)
 	if errno := n.fs.checkKey(); errno != 0 {
 		if !n.isRoot {
 			DebugLog("[VFS Readdir] ERROR: checkKey failed: objID=%d, errno=%d", n.objID, errno)

@@ -568,7 +568,11 @@ func isTempFile(obj *core.ObjectInfo) bool {
 func (ra *RandomAccessor) getOrCreateTempWriter() (*TempFileWriter, error) {
 	// Fast path: check if already exists (lock-free read)
 	if val := ra.tempWriter.Load(); val != nil {
-		if tw, ok := val.(*TempFileWriter); ok && tw != nil {
+		// Check if it's the cleared marker
+		if val == clearedTempWriterMarker {
+			// TempFileWriter was cleared, need to create new one
+			// Continue to slow path below
+		} else if tw, ok := val.(*TempFileWriter); ok && tw != nil {
 			// Verify TempFileWriter is valid (has LocalHandler)
 			if tw.lh != nil && tw.fileID > 0 && tw.dataID > 0 {
 				return tw, nil
@@ -576,7 +580,7 @@ func (ra *RandomAccessor) getOrCreateTempWriter() (*TempFileWriter, error) {
 			// TempFileWriter exists but is invalid, clear it and recreate
 			DebugLog("[VFS RandomAccessor getOrCreateTempWriter] WARNING: Existing TempFileWriter is invalid (lh=%v, fileID=%d, dataID=%d), will recreate: fileID=%d",
 				tw.lh != nil, tw.fileID, tw.dataID, ra.fileID)
-			ra.tempWriter.Store(nil) // Clear invalid TempFileWriter
+			ra.tempWriter.Store(clearedTempWriterMarker) // Clear invalid TempFileWriter (use marker instead of nil)
 		}
 	}
 
@@ -587,7 +591,11 @@ func (ra *RandomAccessor) getOrCreateTempWriter() (*TempFileWriter, error) {
 
 	// Double-check after acquiring lock
 	if val := ra.tempWriter.Load(); val != nil {
-		if tw, ok := val.(*TempFileWriter); ok && tw != nil {
+		// Check if it's the cleared marker
+		if val == clearedTempWriterMarker {
+			// TempFileWriter was cleared, need to create new one
+			// Continue to creation below
+		} else if tw, ok := val.(*TempFileWriter); ok && tw != nil {
 			// Verify TempFileWriter is valid (has LocalHandler)
 			if tw.lh != nil && tw.fileID > 0 && tw.dataID > 0 {
 				return tw, nil
@@ -595,7 +603,7 @@ func (ra *RandomAccessor) getOrCreateTempWriter() (*TempFileWriter, error) {
 			// TempFileWriter exists but is invalid, clear it and recreate
 			DebugLog("[VFS RandomAccessor getOrCreateTempWriter] WARNING: Existing TempFileWriter is invalid after lock (lh=%v, fileID=%d, dataID=%d), will recreate: fileID=%d",
 				tw.lh != nil, tw.fileID, tw.dataID, ra.fileID)
-			ra.tempWriter.Store(nil) // Clear invalid TempFileWriter
+			ra.tempWriter.Store(clearedTempWriterMarker) // Clear invalid TempFileWriter (use marker instead of nil)
 		}
 	}
 
@@ -1659,6 +1667,12 @@ func (tw *TempFileWriter) decideRealtimeProcessing(firstChunk []byte) {
 // Flush uploads DataInfo and ObjectInfo for .tmp file
 // Data chunks are already on disk via AppendData, so we only need to upload metadata
 func (tw *TempFileWriter) Flush() error {
+	// Validate TempFileWriter before flushing
+	if tw.fileID <= 0 || tw.dataID <= 0 {
+		DebugLog("[VFS TempFileWriter Flush] ERROR: TempFileWriter is invalid (fileID=%d, dataID=%d), cannot flush", tw.fileID, tw.dataID)
+		return fmt.Errorf("TempFileWriter is invalid (fileID=%d, dataID=%d)", tw.fileID, tw.dataID)
+	}
+
 	// CRITICAL: Set flushing flag to prevent writes during flush
 	// This ensures data consistency and prevents chunk corruption
 	if !atomic.CompareAndSwapInt32(&tw.flushing, 0, 1) {
@@ -3197,12 +3211,19 @@ func (ra *RandomAccessor) flushInternal(force bool) (int64, error) {
 		// in TempFileWriter but not in RandomAccessor's buffer (writeIndex=0, totalSize=0)
 		hasTempWriterData := false
 		// Lock-free check using atomic.Value
-		if val := ra.tempWriter.Load(); val != nil {
+		if val := ra.tempWriter.Load(); val != nil && val != clearedTempWriterMarker {
 			if tw, ok := val.(*TempFileWriter); ok && tw != nil {
-				// Check if TempFileWriter has data (size > 0)
-				twSize := atomic.LoadInt64(&tw.size)
-				hasTempWriterData = twSize > 0
-				DebugLog("[VFS RandomAccessor Flush] .tmp file with TempFileWriter (force flush on rename): fileID=%d, twSize=%d, writeIndex=%d, totalSize=%d", ra.fileID, twSize, writeIndex, totalSize)
+				// Validate TempFileWriter before checking size
+				if tw.fileID > 0 && tw.dataID > 0 {
+					// Check if TempFileWriter has data (size > 0)
+					twSize := atomic.LoadInt64(&tw.size)
+					hasTempWriterData = twSize > 0
+					DebugLog("[VFS RandomAccessor Flush] .tmp file with TempFileWriter (force flush on rename): fileID=%d, twSize=%d, writeIndex=%d, totalSize=%d", ra.fileID, twSize, writeIndex, totalSize)
+				} else {
+					// TempFileWriter is invalid, clear it
+					DebugLog("[VFS RandomAccessor Flush] WARNING: TempFileWriter is invalid (fileID=%d, dataID=%d), clearing: ra.fileID=%d", tw.fileID, tw.dataID, ra.fileID)
+					ra.tempWriter.Store(clearedTempWriterMarker)
+				}
 			}
 		}
 
@@ -3294,7 +3315,7 @@ func (ra *RandomAccessor) flushInternal(force bool) (int64, error) {
 	// Large .tmp files should use TempFileWriter
 	if isTmpFile {
 		// Check if TempFileWriter exists (lock-free check using atomic.Value)
-		hasTempWriter := ra.tempWriter.Load() != nil
+		hasTempWriter := ra.tempWriter.Load() != nil && ra.tempWriter.Load() != clearedTempWriterMarker
 
 		if hasTempWriter {
 			// TempFileWriter exists, check if there are any pending writes in buffer
@@ -3302,8 +3323,14 @@ func (ra *RandomAccessor) flushInternal(force bool) (int64, error) {
 			if writeIndex > 0 {
 				DebugLog("[VFS RandomAccessor Flush] .tmp file has pending writes in buffer but TempFileWriter exists: fileID=%d, writeIndex=%d. Writing buffer data to TempFileWriter.", ra.fileID, writeIndex)
 				// Get TempFileWriter
-				if val := ra.tempWriter.Load(); val != nil {
+				if val := ra.tempWriter.Load(); val != nil && val != clearedTempWriterMarker {
 					if tw, ok := val.(*TempFileWriter); ok && tw != nil {
+						// Validate TempFileWriter before using it
+						if tw.fileID <= 0 || tw.dataID <= 0 {
+							DebugLog("[VFS RandomAccessor Flush] ERROR: TempFileWriter is invalid (fileID=%d, dataID=%d), cannot write buffer operations: ra.fileID=%d", tw.fileID, tw.dataID, ra.fileID)
+							ra.tempWriter.Store(clearedTempWriterMarker)
+							return 0, fmt.Errorf("TempFileWriter is invalid (fileID=%d, dataID=%d)", tw.fileID, tw.dataID)
+						}
 						// Write all pending operations from buffer to TempFileWriter
 						// Note: We need to read operations before clearing writeIndex
 						// But we can't use atomic.Swap here because we need to read the operations
@@ -6129,11 +6156,20 @@ func (ra *RandomAccessor) Close() error {
 func (ra *RandomAccessor) flushTempFileWriter() error {
 	// Lock-free read using atomic.Value
 	val := ra.tempWriter.Load()
-	if val == nil {
+	if val == nil || val == clearedTempWriterMarker {
 		return nil
 	}
 	tw, ok := val.(*TempFileWriter)
 	if !ok || tw == nil {
+		return nil
+	}
+
+	// Validate TempFileWriter before flushing
+	// If fileID or dataID is 0, TempFileWriter is invalid and should not be flushed
+	if tw.fileID <= 0 || tw.dataID <= 0 {
+		DebugLog("[VFS RandomAccessor] WARNING: TempFileWriter is invalid (fileID=%d, dataID=%d), skipping flush: ra.fileID=%d", tw.fileID, tw.dataID, ra.fileID)
+		// Clear invalid TempFileWriter
+		ra.tempWriter.Store(clearedTempWriterMarker)
 		return nil
 	}
 
@@ -6163,7 +6199,7 @@ func (ra *RandomAccessor) flushTempFileWriter() error {
 // Lock-free check using atomic.Value
 func (ra *RandomAccessor) hasTempFileWriter() bool {
 	val := ra.tempWriter.Load()
-	if val == nil {
+	if val == nil || val == clearedTempWriterMarker {
 		return false
 	}
 	_, ok := val.(*TempFileWriter)
