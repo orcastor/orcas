@@ -717,32 +717,32 @@ func TestRandomAccessorReadWithEncryption(t *testing.T) {
 		dma.DefaultDataMetadataAdapter.SetPath(".")
 		dda := &core.DefaultDataAdapter{}
 
-	// 创建LocalHandler
-	lh := core.NewLocalHandler("", "").(*core.LocalHandler)
-	lh.SetAdapter(dma, dda)
+		// 创建LocalHandler
+		lh := core.NewLocalHandler("", "").(*core.LocalHandler)
+		lh.SetAdapter(dma, dda)
 
-	// 登录以获取上下文
-	testCtx, userInfo, _, err := lh.Login(c, "orcas", "orcas")
-	So(err, ShouldBeNil)
+		// 登录以获取上下文
+		testCtx, userInfo, _, err := lh.Login(c, "orcas", "orcas")
+		So(err, ShouldBeNil)
 
-	// 创建桶（使用登录用户的UID）
-	bucket := &core.BucketInfo{
-		ID:       testBktID,
-		Name:     "test_bucket",
-		Type:     1,
-		Quota:    1000000,
-		Used:     0,
-		RealUsed: 0,
-	}
-	So(dma.PutBkt(testCtx, []*core.BucketInfo{bucket}), ShouldBeNil)
+		// 创建桶（使用登录用户的UID）
+		bucket := &core.BucketInfo{
+			ID:       testBktID,
+			Name:     "test_bucket",
+			Type:     1,
+			Quota:    1000000,
+			Used:     0,
+			RealUsed: 0,
+		}
+		So(dma.PutBkt(testCtx, []*core.BucketInfo{bucket}), ShouldBeNil)
 
-	// 添加ACL权限，确保用户可以访问bucket
-	err = dma.PutACL(testCtx, testBktID, userInfo.ID, core.ALL)
-	So(err, ShouldBeNil)
+		// 添加ACL权限，确保用户可以访问bucket
+		err = dma.PutACL(testCtx, testBktID, userInfo.ID, core.ALL)
+		So(err, ShouldBeNil)
 
-	// 创建加密的数据
-	dataID, _ := ig.New()
-	testData := []byte("This is encrypted test data")
+		// 创建加密的数据
+		dataID, _ := ig.New()
+		testData := []byte("This is encrypted test data")
 		xxh3Value := xxh3.Hash(testData)
 		sha256Hash := sha256.Sum256(testData)
 		sha256_0 := int64(binary.BigEndian.Uint64(sha256Hash[0:8]))
