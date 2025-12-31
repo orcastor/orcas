@@ -3393,15 +3393,15 @@ func (ra *RandomAccessor) flushInternal(force bool) (int64, error) {
 	ra.tempWriteMu.Lock()
 	hasTempWriteFile := ra.tempWriteFile != nil
 	ra.tempWriteMu.Unlock()
-	
+
 	if hasTempWriteFile {
 		DebugLog("[VFS RandomAccessor Flush] Flushing temp write file: fileID=%d", ra.fileID)
-		
+
 		if err := ra.flushTempWriteFile(); err != nil {
 			DebugLog("[VFS RandomAccessor Flush] ERROR: Failed to flush temp write file: %v", err)
 			return 0, err
 		}
-		
+
 		DebugLog("[VFS RandomAccessor Flush] Successfully flushed temp write file: fileID=%d", ra.fileID)
 		return core.NewID(), nil
 	}
@@ -3979,7 +3979,6 @@ func (ra *RandomAccessor) applyRandomWritesWithSDK(fileObj *core.ObjectInfo, wri
 
 	return newVersionID, err
 }
-
 
 // applyWritesStreamingCompressed handles compressed or encrypted data
 // Streaming processing: read original data by chunk, apply write operations, process and write to new object immediately

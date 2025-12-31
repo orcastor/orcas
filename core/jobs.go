@@ -1134,7 +1134,14 @@ func deleteObjFromDB(c Ctx, bktID, id int64, ma MetadataAdapter) error {
 	}
 	// Note: Don't close the connection, it's from the pool
 
-	// Use raw SQL to delete
+	// Use raw SQL to delete object and its extended attributes
+	// Delete extended attributes first (foreign key constraint)
+	_, err = db.Exec("DELETE FROM attr WHERE id = ?", id)
+	if err != nil {
+		return err
+	}
+
+	// Then delete the object itself
 	_, err = db.Exec("DELETE FROM obj WHERE id = ?", id)
 	return err
 }

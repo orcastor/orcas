@@ -737,6 +737,27 @@ func (n *OrcasNode) getDirListWithCache(dirID int64) ([]*core.ObjectInfo, syscal
 			return nil, err
 		}
 
+		// CRITICAL: Merge with fileObjCache to avoid SQLite WAL dirty read
+		// After Flush(), fileObjCache is immediately updated, but database may have WAL delay
+		// We must merge fileObjCache data into directory listing to ensure consistency
+		for i, child := range children {
+			// fileObjKey is just fileID (see RandomAccessor.fileObjKey initialization)
+			if cached, ok := fileObjCache.Get(child.ID); ok {
+				if fileObj, ok := cached.(*core.ObjectInfo); ok && fileObj != nil {
+					// Update with cached data (more recent than database due to WAL)
+					// Only update if cached object has DataID (已 Flush)
+					if fileObj.DataID > 0 {
+						// Update all relevant fields
+						children[i].DataID = fileObj.DataID
+						children[i].Size = fileObj.Size
+						children[i].MTime = fileObj.MTime
+						DebugLog("[VFS getDirListWithCache] Merged fileObjCache into dir list: dirID=%d, fileID=%d, name=%s, size=%d, mtime=%d",
+							dirID, child.ID, child.Name, fileObj.Size, fileObj.MTime)
+					}
+				}
+			}
+		}
+
 		// Get pending objects from RandomAccessor registry
 		// These are objects that are being written but not yet flushed to database
 		pendingChildren := n.getPendingObjectsForDir(dirID)
@@ -766,22 +787,39 @@ func (n *OrcasNode) getDirListWithCache(dirID int64) ([]*core.ObjectInfo, syscal
 
 		// Then, add pending objects that are not already in database
 		for _, pending := range pendingChildren {
-			// Check by ID first - if same ID exists in database, skip (database is authoritative)
+			// Check by ID first - if same ID exists in database
 			if existing, exists := childrenMapByID[pending.ID]; exists {
-				// Same ID exists - database entry is authoritative, skip pending
-				DebugLog("[VFS getDirListWithCache] Skipping pending object (same ID in database): dirID=%d, fileID=%d, name=%s, dbDataID=%d", dirID, pending.ID, pending.Name, existing.DataID)
+				// Same ID exists - but pending might have newer data (DataID, Size, MTime)
+				// Update database entry with pending data if pending has DataID
+				if pending.DataID > 0 && existing.DataID == 0 {
+					existing.DataID = pending.DataID
+					existing.Size = pending.Size
+					existing.MTime = pending.MTime
+					DebugLog("[VFS getDirListWithCache] Updated database entry with pending DataID: dirID=%d, fileID=%d, name=%s, DataID=%d, size=%d", dirID, pending.ID, pending.Name, pending.DataID, pending.Size)
+					continue
+				}
+				// Database entry is authoritative (has DataID or both have no DataID), skip pending
+				DebugLog("[VFS getDirListWithCache] Skipping pending object (same ID in database): dirID=%d, fileID=%d, name=%s, dbDataID=%d, pendingDataID=%d", dirID, pending.ID, pending.Name, existing.DataID, pending.DataID)
 				continue
 			}
 
-			// Check by name - if same name exists in database (with DataID), skip pending
+			// Check by name - if same name exists in database
 			if existing, exists := childrenMapByName[pending.Name]; exists {
+				// If database entry has DataID, it's authoritative
 				if existing.DataID > 0 {
 					// Database entry has DataID (already flushed), skip pending entry
 					DebugLog("[VFS getDirListWithCache] Skipping pending object (same name in database with DataID): dirID=%d, fileID=%d, name=%s, existingFileID=%d, existingDataID=%d", dirID, pending.ID, pending.Name, existing.ID, existing.DataID)
 					continue
 				}
-				// Both are pending (no DataID), but existing is from database query result
-				// This shouldn't happen normally, but if it does, prefer the one from database
+				// Database entry has no DataID, but pending has DataID - update database entry
+				if pending.DataID > 0 {
+					existing.DataID = pending.DataID
+					existing.Size = pending.Size
+					existing.MTime = pending.MTime
+					DebugLog("[VFS getDirListWithCache] Updated database entry with pending DataID (by name): dirID=%d, fileID=%d, name=%s, DataID=%d, size=%d", dirID, pending.ID, pending.Name, pending.DataID, pending.Size)
+					continue
+				}
+				// Both have no DataID, prefer the one from database
 				if existing.ID != pending.ID {
 					DebugLog("[VFS getDirListWithCache] Skipping pending object (same name, different ID, prefer database entry): dirID=%d, fileID=%d, name=%s, existingFileID=%d", dirID, pending.ID, pending.Name, existing.ID)
 					continue

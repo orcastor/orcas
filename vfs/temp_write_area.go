@@ -1,6 +1,7 @@
 package vfs
 
 import (
+	"bytes"
 	"crypto/md5"
 	"fmt"
 	"io"
@@ -10,7 +11,11 @@ import (
 	"sync"
 	"time"
 
+	"github.com/klauspost/compress/zstd"
+	"github.com/mholt/archiver/v3"
+	"github.com/mkmueller/aes256"
 	"github.com/orcastor/orcas/core"
+	"github.com/tjfoc/gmsm/sm4"
 )
 
 // TempWriteAreaConfig 临时写入区配置
@@ -39,8 +44,8 @@ func DefaultTempWriteAreaConfig() *TempWriteAreaConfig {
 	return &TempWriteAreaConfig{
 		Enabled:            true,
 		TempDir:            ".temp_write",
-		SmallFileThreshold: 1 << 20,      // 1MB
-		LargeFileThreshold: 100 << 20,    // 100MB
+		SmallFileThreshold: 1 << 20,   // 1MB
+		LargeFileThreshold: 100 << 20, // 100MB
 		CleanupInterval:    1 * time.Hour,
 		RetentionPeriod:    24 * time.Hour,
 	}
@@ -49,8 +54,8 @@ func DefaultTempWriteAreaConfig() *TempWriteAreaConfig {
 // TempWriteArea 临时写入区管理器
 type TempWriteArea struct {
 	config      *TempWriteAreaConfig
-	basePath    string                    // .temp_write 目录路径
-	activeFiles map[int64]*TempWriteFile  // 活跃的临时文件（key: fileID）
+	basePath    string                   // .temp_write 目录路径
+	activeFiles map[int64]*TempWriteFile // 活跃的临时文件（key: fileID）
 	mu          sync.RWMutex
 	fs          *OrcasFS
 	stopCleanup chan struct{}
@@ -73,7 +78,7 @@ type TempWriteFile struct {
 	needsCompress bool         // 是否需要压缩
 	needsEncrypt  bool         // 是否需要加密
 	mu            sync.RWMutex
-	lastAccess    time.Time    // 最后访问时间
+	lastAccess    time.Time // 最后访问时间
 	twa           *TempWriteArea
 }
 
@@ -91,7 +96,7 @@ func NewTempWriteArea(fs *OrcasFS, config *TempWriteAreaConfig) (*TempWriteArea,
 	basePath := filepath.Join(dataPath, config.TempDir)
 
 	// 创建临时目录
-	if err := os.MkdirAll(basePath, 0755); err != nil {
+	if err := os.MkdirAll(basePath, 0o755); err != nil {
 		return nil, fmt.Errorf("failed to create temp write area: %w", err)
 	}
 
@@ -129,7 +134,7 @@ func (twa *TempWriteArea) GetOrCreate(fileID, dataID, originalSize int64, needsC
 	tempPath := filepath.Join(twa.basePath, fmt.Sprintf("%d_%d", fileID, dataID))
 
 	// 打开或创建文件
-	file, err := os.OpenFile(tempPath, os.O_RDWR|os.O_CREATE, 0644)
+	file, err := os.OpenFile(tempPath, os.O_RDWR|os.O_CREATE, 0o644)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create temp file: %w", err)
 	}
@@ -188,7 +193,7 @@ func (twf *TempWriteFile) Write(offset int64, data []byte) error {
 		twf.size = endOffset
 	}
 
-	DebugLog("[TempWriteArea] Wrote to temp file: fileID=%d, offset=%d, size=%d, totalSize=%d", 
+	DebugLog("[TempWriteArea] Wrote to temp file: fileID=%d, offset=%d, size=%d, totalSize=%d",
 		twf.fileID, offset, len(data), twf.size)
 
 	return nil
@@ -255,7 +260,7 @@ func (twf *TempWriteFile) Flush() error {
 		return fmt.Errorf("failed to sync temp file: %w", err)
 	}
 	twf.file = nil
-	
+
 	// 从活跃文件列表中移除（重要！避免下次GetOrCreate返回已关闭的文件）
 	twf.twa.mu.Lock()
 	delete(twf.twa.activeFiles, twf.fileID)
@@ -268,9 +273,9 @@ func (twf *TempWriteFile) Flush() error {
 		return twf.moveToFinalLocation()
 	}
 
-	// 需要压缩/加密，流式处理
-	DebugLog("[TempWriteArea] Processing temp file with compression/encryption: fileID=%d", twf.fileID)
-	return twf.processAndMove()
+	// 需要压缩/加密，使用 SDK 的 BatchWriter
+	DebugLog("[TempWriteArea] Processing temp file with compression/encryption using SDK: fileID=%d", twf.fileID)
+	return twf.processWithSDK()
 }
 
 // moveToFinalLocation 直接移动文件到最终位置（不压缩/不加密）
@@ -298,7 +303,7 @@ func (twf *TempWriteFile) moveToFinalLocation() error {
 
 	// 计算需要多少个chunk
 	numChunks := (twf.size + chunkSize - 1) / chunkSize
-	
+
 	DebugLog("[TempWriteArea] Splitting file into chunks: fileID=%d, size=%d, chunkSize=%d, numChunks=%d",
 		twf.fileID, twf.size, chunkSize, numChunks)
 
@@ -324,16 +329,16 @@ func (twf *TempWriteFile) moveToFinalLocation() error {
 		// 计算最终路径
 		fileName := fmt.Sprintf("%d_%d", twf.dataID, sn)
 		hash := fmt.Sprintf("%X", md5.Sum([]byte(fileName)))
-		
+
 		finalDir := filepath.Join(twf.twa.fs.DataPath, fmt.Sprint(twf.twa.fs.bktID), hash[21:24], hash[8:24])
-		if err := os.MkdirAll(finalDir, 0755); err != nil {
+		if err := os.MkdirAll(finalDir, 0o755); err != nil {
 			return fmt.Errorf("failed to create final directory: %w", err)
 		}
 
 		finalPath := filepath.Join(finalDir, fileName)
 
 		// 写入chunk文件
-		if err := ioutil.WriteFile(finalPath, chunkData, 0644); err != nil {
+		if err := ioutil.WriteFile(finalPath, chunkData, 0o644); err != nil {
 			return fmt.Errorf("failed to write chunk %d: %w", sn, err)
 		}
 
@@ -358,18 +363,287 @@ func (twf *TempWriteFile) moveToFinalLocation() error {
 		DebugLog("[TempWriteArea] Updated DataInfo cache: dataID=%d, size=%d", twf.dataID, twf.size)
 	}
 
-	DebugLog("[TempWriteArea] Successfully split and moved temp file: fileID=%d, dataID=%d, size=%d, numChunks=%d", 
+	DebugLog("[TempWriteArea] Successfully split and moved temp file: fileID=%d, dataID=%d, size=%d, numChunks=%d",
 		twf.fileID, twf.dataID, twf.size, numChunks)
 
 	return nil
 }
 
-// processAndMove 处理文件（压缩/加密）并移动到最终位置
-func (twf *TempWriteFile) processAndMove() error {
-	// 对于现在的实现，如果需要压缩/加密，我们暂时也使用直接移动
-	// TODO: 未来实现流式压缩/加密
-	DebugLog("[TempWriteArea] WARNING: Compression/encryption not yet implemented, using direct move: fileID=%d", twf.fileID)
-	return twf.moveToFinalLocation()
+// processWithSDK 使用真正的压缩和加密处理文件
+func (twf *TempWriteFile) processWithSDK() error {
+	// 获取 LocalHandler
+	lh, ok := twf.twa.fs.h.(*core.LocalHandler)
+	if !ok {
+		return fmt.Errorf("handler is not LocalHandler")
+	}
+
+	// 打开临时文件读取
+	tempFile, err := os.Open(twf.tempPath)
+	if err != nil {
+		return fmt.Errorf("failed to open temp file: %w", err)
+	}
+	defer tempFile.Close()
+	defer os.Remove(twf.tempPath) // 清理临时文件
+
+	// 准备 DataInfo
+	dataInfo := &core.DataInfo{
+		ID:       twf.dataID,
+		Size:     0, // Will be updated after processing
+		OrigSize: twf.size,
+		Kind:     0, // Will be set based on compression/encryption
+	}
+
+	// 设置压缩标志
+	if twf.needsCompress && twf.twa.fs.CmprWay > 0 {
+		switch twf.twa.fs.CmprWay {
+		case 1:
+			dataInfo.Kind |= core.DATA_CMPR_SNAPPY
+		case 2:
+			dataInfo.Kind |= core.DATA_CMPR_ZSTD
+		case 3:
+			dataInfo.Kind |= core.DATA_CMPR_GZIP
+		case 4:
+			dataInfo.Kind |= core.DATA_CMPR_BR
+		}
+	}
+
+	// 设置加密标志
+	if twf.needsEncrypt && twf.twa.fs.EndecWay > 0 && twf.twa.fs.EndecKey != "" {
+		switch twf.twa.fs.EndecWay {
+		case 1:
+			dataInfo.Kind |= core.DATA_ENDEC_AES256
+		case 2:
+			dataInfo.Kind |= core.DATA_ENDEC_SM4
+		}
+	}
+
+	// 获取分块大小
+	chunkSize := twf.twa.fs.chunkSize
+	if chunkSize <= 0 {
+		chunkSize = 10 << 20 // Default 10MB
+	}
+
+	// 流式处理：读取 → 压缩 → 加密 → 写入
+	buffer := make([]byte, chunkSize)
+	sn := 0
+	var totalProcessedSize int64 = 0
+	da := lh.GetDataAdapter()
+
+	for {
+		n, readErr := tempFile.Read(buffer)
+		if readErr != nil && readErr != io.EOF {
+			return fmt.Errorf("failed to read from temp file: %w", readErr)
+		}
+		if n == 0 {
+			break
+		}
+
+		chunkData := buffer[:n]
+
+		// 处理数据：压缩和加密
+		processedData, err := twf.processChunkData(chunkData, dataInfo)
+		if err != nil {
+			return fmt.Errorf("failed to process chunk %d: %w", sn, err)
+		}
+
+		// 写入处理后的数据
+		if err := da.Write(twf.twa.fs.c, twf.twa.fs.bktID, twf.dataID, sn, processedData); err != nil {
+			return fmt.Errorf("failed to write chunk %d: %w", sn, err)
+		}
+
+		totalProcessedSize += int64(len(processedData))
+		sn++
+
+		if readErr == io.EOF {
+			break
+		}
+	}
+
+	// 更新 DataInfo 的最终大小
+	dataInfo.Size = totalProcessedSize
+
+	// 保存 DataInfo
+	if _, err := lh.PutDataInfo(twf.twa.fs.c, twf.twa.fs.bktID, []*core.DataInfo{dataInfo}); err != nil {
+		DebugLog("[TempWriteArea] WARNING: Failed to update DataInfo: %v", err)
+	} else {
+		// 更新 DataInfo 缓存
+		dataInfoCache.Put(twf.dataID, dataInfo)
+		DebugLog("[TempWriteArea] Updated DataInfo: dataID=%d, size=%d, origSize=%d, kind=%d, compress=%v, encrypt=%v",
+			twf.dataID, dataInfo.Size, dataInfo.OrigSize, dataInfo.Kind, twf.needsCompress, twf.needsEncrypt)
+	}
+
+	DebugLog("[TempWriteArea] Successfully processed temp file: fileID=%d, dataID=%d, origSize=%d, processedSize=%d, numChunks=%d, compress=%v, encrypt=%v",
+		twf.fileID, twf.dataID, twf.size, totalProcessedSize, sn, twf.needsCompress, twf.needsEncrypt)
+
+	return nil
+}
+
+// processChunkData 处理单个数据块（压缩和加密）
+func (twf *TempWriteFile) processChunkData(originalData []byte, dataInfo *core.DataInfo) ([]byte, error) {
+	data := originalData
+
+	// 1. 应用压缩（如果需要）
+	if twf.needsCompress && twf.twa.fs.CmprWay > 0 {
+		var cmpr archiver.Compressor
+		if dataInfo.Kind&core.DATA_CMPR_SNAPPY != 0 {
+			cmpr = &archiver.Snappy{}
+		} else if dataInfo.Kind&core.DATA_CMPR_ZSTD != 0 {
+			cmpr = &archiver.Zstd{
+				EncoderOptions: []zstd.EOption{
+					zstd.WithEncoderLevel(zstd.EncoderLevelFromZstd(int(twf.twa.fs.CmprQlty))),
+				},
+			}
+		} else if dataInfo.Kind&core.DATA_CMPR_GZIP != 0 {
+			cmpr = &archiver.Gz{
+				CompressionLevel: int(twf.twa.fs.CmprQlty),
+			}
+		} else if dataInfo.Kind&core.DATA_CMPR_BR != 0 {
+			cmpr = &archiver.Brotli{
+				Quality: int(twf.twa.fs.CmprQlty),
+			}
+		}
+
+		if cmpr != nil {
+			var cmprBuf bytes.Buffer
+			err := cmpr.Compress(bytes.NewBuffer(data), &cmprBuf)
+			if err == nil && cmprBuf.Len() < len(data) {
+				// 压缩成功且压缩后更小
+				data = cmprBuf.Bytes()
+				DebugLog("[TempWriteArea] Compressed chunk: origSize=%d, compressedSize=%d, ratio=%.2f%%",
+					len(originalData), len(data), float64(len(data))*100/float64(len(originalData)))
+			} else if err != nil {
+				DebugLog("[TempWriteArea] WARNING: Compression failed, using original data: %v", err)
+			} else {
+				DebugLog("[TempWriteArea] Compression not beneficial, using original data: origSize=%d, compressedSize=%d",
+					len(originalData), cmprBuf.Len())
+			}
+		}
+	}
+
+	// 2. 应用加密（如果需要）
+	if twf.needsEncrypt && twf.twa.fs.EndecWay > 0 && twf.twa.fs.EndecKey != "" {
+		var err error
+		if dataInfo.Kind&core.DATA_ENDEC_AES256 != 0 {
+			data, err = aes256.Encrypt(twf.twa.fs.EndecKey, data)
+			if err != nil {
+				return nil, fmt.Errorf("AES256 encryption failed: %w", err)
+			}
+			DebugLog("[TempWriteArea] Encrypted chunk with AES256: size=%d", len(data))
+		} else if dataInfo.Kind&core.DATA_ENDEC_SM4 != 0 {
+			data, err = sm4.Sm4Cbc([]byte(twf.twa.fs.EndecKey), data, true)
+			if err != nil {
+				return nil, fmt.Errorf("SM4 encryption failed: %w", err)
+			}
+			DebugLog("[TempWriteArea] Encrypted chunk with SM4: size=%d", len(data))
+		}
+	}
+
+	return data, nil
+}
+
+// processAndMove_OLD 处理文件（压缩/加密）并移动到最终位置 (备用实现)
+func (twf *TempWriteFile) processAndMove_OLD() error {
+	// 获取 LocalHandler
+	lh, ok := twf.twa.fs.h.(*core.LocalHandler)
+	if !ok {
+		return fmt.Errorf("handler is not LocalHandler")
+	}
+
+	// 获取 chunk size
+	chunkSize := twf.twa.fs.chunkSize
+	if chunkSize <= 0 {
+		chunkSize = 10 << 20 // Default 10MB
+	}
+
+	// 打开临时文件读取
+	tempFile, err := os.Open(twf.tempPath)
+	if err != nil {
+		return fmt.Errorf("failed to open temp file: %w", err)
+	}
+	defer tempFile.Close()
+	defer os.Remove(twf.tempPath) // 清理临时文件
+
+	// 准备 DataInfo
+	dataInfo := &core.DataInfo{
+		ID:       twf.dataID,
+		Size:     0, // Will be updated after compression
+		OrigSize: twf.size,
+		Kind:     0, // Will be set based on compression/encryption
+	}
+
+	// Set compression kind based on VFS config
+	if twf.needsCompress && twf.twa.fs.CmprWay > 0 {
+		switch twf.twa.fs.CmprWay {
+		case 1:
+			dataInfo.Kind |= core.DATA_CMPR_SNAPPY
+		case 2:
+			dataInfo.Kind |= core.DATA_CMPR_ZSTD
+		case 3:
+			dataInfo.Kind |= core.DATA_CMPR_GZIP
+		}
+	}
+
+	// Set encryption kind if needed
+	if twf.needsEncrypt {
+		dataInfo.Kind |= core.DATA_ENDEC_AES256
+	}
+
+	// 流式处理：读取、压缩/加密、写入
+	buffer := make([]byte, chunkSize)
+	sn := 0
+	var totalProcessedSize int64 = 0
+
+	for {
+		n, readErr := tempFile.Read(buffer)
+		if readErr != nil && readErr != io.EOF {
+			return fmt.Errorf("failed to read from temp file: %w", readErr)
+		}
+		if n == 0 {
+			break
+		}
+
+		chunkData := buffer[:n]
+
+		// Process chunk data (compress and/or encrypt)
+		// Note: processChunkData is in core package but not exported
+		// We need to use SDK or implement our own processing
+		processedData := chunkData
+
+		// For now, we'll use the DataAdapter's Write method directly
+		// The compression and encryption will be handled by the SDK layer
+		// TODO: Implement proper compression/encryption here or use SDK
+
+		// Write processed chunk using DataAdapter
+		da := lh.GetDataAdapter()
+		if err := da.Write(twf.twa.fs.c, twf.twa.fs.bktID, twf.dataID, sn, processedData); err != nil {
+			return fmt.Errorf("failed to write processed chunk %d: %w", sn, err)
+		}
+
+		totalProcessedSize += int64(len(processedData))
+		sn++
+
+		if readErr == io.EOF {
+			break
+		}
+	}
+
+	// Update DataInfo with final size
+	dataInfo.Size = totalProcessedSize
+
+	// Save DataInfo
+	if _, err := lh.PutDataInfo(twf.twa.fs.c, twf.twa.fs.bktID, []*core.DataInfo{dataInfo}); err != nil {
+		DebugLog("[TempWriteArea] WARNING: Failed to update DataInfo: %v", err)
+	} else {
+		// Update DataInfo cache
+		dataInfoCache.Put(twf.dataID, dataInfo)
+		DebugLog("[TempWriteArea] Updated DataInfo cache: dataID=%d, size=%d, origSize=%d, kind=%d",
+			twf.dataID, dataInfo.Size, dataInfo.OrigSize, dataInfo.Kind)
+	}
+
+	DebugLog("[TempWriteArea] Successfully processed and moved temp file: fileID=%d, dataID=%d, origSize=%d, processedSize=%d, numChunks=%d, compress=%v, encrypt=%v",
+		twf.fileID, twf.dataID, twf.size, totalProcessedSize, sn, twf.needsCompress, twf.needsEncrypt)
+
+	return nil
 }
 
 // Close 关闭临时文件
@@ -473,4 +747,3 @@ func max(a, b int64) int64 {
 	}
 	return b
 }
-
