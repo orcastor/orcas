@@ -71,6 +71,8 @@ type OrcasFS struct {
 	raRegistry sync.Map // map[fileID]*RandomAccessor
 	// Mutex to protect RandomAccessor creation for .tmp files during concurrent writes
 	raCreateMu sync.Mutex // Protects creation of RandomAccessor for same fileID
+	// Temporary write area for large files and random writes
+	tempWriteArea *TempWriteArea
 	// OnRootDeleted is called when the root node is deleted (entire bucket is deleted)
 	// This callback can be used to perform cleanup operations
 	// Note: If you need to unmount in the callback, use fs.Server.Unmount()
@@ -91,7 +93,7 @@ type OrcasFS struct {
 //
 // IMPORTANT: VFS requires LocalHandler for full functionality:
 // - TempFileWriter (for .tmp files and large files) requires LocalHandler
-// - Random writes with writing version require LocalHandler
+// - Random writes with temp write area require LocalHandler
 // - Direct data updates require LocalHandler
 // If a non-LocalHandler is provided, some features may not work (e.g., .tmp file writes)
 func NewOrcasFS(h core.Handler, c core.Ctx, bktID int64, requireKey ...bool) *OrcasFS {
@@ -138,11 +140,11 @@ func NewOrcasFSWithConfig(h core.Handler, c core.Ctx, bktID int64, cfg *core.Con
 	}
 
 	// Verify handler type and log warning if not LocalHandler
-	// VFS requires LocalHandler for full functionality (TempFileWriter, writing version, etc.)
+	// VFS requires LocalHandler for full functionality (TempFileWriter, temp write area, etc.)
 	if _, ok := h.(*core.LocalHandler); !ok {
 		handlerType := fmt.Sprintf("%T", h)
 		DebugLog("[VFS NewOrcasFSWithConfig] WARNING: handler is not LocalHandler (type: %s), some features may not work: bktID=%d", handlerType, bktID)
-		DebugLog("[VFS NewOrcasFSWithConfig] NOTE: TempFileWriter, writing version, and direct data updates require LocalHandler")
+		DebugLog("[VFS NewOrcasFSWithConfig] NOTE: TempFileWriter and temp write area require LocalHandler")
 	}
 
 	ofs := &OrcasFS{
@@ -152,6 +154,15 @@ func NewOrcasFSWithConfig(h core.Handler, c core.Ctx, bktID int64, cfg *core.Con
 		chunkSize:  chunkSize,
 		requireKey: reqKey,
 		Config:     config,
+	}
+
+	// Initialize temporary write area
+	twaConfig := DefaultTempWriteAreaConfig()
+	if twa, err := NewTempWriteArea(ofs, twaConfig); err != nil {
+		DebugLog("[VFS NewOrcasFSWithConfig] WARNING: Failed to create temp write area: %v", err)
+	} else {
+		ofs.tempWriteArea = twa
+		DebugLog("[VFS NewOrcasFSWithConfig] Temp write area initialized: path=%s", twa.basePath)
 	}
 
 	// Root node initialization

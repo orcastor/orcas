@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/binary"
-	"errors"
 	"fmt"
 	"hash"
 	"io"
@@ -536,19 +535,21 @@ func (buf *chunkBuffer) isChunkComplete(chunkSize int64) bool {
 
 // RandomAccessor random access object in VFS, supports compression and encryption
 type RandomAccessor struct {
-	fs           *OrcasFS
-	fileID       int64
-	buffer       *WriteBuffer           // Random write buffer
-	seqBuffer    *SequentialWriteBuffer // Sequential write buffer (optimized)
-	fileObj      atomic.Value
-	fileObjKey   int64                         // Pre-computed file_obj cache key (optimized: avoid repeated conversion)
-	lastActivity int64                         // Last activity timestamp (atomic access)
-	sparseSize   int64                         // Sparse file size (for pre-allocated files, e.g., qBittorrent) (atomic access)
-	lastOffset   int64                         // Last write offset (for sequential write detection) (atomic access)
-	seqDetector  *ConcurrentSequentialDetector // Concurrent sequential write detector
-	tempWriter   atomic.Value                  // TempFileWriter for .tmp files (atomic.Value stores *TempFileWriter)
-	isTmpFile    bool                          // Whether this file is a .tmp file (determined at creation time, immutable)
-	dataInfo     atomic.Value                  // Cached DataInfo (atomic.Value stores *core.DataInfo)
+	fs            *OrcasFS
+	fileID        int64
+	buffer        *WriteBuffer           // Random write buffer
+	seqBuffer     *SequentialWriteBuffer // Sequential write buffer (optimized)
+	fileObj       atomic.Value
+	fileObjKey    int64                         // Pre-computed file_obj cache key (optimized: avoid repeated conversion)
+	lastActivity  int64                         // Last activity timestamp (atomic access)
+	sparseSize    int64                         // Sparse file size (for pre-allocated files, e.g., qBittorrent) (atomic access)
+	lastOffset    int64                         // Last write offset (for sequential write detection) (atomic access)
+	seqDetector   *ConcurrentSequentialDetector // Concurrent sequential write detector
+	tempWriter    atomic.Value                  // TempFileWriter for .tmp files (atomic.Value stores *TempFileWriter)
+	tempWriteFile *TempWriteFile                // TempWriteFile for large files and random writes (protected by mutex)
+	tempWriteMu   sync.Mutex                    // Mutex for tempWriteFile access
+	isTmpFile     bool                          // Whether this file is a .tmp file (determined at creation time, immutable)
+	dataInfo      atomic.Value                  // Cached DataInfo (atomic.Value stores *core.DataInfo)
 }
 
 func isTempFile(obj *core.ObjectInfo) bool {
@@ -654,8 +655,7 @@ func (ra *RandomAccessor) getOrCreateTempWriter() (*TempFileWriter, error) {
 	// Cache LocalHandler if available
 	// IMPORTANT: TempFileWriter requires LocalHandler because it needs:
 	// 1. PutDataInfoAndObj() - for atomic metadata writes (in Handler interface)
-	// 2. GetOrCreateWritingVersion() - for writing version support (LocalHandler only)
-	// 3. UpdateData() - for direct data block updates (LocalHandler only)
+	// 2. Temp write area - for large files and random writes (handled by TempWriteArea)
 	// 4. GetDataAdapter() - for accessing data adapter (LocalHandler only)
 	// If handler is not LocalHandler (e.g., RPC handler, wrapper handler), these methods won't be available
 	var lh *core.LocalHandler
@@ -1416,7 +1416,7 @@ func (tw *TempFileWriter) flushChunkWithBuffer(sn int, buf *chunkBuffer) error {
 			tw.fileID, tw.dataID, sn, len(chunkData), len(finalData), float64(len(finalData))*100.0/float64(len(chunkData)))
 	} else {
 		// Real-time compression/encryption disabled - write raw data for offline processing
-		// Similar to writing versions, data will be processed offline later
+		// Data will be processed offline later (compression/encryption if needed)
 		finalData = chunkData
 		DebugLog("[VFS TempFileWriter flushChunk] Writing raw data (offline processing): fileID=%d, dataID=%d, sn=%d, size=%d",
 			tw.fileID, tw.dataID, sn, len(finalData))
@@ -2025,6 +2025,13 @@ func (ra *RandomAccessor) Write(offset int64, data []byte) error {
 			DebugLog("[VFS RandomAccessor Write] ERROR: Failed to get file object: fileID=%d, offset=%d, size=%d, error=%v", ra.fileID, offset, len(data), err)
 			return err
 		}
+	}
+
+	// PRIORITY 1: Check if should use temporary write area
+	// This handles: sparse files, random writes, large files, existing file modifications
+	if ra.shouldUseTempWriteArea(fileObj) {
+		DebugLog("[VFS RandomAccessor Write] Using temp write area: fileID=%d, offset=%d, size=%d", ra.fileID, offset, len(data))
+		return ra.writeToTempWriteArea(offset, data)
 	}
 
 	// CRITICAL: For non-.tmp files, do NOT use TempFileWriter
@@ -3381,6 +3388,24 @@ func (ra *RandomAccessor) flushInternal(force bool) (int64, error) {
 		return 0, fmt.Errorf("RandomAccessor.fileID is invalid: %d", ra.fileID)
 	}
 
+	// PRIORITY 1: Check if temp write file needs to be flushed
+	// This handles large files, random writes, and sparse files
+	ra.tempWriteMu.Lock()
+	hasTempWriteFile := ra.tempWriteFile != nil
+	ra.tempWriteMu.Unlock()
+	
+	if hasTempWriteFile {
+		DebugLog("[VFS RandomAccessor Flush] Flushing temp write file: fileID=%d", ra.fileID)
+		
+		if err := ra.flushTempWriteFile(); err != nil {
+			DebugLog("[VFS RandomAccessor Flush] ERROR: Failed to flush temp write file: %v", err)
+			return 0, err
+		}
+		
+		DebugLog("[VFS RandomAccessor Flush] Successfully flushed temp write file: fileID=%d", ra.fileID)
+		return core.NewID(), nil
+	}
+
 	// For .tmp files, check final file size before flushing TempFileWriter
 	// Use the immutable isTmpFile flag (set at creation time)
 	if ra.isTmpFile {
@@ -3606,90 +3631,15 @@ func (ra *RandomAccessor) flushInternal(force bool) (int64, error) {
 	}
 	DebugLog("[VFS RandomAccessor Flush] Got fileObj: fileID=%d, dataID=%d, size=%d, writeIndex=%d, totalSize=%d", ra.fileID, fileObj.DataID, fileObj.Size, writeIndex, totalSize)
 
-	// Only use writing version for sparse files (pre-allocated files with holes, e.g., qBittorrent)
-	// For non-sparse files, use SDK path which handles compression/encryption properly
-	sparseSize := atomic.LoadInt64(&ra.sparseSize)
-	isSparseFile := sparseSize > 0
-
-	if isSparseFile {
-		// For sparse files, use writing version to directly modify data blocks
-		// This avoids creating new versions and significantly improves performance for random writes
-		// Note: Writing versions use uncompressed/unencrypted data for better performance
-		// If compression/encryption is needed, it will be processed when the file is completed
-
-		// Get DataInfo to check compression/encryption status
-		var oldDataInfo *core.DataInfo
-		oldDataID := fileObj.DataID
-		if oldDataID > 0 && oldDataID != core.EmptyDataID {
-			dataInfoCacheKey := oldDataID
-			if cached, ok := dataInfoCache.Get(dataInfoCacheKey); ok {
-				if info, ok := cached.(*core.DataInfo); ok && info != nil {
-					oldDataInfo = info
-				}
-			}
-			if oldDataInfo == nil {
-				var err error
-				oldDataInfo, err = ra.fs.h.GetDataInfo(ra.fs.c, ra.fs.bktID, oldDataID)
-				if err == nil && oldDataInfo != nil {
-					dataInfoCache.Put(dataInfoCacheKey, oldDataInfo)
-				}
-			}
-		}
-
-		// Use writing version path for sparse files, but fall back if DB access fails
-		newVersionID, err := ra.applyWritesWithWritingVersion(fileObj, mergedOps, oldDataInfo)
-		if err != nil {
-			if errors.Is(err, core.ERR_QUERY_DB) || errors.Is(err, core.ERR_OPEN_DB) {
-				DebugLog("[VFS RandomAccessor Flush] Writing version unavailable, falling back to SDK path: fileID=%d, error=%v", ra.fileID, err)
-				versionID, err := ra.applyRandomWritesWithSDK(fileObj, mergedOps)
-				if err != nil {
-					return 0, err
-				}
-				// After flush completes, update file object cache with latest metadata from database
-				updatedObjs, err := ra.fs.h.Get(ra.fs.c, ra.fs.bktID, []int64{ra.fileID})
-				if err == nil && len(updatedObjs) > 0 {
-					updatedObj := updatedObjs[0]
-					fileObjCache.Put(ra.fileObjKey, updatedObj)
-					ra.fileObj.Store(updatedObj)
-					DebugLog("[VFS RandomAccessor Flush] Updated file object cache after flush (fallback): fileID=%d, size=%d, dataID=%d, mtime=%d",
-						updatedObj.ID, updatedObj.Size, updatedObj.DataID, updatedObj.MTime)
-				}
-				return versionID, nil
-			}
-			return 0, err
-		}
-
-		// IMPORTANT: applyWritesWithWritingVersion already updated the cache with correct size
-		// DO NOT re-read from database as it may return stale data
-		// Just verify the cache was updated correctly
-		if cachedObj := ra.fileObj.Load(); cachedObj != nil {
-			if obj, ok := cachedObj.(*core.ObjectInfo); ok && obj != nil {
-				DebugLog("[VFS RandomAccessor Flush] Verified file object cache after flush (writing version): fileID=%d, size=%d, dataID=%d, mtime=%d",
-					obj.ID, obj.Size, obj.DataID, obj.MTime)
-			}
-		}
-
-		// For sparse files, writing version returns 0 (no new version created)
-		// This is acceptable for sparse files as they use writing version mechanism
-		// However, we should still return 0 to indicate no new version was created
-		return newVersionID, nil
-	}
-
-	// For non-sparse files, ALWAYS use SDK path which creates a new version (versionID > 0)
-	// Non-sparse files must have versionID, do NOT use writing version
-	DebugLog("[VFS RandomAccessor Flush] Non-sparse file, using SDK path (will create versionID): fileID=%d, fileObj.DataID=%d, fileObj.Size=%d, mergedOps count=%d", ra.fileID, fileObj.DataID, fileObj.Size, len(mergedOps))
+	// Use SDK path which handles compression/encryption properly
+	// Note: Sparse files and random writes are now handled by temp write area
+	DebugLog("[VFS RandomAccessor Flush] Using SDK path: fileID=%d, fileObj.DataID=%d, fileObj.Size=%d, mergedOps count=%d", ra.fileID, fileObj.DataID, fileObj.Size, len(mergedOps))
 	for i, op := range mergedOps {
 		DebugLog("[VFS RandomAccessor Flush] MergedOp[%d]: offset=%d, size=%d", i, op.Offset, len(op.Data))
 	}
 	versionID, err := ra.applyRandomWritesWithSDK(fileObj, mergedOps)
 	if err != nil {
 		return 0, err
-	}
-	// For non-sparse files, versionID must be > 0 (a new version must be created)
-	// Non-sparse files should NOT use writing version, must create a new version
-	if versionID <= 0 {
-		DebugLog("[VFS RandomAccessor Flush] ERROR: Non-sparse file must have versionID > 0, but got versionID=%d: fileID=%d", versionID, ra.fileID)
-		return 0, fmt.Errorf("non-sparse file must have versionID > 0, but got versionID=%d", versionID)
 	}
 
 	// IMPORTANT: applyRandomWritesWithSDK already updated the cache with correct values
@@ -4030,262 +3980,6 @@ func (ra *RandomAccessor) applyRandomWritesWithSDK(fileObj *core.ObjectInfo, wri
 	return newVersionID, err
 }
 
-// applyWritesWithWritingVersion applies writes using writing version (name="0") to directly modify data blocks
-// This is optimized for sparse files (qBittorrent scenario) to avoid creating new versions
-// Writing versions always use uncompressed/unencrypted data for better performance
-func (ra *RandomAccessor) applyWritesWithWritingVersion(fileObj *core.ObjectInfo, writes []WriteOperation, oldDataInfo *core.DataInfo) (int64, error) {
-	// Get LocalHandler
-	lh, ok := ra.fs.h.(*core.LocalHandler)
-	if !ok {
-		DebugLog("[VFS applyWritesWithWritingVersion] ERROR: handler is not LocalHandler, operation not supported: fileID=%d, writes=%d", ra.fileID, len(writes))
-		return 0, fmt.Errorf("handler is not LocalHandler")
-	}
-
-	// Get or create writing version
-	writingVersion, err := lh.GetOrCreateWritingVersion(ra.fs.c, ra.fs.bktID, ra.fileID)
-	if err != nil {
-		return 0, fmt.Errorf("failed to get or create writing version: %w", err)
-	}
-
-	// Use writing version's DataID (writing version always has its own DataID without compression/encryption)
-	dataID := writingVersion.DataID
-	if dataID == 0 || dataID == core.EmptyDataID {
-		return 0, fmt.Errorf("writing version has invalid DataID")
-	}
-
-	// Writing versions always use uncompressed/unencrypted data
-	// No need to handle compression/encryption
-	chunkSizeInt := int64(ra.fs.chunkSize)
-
-	// Group writes by chunk to batch updates
-	type chunkUpdate struct {
-		sn         int
-		offset     int
-		data       []byte
-		needsWrite bool
-	}
-	chunkUpdates := make(map[int]*chunkUpdate)
-
-	for _, write := range writes {
-		writeEnd := write.Offset + int64(len(write.Data))
-		startChunk := write.Offset / chunkSizeInt
-		endChunk := (writeEnd - 1) / chunkSizeInt
-
-		// Process each chunk that this write affects
-		for chunkIdx := startChunk; chunkIdx <= endChunk; chunkIdx++ {
-			chunkStart := chunkIdx * chunkSizeInt
-			chunkEnd := chunkStart + chunkSizeInt
-
-			// Calculate overlap between write and chunk
-			overlapStart := write.Offset
-			if overlapStart < chunkStart {
-				overlapStart = chunkStart
-			}
-			overlapEnd := writeEnd
-			if overlapEnd > chunkEnd {
-				overlapEnd = chunkEnd
-			}
-
-			if overlapStart >= overlapEnd {
-				continue
-			}
-
-			// Extract data for this chunk
-			writeDataStart := overlapStart - write.Offset
-			writeDataEnd := writeDataStart + (overlapEnd - overlapStart)
-			chunkData := write.Data[writeDataStart:writeDataEnd]
-
-			// Calculate offset within chunk
-			chunkOffset := int(overlapStart - chunkStart)
-			sn := int(chunkIdx)
-
-			// Check if we already have an update for this chunk
-			key := sn
-			if existing, ok := chunkUpdates[key]; ok {
-				// Merge with existing update (overwrite overlapping region)
-				existingEnd := existing.offset + len(existing.data)
-				newEnd := chunkOffset + len(chunkData)
-
-				// Calculate merged range
-				mergedStart := existing.offset
-				if chunkOffset < mergedStart {
-					mergedStart = chunkOffset
-				}
-				mergedEnd := existingEnd
-				if newEnd > mergedEnd {
-					mergedEnd = newEnd
-				}
-
-				// Create merged data
-				mergedData := make([]byte, mergedEnd-mergedStart)
-				// Copy existing data
-				if existing.offset >= mergedStart {
-					copy(mergedData[existing.offset-mergedStart:], existing.data)
-				}
-				// Overwrite with new data
-				if chunkOffset >= mergedStart {
-					copy(mergedData[chunkOffset-mergedStart:], chunkData)
-				}
-
-				existing.offset = mergedStart
-				existing.data = mergedData
-				existing.needsWrite = true
-			} else {
-				// New chunk update
-				chunkUpdates[key] = &chunkUpdate{
-					sn:         sn,
-					offset:     chunkOffset,
-					data:       chunkData,
-					needsWrite: true,
-				}
-			}
-		}
-	}
-
-	// Apply all chunk updates
-	// Optimization: check if data already exists to avoid duplicate writes
-	// Writing versions always use uncompressed/unencrypted data, so we can use UpdateData directly
-	for _, update := range chunkUpdates {
-		if !update.needsWrite {
-			continue
-		}
-
-		// Try to read existing data to check if update is needed (deduplication)
-		existingData, err := ra.fs.h.GetData(ra.fs.c, ra.fs.bktID, dataID, update.sn, update.offset, len(update.data))
-		if err == nil && len(existingData) == len(update.data) {
-			// Check if data is identical (simple byte comparison)
-			identical := true
-			for i := 0; i < len(update.data); i++ {
-				if existingData[i] != update.data[i] {
-					identical = false
-					break
-				}
-			}
-			if identical {
-				// Data is identical, skip write
-				continue
-			}
-		}
-
-		// Use UpdateData to directly modify data block (uncompressed/unencrypted)
-		// This avoids creating new versions and significantly improves performance
-		DebugLog("[VFS applyWritesWithWritingVersion] Updating data chunk on disk: fileID=%d, dataID=%d, sn=%d, offset=%d, size=%d", ra.fileID, dataID, update.sn, update.offset, len(update.data))
-		updateErr := lh.UpdateData(ra.fs.c, ra.fs.bktID, dataID, update.sn, update.offset, update.data)
-		if updateErr != nil {
-			DebugLog("[VFS applyWritesWithWritingVersion] ERROR: Failed to update data chunk on disk: fileID=%d, dataID=%d, sn=%d, error=%v", ra.fileID, dataID, update.sn, updateErr)
-			return 0, fmt.Errorf("failed to update data chunk %d: %v", update.sn, updateErr)
-		}
-		DebugLog("[VFS applyWritesWithWritingVersion] Successfully updated data chunk on disk: fileID=%d, dataID=%d, sn=%d, offset=%d, size=%d", ra.fileID, dataID, update.sn, update.offset, len(update.data))
-	}
-
-	// Update file object size if needed
-	// Calculate the maximum end position of all write operations
-	newSize := fileObj.Size
-	maxEnd := int64(0)
-	hasWriteFromZero := false
-	for _, write := range writes {
-		writeEnd := write.Offset + int64(len(write.Data))
-		if writeEnd > maxEnd {
-			maxEnd = writeEnd
-		}
-		if write.Offset == 0 {
-			hasWriteFromZero = true
-		}
-	}
-
-	if hasWriteFromZero {
-		// File is being overwritten from the beginning, use maxEnd (even if shorter than original)
-		newSize = maxEnd
-		DebugLog("[VFS applyWritesWithWritingVersion] File overwritten from beginning: fileID=%d, oldSize=%d, newSize=%d", ra.fileID, fileObj.Size, newSize)
-	} else if maxEnd > fileObj.Size {
-		// File is being extended, use maxEnd
-		newSize = maxEnd
-		DebugLog("[VFS applyWritesWithWritingVersion] File extended: fileID=%d, oldSize=%d, newSize=%d", ra.fileID, fileObj.Size, newSize)
-	} else {
-		// File size doesn't change (writes are within existing file)
-		DebugLog("[VFS applyWritesWithWritingVersion] File size unchanged: fileID=%d, size=%d", ra.fileID, fileObj.Size)
-	}
-
-	// Update writing version and file object if size changed
-	if newSize != fileObj.Size {
-		// Get current DataInfo to update its size
-		var dataInfo *core.DataInfo
-		dataInfoCacheKey := dataID
-		if cached, ok := dataInfoCache.Get(dataInfoCacheKey); ok {
-			if info, ok := cached.(*core.DataInfo); ok && info != nil {
-				dataInfo = info
-			}
-		}
-		if dataInfo == nil {
-			var err error
-			dataInfo, err = ra.fs.h.GetDataInfo(ra.fs.c, ra.fs.bktID, dataID)
-			if err == nil && dataInfo != nil {
-				dataInfoCache.Put(dataInfoCacheKey, dataInfo)
-			}
-		}
-
-		// Update DataInfo size if it exists (for writing versions, Size should equal OrigSize)
-		if dataInfo != nil {
-			dataInfo.OrigSize = newSize
-			dataInfo.Size = newSize // For uncompressed/unencrypted data, Size equals OrigSize
-			_, err := ra.fs.h.PutDataInfo(ra.fs.c, ra.fs.bktID, []*core.DataInfo{dataInfo})
-			if err != nil {
-				DebugLog("[VFS applyWritesWithWritingVersion] ERROR: Failed to update DataInfo: fileID=%d, dataID=%d, error=%v", ra.fileID, dataID, err)
-				// Continue with file object update even if DataInfo update fails
-			} else {
-				// Update cache
-				dataInfoCache.Put(dataInfoCacheKey, dataInfo)
-				DebugLog("[VFS applyWritesWithWritingVersion] Successfully updated DataInfo: fileID=%d, dataID=%d, size=%d", ra.fileID, dataID, newSize)
-			}
-		}
-
-		// Update writing version object size
-		updateVersionObj := &core.ObjectInfo{
-			ID:     writingVersion.ID,
-			DataID: dataID,
-			Size:   newSize,
-			MTime:  core.Now(),
-		}
-		_, err = lh.Put(ra.fs.c, ra.fs.bktID, []*core.ObjectInfo{updateVersionObj})
-		if err != nil {
-			DebugLog("[VFS applyWritesWithWritingVersion] ERROR: Failed to update writing version: fileID=%d, versionID=%d, error=%v", ra.fileID, writingVersion.ID, err)
-			// Continue with file object update
-		} else {
-			DebugLog("[VFS applyWritesWithWritingVersion] Successfully updated writing version: fileID=%d, versionID=%d, size=%d", ra.fileID, writingVersion.ID, newSize)
-		}
-
-		// Update file object
-		// IMPORTANT: Must include Type, Name, PID, MTime to avoid cache corruption
-		mTime := core.Now()
-		updateFileObj := &core.ObjectInfo{
-			ID:     ra.fileID,
-			PID:    fileObj.PID,
-			Type:   fileObj.Type,
-			Name:   fileObj.Name,
-			DataID: dataID,
-			Size:   newSize,
-			MTime:  mTime,
-		}
-
-		DebugLog("[VFS applyWritesWithWritingVersion] Writing file object to disk: fileID=%d, dataID=%d, size=%d, chunkSize=%d", ra.fileID, dataID, newSize, ra.fs.chunkSize)
-		_, err = lh.Put(ra.fs.c, ra.fs.bktID, []*core.ObjectInfo{updateFileObj})
-		if err != nil {
-			DebugLog("[VFS applyWritesWithWritingVersion] ERROR: Failed to write file object to disk: fileID=%d, error=%v", ra.fileID, err)
-			return 0, fmt.Errorf("failed to update file object: %v", err)
-		}
-		DebugLog("[VFS applyWritesWithWritingVersion] Successfully wrote file object to disk: fileID=%d, dataID=%d, size=%d", ra.fileID, dataID, newSize)
-
-		// Update cache
-		fileObjCache.Put(ra.fileObjKey, updateFileObj)
-		ra.fileObj.Store(updateFileObj)
-		DebugLog("[VFS applyWritesWithWritingVersion] Successfully updated file: fileID=%d, dataID=%d, size=%d", ra.fileID, dataID, newSize)
-	} else {
-		DebugLog("[VFS applyWritesWithWritingVersion] No size change: fileID=%d, dataID=%d, size=%d", ra.fileID, dataID, newSize)
-	}
-
-	// Return 0 to indicate no new version was created (using writing version)
-	return 0, nil
-}
 
 // applyWritesStreamingCompressed handles compressed or encrypted data
 // Streaming processing: read original data by chunk, apply write operations, process and write to new object immediately
@@ -6357,6 +6051,14 @@ func (ra *RandomAccessor) Truncate(newSize int64) (int64, error) {
 		decodingReaderCache.Del(newDataID)
 	}
 
+	// CRITICAL: Set sparseSize for sparse file optimization
+	// When truncating to a larger size (especially from 0), mark as sparse
+	// This allows subsequent writes to use temporary write area efficiently
+	if newSize > oldSize {
+		atomic.StoreInt64(&ra.sparseSize, newSize)
+		DebugLog("[VFS Truncate] Marked as sparse file: fileID=%d, sparseSize=%d", ra.fileID, newSize)
+	}
+
 	DebugLog("[VFS Truncate] Returning versionID: fileID=%d, versionID=%d, newSize=%d, newDataID=%d", ra.fileID, newVersionID, newSize, newDataID)
 	return newVersionID, nil
 }
@@ -6369,6 +6071,11 @@ func (ra *RandomAccessor) Close() error {
 	_, err := ra.Flush()
 	if err != nil {
 		return err
+	}
+
+	// Close temp write file if exists
+	if err := ra.closeTempWriteFile(); err != nil {
+		DebugLog("[VFS RandomAccessor Close] WARNING: Failed to close temp write file: %v", err)
 	}
 
 	return nil
