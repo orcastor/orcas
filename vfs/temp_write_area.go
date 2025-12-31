@@ -414,8 +414,6 @@ func (twf *TempWriteFile) processWithSDK() error {
 			dataInfo.Kind |= core.DATA_ENDEC_AES256
 		case core.DATA_ENDEC_SM4:
 			dataInfo.Kind |= core.DATA_ENDEC_SM4
-		default:
-			return fmt.Errorf("invalid encryption method: %d", twf.twa.fs.EndecWay)
 		}
 	}
 
