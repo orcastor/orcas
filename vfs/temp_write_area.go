@@ -804,6 +804,12 @@ func (twa *TempWriteArea) cleanupOrphanedFiles(activeFileIDs map[int64]bool) {
 func (twa *TempWriteArea) Stop() {
 	close(twa.stopCleanup)
 
+	// 停止 WAL 管理器
+	if twa.fs.walManager != nil {
+		twa.fs.walManager.Stop()
+		DebugLog("[TempWriteArea] WAL manager stopped")
+	}
+
 	// 关闭所有活跃文件
 	twa.mu.Lock()
 	defer twa.mu.Unlock()

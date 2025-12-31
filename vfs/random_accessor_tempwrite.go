@@ -26,6 +26,17 @@ func (ra *RandomAccessor) shouldUseTempWriteArea(fileObj *core.ObjectInfo) bool 
 		return false
 	}
 
+	// Scenario 0: Files that need encryption or compression
+	// CRITICAL: If encryption or compression is enabled, ALWAYS use temp write area
+	// This ensures data is properly processed before being written to disk
+	needsEncrypt := ra.fs.EndecKey != ""
+	needsCompress := ra.fs.CmprWay > 0 && shouldCompressFileByName(ra.fs, fileObj.Name)
+	if needsEncrypt || needsCompress {
+		DebugLog("[VFS shouldUseTempWriteArea] File needs encryption/compression: fileID=%d, needsEncrypt=%v, needsCompress=%v",
+			ra.fileID, needsEncrypt, needsCompress)
+		return true
+	}
+
 	// Scenario 1: Sparse files (qBittorrent scenario)
 	// Always use temp write area for sparse files regardless of size
 	if atomic.LoadInt64(&ra.sparseSize) > 0 {
