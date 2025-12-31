@@ -263,6 +263,9 @@ func (ra *RandomAccessor) flushTempWriteFile() error {
 	DebugLog("[VFS flushTempWriteFile] Successfully updated file object in DB and cache: fileID=%d, size=%d, dataID=%d",
 		ra.fileID, updateFileObj.Size, updateFileObj.DataID)
 
+	// Record write operation for save pattern detection
+	ra.fs.recordFileOperation(OpWrite, ra.fileID, updateFileObj.Name, updateFileObj.PID, updateFileObj.DataID, updateFileObj.Size, "", 0)
+
 	// Clear the reference
 	ra.tempWriteMu.Lock()
 	ra.tempWriteFile = nil

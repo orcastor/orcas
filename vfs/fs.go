@@ -1415,6 +1415,8 @@ func (n *OrcasNode) Create(ctx context.Context, name string, flags uint32, mode 
 		// Success - use the returned ID
 		fileObj.ID = ids[0]
 		DebugLog("[VFS Create] Successfully created file: name=%s, fileID=%d, parentID=%d", name, fileObj.ID, obj.ID)
+		// Record file creation operation for save pattern detection
+		n.fs.recordFileOperation(OpCreate, fileObj.ID, name, obj.ID, 0, 0, "", 0)
 		// Continue with new file creation logic below (existingFileID is already 0)
 	}
 
@@ -1946,7 +1948,21 @@ func (n *OrcasNode) Unlink(ctx context.Context, name string) syscall.Errno {
 		return syscall.ENOENT
 	}
 
-	// Step 0: Remove from RandomAccessor registry if present
+	// Step 0: Check if this delete should be intercepted for save pattern merge
+	if n.fs.savePatternDetector != nil {
+		if shouldIntercept, match := n.fs.savePatternDetector.ShouldInterceptDelete(targetID, name, obj.ID); shouldIntercept {
+			// Intercept delete operation, mark for pending merge
+			if err := n.fs.savePatternDetector.HandleDeleteWithMerge(match); err != nil {
+				DebugLog("[VFS Unlink] Failed to handle delete with merge: %v", err)
+				return syscall.EIO
+			}
+			// Successfully intercepted, return success without actually deleting
+			DebugLog("[VFS Unlink] Intercepted delete for save pattern merge: name=%s, fileID=%d", name, targetID)
+			return 0
+		}
+	}
+
+	// Step 1: Remove from RandomAccessor registry if present
 	// This ensures the file is removed from pending objects before deletion
 
 	// Remove from RandomAccessor registry if present
@@ -1969,6 +1985,9 @@ func (n *OrcasNode) Unlink(ctx context.Context, name string) syscall.Errno {
 		DebugLog("[VFS Unlink] ERROR: Failed to recycle file: fileID=%d, name=%s, parentID=%d, error=%v", targetID, name, obj.ID, err)
 		return syscall.EIO
 	}
+
+	// Record delete operation for save pattern detection
+	n.fs.recordFileOperation(OpDelete, targetID, name, obj.ID, 0, 0, "", 0)
 
 	// Step 2: Update cache immediately
 	// CRITICAL: Clear all caches for the deleted file to prevent data corruption
@@ -2319,6 +2338,40 @@ func (n *OrcasNode) Rename(ctx context.Context, name string, newParent fs.InodeE
 
 	DebugLog("[VFS Rename] Found source file: sourceID=%d, name=%s, type=%d, PID=%d", sourceID, sourceObj.Name, sourceObj.Type, sourceObj.PID)
 
+	// Get new parent object first (needed for interception check)
+	newParentNode, ok := newParent.(*OrcasNode)
+	if !ok {
+		DebugLog("[VFS Rename] ERROR: newParent is not OrcasNode: name=%s, newName=%s", name, newName)
+		return syscall.EIO
+	}
+	
+	newParentObj, err := newParentNode.getObj()
+	if err != nil {
+		DebugLog("[VFS Rename] ERROR: Failed to get new parent object: name=%s, newName=%s, error=%v", name, newName, err)
+		return syscall.ENOENT
+	}
+	
+	if newParentObj.Type != core.OBJ_TYPE_DIR {
+		DebugLog("[VFS Rename] ERROR: New parent is not a directory: name=%s, newName=%s, newParentID=%d, type=%d", name, newName, newParentObj.ID, newParentObj.Type)
+		return syscall.ENOTDIR
+	}
+
+	// Check if this rename should be intercepted for save pattern merge
+	if n.fs.savePatternDetector != nil && sourceObj.Type == core.OBJ_TYPE_FILE {
+		if shouldIntercept, match := n.fs.savePatternDetector.ShouldInterceptRename(
+			sourceID, sourceObj.Name, newName, obj.ID, newParentObj.ID); shouldIntercept {
+			// Intercept rename operation, execute merge
+			if err := n.fs.savePatternDetector.HandleRenameWithMerge(match); err != nil {
+				DebugLog("[VFS Rename] Failed to handle rename with merge: %v", err)
+				return syscall.EIO
+			}
+			// Successfully merged, return success without actually renaming
+			DebugLog("[VFS Rename] Intercepted rename for save pattern merge: %s -> %s, fileID=%d", 
+				sourceObj.Name, newName, sourceID)
+			return 0
+		}
+	}
+
 	// Determine if source is .tmp file that will lose its .tmp suffix
 	isTmpFile := false
 	isRemovingTmp := false
@@ -2384,24 +2437,6 @@ func (n *OrcasNode) Rename(ctx context.Context, name string, newParent fs.InodeE
 	}
 
 	// Get target parent directory
-	// Note: InodeEmbedder interface needs to be converted to specific node type
-	// Here assume newParent is OrcasNode type
-	var newParentNode *OrcasNode
-	if node, ok := newParent.(*OrcasNode); ok {
-		newParentNode = node
-	} else {
-		return syscall.EIO
-	}
-
-	newParentObj, err := newParentNode.getObj()
-	if err != nil {
-		return syscall.ENOENT
-	}
-
-	if newParentObj.Type != core.OBJ_TYPE_DIR {
-		return syscall.ENOTDIR
-	}
-
 	// Check if target file already exists in the new parent directory
 	// First try to find from cache (RandomAccessor or fileObjCache) before calling List
 	var existingTargetID int64
@@ -2917,6 +2952,10 @@ func (n *OrcasNode) Rename(ctx context.Context, name string, newParent fs.InodeE
 	}
 
 	DebugLog("[VFS Rename] Successfully renamed source file to target name: sourceID=%d, targetID=%d, targetName=%s", sourceID, existingTargetID, newName)
+
+	// Record rename operation for save pattern detection
+	n.fs.recordFileOperation(OpRename, sourceID, name, obj.ID, 0, 0, newName, newParentObj.ID)
+
 	// If moved to different directory, need to move
 	if newParentObj.ID != obj.ID {
 		err = n.fs.h.MoveTo(n.fs.c, n.fs.bktID, sourceID, newParentObj.ID)

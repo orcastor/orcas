@@ -73,6 +73,8 @@ type OrcasFS struct {
 	raCreateMu sync.Mutex // Protects creation of RandomAccessor for same fileID
 	// Temporary write area for large files and random writes
 	tempWriteArea *TempWriteArea
+	// Save pattern detector for automatic version merging
+	savePatternDetector *SavePatternDetector
 	// OnRootDeleted is called when the root node is deleted (entire bucket is deleted)
 	// This callback can be used to perform cleanup operations
 	// Note: If you need to unmount in the callback, use fs.Server.Unmount()
@@ -165,8 +167,12 @@ func NewOrcasFSWithConfig(h core.Handler, c core.Ctx, bktID int64, cfg *core.Con
 		DebugLog("[VFS NewOrcasFSWithConfig] Temp write area initialized: path=%s", twa.basePath)
 	}
 
-	// Note: WAL manager removed since we're using DELETE journal mode
-	// DELETE mode provides immediate consistency without needing checkpoint/vacuum management
+	// Initialize save pattern detector
+	ofs.savePatternDetector = NewSavePatternDetector(ofs)
+	DebugLog("[VFS NewOrcasFSWithConfig] Save pattern detector initialized")
+
+	// Note: WAL manager removed since we're using WAL journal mode again
+	// WAL mode provides better performance with our cache-first strategy
 
 	// Root node initialization
 	// Windows platform needs to initialize root node immediately, as it doesn't rely on FUSE (implemented in fs_win.go)
@@ -237,6 +243,28 @@ func getCmprWayForFS(fs *OrcasFS) uint32 {
 		return 0
 	}
 	return fs.Config.CmprWay
+}
+
+// recordFileOperation records a file operation to the save pattern detector
+// This is a helper function to simplify integration
+func (fs *OrcasFS) recordFileOperation(op SaveOperation, fileID int64, fileName string, parentID int64, dataID int64, size int64, newName string, newParent int64) {
+	if fs == nil || fs.savePatternDetector == nil {
+		return
+	}
+
+	fileOp := &FileOperation{
+		Op:        op,
+		FileID:    fileID,
+		FileName:  fileName,
+		ParentID:  parentID,
+		DataID:    dataID,
+		Size:      size,
+		NewName:   newName,
+		NewParent: newParent,
+		Timestamp: core.Now(),
+	}
+
+	fs.savePatternDetector.RecordOperation(fileOp)
 }
 
 // getCmprQltyForFS returns the compression quality for a given OrcasFS
