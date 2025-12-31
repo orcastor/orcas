@@ -618,10 +618,15 @@ func (ra *RandomAccessor) getOrCreateTempWriter() (*TempFileWriter, error) {
 	// Use existing DataID if file already has one, otherwise create new DataID
 	// IMPORTANT: This ensures we reuse existing data instead of creating duplicate dataIDs
 	var dataID int64
+	var initialSize int64
 	if fileObj.DataID > 0 && fileObj.DataID != core.EmptyDataID {
 		// File already has DataID, reuse it
 		dataID = fileObj.DataID
-		DebugLog("[VFS TempFileWriter Create] Reusing existing DataID: fileID=%d, dataID=%d", ra.fileID, dataID)
+		// CRITICAL: Initialize size from existing file size to prevent size loss
+		// This is important when TempFileWriter is recreated for a file that already has data
+		// Without this, the size would be reset to 0, causing data loss on flush
+		initialSize = fileObj.Size
+		DebugLog("[VFS TempFileWriter Create] Reusing existing DataID: fileID=%d, dataID=%d, initialSize=%d", ra.fileID, dataID, initialSize)
 	} else {
 		// File has no DataID, create new one
 		dataID = core.NewID()
@@ -629,6 +634,7 @@ func (ra *RandomAccessor) getOrCreateTempWriter() (*TempFileWriter, error) {
 			DebugLog("[VFS RandomAccessor getOrCreateTempWriter] ERROR: Failed to create DataID for .tmp file: fileID=%d", ra.fileID)
 			return nil, fmt.Errorf("failed to create DataID for .tmp file")
 		}
+		initialSize = 0
 		DebugLog("[VFS TempFileWriter Create] Created new DataID: fileID=%d, dataID=%d", ra.fileID, dataID)
 	}
 
@@ -668,8 +674,8 @@ func (ra *RandomAccessor) getOrCreateTempWriter() (*TempFileWriter, error) {
 		fileID:          ra.fileID,
 		dataID:          dataID,
 		fileName:        fileObj.Name,
-		chunkSize:       chunkSize, // Always use 10MB
-		size:            0,
+		chunkSize:       chunkSize,   // Always use 10MB
+		size:            initialSize, // Initialize from existing file size if reusing DataID
 		chunks:          make(map[int]*chunkBuffer),
 		dataInfo:        dataInfo,
 		enableRealtime:  false,

@@ -3244,15 +3244,49 @@ func (n *OrcasNode) flushImpl(ctx context.Context) syscall.Errno {
 		DebugLog("[VFS Flush] ERROR: Failed to flush file: fileID=%d, error=%v", fileID, err)
 		return syscall.EIO
 	}
-	// After flush, get updated object from database to ensure we have latest size
+
+	// IMPORTANT: After flush, get updated object from RandomAccessor's cache, NOT from database
+	// ra.Flush() has already updated the cache with the correct size
+	// Reading from database may return stale data due to SQLite WAL not being checkpointed yet
+	// This fixes the bug where file size was incorrectly reverted to old value after flush
 	fileID := n.objID
 	if obj != nil {
 		fileID = obj.ID
 	}
-	updatedObjs, err := n.fs.h.Get(n.fs.c, n.fs.bktID, []int64{fileID})
-	if err == nil && len(updatedObjs) > 0 {
-		updatedObj := updatedObjs[0]
 
+	// Try to get updated object from RandomAccessor's cache first
+	var updatedObj *core.ObjectInfo
+	if cachedObj := ra.fileObj.Load(); cachedObj != nil {
+		if loadedObj, ok := cachedObj.(*core.ObjectInfo); ok && loadedObj != nil {
+			updatedObj = loadedObj
+			DebugLog("[VFS Flush] Got updated object from RandomAccessor cache: fileID=%d, size=%d, dataID=%d, mtime=%d",
+				updatedObj.ID, updatedObj.Size, updatedObj.DataID, updatedObj.MTime)
+		}
+	}
+
+	// If not in RandomAccessor cache, try global cache
+	if updatedObj == nil {
+		if cached, ok := fileObjCache.Get(fileID); ok {
+			if loadedObj, ok := cached.(*core.ObjectInfo); ok && loadedObj != nil {
+				updatedObj = loadedObj
+				DebugLog("[VFS Flush] Got updated object from global cache: fileID=%d, size=%d, dataID=%d, mtime=%d",
+					updatedObj.ID, updatedObj.Size, updatedObj.DataID, updatedObj.MTime)
+			}
+		}
+	}
+
+	// Only if cache is empty, read from database (this should rarely happen)
+	if updatedObj == nil {
+		DebugLog("[VFS Flush] WARNING: Object not in cache after flush, reading from database: fileID=%d", fileID)
+		updatedObjs, err := n.fs.h.Get(n.fs.c, n.fs.bktID, []int64{fileID})
+		if err == nil && len(updatedObjs) > 0 {
+			updatedObj = updatedObjs[0]
+			DebugLog("[VFS Flush] Got updated object from database: fileID=%d, size=%d, dataID=%d, mtime=%d",
+				updatedObj.ID, updatedObj.Size, updatedObj.DataID, updatedObj.MTime)
+		}
+	}
+
+	if updatedObj != nil {
 		// Update global file object cache with latest metadata
 		cacheKey := updatedObj.ID
 		fileObjCache.Put(cacheKey, updatedObj)
@@ -3281,7 +3315,7 @@ func (n *OrcasNode) flushImpl(ctx context.Context) syscall.Errno {
 	} else {
 		// If we can't get updated object, at least invalidate cache
 		n.invalidateObj()
-		DebugLog("[VFS Flush] Successfully flushed file: fileID=%d, versionID=%d (failed to get final obj: %v)", fileID, versionID, err)
+		DebugLog("[VFS Flush] Successfully flushed file: fileID=%d, versionID=%d (failed to get final obj)", fileID, versionID)
 	}
 
 	return 0
@@ -3830,7 +3864,7 @@ func (n *OrcasNode) forceFlushTempFileBeforeRename(fileID int64, oldName, newNam
 			fileObjCache.Del(cacheKey)
 			objs, err := n.fs.h.Get(n.fs.c, n.fs.bktID, []int64{fileID})
 			if err == nil && len(objs) > 0 {
-				fileObj := objs[0]
+				fileObj = objs[0]
 				// For empty files, ensure EmptyDataID is set
 				if fileObj.Size == 0 && fileObj.DataID != core.EmptyDataID {
 					DebugLog("[VFS Rename] Empty file detected, setting EmptyDataID: fileID=%d, currentDataID=%d", fileID, fileObj.DataID)
@@ -3880,12 +3914,24 @@ func (n *OrcasNode) forceFlushTempFileBeforeRename(fileID int64, oldName, newNam
 			DebugLog("[VFS Rename] ERROR: Failed to force flush: fileID=%d, error=%v", fileID, err)
 		} else {
 			DebugLog("[VFS Rename] Successfully force flushed: fileID=%d", fileID)
-			// Re-fetch to check if empty file needs EmptyDataID
+			// Get updated object from cache first (ForceFlush already updated it)
+			// Only read from database if cache is empty (to avoid WAL stale read)
 			cacheKey := fileID
-			fileObjCache.Del(cacheKey)
-			objs, err := n.fs.h.Get(n.fs.c, n.fs.bktID, []int64{fileID})
-			if err == nil && len(objs) > 0 {
-				fileObj := objs[0]
+			var fileObj *core.ObjectInfo
+			if cached, ok := fileObjCache.Get(cacheKey); ok {
+				if obj, ok := cached.(*core.ObjectInfo); ok && obj != nil {
+					fileObj = obj
+					DebugLog("[VFS Rename] Got file object from cache after flush: fileID=%d, size=%d, dataID=%d", fileID, fileObj.Size, fileObj.DataID)
+				}
+			}
+			if fileObj == nil {
+				DebugLog("[VFS Rename] WARNING: File object not in cache after flush, reading from database: fileID=%d", fileID)
+				objs, err := n.fs.h.Get(n.fs.c, n.fs.bktID, []int64{fileID})
+				if err == nil && len(objs) > 0 {
+					fileObj = objs[0]
+				}
+			}
+			if fileObj != nil {
 				// For empty files, ensure EmptyDataID is set
 				if fileObj.Size == 0 && fileObj.DataID != core.EmptyDataID {
 					DebugLog("[VFS Rename] Empty file detected after flush, setting EmptyDataID: fileID=%d, currentDataID=%d", fileID, fileObj.DataID)
@@ -3951,15 +3997,24 @@ func (n *OrcasNode) forceFlushTempFileBeforeRename(fileID int64, oldName, newNam
 			DebugLog("[VFS Rename] WARNING: Failed to flush RandomAccessor: fileID=%d, error=%v", fileID, err)
 		}
 
-		// Strong consistency: re-fetch from database
+		// Get updated object from cache first (ForceFlush already updated it)
+		// Only read from database if cache is empty (to avoid WAL stale read)
 		cacheKey := fileID
-		fileObjCache.Del(cacheKey)
-
-		// Fetch from database (should have DataID immediately after flush)
-		objs, err := n.fs.h.Get(n.fs.c, n.fs.bktID, []int64{fileID})
 		var fileObj *core.ObjectInfo
-		if err == nil && len(objs) > 0 {
-			fileObj = objs[0]
+		if cached, ok := fileObjCache.Get(cacheKey); ok {
+			if obj, ok := cached.(*core.ObjectInfo); ok && obj != nil {
+				fileObj = obj
+				DebugLog("[VFS Rename] Got file object from cache after flush: fileID=%d, size=%d, dataID=%d", fileID, fileObj.Size, fileObj.DataID)
+			}
+		}
+		if fileObj == nil {
+			DebugLog("[VFS Rename] WARNING: File object not in cache after flush, reading from database: fileID=%d", fileID)
+			objs, err := n.fs.h.Get(n.fs.c, n.fs.bktID, []int64{fileID})
+			if err == nil && len(objs) > 0 {
+				fileObj = objs[0]
+			}
+		}
+		if fileObj != nil {
 			// For empty files (Size = 0), EmptyDataID is valid
 			if fileObj.Size == 0 {
 				fileObjCache.Put(cacheKey, fileObj)
@@ -4105,12 +4160,24 @@ func (n *OrcasNode) forceFlushTempFileBeforeRename(fileID int64, oldName, newNam
 		}
 	}
 
-	// Strong consistency: always re-fetch from database and update cache
+	// Get updated object from cache first (ForceFlush already updated it)
+	// Only read from database if cache is empty (to avoid WAL stale read)
 	cacheKey = fileID
-	fileObjCache.Del(cacheKey)
-	objs, err = n.fs.h.Get(n.fs.c, n.fs.bktID, []int64{fileID})
-	if err == nil && len(objs) > 0 {
-		fileObj := objs[0]
+	fileObj = nil // Reset fileObj to get updated version
+	if cached, ok := fileObjCache.Get(cacheKey); ok {
+		if obj, ok := cached.(*core.ObjectInfo); ok && obj != nil {
+			fileObj = obj
+			DebugLog("[VFS Rename] Got file object from cache after flush: fileID=%d, size=%d, dataID=%d", fileID, fileObj.Size, fileObj.DataID)
+		}
+	}
+	if fileObj == nil {
+		DebugLog("[VFS Rename] WARNING: File object not in cache after flush, reading from database: fileID=%d", fileID)
+		objs, err := n.fs.h.Get(n.fs.c, n.fs.bktID, []int64{fileID})
+		if err == nil && len(objs) > 0 {
+			fileObj = objs[0]
+		}
+	}
+	if fileObj != nil {
 		// For empty files, ensure EmptyDataID is set
 		if fileObj.Size == 0 && fileObj.DataID != core.EmptyDataID {
 			DebugLog("[VFS Rename] Empty file detected after flush, setting EmptyDataID: fileID=%d, currentDataID=%d", fileID, fileObj.DataID)
@@ -4132,7 +4199,7 @@ func (n *OrcasNode) forceFlushTempFileBeforeRename(fileID int64, oldName, newNam
 			}
 		}
 		fileObjCache.Put(cacheKey, fileObj)
-		DebugLog("[VFS Rename] Strong consistency: re-fetched from database after flush: fileID=%d, dataID=%d, size=%d, name=%s", fileID, fileObj.DataID, fileObj.Size, fileObj.Name)
+		DebugLog("[VFS Rename] Got file object from cache after flush: fileID=%d, dataID=%d, size=%d, name=%s", fileID, fileObj.DataID, fileObj.Size, fileObj.Name)
 		if fileObj.DataID == 0 || fileObj.DataID == core.EmptyDataID || fileObj.Size == 0 {
 			DebugLog("[VFS Rename] WARNING: File has no data after flush: fileID=%d, dataID=%d, size=%d", fileID, fileObj.DataID, fileObj.Size)
 		}
@@ -4146,7 +4213,7 @@ func (n *OrcasNode) forceFlushTempFileBeforeRename(fileID int64, oldName, newNam
 			DebugLog("[VFS Rename] Updated directory listing cache after flush: fileID=%d, dirID=%d, name=%s", fileID, fileObj.PID, fileObj.Name)
 		}
 	} else {
-		DebugLog("[VFS Rename] WARNING: Failed to re-fetch file object after flush: fileID=%d, error=%v", fileID, err)
+		DebugLog("[VFS Rename] WARNING: Failed to get file object after flush: fileID=%d", fileID)
 	}
 
 	// IMPORTANT: Do NOT unregister RandomAccessor immediately after force flush
@@ -4243,17 +4310,48 @@ func (n *OrcasNode) releaseImpl(ctx context.Context) syscall.Errno {
 		DebugLog("[VFS Release] Flushed during release: fileID=%d, versionID=%d", fileID, versionID)
 	}
 
+	// IMPORTANT: Get updated object from RandomAccessor's cache BEFORE closing
+	// ra.ForceFlush() has already updated the cache with the correct size
+	// We must read from cache before Close() because Close() might clear some state
+	var updatedObj *core.ObjectInfo
+	if cachedObj := ra.fileObj.Load(); cachedObj != nil {
+		if loadedObj, ok := cachedObj.(*core.ObjectInfo); ok && loadedObj != nil {
+			updatedObj = loadedObj
+			DebugLog("[VFS Release] Got updated object from RandomAccessor cache before close: fileID=%d, size=%d, dataID=%d, mtime=%d",
+				updatedObj.ID, updatedObj.Size, updatedObj.DataID, updatedObj.MTime)
+		}
+	}
+
 	// Close RandomAccessor (this will flush any remaining data)
 	err = ra.Close()
 	if err != nil {
 		DebugLog("[VFS Release] ERROR: Failed to close RandomAccessor: fileID=%d, error=%v", fileID, err)
 	}
 
-	// After flush, get updated object from database to ensure we have latest size
-	updatedObjs, err := n.fs.h.Get(n.fs.c, n.fs.bktID, []int64{fileID})
-	if err == nil && len(updatedObjs) > 0 {
-		updatedObj := updatedObjs[0]
+	// If not in RandomAccessor cache, try global cache
+	if updatedObj == nil {
+		if cached, ok := fileObjCache.Get(fileID); ok {
+			if loadedObj, ok := cached.(*core.ObjectInfo); ok && loadedObj != nil {
+				updatedObj = loadedObj
+				DebugLog("[VFS Release] Got updated object from global cache: fileID=%d, size=%d, dataID=%d, mtime=%d",
+					updatedObj.ID, updatedObj.Size, updatedObj.DataID, updatedObj.MTime)
+			}
+		}
+	}
 
+	// Only if cache is empty, read from database (this should rarely happen)
+	// Reading from database may return stale data due to SQLite WAL not being checkpointed yet
+	if updatedObj == nil {
+		DebugLog("[VFS Release] WARNING: Object not in cache after flush, reading from database: fileID=%d", fileID)
+		updatedObjs, err := n.fs.h.Get(n.fs.c, n.fs.bktID, []int64{fileID})
+		if err == nil && len(updatedObjs) > 0 {
+			updatedObj = updatedObjs[0]
+			DebugLog("[VFS Release] Got updated object from database: fileID=%d, size=%d, dataID=%d, mtime=%d",
+				updatedObj.ID, updatedObj.Size, updatedObj.DataID, updatedObj.MTime)
+		}
+	}
+
+	if updatedObj != nil {
 		// Update global file object cache with latest metadata
 		cacheKey := updatedObj.ID
 		fileObjCache.Put(cacheKey, updatedObj)
@@ -4282,7 +4380,7 @@ func (n *OrcasNode) releaseImpl(ctx context.Context) syscall.Errno {
 	} else {
 		// If we can't get updated object, at least invalidate cache
 		n.invalidateObj()
-		DebugLog("[VFS Release] Successfully released file: fileID=%d (failed to get final obj: %v)", fileID, err)
+		DebugLog("[VFS Release] Successfully released file: fileID=%d (failed to get final obj)", fileID)
 	}
 
 	return 0

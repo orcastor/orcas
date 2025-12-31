@@ -704,34 +704,49 @@ func (lh *LocalHandler) GetOrCreateWritingVersion(c Ctx, bktID, fileID int64) (*
 	fileObj := fileObjs[0]
 
 	// For writing version, we need a separate DataID without compression/encryption
-	// Check if current DataID has compression/encryption
-	var writingDataID int64 = fileObj.DataID
+	// IMPORTANT: Always create new DataID for writing version to avoid modifying completed versions
+	// Even if original data has no compression/encryption, we should not reuse it
+	// This ensures that completed versions remain immutable
+	var writingDataID int64 = 0
 	if fileObj.DataID > 0 && fileObj.DataID != EmptyDataID {
 		dataInfo, err := lh.ma.GetData(c, bktID, fileObj.DataID)
 		if err == nil && dataInfo != nil {
-			hasCompression := dataInfo.Kind&DATA_CMPR_MASK != 0
-			hasEncryption := dataInfo.Kind&DATA_ENDEC_MASK != 0
-			// If original data has compression/encryption, create new DataID for writing version
-			if hasCompression || hasEncryption {
-				// Create new DataID for writing version (uncompressed/unencrypted)
-				writingDataID = NewID()
-				if writingDataID <= 0 {
-					return nil, fmt.Errorf("failed to create DataID for writing version")
-				}
-				// Create DataInfo for writing version (no compression/encryption)
-				writingDataInfo := &DataInfo{
-					ID:       writingDataID,
-					Size:     0,
-					OrigSize: fileObj.Size,
-					Kind:     DATA_NORMAL, // No compression, no encryption
-				}
-				if dataInfo.Kind&DATA_SPARSE != 0 {
-					writingDataInfo.Kind |= DATA_SPARSE // Preserve sparse flag
-				}
-				_, err = lh.PutDataInfo(c, bktID, []*DataInfo{writingDataInfo})
-				if err != nil {
-					return nil, fmt.Errorf("failed to create DataInfo for writing version: %v", err)
-				}
+			// CRITICAL: Always create new DataID for writing version
+			// This prevents modifying completed versions, even if they have no compression/encryption
+			writingDataID = NewID()
+			if writingDataID <= 0 {
+				return nil, fmt.Errorf("failed to create DataID for writing version")
+			}
+			// Create DataInfo for writing version (no compression/encryption)
+			writingDataInfo := &DataInfo{
+				ID:       writingDataID,
+				Size:     0,
+				OrigSize: fileObj.Size,
+				Kind:     DATA_NORMAL, // No compression, no encryption
+			}
+			if dataInfo.Kind&DATA_SPARSE != 0 {
+				writingDataInfo.Kind |= DATA_SPARSE // Preserve sparse flag
+			}
+			_, err = lh.PutDataInfo(c, bktID, []*DataInfo{writingDataInfo})
+			if err != nil {
+				return nil, fmt.Errorf("failed to create DataInfo for writing version: %v", err)
+			}
+		} else {
+			// Failed to get DataInfo, but file has DataID
+			// Create new DataID for writing version anyway
+			writingDataID = NewID()
+			if writingDataID <= 0 {
+				return nil, fmt.Errorf("failed to create DataID for writing version")
+			}
+			writingDataInfo := &DataInfo{
+				ID:       writingDataID,
+				Size:     0,
+				OrigSize: fileObj.Size,
+				Kind:     DATA_NORMAL | DATA_SPARSE,
+			}
+			_, err = lh.PutDataInfo(c, bktID, []*DataInfo{writingDataInfo})
+			if err != nil {
+				return nil, fmt.Errorf("failed to create DataInfo for writing version: %v", err)
 			}
 		}
 	} else if fileObj.DataID == 0 || fileObj.DataID == EmptyDataID {

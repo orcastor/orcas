@@ -499,6 +499,67 @@ func TestCacheConsistencyAfterWrites(t *testing.T) {
 			So(err, ShouldBeNil)
 			So(fileObjAfterFlush.Size, ShouldEqual, 4096)
 		})
+
+		Convey("test TempFileWriter size preserved when recreated", func() {
+			fileID, _ := ig.New()
+			fileObj := &core.ObjectInfo{
+				ID:     fileID,
+				PID:    testBktID,
+				Type:   core.OBJ_TYPE_FILE,
+				Name:   "recreate_test.txt", // Use non-.tmp file to test normal flush
+				DataID: core.EmptyDataID,
+				Size:   0,
+				MTime:  core.Now(),
+			}
+			_, err = dma.PutObj(testCtx, testBktID, []*core.ObjectInfo{fileObj})
+			So(err, ShouldBeNil)
+
+			ra, err := NewRandomAccessor(NewOrcasFS(lh, testCtx, testBktID), fileID)
+			So(err, ShouldBeNil)
+
+			// Write 8MB data
+			dataSize := int64(8 * 1024 * 1024)
+			testData := bytes.Repeat([]byte("X"), int(dataSize))
+			err = ra.Write(0, testData)
+			So(err, ShouldBeNil)
+
+			// Flush to persist data
+			_, err = ra.Flush()
+			So(err, ShouldBeNil)
+
+			// Verify size is correct
+			fileObjAfterFlush, err := ra.getFileObj()
+			So(err, ShouldBeNil)
+			So(fileObjAfterFlush.Size, ShouldEqual, dataSize)
+
+			// Close RandomAccessor
+			ra.Close()
+
+			// Create new RandomAccessor (simulating recreation)
+			ra2, err := NewRandomAccessor(NewOrcasFS(lh, testCtx, testBktID), fileID)
+			So(err, ShouldBeNil)
+			defer ra2.Close()
+
+			// Write additional 1MB data
+			additionalSize := int64(1 * 1024 * 1024)
+			additionalData := bytes.Repeat([]byte("Y"), int(additionalSize))
+			err = ra2.Write(dataSize, additionalData)
+			So(err, ShouldBeNil)
+
+			// Flush again
+			_, err = ra2.Flush()
+			So(err, ShouldBeNil)
+
+			// Verify size is 8MB + 1MB = 9MB, not just 1MB
+			fileObjAfterFlush2, err := ra2.getFileObj()
+			So(err, ShouldBeNil)
+			So(fileObjAfterFlush2.Size, ShouldEqual, dataSize+additionalSize)
+
+			// Verify from database
+			objs, err := dma.GetObj(testCtx, testBktID, []int64{fileID})
+			So(err, ShouldBeNil)
+			So(objs[0].Size, ShouldEqual, dataSize+additionalSize)
+		})
 	})
 }
 
