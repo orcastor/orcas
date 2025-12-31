@@ -472,7 +472,7 @@ func TestCacheConsistencyAfterWrites(t *testing.T) {
 			testData2 := bytes.Repeat([]byte("B"), 4096)
 			err = ra.Write(4096, testData2)
 			So(err, ShouldNotBeNil)
-			So(err.Error(), ShouldContainSubstring, "writes are no longer allowed")
+			So(err.Error(), ShouldContainSubstring, "renamed from .tmp")
 
 			// Verify TempFileWriter was cleared
 			tempWriterVal := ra.tempWriter.Load()

@@ -547,6 +547,8 @@ type RandomAccessor struct {
 	lastOffset   int64                         // Last write offset (for sequential write detection) (atomic access)
 	seqDetector  *ConcurrentSequentialDetector // Concurrent sequential write detector
 	tempWriter   atomic.Value                  // TempFileWriter for .tmp files (atomic.Value stores *TempFileWriter)
+	isTmpFile    bool                          // Whether this file is a .tmp file (determined at creation time, immutable)
+	dataInfo     atomic.Value                  // Cached DataInfo (atomic.Value stores *core.DataInfo)
 }
 
 func isTempFile(obj *core.ObjectInfo) bool {
@@ -1968,6 +1970,17 @@ func NewRandomAccessor(fs *OrcasFS, fileID int64) (*RandomAccessor, error) {
 		},
 	}
 
+	// Initialize isTmpFile flag by checking file name at creation time
+	// This avoids repeated file name checks on every write operation
+	// IMPORTANT: This flag is immutable after creation - if file is renamed,
+	// the RandomAccessor MUST be closed and recreated
+	fileObj, err := ra.getFileObj()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get file object for isTmpFile check: %w", err)
+	}
+	ra.isTmpFile = isTempFile(fileObj)
+	DebugLog("[VFS NewRandomAccessor] Created RandomAccessor: fileID=%d, fileName=%s, isTmpFile=%v", fileID, fileObj.Name, ra.isTmpFile)
+
 	// Note: RandomAccessor registration is now handled by the caller (getRandomAccessor)
 	// to ensure proper synchronization for .tmp files during concurrent writes
 	// For non-.tmp files or when called from other places, registration should be done explicitly
@@ -2011,13 +2024,36 @@ func (ra *RandomAccessor) Write(offset int64, data []byte) error {
 	// CRITICAL: For non-.tmp files, do NOT use TempFileWriter
 	// TempFileWriter should only be used for .tmp files
 	// Once a file is renamed (removed .tmp suffix), writes should go through normal write path
-	// Check if this is a .tmp file first
-	isTmpFile := isTempFile(fileObj)
+	// Use the immutable isTmpFile flag (set at creation time) instead of checking file name
+	// This is more efficient and avoids cache inconsistency issues
+	// IMPORTANT: If file is renamed, RandomAccessor MUST be closed and recreated
+
+	// CRITICAL: Detect file rename by comparing isTmpFile flag with actual file name
+	// If isTmpFile is true but actual file name is not .tmp, file was renamed
+	// In this case, reject write and force RandomAccessor recreation
+	actualIsTmpFile := isTempFile(fileObj)
+	if ra.isTmpFile != actualIsTmpFile {
+		// File was renamed! isTmpFile flag doesn't match actual file name
+		if ra.isTmpFile {
+			// File was renamed from .tmp to normal name
+			DebugLog("[VFS RandomAccessor Write] ERROR: File was renamed from .tmp, RandomAccessor must be recreated: fileID=%d, fileName=%s", ra.fileID, fileObj.Name)
+			// Clear TempFileWriter to prevent future writes
+			ra.tempWriter.Store(clearedTempWriterMarker)
+			// Close RandomAccessor to force recreation
+			ra.Close()
+			return fmt.Errorf("file was renamed from .tmp, RandomAccessor must be recreated: fileID=%d, fileName=%s", ra.fileID, fileObj.Name)
+		} else {
+			// File was renamed to .tmp (unusual but possible)
+			DebugLog("[VFS RandomAccessor Write] ERROR: File was renamed to .tmp, RandomAccessor must be recreated: fileID=%d, fileName=%s", ra.fileID, fileObj.Name)
+			ra.Close()
+			return fmt.Errorf("file was renamed to .tmp, RandomAccessor must be recreated: fileID=%d, fileName=%s", ra.fileID, fileObj.Name)
+		}
+	}
 
 	// IMPORTANT: Check TempFileWriter only for .tmp files
 	// For non-.tmp files, TempFileWriter should have been cleared after rename
 	// If it still exists, reject the write to prevent data corruption
-	if !isTmpFile {
+	if !ra.isTmpFile {
 		// File is not .tmp, check if TempFileWriter still exists (should have been cleared)
 		hasTempWriter := ra.tempWriter.Load() != nil
 		if hasTempWriter {
@@ -2063,9 +2099,10 @@ func (ra *RandomAccessor) Write(offset int64, data []byte) error {
 	}
 
 	// Check if this is a .tmp file (and TempFileWriter doesn't exist yet)
-	// Note: isTmpFile was already checked above, but we need to check again here
+	// Use the immutable isTmpFile flag (set at creation time)
+	// Note: ra.isTmpFile was already checked above, but we need to check again here
 	// because the code path above might have returned early
-	if isTmpFile {
+	if ra.isTmpFile {
 		// For .tmp files, all writes should go through TempFileWriter
 		// This ensures consistent data handling and avoids triggering applyRandomWritesWithSDK
 		// IMPORTANT: Update lastActivity before writing to enable timeout flush
@@ -3290,9 +3327,8 @@ func (ra *RandomAccessor) executeDelayedFlush(force bool) {
 	// CRITICAL: For .tmp files, skip delayed flush
 	// .tmp files should only be flushed on rename (force=true)
 	// Delayed flush (timeout) should not trigger flush for .tmp files
-	fileObj, err := ra.getFileObj()
-	isTmpFile := err == nil && fileObj != nil && isTempFile(fileObj)
-	if isTmpFile {
+	// Use the immutable isTmpFile flag (set at creation time)
+	if ra.isTmpFile {
 		DebugLog("[VFS RandomAccessor] Skipping delayed flush for .tmp file (only flush on rename): fileID=%d, force=%v", ra.fileID, force)
 		return
 	}
@@ -3340,9 +3376,12 @@ func (ra *RandomAccessor) flushInternal(force bool) (int64, error) {
 	}
 
 	// For .tmp files, check final file size before flushing TempFileWriter
-	fileObj, err := ra.getFileObj()
-	isTmpFile := err == nil && fileObj != nil && isTempFile(fileObj)
-	if isTmpFile {
+	// Use the immutable isTmpFile flag (set at creation time)
+	if ra.isTmpFile {
+		fileObj, err := ra.getFileObj()
+		if err != nil {
+			return 0, fmt.Errorf("failed to get file object for .tmp file flush: %w", err)
+		}
 		// CRITICAL: For .tmp files, only flush when force=true (i.e., during rename)
 		// For .tmp files, flush should only occur in these scenarios:
 		// 1. chunk写满（range只有一个，而且是从0-10MB的范围写满）- handled in TempFileWriter.Write
@@ -3394,8 +3433,16 @@ func (ra *RandomAccessor) flushInternal(force bool) (int64, error) {
 				DebugLog("[VFS RandomAccessor Flush] Got fileObj from cache after TempFileWriter flush: fileID=%d, dataID=%d, size=%d", ra.fileID, fileObj.DataID, fileObj.Size)
 			}
 		}
-	} else {
-		// Not a .tmp file, flush TempFileWriter if exists
+	}
+
+	// Get fileObj for non-.tmp files or after .tmp file flush
+	fileObj, err := ra.getFileObj()
+	if err != nil {
+		return 0, fmt.Errorf("failed to get file object: %w", err)
+	}
+
+	// For non-.tmp files, flush TempFileWriter if exists
+	if !ra.isTmpFile {
 		if err := ra.flushTempFileWriter(); err != nil {
 			return 0, err
 		}
@@ -3453,7 +3500,7 @@ func (ra *RandomAccessor) flushInternal(force bool) (int64, error) {
 
 	// For .tmp files, use TempFileWriter
 	// Large .tmp files should use TempFileWriter
-	if isTmpFile {
+	if ra.isTmpFile {
 		// Check if TempFileWriter exists (lock-free check using atomic.Value)
 		hasTempWriter := ra.tempWriter.Load() != nil && ra.tempWriter.Load() != clearedTempWriterMarker
 
@@ -3724,9 +3771,9 @@ func (ra *RandomAccessor) applyRandomWritesWithSDK(fileObj *core.ObjectInfo, wri
 	// For .tmp files, check if TempFileWriter is using the existing DataID
 	// If TempFileWriter exists and has the same DataID, we should not create a new one
 	// Otherwise, create new DataID (for non-.tmp files or when TempFileWriter doesn't exist)
+	// Use the immutable isTmpFile flag (set at creation time)
 	var newDataID int64
-	isTmpFile := isTempFile(fileObj)
-	if isTmpFile && fileObj.DataID > 0 && fileObj.DataID != core.EmptyDataID {
+	if ra.isTmpFile && fileObj.DataID > 0 && fileObj.DataID != core.EmptyDataID {
 		// Check if TempFileWriter is using this DataID (lock-free check using atomic.Value)
 		hasTempWriter := false
 		if val := ra.tempWriter.Load(); val != nil {
@@ -3754,7 +3801,7 @@ func (ra *RandomAccessor) applyRandomWritesWithSDK(fileObj *core.ObjectInfo, wri
 		if newDataID <= 0 {
 			return 0, fmt.Errorf("failed to generate DataID")
 		}
-		DebugLog("[VFS applyRandomWritesWithSDK] Created new DataID: fileID=%d, dataID=%d, isTmpFile=%v", ra.fileID, newDataID, isTmpFile)
+		DebugLog("[VFS applyRandomWritesWithSDK] Created new DataID: fileID=%d, dataID=%d, isTmpFile=%v", ra.fileID, newDataID, ra.isTmpFile)
 	}
 
 	// Calculate new file size
