@@ -423,6 +423,82 @@ func TestCacheConsistencyAfterWrites(t *testing.T) {
 			So(cachedObj.Size, ShouldEqual, expectedSize)
 			So(objsFromDB[0].Size, ShouldEqual, expectedSize)
 		})
+
+		Convey("test TempFileWriter not recreated after file rename", func() {
+			fileID, _ := ig.New()
+			fileObj := &core.ObjectInfo{
+				ID:     fileID,
+				PID:    testBktID,
+				Type:   core.OBJ_TYPE_FILE,
+				Name:   "test.tmp", // Start with .tmp file
+				DataID: core.EmptyDataID,
+				Size:   0,
+				MTime:  core.Now(),
+			}
+			_, err = dma.PutObj(testCtx, testBktID, []*core.ObjectInfo{fileObj})
+			So(err, ShouldBeNil)
+
+			ra, err := NewRandomAccessor(NewOrcasFS(lh, testCtx, testBktID), fileID)
+			So(err, ShouldBeNil)
+
+			// Write some data to .tmp file (should create TempFileWriter)
+			testData1 := bytes.Repeat([]byte("A"), 4096)
+			err = ra.Write(0, testData1)
+			So(err, ShouldBeNil)
+
+			// Verify TempFileWriter was created
+			tempWriterVal1 := ra.tempWriter.Load()
+			So(tempWriterVal1, ShouldNotBeNil)
+			So(tempWriterVal1, ShouldNotEqual, clearedTempWriterMarker)
+
+			// Rename file from .tmp to normal name
+			fileObj.Name = "test.txt"
+			_, err = dma.PutObj(testCtx, testBktID, []*core.ObjectInfo{fileObj})
+			So(err, ShouldBeNil)
+
+			// Update cache with renamed file object
+			fileObjCache.Put(ra.fileObjKey, fileObj)
+
+			// Verify cache was updated
+			cachedFileObj, ok := fileObjCache.Get(ra.fileObjKey)
+			So(ok, ShouldBeTrue)
+			So(cachedFileObj.(*core.ObjectInfo).Name, ShouldEqual, "test.txt")
+
+			// IMPORTANT: Also update the local atomic.Value cache in RandomAccessor
+			// This is critical because Write() checks the local cache first
+			ra.fileObj.Store(fileObj)
+
+			// Try to write again (should fail because file is no longer .tmp)
+			testData2 := bytes.Repeat([]byte("B"), 4096)
+			err = ra.Write(4096, testData2)
+			So(err, ShouldNotBeNil)
+			So(err.Error(), ShouldContainSubstring, "writes are no longer allowed")
+
+			// Verify TempFileWriter was cleared
+			tempWriterVal := ra.tempWriter.Load()
+			So(tempWriterVal, ShouldEqual, clearedTempWriterMarker)
+
+			// Close and reopen RandomAccessor
+			ra.Close()
+
+			// Create new RandomAccessor for the renamed file
+			ra2, err := NewRandomAccessor(NewOrcasFS(lh, testCtx, testBktID), fileID)
+			So(err, ShouldBeNil)
+			defer ra2.Close()
+
+			// Write should now work with normal write path (not TempFileWriter)
+			testData3 := bytes.Repeat([]byte("C"), 4096)
+			err = ra2.Write(0, testData3)
+			So(err, ShouldBeNil)
+
+			// Flush and verify
+			_, err = ra2.Flush()
+			So(err, ShouldBeNil)
+
+			fileObjAfterFlush, err := ra2.getFileObj()
+			So(err, ShouldBeNil)
+			So(fileObjAfterFlush.Size, ShouldEqual, 4096)
+		})
 	})
 }
 

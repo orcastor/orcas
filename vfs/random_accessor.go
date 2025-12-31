@@ -2032,6 +2032,12 @@ func (ra *RandomAccessor) Write(offset int64, data []byte) error {
 					ra.tempWriter.Store(clearedTempWriterMarker)
 					return fmt.Errorf("file was renamed from .tmp, writes are no longer allowed: fileID=%d, fileName=%s", ra.fileID, fileObj.Name)
 				}
+			} else {
+				// TempFileWriter was cleared (clearedTempWriterMarker)
+				// This means the file was renamed from .tmp
+				// Reject writes to prevent accidental TempFileWriter recreation
+				DebugLog("[VFS RandomAccessor Write] ERROR: File is not .tmp and TempFileWriter was cleared, rejecting write: fileID=%d, fileName=%s", ra.fileID, fileObj.Name)
+				return fmt.Errorf("file was renamed from .tmp, writes are no longer allowed (cleared): fileID=%d, fileName=%s", ra.fileID, fileObj.Name)
 			}
 		}
 		// For non-.tmp files, continue to normal write path below
@@ -2122,7 +2128,8 @@ func (ra *RandomAccessor) Write(offset int64, data []byte) error {
 		if fileObj != nil {
 			// Re-check if TempFileWriter exists (should have returned above, but check for safety)
 			// Lock-free check using atomic.Value
-			hasTempWriter := ra.tempWriter.Load() != nil
+			tempWriterVal := ra.tempWriter.Load()
+			hasTempWriter := tempWriterVal != nil && tempWriterVal != clearedTempWriterMarker
 			if hasTempWriter {
 				// TempFileWriter exists, this should not happen here (should have returned above)
 				// But handle it for safety - don't initialize sequential buffer
@@ -2148,7 +2155,8 @@ func (ra *RandomAccessor) Write(offset int64, data []byte) error {
 	// IMPORTANT: Double-check that TempFileWriter doesn't exist before using random write buffer
 	// This prevents .tmp files from accidentally using random write when fileObj cache is stale
 	// Lock-free check using atomic.Value
-	hasTempWriterInRandomMode := ra.tempWriter.Load() != nil
+	tempWriterValInRandomMode := ra.tempWriter.Load()
+	hasTempWriterInRandomMode := tempWriterValInRandomMode != nil && tempWriterValInRandomMode != clearedTempWriterMarker
 	if hasTempWriterInRandomMode {
 		// TempFileWriter exists, this should not happen (should have returned above)
 		// But handle it for safety - use TempFileWriter instead of random write buffer
