@@ -2190,25 +2190,27 @@ func TestTruncateAndWrite(t *testing.T) {
 		dma.DefaultDataMetadataAdapter.SetPath(".")
 		dda := &core.DefaultDataAdapter{}
 
-		lh := core.NewLocalHandler("", "").(*core.LocalHandler)
-		lh.SetAdapter(dma, dda)
+	lh := core.NewLocalHandler("", "").(*core.LocalHandler)
+	lh.SetAdapter(dma, dda)
 
-		testCtx, _, _, err := lh.Login(c, "orcas", "orcas")
-		So(err, ShouldBeNil)
+	testCtx, userInfo, _, err := lh.Login(c, "orcas", "orcas")
+	So(err, ShouldBeNil)
 
-		bucket := &core.BucketInfo{
-			ID:       testBktID,
-			Name:     "test_bucket",
-			Type:     1,
-			Quota:    1000000,
-			Used:     0,
-			RealUsed: 0,
-		}
-		So(dma.PutBkt(testCtx, []*core.BucketInfo{bucket}), ShouldBeNil)
+	bucket := &core.BucketInfo{
+		ID:       testBktID,
+		Name:     "test_bucket",
+		Type:     1,
+		Quota:    1000000,
+		Used:     0,
+		RealUsed: 0,
+	}
+	So(dma.PutBkt(testCtx, []*core.BucketInfo{bucket}), ShouldBeNil)
+	err = dma.PutACL(testCtx, testBktID, userInfo.ID, core.ALL)
+	So(err, ShouldBeNil)
 
-		ofs := NewOrcasFS(lh, testCtx, testBktID)
+	ofs := NewOrcasFS(lh, testCtx, testBktID)
 
-		Convey("test truncate then write", func() {
+	Convey("test truncate then write", func() {
 			fileID, _ := ig.New()
 			fileObj := &core.ObjectInfo{
 				ID:    fileID,

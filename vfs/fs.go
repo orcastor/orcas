@@ -3561,12 +3561,32 @@ func (n *OrcasNode) truncateFile(newSize int64) syscall.Errno {
 		} else {
 			// No RandomAccessor or invalid RandomAccessor, create one and use Truncate method
 			DebugLog("[VFS truncateFile] Creating new RandomAccessor for truncate: objID=%d, newSize=%d", obj.ID, newSize)
+
+			// Remove old RandomAccessor from global registry if exists
+			// We need to get the old RA first to properly unregister it
+			var oldRA *RandomAccessor
+			if n.fs != nil {
+				oldRA = n.fs.getRandomAccessorByFileID(obj.ID)
+				if oldRA != nil {
+					n.fs.unregisterRandomAccessor(obj.ID, oldRA)
+					DebugLog("[VFS truncateFile] Unregistered old RandomAccessor: objID=%d, oldRA=%p", obj.ID, oldRA)
+				}
+			}
+
 			ra, err := NewRandomAccessor(n.fs, obj.ID)
 			if err != nil {
 				DebugLog("[VFS truncateFile] ERROR: Failed to create RandomAccessor: objID=%d, error=%v", obj.ID, err)
 				return syscall.EIO
 			}
-			defer ra.Close()
+
+			// Store the new RandomAccessor so subsequent operations can use it
+			n.ra.Store(ra)
+
+			// Register the new RandomAccessor in global registry
+			if n.fs != nil {
+				n.fs.registerRandomAccessor(obj.ID, ra)
+				DebugLog("[VFS truncateFile] Registered new RandomAccessor: objID=%d, ra=%p", obj.ID, ra)
+			}
 
 			_, err = ra.Truncate(newSize)
 			if err != nil {

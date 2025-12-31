@@ -683,13 +683,11 @@ func (twa *TempWriteArea) cleanupLoop() {
 
 // cleanup 清理过期的临时文件
 func (twa *TempWriteArea) cleanup() {
-	twa.mu.Lock()
-	defer twa.mu.Unlock()
-
 	now := time.Now()
 	expiredFiles := make([]*TempWriteFile, 0)
 
-	// 查找过期文件
+	// 查找过期文件（持有锁）
+	twa.mu.Lock()
 	for _, twf := range twa.activeFiles {
 		twf.mu.RLock()
 		if now.Sub(twf.lastAccess) > twa.config.RetentionPeriod {
@@ -697,8 +695,14 @@ func (twa *TempWriteArea) cleanup() {
 		}
 		twf.mu.RUnlock()
 	}
+	
+	// 从活跃列表中移除（在关闭文件之前）
+	for _, twf := range expiredFiles {
+		delete(twa.activeFiles, twf.fileID)
+	}
+	twa.mu.Unlock()
 
-	// 清理过期文件
+	// 清理过期文件（不持有 twa.mu 锁，避免死锁）
 	for _, twf := range expiredFiles {
 		DebugLog("[TempWriteArea] Cleaning up expired temp file: fileID=%d, lastAccess=%v",
 			twf.fileID, twf.lastAccess)
@@ -710,9 +714,6 @@ func (twa *TempWriteArea) cleanup() {
 		if err := os.Remove(twf.tempPath); err != nil {
 			DebugLog("[TempWriteArea] WARNING: Failed to remove expired temp file: %v", err)
 		}
-
-		// 从活跃列表中移除
-		delete(twa.activeFiles, twf.fileID)
 	}
 
 	if len(expiredFiles) > 0 {
