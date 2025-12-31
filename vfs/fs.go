@@ -634,6 +634,36 @@ func (n *OrcasNode) getDirListWithCache(dirID int64) ([]*core.ObjectInfo, syscal
 
 	if cacheOk {
 		if children, ok := cached.([]*core.ObjectInfo); ok && children != nil {
+			// CRITICAL: Merge with RandomAccessor to get latest data (even from cache)
+			// This ensures that even if cache is valid, we still get the most recent data
+			// from files that are still in memory (RandomAccessor)
+			for i, child := range children {
+				var latestFileObj *core.ObjectInfo
+
+				// Priority 1: Check fileObjCache
+				if cached, ok := fileObjCache.Get(child.ID); ok {
+					if fileObj, ok := cached.(*core.ObjectInfo); ok && fileObj != nil && fileObj.DataID > 0 {
+						latestFileObj = fileObj
+					}
+				}
+
+				// Priority 2: Check RandomAccessor registry
+				if latestFileObj == nil {
+					if ra := n.fs.getRandomAccessorByFileID(child.ID); ra != nil {
+						if fileObj, err := ra.getFileObj(); err == nil && fileObj != nil && fileObj.DataID > 0 {
+							latestFileObj = fileObj
+						}
+					}
+				}
+
+				// Update with latest data if found
+				if latestFileObj != nil {
+					children[i].DataID = latestFileObj.DataID
+					children[i].Size = latestFileObj.Size
+					children[i].MTime = latestFileObj.MTime
+				}
+			}
+
 			// Merge pending objects with cached children
 			// Strategy: Cached entries (from database) are authoritative
 			// Pending entries are only added if they don't exist in cache (by ID or by name)
@@ -743,7 +773,7 @@ func (n *OrcasNode) getDirListWithCache(dirID int64) ([]*core.ObjectInfo, syscal
 		// ALSO: Check RandomAccessor registry for files that are still in memory (even if cache expired)
 		for i, child := range children {
 			var latestFileObj *core.ObjectInfo
-			
+
 			// Priority 1: Check fileObjCache (most recent, includes flushed data)
 			if cached, ok := fileObjCache.Get(child.ID); ok {
 				if fileObj, ok := cached.(*core.ObjectInfo); ok && fileObj != nil && fileObj.DataID > 0 {
@@ -752,7 +782,7 @@ func (n *OrcasNode) getDirListWithCache(dirID int64) ([]*core.ObjectInfo, syscal
 						dirID, child.ID, child.Name, fileObj.Size, fileObj.DataID)
 				}
 			}
-			
+
 			// Priority 2: Check RandomAccessor registry (for files still in memory, even if cache expired)
 			// This handles the case where fileObjCache expired (30s TTL) but file is still being accessed
 			if latestFileObj == nil {
@@ -764,7 +794,7 @@ func (n *OrcasNode) getDirListWithCache(dirID int64) ([]*core.ObjectInfo, syscal
 					}
 				}
 			}
-			
+
 			// Update with latest data if found
 			if latestFileObj != nil {
 				// Update all relevant fields
@@ -2362,13 +2392,13 @@ func (n *OrcasNode) Rename(ctx context.Context, name string, newParent fs.InodeE
 		DebugLog("[VFS Rename] ERROR: newParent is not OrcasNode: name=%s, newName=%s", name, newName)
 		return syscall.EIO
 	}
-	
+
 	newParentObj, err := newParentNode.getObj()
 	if err != nil {
 		DebugLog("[VFS Rename] ERROR: Failed to get new parent object: name=%s, newName=%s, error=%v", name, newName, err)
 		return syscall.ENOENT
 	}
-	
+
 	if newParentObj.Type != core.OBJ_TYPE_DIR {
 		DebugLog("[VFS Rename] ERROR: New parent is not a directory: name=%s, newName=%s, newParentID=%d, type=%d", name, newName, newParentObj.ID, newParentObj.Type)
 		return syscall.ENOTDIR
@@ -2384,7 +2414,7 @@ func (n *OrcasNode) Rename(ctx context.Context, name string, newParent fs.InodeE
 				return syscall.EIO
 			}
 			// Successfully merged, return success without actually renaming
-			DebugLog("[VFS Rename] Intercepted rename for save pattern merge: %s -> %s, fileID=%d", 
+			DebugLog("[VFS Rename] Intercepted rename for save pattern merge: %s -> %s, fileID=%d",
 				sourceObj.Name, newName, sourceID)
 			return 0
 		}
