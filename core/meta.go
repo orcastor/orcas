@@ -353,7 +353,9 @@ func GetMainDBWithKey(basePathOrKey ...interface{}) (*sql.DB, error) {
 		basePath = "."
 	}
 
-	param := "?_journal=WAL&cache=shared&mode=rwc&_busy_timeout=10000&_txlock=immediate"
+	// Use DELETE journal mode instead of WAL to avoid dirty read issues
+	// DELETE mode ensures immediate consistency but may have lower concurrency
+	param := "?_journal=DELETE&cache=shared&mode=rwc&_busy_timeout=10000&_txlock=immediate"
 	if key != "" {
 		param += "&key=" + key
 	}
@@ -591,9 +593,15 @@ func InitBucketDB(dataPath string, bktID int64, key ...string) error {
 	if err != nil {
 		return fmt.Errorf("%w: set pragma: %v", ERR_EXEC_DB, err)
 	}
-	_, err = db.Exec(`PRAGMA wal_autocheckpoint = 1000`)
+	// Note: wal_autocheckpoint is not needed in DELETE journal mode
+	// Additional pragmas for DELETE mode optimization
+	_, err = db.Exec(`PRAGMA synchronous = NORMAL`)
 	if err != nil {
-		return fmt.Errorf("%w: set pragma wal_autocheckpoint: %v", ERR_EXEC_DB, err)
+		return fmt.Errorf("%w: set pragma synchronous: %v", ERR_EXEC_DB, err)
+	}
+	_, err = db.Exec(`PRAGMA cache_size = -64000`) // 64MB cache
+	if err != nil {
+		return fmt.Errorf("%w: set pragma cache_size: %v", ERR_EXEC_DB, err)
 	}
 	return nil
 }

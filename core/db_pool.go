@@ -135,12 +135,10 @@ func (dp *DBPool) getDatabasePool(dirPath, dbKey string) (*DatabasePool, error) 
 
 // createConnection creates a database connection with appropriate settings
 func (dp *DBPool) createConnection(dbPath, dbKey string, readOnly bool) (*sql.DB, error) {
-	// SQLite connection parameters optimized for performance
-	// Note: For read-only connections, we still use rwc mode because:
-	// 1. SQLite WAL mode allows concurrent reads even with rwc
-	// 2. Read-only mode (ro) prevents temporary table creation which is needed in some operations
-	// 3. WAL mode provides excellent read concurrency without blocking writes
-	param := "?_journal=WAL&cache=shared&mode=rwc&_busy_timeout=10000&_txlock=immediate"
+	// SQLite connection parameters optimized for consistency
+	// Using DELETE journal mode instead of WAL to avoid dirty read issues
+	// DELETE mode ensures immediate consistency at the cost of some concurrency
+	param := "?_journal=DELETE&cache=shared&mode=rwc&_busy_timeout=10000&_txlock=immediate"
 
 	if dbKey != "" {
 		param += "&key=" + dbKey

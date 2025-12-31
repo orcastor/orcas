@@ -73,17 +73,31 @@ func (wm *WALManager) Start() error {
 	}
 
 	wm.running = true
-
-	// Start checkpoint goroutine
-	wm.wg.Add(1)
-	go wm.checkpointLoop()
-
-	// Start vacuum goroutine
-	wm.wg.Add(1)
-	go wm.vacuumLoop()
-
-	log.Printf("[WAL Manager] Started: checkpointInterval=%v, vacuumInterval=%v",
-		wm.checkpointInterval, wm.vacuumInterval)
+	
+	// Start checkpoint goroutine only if interval is set
+	if wm.checkpointInterval > 0 {
+		wm.wg.Add(1)
+		go wm.checkpointLoop()
+	}
+	
+	// Start vacuum goroutine only if interval is set
+	if wm.vacuumInterval > 0 {
+		wm.wg.Add(1)
+		go wm.vacuumLoop()
+	}
+	
+	if wm.checkpointInterval > 0 && wm.vacuumInterval > 0 {
+		log.Printf("[DB Manager] Started: checkpointInterval=%v, vacuumInterval=%v",
+			wm.checkpointInterval, wm.vacuumInterval)
+	} else if wm.vacuumInterval > 0 {
+		log.Printf("[DB Manager] Started: vacuumInterval=%v (checkpoint disabled)",
+			wm.vacuumInterval)
+	} else if wm.checkpointInterval > 0 {
+		log.Printf("[DB Manager] Started: checkpointInterval=%v (vacuum disabled)",
+			wm.checkpointInterval)
+	} else {
+		log.Printf("[DB Manager] Started: all tasks disabled")
+	}
 
 	return nil
 }
@@ -101,7 +115,7 @@ func (wm *WALManager) Stop() {
 	wm.cancel()
 	wm.wg.Wait()
 
-	log.Printf("[WAL Manager] Stopped")
+	log.Printf("[DB Manager] Stopped")
 }
 
 // checkpointLoop runs periodic WAL checkpoints

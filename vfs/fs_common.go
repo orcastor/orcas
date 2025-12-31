@@ -73,8 +73,6 @@ type OrcasFS struct {
 	raCreateMu sync.Mutex // Protects creation of RandomAccessor for same fileID
 	// Temporary write area for large files and random writes
 	tempWriteArea *TempWriteArea
-	// WAL manager for periodic checkpoint and vacuum
-	walManager *core.WALManager
 	// OnRootDeleted is called when the root node is deleted (entire bucket is deleted)
 	// This callback can be used to perform cleanup operations
 	// Note: If you need to unmount in the callback, use fs.Server.Unmount()
@@ -167,21 +165,8 @@ func NewOrcasFSWithConfig(h core.Handler, c core.Ctx, bktID int64, cfg *core.Con
 		DebugLog("[VFS NewOrcasFSWithConfig] Temp write area initialized: path=%s", twa.basePath)
 	}
 
-	// Initialize WAL manager for periodic checkpoint and vacuum
-	// This helps mitigate SQLite WAL dirty read issues
-	walConfig := core.DefaultWALManagerConfig()
-	// Use shorter intervals for more aggressive WAL management
-	walConfig.CheckpointInterval = 2 * time.Minute // Checkpoint every 2 minutes
-	walConfig.VacuumInterval = 30 * time.Minute    // Vacuum every 30 minutes
-
-	walManager := core.NewWALManager(config.BasePath, "", walConfig)
-	if err := walManager.Start(); err != nil {
-		DebugLog("[VFS NewOrcasFSWithConfig] WARNING: Failed to start WAL manager: %v", err)
-	} else {
-		ofs.walManager = walManager
-		DebugLog("[VFS NewOrcasFSWithConfig] WAL manager started: checkpointInterval=%v, vacuumInterval=%v",
-			walConfig.CheckpointInterval, walConfig.VacuumInterval)
-	}
+	// Note: WAL manager removed since we're using DELETE journal mode
+	// DELETE mode provides immediate consistency without needing checkpoint/vacuum management
 
 	// Root node initialization
 	// Windows platform needs to initialize root node immediately, as it doesn't rely on FUSE (implemented in fs_win.go)
