@@ -2433,6 +2433,30 @@ func (ra *RandomAccessor) initSequentialBufferWithNewData() error {
 		dataInfo:  dataInfo,
 	}
 
+	// Update file object with new DataID immediately (but keep Size unchanged)
+	// This allows the DataID to be visible before Flush, while Size will be updated on Flush
+	fileObj, err := ra.getFileObj()
+	if err == nil && fileObj != nil {
+		updateFileObj := &core.ObjectInfo{
+			ID:     fileObj.ID,
+			PID:    fileObj.PID,
+			Type:   fileObj.Type,
+			Name:   fileObj.Name,
+			DataID: newDataID,
+			Size:   fileObj.Size, // Keep existing size (will be updated on Flush)
+			MTime:  core.Now(),
+		}
+		if _, putErr := ra.fs.h.Put(ra.fs.c, ra.fs.bktID, []*core.ObjectInfo{updateFileObj}); putErr != nil {
+			DebugLog("[VFS initSequentialBufferWithNewData] WARNING: Failed to update file DataID: %v", putErr)
+		} else {
+			// Update cache immediately
+			fileObjCache.Put(ra.fileObjKey, updateFileObj)
+			ra.fileObj.Store(updateFileObj)
+			DebugLog("[VFS initSequentialBufferWithNewData] Created new DataID and updated DB: fileID=%d, oldDataID=%d, newDataID=%d, size=%d",
+				ra.fileID, fileObj.DataID, newDataID, fileObj.Size)
+		}
+	}
+
 	return nil
 }
 
