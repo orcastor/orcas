@@ -806,10 +806,15 @@ func (twa *TempWriteArea) Stop() {
 
 	// 关闭所有活跃文件
 	twa.mu.Lock()
-	defer twa.mu.Unlock()
-
 	for _, twf := range twa.activeFiles {
 		twf.Close()
+	}
+	twa.mu.Unlock()
+
+	// 停止 WAL checkpoint 管理器
+	if twa.fs.walCheckpointManager != nil {
+		twa.fs.walCheckpointManager.Stop()
+		DebugLog("[TempWriteArea] WAL checkpoint manager stopped")
 	}
 }
 

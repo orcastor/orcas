@@ -266,6 +266,11 @@ func (ra *RandomAccessor) flushTempWriteFile() error {
 	// Record write operation for save pattern detection
 	ra.fs.recordFileOperation(OpWrite, ra.fileID, updateFileObj.Name, updateFileObj.PID, updateFileObj.DataID, updateFileObj.Size, "", 0)
 
+	// Register bucket for WAL checkpoint (有写入操作)
+	if ra.fs.walCheckpointManager != nil {
+		ra.fs.walCheckpointManager.RegisterBucket(ra.fs.bktID)
+	}
+
 	// Clear the reference
 	ra.tempWriteMu.Lock()
 	ra.tempWriteFile = nil

@@ -737,24 +737,42 @@ func (n *OrcasNode) getDirListWithCache(dirID int64) ([]*core.ObjectInfo, syscal
 			return nil, err
 		}
 
-		// CRITICAL: Merge with fileObjCache to avoid SQLite WAL dirty read
+		// CRITICAL: Merge with fileObjCache and RandomAccessor to avoid SQLite WAL dirty read
 		// After Flush(), fileObjCache is immediately updated, but database may have WAL delay
 		// We must merge fileObjCache data into directory listing to ensure consistency
+		// ALSO: Check RandomAccessor registry for files that are still in memory (even if cache expired)
 		for i, child := range children {
-			// fileObjKey is just fileID (see RandomAccessor.fileObjKey initialization)
+			var latestFileObj *core.ObjectInfo
+			
+			// Priority 1: Check fileObjCache (most recent, includes flushed data)
 			if cached, ok := fileObjCache.Get(child.ID); ok {
-				if fileObj, ok := cached.(*core.ObjectInfo); ok && fileObj != nil {
-					// Update with cached data (more recent than database due to WAL)
-					// Only update if cached object has DataID (已 Flush)
-					if fileObj.DataID > 0 {
-						// Update all relevant fields
-						children[i].DataID = fileObj.DataID
-						children[i].Size = fileObj.Size
-						children[i].MTime = fileObj.MTime
-						DebugLog("[VFS getDirListWithCache] Merged fileObjCache into dir list: dirID=%d, fileID=%d, name=%s, size=%d, mtime=%d",
-							dirID, child.ID, child.Name, fileObj.Size, fileObj.MTime)
+				if fileObj, ok := cached.(*core.ObjectInfo); ok && fileObj != nil && fileObj.DataID > 0 {
+					latestFileObj = fileObj
+					DebugLog("[VFS getDirListWithCache] Found in fileObjCache: dirID=%d, fileID=%d, name=%s, size=%d, dataID=%d",
+						dirID, child.ID, child.Name, fileObj.Size, fileObj.DataID)
+				}
+			}
+			
+			// Priority 2: Check RandomAccessor registry (for files still in memory, even if cache expired)
+			// This handles the case where fileObjCache expired (30s TTL) but file is still being accessed
+			if latestFileObj == nil {
+				if ra := n.fs.getRandomAccessorByFileID(child.ID); ra != nil {
+					if fileObj, err := ra.getFileObj(); err == nil && fileObj != nil && fileObj.DataID > 0 {
+						latestFileObj = fileObj
+						DebugLog("[VFS getDirListWithCache] Found in RandomAccessor: dirID=%d, fileID=%d, name=%s, size=%d, dataID=%d",
+							dirID, child.ID, child.Name, fileObj.Size, fileObj.DataID)
 					}
 				}
+			}
+			
+			// Update with latest data if found
+			if latestFileObj != nil {
+				// Update all relevant fields
+				children[i].DataID = latestFileObj.DataID
+				children[i].Size = latestFileObj.Size
+				children[i].MTime = latestFileObj.MTime
+				DebugLog("[VFS getDirListWithCache] Merged latest data into dir list: dirID=%d, fileID=%d, name=%s, size=%d, mtime=%d",
+					dirID, child.ID, child.Name, latestFileObj.Size, latestFileObj.MTime)
 			}
 		}
 

@@ -75,6 +75,8 @@ type OrcasFS struct {
 	tempWriteArea *TempWriteArea
 	// Save pattern detector for automatic version merging
 	savePatternDetector *SavePatternDetector
+	// WAL checkpoint manager for periodic WAL flushing
+	walCheckpointManager *core.WALCheckpointManager
 	// OnRootDeleted is called when the root node is deleted (entire bucket is deleted)
 	// This callback can be used to perform cleanup operations
 	// Note: If you need to unmount in the callback, use fs.Server.Unmount()
@@ -171,8 +173,22 @@ func NewOrcasFSWithConfig(h core.Handler, c core.Ctx, bktID int64, cfg *core.Con
 	ofs.savePatternDetector = NewSavePatternDetector(ofs)
 	DebugLog("[VFS NewOrcasFSWithConfig] Save pattern detector initialized")
 
-	// Note: WAL manager removed since we're using WAL journal mode again
-	// WAL mode provides better performance with our cache-first strategy
+	// Initialize WAL checkpoint manager
+	// This periodically flushes WAL to main database to reduce dirty read issues
+	if config.DataPath != "" {
+		walConfig := core.DefaultWALCheckpointConfig()
+		walConfig.CheckpointInterval = 10 * time.Second // 每10秒刷新一次
+		walCheckpointManager := core.NewWALCheckpointManager(config.DataPath, walConfig)
+		if err := walCheckpointManager.Start(); err != nil {
+			DebugLog("[VFS NewOrcasFSWithConfig] WARNING: Failed to start WAL checkpoint manager: %v", err)
+		} else {
+			ofs.walCheckpointManager = walCheckpointManager
+			DebugLog("[VFS NewOrcasFSWithConfig] WAL checkpoint manager started: interval=%v, dataPath=%s",
+				walConfig.CheckpointInterval, config.DataPath)
+		}
+	} else {
+		DebugLog("[VFS NewOrcasFSWithConfig] Skipping WAL checkpoint manager: DataPath is empty")
+	}
 
 	// Root node initialization
 	// Windows platform needs to initialize root node immediately, as it doesn't rely on FUSE (implemented in fs_win.go)
