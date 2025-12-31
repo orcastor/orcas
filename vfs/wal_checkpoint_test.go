@@ -22,7 +22,7 @@ func TestWALCheckpointManager(t *testing.T) {
 		tmpDir := t.TempDir()
 		
 		// Initialize base database first
-		err := core.InitDB(tmpDir)
+		err := core.InitDB(tmpDir, "")
 		So(err, ShouldBeNil)
 		
 		err = core.InitBucketDB(tmpDir, testBktID)
