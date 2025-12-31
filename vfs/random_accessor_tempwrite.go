@@ -155,24 +155,11 @@ func (ra *RandomAccessor) getOrCreateTempWriteFile() (*TempWriteFile, error) {
 		return nil, fmt.Errorf("failed to generate DataID")
 	}
 
-	// Update file object with new DataID
-	updateFileObj := &core.ObjectInfo{
-		ID:     fileObj.ID,
-		PID:    fileObj.PID,
-		Type:   fileObj.Type,
-		Name:   fileObj.Name,
-		DataID: dataID,
-		Size:   fileObj.Size,
-		MTime:  core.Now(),
-	}
-	if _, putErr := ra.fs.h.Put(ra.fs.c, ra.fs.bktID, []*core.ObjectInfo{updateFileObj}); putErr != nil {
-		DebugLog("[VFS getOrCreateTempWriteFile] WARNING: Failed to update file DataID: %v", putErr)
-	} else {
-		fileObjCache.Put(ra.fileObjKey, updateFileObj)
-		ra.fileObj.Store(updateFileObj)
-		DebugLog("[VFS getOrCreateTempWriteFile] Created new DataID: fileID=%d, oldDataID=%d, newDataID=%d",
-			ra.fileID, fileObj.DataID, dataID)
-	}
+	// IMPORTANT: Do NOT update database here!
+	// The DataID and Size will be updated in flushTempWriteFile() after all writes are complete
+	// Updating database here with Size=0 would cause the "size=0" problem
+	DebugLog("[VFS getOrCreateTempWriteFile] Created new DataID (will update DB on flush): fileID=%d, oldDataID=%d, newDataID=%d",
+		ra.fileID, fileObj.DataID, dataID)
 
 	// Determine if compression and encryption are needed
 	needsCompress := shouldCompressFileByName(ra.fs, fileObj.Name)

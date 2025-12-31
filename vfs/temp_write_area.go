@@ -3,6 +3,8 @@ package vfs
 import (
 	"bytes"
 	"crypto/md5"
+	"crypto/sha256"
+	"encoding/binary"
 	"fmt"
 	"io"
 	"io/ioutil"
@@ -16,6 +18,7 @@ import (
 	"github.com/mkmueller/aes256"
 	"github.com/orcastor/orcas/core"
 	"github.com/tjfoc/gmsm/sm4"
+	"github.com/zeebo/xxh3"
 )
 
 // TempWriteAreaConfig 临时写入区配置
@@ -307,6 +310,10 @@ func (twf *TempWriteFile) moveToFinalLocation() error {
 	DebugLog("[TempWriteArea] Splitting file into chunks: fileID=%d, size=%d, chunkSize=%d, numChunks=%d",
 		twf.fileID, twf.size, chunkSize, numChunks)
 
+	// Initialize hash calculators for the entire file
+	xxh3Hash := xxh3.New()
+	sha256Hash := sha256.New()
+
 	// 分片写入
 	for sn := int64(0); sn < numChunks; sn++ {
 		// 计算这个chunk的大小
@@ -325,6 +332,10 @@ func (twf *TempWriteFile) moveToFinalLocation() error {
 		if int64(n) != size {
 			return fmt.Errorf("incomplete read for chunk %d: got %d bytes, expected %d", sn, n, size)
 		}
+
+		// Update hash calculators with chunk data
+		xxh3Hash.Write(chunkData)
+		sha256Hash.Write(chunkData)
 
 		// 计算最终路径
 		fileName := fmt.Sprintf("%d_%d", twf.dataID, sn)
@@ -345,12 +356,25 @@ func (twf *TempWriteFile) moveToFinalLocation() error {
 		DebugLog("[TempWriteArea] Wrote chunk: sn=%d, path=%s, size=%d", sn, finalPath, size)
 	}
 
+	// Calculate final hash values
+	xxh3Val := int64(xxh3Hash.Sum64())
+	sha256Sum := sha256Hash.Sum(nil)
+	sha256_0 := int64(binary.BigEndian.Uint64(sha256Sum[0:8]))
+	sha256_1 := int64(binary.BigEndian.Uint64(sha256Sum[8:16]))
+	sha256_2 := int64(binary.BigEndian.Uint64(sha256Sum[16:24]))
+	sha256_3 := int64(binary.BigEndian.Uint64(sha256Sum[24:32]))
+
 	// 更新 DataInfo
 	dataInfo := &core.DataInfo{
 		ID:       twf.dataID,
 		Size:     twf.size,
 		OrigSize: twf.size,
 		Kind:     0, // 不压缩/不加密
+		XXH3:     xxh3Val,
+		SHA256_0: sha256_0,
+		SHA256_1: sha256_1,
+		SHA256_2: sha256_2,
+		SHA256_3: sha256_3,
 	}
 
 	if _, err := lh.PutDataInfo(twf.twa.fs.c, twf.twa.fs.bktID, []*core.DataInfo{dataInfo}); err != nil {
@@ -430,6 +454,10 @@ func (twf *TempWriteFile) processWithSDK() error {
 		chunkSize = 10 << 20 // Default 10MB
 	}
 
+	// Initialize hash calculators for the original (unprocessed) data
+	xxh3Hash := xxh3.New()
+	sha256Hash := sha256.New()
+
 	// 流式处理：读取 → 压缩 → 加密 → 写入
 	buffer := make([]byte, chunkSize)
 	sn := 0
@@ -445,6 +473,10 @@ func (twf *TempWriteFile) processWithSDK() error {
 		}
 
 		chunkData := buffer[:n]
+
+		// Update hash calculators with original data (before compression/encryption)
+		xxh3Hash.Write(chunkData)
+		sha256Hash.Write(chunkData)
 
 		// 处理数据：压缩和加密
 		processedData, err := twf.processChunkData(chunkData, dataInfo)
@@ -468,14 +500,23 @@ func (twf *TempWriteFile) processWithSDK() error {
 	// 更新 DataInfo 的最终大小
 	dataInfo.Size = totalProcessedSize
 
+	// Calculate final hash values (from original data)
+	xxh3Val := int64(xxh3Hash.Sum64())
+	sha256Sum := sha256Hash.Sum(nil)
+	dataInfo.XXH3 = xxh3Val
+	dataInfo.SHA256_0 = int64(binary.BigEndian.Uint64(sha256Sum[0:8]))
+	dataInfo.SHA256_1 = int64(binary.BigEndian.Uint64(sha256Sum[8:16]))
+	dataInfo.SHA256_2 = int64(binary.BigEndian.Uint64(sha256Sum[16:24]))
+	dataInfo.SHA256_3 = int64(binary.BigEndian.Uint64(sha256Sum[24:32]))
+
 	// 保存 DataInfo
 	if _, err := lh.PutDataInfo(twf.twa.fs.c, twf.twa.fs.bktID, []*core.DataInfo{dataInfo}); err != nil {
 		DebugLog("[TempWriteArea] WARNING: Failed to update DataInfo: %v", err)
 	} else {
 		// 更新 DataInfo 缓存
 		dataInfoCache.Put(twf.dataID, dataInfo)
-		DebugLog("[TempWriteArea] Updated DataInfo: dataID=%d, size=%d, origSize=%d, kind=%d, compress=%v, encrypt=%v",
-			twf.dataID, dataInfo.Size, dataInfo.OrigSize, dataInfo.Kind, twf.needsCompress, twf.needsEncrypt)
+		DebugLog("[TempWriteArea] Updated DataInfo: dataID=%d, size=%d, origSize=%d, kind=%d, xxh3=%d, sha256_0=%d, compress=%v, encrypt=%v",
+			twf.dataID, dataInfo.Size, dataInfo.OrigSize, dataInfo.Kind, dataInfo.XXH3, dataInfo.SHA256_0, twf.needsCompress, twf.needsEncrypt)
 	}
 
 	DebugLog("[TempWriteArea] Successfully processed temp file: fileID=%d, dataID=%d, origSize=%d, processedSize=%d, numChunks=%d, compress=%v, encrypt=%v",
