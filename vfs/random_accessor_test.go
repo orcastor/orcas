@@ -51,27 +51,29 @@ func TestVFSRandomAccessor(t *testing.T) {
 		dma.DefaultDataMetadataAdapter.SetPath(".")
 		dda := &core.DefaultDataAdapter{}
 
-		// 创建LocalHandler
-		lh := core.NewLocalHandler("", "").(*core.LocalHandler)
-		lh.SetAdapter(dma, dda)
+	// 创建LocalHandler
+	lh := core.NewLocalHandler("", "").(*core.LocalHandler)
+	lh.SetAdapter(dma, dda)
 
-		// 登录以获取上下文
-		testCtx, _, _, err := lh.Login(c, "orcas", "orcas")
-		So(err, ShouldBeNil)
+	// 登录以获取上下文
+	testCtx, userInfo, _, err := lh.Login(c, "orcas", "orcas")
+	So(err, ShouldBeNil)
 
-		// 创建桶（使用登录用户的UID）
-		bucket := &core.BucketInfo{
-			ID:       testBktID,
-			Name:     "test_bucket",
-			Type:     1,
-			Quota:    1000000,
-			Used:     0,
-			RealUsed: 0,
-		}
-		So(dma.PutBkt(testCtx, []*core.BucketInfo{bucket}), ShouldBeNil)
+	// 创建桶（使用登录用户的UID）
+	bucket := &core.BucketInfo{
+		ID:       testBktID,
+		Name:     "test_bucket",
+		Type:     1,
+		Quota:    1000000,
+		Used:     0,
+		RealUsed: 0,
+	}
+	So(dma.PutBkt(testCtx, []*core.BucketInfo{bucket}), ShouldBeNil)
+	err = dma.PutACL(testCtx, testBktID, userInfo.ID, core.ALL)
+	So(err, ShouldBeNil)
 
-		// 创建文件对象
-		fileID, _ := ig.New()
+	// 创建文件对象
+	fileID, _ := ig.New()
 		fileObj := &core.ObjectInfo{
 			ID:    fileID,
 			PID:   testBktID,
@@ -248,27 +250,29 @@ func TestVFSRandomAccessorWithSDK(t *testing.T) {
 		dma.DefaultDataMetadataAdapter.SetPath(".")
 		dda := &core.DefaultDataAdapter{}
 
-		// 创建LocalHandler
-		lh := core.NewLocalHandler("", "").(*core.LocalHandler)
-		lh.SetAdapter(dma, dda)
+	// 创建LocalHandler
+	lh := core.NewLocalHandler("", "").(*core.LocalHandler)
+	lh.SetAdapter(dma, dda)
 
-		// 登录以获取上下文
-		testCtx, _, _, err := lh.Login(c, "orcas", "orcas")
-		So(err, ShouldBeNil)
+	// 登录以获取上下文
+	testCtx, userInfo, _, err := lh.Login(c, "orcas", "orcas")
+	So(err, ShouldBeNil)
 
-		// 创建桶（使用登录用户的UID）
-		bucket := &core.BucketInfo{
-			ID:       testBktID,
-			Name:     "test_bucket",
-			Type:     1,
-			Quota:    1000000,
-			Used:     0,
-			RealUsed: 0,
-		}
-		So(dma.PutBkt(testCtx, []*core.BucketInfo{bucket}), ShouldBeNil)
+	// 创建桶（使用登录用户的UID）
+	bucket := &core.BucketInfo{
+		ID:       testBktID,
+		Name:     "test_bucket",
+		Type:     1,
+		Quota:    1000000,
+		Used:     0,
+		RealUsed: 0,
+	}
+	So(dma.PutBkt(testCtx, []*core.BucketInfo{bucket}), ShouldBeNil)
+	err = dma.PutACL(testCtx, testBktID, userInfo.ID, core.ALL)
+	So(err, ShouldBeNil)
 
-		// 创建文件对象
-		fileID, _ := ig.New()
+	// 创建文件对象
+	fileID, _ := ig.New()
 		fileObj := &core.ObjectInfo{
 			ID:    fileID,
 			PID:   testBktID,

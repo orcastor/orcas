@@ -396,13 +396,13 @@ func (twf *TempWriteFile) processWithSDK() error {
 	// 设置压缩标志
 	if twf.needsCompress && twf.twa.fs.CmprWay > 0 {
 		switch twf.twa.fs.CmprWay {
-		case 1:
+		case core.DATA_CMPR_SNAPPY:
 			dataInfo.Kind |= core.DATA_CMPR_SNAPPY
-		case 2:
+		case core.DATA_CMPR_ZSTD:
 			dataInfo.Kind |= core.DATA_CMPR_ZSTD
-		case 3:
+		case core.DATA_CMPR_GZIP:
 			dataInfo.Kind |= core.DATA_CMPR_GZIP
-		case 4:
+		case core.DATA_CMPR_BR:
 			dataInfo.Kind |= core.DATA_CMPR_BR
 		}
 	}
@@ -410,10 +410,12 @@ func (twf *TempWriteFile) processWithSDK() error {
 	// 设置加密标志
 	if twf.needsEncrypt && twf.twa.fs.EndecWay > 0 && twf.twa.fs.EndecKey != "" {
 		switch twf.twa.fs.EndecWay {
-		case 1:
+		case core.DATA_ENDEC_AES256:
 			dataInfo.Kind |= core.DATA_ENDEC_AES256
-		case 2:
+		case core.DATA_ENDEC_SM4:
 			dataInfo.Kind |= core.DATA_ENDEC_SM4
+		default:
+			return fmt.Errorf("invalid encryption method: %d", twf.twa.fs.EndecWay)
 		}
 	}
 
@@ -695,7 +697,7 @@ func (twa *TempWriteArea) cleanup() {
 		}
 		twf.mu.RUnlock()
 	}
-	
+
 	// 从活跃列表中移除（在关闭文件之前）
 	for _, twf := range expiredFiles {
 		delete(twa.activeFiles, twf.fileID)
