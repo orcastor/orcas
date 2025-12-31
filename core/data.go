@@ -45,9 +45,7 @@ func (dda *DefaultDataAdapter) Close() {
 func toFilePath(path string, bcktID, dataID int64, sn int) string {
 	fileName := fmt.Sprintf("%d_%d", dataID, sn)
 	hash := fmt.Sprintf("%X", md5.Sum([]byte(fileName)))
-	result := filepath.Join(path, fmt.Sprint(bcktID), hash[21:24], hash[8:24], fileName)
-	fmt.Printf("[DEBUG toFilePath] path=%s, bcktID=%d, dataID=%d, sn=%d -> %s\n", path, bcktID, dataID, sn, result)
-	return result
+	return filepath.Join(path, fmt.Sprint(bcktID), hash[21:24], hash[8:24], fileName)
 }
 
 func (dda *DefaultDataAdapter) Write(c Ctx, bktID, dataID int64, sn int, buf []byte) error {
