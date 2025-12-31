@@ -371,10 +371,17 @@ func (twf *TempWriteFile) moveToFinalLocation() error {
 
 // processWithSDK 使用真正的压缩和加密处理文件
 func (twf *TempWriteFile) processWithSDK() error {
+	DebugLog("[TempWriteArea] Processing temp file with compression/encryption using SDK: fileID=%d", twf.fileID)
+
 	// 获取 LocalHandler
 	lh, ok := twf.twa.fs.h.(*core.LocalHandler)
 	if !ok {
 		return fmt.Errorf("handler is not LocalHandler")
+	}
+
+	da := lh.GetDataAdapter()
+	if da == nil {
+		return fmt.Errorf("data adapter is nil")
 	}
 
 	// 打开临时文件读取
@@ -427,7 +434,6 @@ func (twf *TempWriteFile) processWithSDK() error {
 	buffer := make([]byte, chunkSize)
 	sn := 0
 	var totalProcessedSize int64 = 0
-	da := lh.GetDataAdapter()
 
 	for {
 		n, readErr := tempFile.Read(buffer)
@@ -686,7 +692,7 @@ func (twa *TempWriteArea) cleanup() {
 	now := time.Now()
 	expiredFiles := make([]*TempWriteFile, 0)
 
-	// 查找过期文件（持有锁）
+	// 步骤1: 查找内存中的过期文件（持有锁）
 	twa.mu.Lock()
 	for _, twf := range twa.activeFiles {
 		twf.mu.RLock()
@@ -700,9 +706,15 @@ func (twa *TempWriteArea) cleanup() {
 	for _, twf := range expiredFiles {
 		delete(twa.activeFiles, twf.fileID)
 	}
+
+	// 构建当前活跃文件ID列表（在删除过期文件之后）
+	activeFileIDs := make(map[int64]bool)
+	for fileID := range twa.activeFiles {
+		activeFileIDs[fileID] = true
+	}
 	twa.mu.Unlock()
 
-	// 清理过期文件（不持有 twa.mu 锁，避免死锁）
+	// 步骤2: 清理内存中的过期文件（不持有 twa.mu 锁，避免死锁）
 	for _, twf := range expiredFiles {
 		DebugLog("[TempWriteArea] Cleaning up expired temp file: fileID=%d, lastAccess=%v",
 			twf.fileID, twf.lastAccess)
@@ -717,7 +729,74 @@ func (twa *TempWriteArea) cleanup() {
 	}
 
 	if len(expiredFiles) > 0 {
-		DebugLog("[TempWriteArea] Cleaned up %d expired temp files", len(expiredFiles))
+		DebugLog("[TempWriteArea] Cleaned up %d expired temp files from memory", len(expiredFiles))
+	}
+
+	// 步骤3: 扫描磁盘上的孤儿临时文件
+	twa.cleanupOrphanedFiles(activeFileIDs)
+}
+
+// cleanupOrphanedFiles 清理磁盘上的孤儿临时文件
+// 这些文件可能是由于程序崩溃、异常退出等原因遗留的
+func (twa *TempWriteArea) cleanupOrphanedFiles(activeFileIDs map[int64]bool) {
+	tempDir := filepath.Join(twa.fs.DataPath, twa.config.TempDir)
+
+	// 检查临时目录是否存在
+	if _, err := os.Stat(tempDir); os.IsNotExist(err) {
+		return
+	}
+
+	// 读取临时目录中的所有文件
+	entries, err := os.ReadDir(tempDir)
+	if err != nil {
+		DebugLog("[TempWriteArea] WARNING: Failed to read temp directory: %v", err)
+		return
+	}
+
+	now := time.Now()
+	orphanedCount := 0
+
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+
+		// 解析文件名：fileID_dataID
+		fileName := entry.Name()
+		var fileID, dataID int64
+		if _, err := fmt.Sscanf(fileName, "%d_%d", &fileID, &dataID); err != nil {
+			// 文件名格式不正确，可能是其他文件，跳过
+			continue
+		}
+
+		// 检查文件是否在活跃列表中
+		if activeFileIDs[fileID] {
+			// 文件仍在使用中，跳过
+			DebugLog("[TempWriteArea] Skipping active file: %s", fileName)
+			continue
+		}
+
+		// 获取文件信息
+		filePath := filepath.Join(tempDir, fileName)
+		fileInfo, err := os.Stat(filePath)
+		if err != nil {
+			continue
+		}
+
+		// 检查文件是否过期（根据修改时间）
+		if now.Sub(fileInfo.ModTime()) > twa.config.RetentionPeriod {
+			// 文件已过期，删除
+			if err := os.Remove(filePath); err != nil {
+				DebugLog("[TempWriteArea] WARNING: Failed to remove orphaned temp file: %s, error=%v", fileName, err)
+			} else {
+				DebugLog("[TempWriteArea] Removed orphaned temp file: %s, age=%v", fileName, now.Sub(fileInfo.ModTime()))
+				orphanedCount++
+			}
+		}
+	}
+
+	if orphanedCount > 0 {
+		DebugLog("[TempWriteArea] Cleaned up %d orphaned temp files from disk", orphanedCount)
 	}
 }
 

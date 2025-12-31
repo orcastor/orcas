@@ -136,31 +136,31 @@ func (ra *RandomAccessor) getOrCreateTempWriteFile() (*TempWriteFile, error) {
 		return nil, err
 	}
 
-	// Get or create DataID
-	dataID := fileObj.DataID
-	if dataID == 0 || dataID == core.EmptyDataID {
-		dataID = core.NewID()
-		if dataID == 0 {
-			return nil, fmt.Errorf("failed to generate DataID")
-		}
+	// Always create new DataID for temporary write area
+	// This ensures version control and data safety
+	// The old DataID will be cleaned up by garbage collection
+	dataID := core.NewID()
+	if dataID == 0 {
+		return nil, fmt.Errorf("failed to generate DataID")
+	}
 
-		// Update file object with new DataID
-		updateFileObj := &core.ObjectInfo{
-			ID:     fileObj.ID,
-			PID:    fileObj.PID,
-			Type:   fileObj.Type,
-			Name:   fileObj.Name,
-			DataID: dataID,
-			Size:   fileObj.Size,
-			MTime:  core.Now(),
-		}
-		if _, putErr := ra.fs.h.Put(ra.fs.c, ra.fs.bktID, []*core.ObjectInfo{updateFileObj}); putErr != nil {
-			DebugLog("[VFS getOrCreateTempWriteFile] WARNING: Failed to update file DataID: %v", putErr)
-		} else {
-			fileObjCache.Put(ra.fileObjKey, updateFileObj)
-			ra.fileObj.Store(updateFileObj)
-			DebugLog("[VFS getOrCreateTempWriteFile] Created new DataID: fileID=%d, dataID=%d", ra.fileID, dataID)
-		}
+	// Update file object with new DataID
+	updateFileObj := &core.ObjectInfo{
+		ID:     fileObj.ID,
+		PID:    fileObj.PID,
+		Type:   fileObj.Type,
+		Name:   fileObj.Name,
+		DataID: dataID,
+		Size:   fileObj.Size,
+		MTime:  core.Now(),
+	}
+	if _, putErr := ra.fs.h.Put(ra.fs.c, ra.fs.bktID, []*core.ObjectInfo{updateFileObj}); putErr != nil {
+		DebugLog("[VFS getOrCreateTempWriteFile] WARNING: Failed to update file DataID: %v", putErr)
+	} else {
+		fileObjCache.Put(ra.fileObjKey, updateFileObj)
+		ra.fileObj.Store(updateFileObj)
+		DebugLog("[VFS getOrCreateTempWriteFile] Created new DataID: fileID=%d, oldDataID=%d, newDataID=%d",
+			ra.fileID, fileObj.DataID, dataID)
 	}
 
 	// Determine if compression and encryption are needed

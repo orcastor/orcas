@@ -331,5 +331,63 @@ func ScanOrphanedChunks(c Ctx, bktID int64, ma MetadataAdapter, da DataAdapter, 
 		}
 	}
 
+	// Scan temporary write area for orphaned files
+	scanTempWriteArea(dataPath, delaySeconds, result)
+
 	return result, nil
+}
+
+// scanTempWriteArea scans the temporary write area for orphaned files
+func scanTempWriteArea(dataPath string, delaySeconds int, result *ScanOrphanedChunksResult) {
+	tempDir := filepath.Join(dataPath, ".temp_write")
+	
+	// Check if temp directory exists
+	if _, err := os.Stat(tempDir); os.IsNotExist(err) {
+		return // No temp directory, nothing to scan
+	}
+
+	// Read all files in temp directory
+	entries, err := os.ReadDir(tempDir)
+	if err != nil {
+		result.Errors = append(result.Errors, fmt.Sprintf("error reading temp directory %s: %v", tempDir, err))
+		return
+	}
+
+	now := time.Now()
+	retentionPeriod := time.Duration(delaySeconds) * time.Second
+	if retentionPeriod < 24*time.Hour {
+		retentionPeriod = 24 * time.Hour // Minimum 24 hours for temp files
+	}
+
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+
+		// Parse filename: fileID_dataID
+		fileName := entry.Name()
+		var fileID, dataID int64
+		if _, err := fmt.Sscanf(fileName, "%d_%d", &fileID, &dataID); err != nil {
+			// Invalid format, skip
+			continue
+		}
+
+		// Get file info
+		filePath := filepath.Join(tempDir, fileName)
+		fileInfo, err := os.Stat(filePath)
+		if err != nil {
+			continue
+		}
+
+		// Check if file is old enough to be considered orphaned
+		if now.Sub(fileInfo.ModTime()) > retentionPeriod {
+			// File is orphaned, delete it
+			if err := os.Remove(filePath); err != nil {
+				result.Errors = append(result.Errors, fmt.Sprintf("error removing orphaned temp file %s: %v", fileName, err))
+			} else {
+				result.DeletedChunks++
+				result.OrphanedChunks = append(result.OrphanedChunks, dataID)
+			}
+		}
+	}
 }
