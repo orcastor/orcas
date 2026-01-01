@@ -105,38 +105,6 @@ func TestEnvironmentConfig(t *testing.T) {
 				os.Unsetenv("ORCAS_BATCH_INTERVAL_MS")
 			})
 		})
-
-		Convey("VersionRetentionConfig", func() {
-			Convey("default values", func() {
-				config := GetVersionRetentionConfig()
-				So(config.MinVersionInterval, ShouldEqual, 0)
-				So(config.MaxVersions, ShouldEqual, 0)
-			})
-
-			Convey("custom min version interval", func() {
-				os.Setenv("ORCAS_MIN_VERSION_INTERVAL_SEC", "300")
-				config := GetVersionRetentionConfig()
-				So(config.MinVersionInterval, ShouldEqual, 300)
-				os.Unsetenv("ORCAS_MIN_VERSION_INTERVAL_SEC")
-			})
-
-			Convey("custom max versions", func() {
-				os.Setenv("ORCAS_MAX_VERSIONS", "10")
-				config := GetVersionRetentionConfig()
-				So(config.MaxVersions, ShouldEqual, 10)
-				os.Unsetenv("ORCAS_MAX_VERSIONS")
-			})
-
-			Convey("zero values are allowed", func() {
-				os.Setenv("ORCAS_MIN_VERSION_INTERVAL_SEC", "0")
-				os.Setenv("ORCAS_MAX_VERSIONS", "0")
-				config := GetVersionRetentionConfig()
-				So(config.MinVersionInterval, ShouldEqual, 0)
-				So(config.MaxVersions, ShouldEqual, 0)
-				os.Unsetenv("ORCAS_MIN_VERSION_INTERVAL_SEC")
-				os.Unsetenv("ORCAS_MAX_VERSIONS")
-			})
-		})
 	})
 }
 

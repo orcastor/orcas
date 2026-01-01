@@ -14,11 +14,8 @@ import (
 	"sort"
 
 	"github.com/h2non/filetype"
-	"github.com/klauspost/compress/zstd"
 	"github.com/mholt/archiver/v3"
-	"github.com/mkmueller/aes256"
 	"github.com/orcastor/orcas/core"
-	"github.com/tjfoc/gmsm/sm4"
 	"github.com/zeebo/xxh3"
 )
 
@@ -70,28 +67,11 @@ func (l *listener) Once() *listener {
 	return l
 }
 
-func (l *listener) encode(src []byte) (dst []byte, err error) {
-	// Encryption
-	if l.d.Kind&core.DATA_ENDEC_AES256 != 0 {
-		// AES256 encryption
-		dst, err = aes256.Encrypt(l.cfg.EndecKey, src)
-	} else if l.d.Kind&core.DATA_ENDEC_SM4 != 0 {
-		// SM4 encryption
-		dst, err = sm4.Sm4Cbc([]byte(l.cfg.EndecKey), src, true) // sm4Cbc mode PKCS7 padding encryption
-	} else {
-		dst = src
-	}
-	if err != nil {
-		dst = src
-	}
-	return
-}
-
 func (l *listener) OnData(c core.Ctx, h core.Handler, dp *dataPkger, buf []byte) (once bool, err error) {
 	if l.cnt == 0 {
 		if l.action&HDR_XXH3 != 0 {
-			if len(buf) > HdrSize {
-				l.d.HdrXXH3 = int64(xxh3.Hash(buf[0:HdrSize]))
+			if len(buf) > core.DefaultHdrSize {
+				l.d.HdrXXH3 = int64(xxh3.Hash(buf[0:core.DefaultHdrSize]))
 			} else {
 				l.d.HdrXXH3 = int64(xxh3.Hash(buf))
 			}
@@ -101,15 +81,7 @@ func (l *listener) OnData(c core.Ctx, h core.Handler, dp *dataPkger, buf []byte)
 			kind, _ := filetype.Match(buf)
 			if kind == filetype.Unknown { // Multimedia, archive, application
 				l.d.Kind |= l.cfg.CmprWay
-				if l.cfg.CmprWay&core.DATA_CMPR_SNAPPY != 0 {
-					l.cmpr = &archiver.Snappy{}
-				} else if l.cfg.CmprWay&core.DATA_CMPR_ZSTD != 0 {
-					l.cmpr = &archiver.Zstd{EncoderOptions: []zstd.EOption{zstd.WithEncoderLevel(zstd.EncoderLevelFromZstd(int(l.cfg.CmprQlty)))}}
-				} else if l.cfg.CmprWay&core.DATA_CMPR_GZIP != 0 {
-					l.cmpr = &archiver.Gz{CompressionLevel: int(l.cfg.CmprQlty)}
-				} else if l.cfg.CmprWay&core.DATA_CMPR_BR != 0 {
-					l.cmpr = &archiver.Brotli{Quality: int(l.cfg.CmprQlty)}
-				}
+				l.cmpr = core.CreateCompressor(l.cfg.CmprWay, l.cfg.CmprQlty)
 			}
 			// If it's a blacklisted type, don't compress
 			// fmt.Println(kind.MIME.Value)
@@ -158,7 +130,7 @@ func (l *listener) OnData(c core.Ctx, h core.Handler, dp *dataPkger, buf []byte)
 		}
 
 		// 2. Encrypt next (if enabled)
-		encodedBuf, encodeErr := l.encode(processedChunk)
+		encodedBuf, encodeErr := core.EncryptData(processedChunk, l.d.Kind, l.cfg.EndecKey)
 		if encodeErr != nil {
 			encodedBuf = processedChunk // Encryption failed, use unencrypted data
 		}
@@ -206,7 +178,7 @@ func (l *listener) OnFinish(c core.Ctx, h core.Handler) error {
 	// If compression produced residual data (theoretically shouldn't, because each chunk is independently compressed), handle here
 	if l.cmprBuf.Len() > 0 {
 		// Encrypt residual data (if enabled)
-		encodedBuf, err := l.encode(l.cmprBuf.Bytes())
+		encodedBuf, err := core.EncryptData(l.cmprBuf.Bytes(), l.d.Kind, l.cfg.EndecKey)
 		if err != nil {
 			return err
 		}
@@ -542,19 +514,6 @@ func (osi *OrcasSDKImpl) uploadFiles(c core.Ctx, bktID int64, u []uploadInfo,
 	return nil
 }
 
-type DummyArchiver struct{}
-
-func (DummyArchiver) CheckExt(string) error { return nil }
-func (DummyArchiver) Compress(in io.Reader, out io.Writer) error {
-	_, err := io.Copy(out, in)
-	return err
-}
-
-func (DummyArchiver) Decompress(in io.Reader, out io.Writer) error {
-	_, err := io.Copy(out, in)
-	return err
-}
-
 type dataReader struct {
 	c               core.Ctx
 	h               core.Handler
@@ -619,62 +578,20 @@ func (dr *dataReader) Read(p []byte) (n int, err error) {
 			return 0, io.EOF
 		}
 
-		fmt.Println("buf", len(buf))
-
 		dr.sn++
 
 		// Important: decrypt first, then decompress (because each chunk is independently compressed and encrypted)
 		// 1. Decrypt first (if enabled)
-		decodeBuf := buf
-		if dr.kind&core.DATA_ENDEC_AES256 != 0 {
-			// AES256 decryption
-			if dr.endecKey == "" {
-				return 0, fmt.Errorf("AES256 decryption requires encryption key but key is empty (chunk sn=%d)", dr.sn-1)
-			}
-			decodeBuf, err = aes256.Decrypt(dr.endecKey, buf)
-			if err != nil {
-				// Decryption failed - this usually means wrong key or corrupted data
-				return 0, fmt.Errorf("AES256 decryption failed for chunk sn=%d (key length=%d, data length=%d): %v. This usually means the encryption key is incorrect or the data is corrupted", dr.sn-1, len(dr.endecKey), len(buf), err)
-			}
-		} else if dr.kind&core.DATA_ENDEC_SM4 != 0 {
-			// SM4 decryption
-			if dr.endecKey == "" {
-				return 0, fmt.Errorf("SM4 decryption requires encryption key but key is empty (chunk sn=%d)", dr.sn-1)
-			}
-			decodeBuf, err = sm4.Sm4Cbc([]byte(dr.endecKey), buf, false) // sm4Cbc mode PKCS7 padding decryption
-			if err != nil {
-				// Decryption failed - this usually means wrong key or corrupted data
-				return 0, fmt.Errorf("SM4 decryption failed for chunk sn=%d (key length=%d, data length=%d): %v. This usually means the encryption key is incorrect or the data is corrupted", dr.sn-1, len(dr.endecKey), len(buf), err)
-			}
+		decodeBuf, err := core.DecryptData(buf, dr.kind, dr.endecKey)
+		if err != nil {
+			return 0, err
 		}
 
 		// 2. Decompress next (if enabled)
 		// Note: Each chunk is independently compressed, so need to create independent decompressor for each chunk
-		finalBuf := decodeBuf
-		if dr.kind&core.DATA_CMPR_MASK != 0 {
-			var decompressor archiver.Decompressor
-			if dr.kind&core.DATA_CMPR_SNAPPY != 0 {
-				decompressor = &archiver.Snappy{}
-			} else if dr.kind&core.DATA_CMPR_ZSTD != 0 {
-				decompressor = &archiver.Zstd{}
-			} else if dr.kind&core.DATA_CMPR_GZIP != 0 {
-				decompressor = &archiver.Gz{}
-			} else if dr.kind&core.DATA_CMPR_BR != 0 {
-				decompressor = &archiver.Brotli{}
-			}
-
-			if decompressor != nil {
-				var decompressedBuf bytes.Buffer
-				err := decompressor.Decompress(bytes.NewReader(decodeBuf), &decompressedBuf)
-				if err != nil {
-					// Decompression failed, use decrypted data (compressed data may be corrupted or wrong format)
-					fmt.Println(runtime.Caller(0))
-					fmt.Println(err)
-					finalBuf = decodeBuf
-				} else {
-					finalBuf = decompressedBuf.Bytes()
-				}
-			}
+		finalBuf, err := core.DecompressData(decodeBuf, core.CreateDecompressor(dr.kind))
+		if err != nil {
+			return 0, err
 		}
 
 		dr.buf.Write(finalBuf)

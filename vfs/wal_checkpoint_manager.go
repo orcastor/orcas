@@ -1,4 +1,4 @@
-package core
+package vfs
 
 import (
 	"fmt"
@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
+
+	"github.com/orcastor/orcas/core"
 )
 
 // WALCheckpointManager 定期刷新 WAL 的管理器
@@ -180,7 +182,7 @@ func (wcm *WALCheckpointManager) checkpointBucket(bktID int64) error {
 	}
 
 	// 获取数据库连接
-	db, err := GetWriteDB(bktDirPath, "")
+	db, err := core.GetWriteDB(bktDirPath, "")
 	if err != nil {
 		return fmt.Errorf("failed to get database connection: %w", err)
 	}

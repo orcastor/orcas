@@ -16,11 +16,6 @@ type DataAdapter interface {
 	SetDataPath(dataPath string)
 
 	Write(c Ctx, bktID, dataID int64, sn int, buf []byte) error
-	// Update updates part of existing data chunk (for writing versions with name="0")
-	// offset: offset within the chunk, size: size to update, buf: data to write
-	// If offset+len(buf) exceeds chunk size, the chunk will be extended
-	// This allows direct modification of data blocks without creating new versions
-	Update(c Ctx, bktID, dataID int64, sn int, offset int, buf []byte) error
 
 	Read(c Ctx, bktID, dataID int64, sn int) ([]byte, error)
 	ReadBytes(c Ctx, bktID, dataID int64, sn, offset, size int) ([]byte, error)
@@ -70,69 +65,6 @@ func (dda *DefaultDataAdapter) Write(c Ctx, bktID, dataID int64, sn int, buf []b
 	if err != nil {
 		return err
 	}
-	return nil
-}
-
-// Update updates part of existing data chunk (for writing versions with name="0")
-// This allows direct modification of data blocks without creating new versions
-// offset: offset within the chunk, buf: data to write at that offset
-// If the chunk doesn't exist, it will be created and padded with zeros if needed
-// If offset+len(buf) exceeds current chunk size, the chunk will be extended
-func (dda *DefaultDataAdapter) Update(c Ctx, bktID, dataID int64, sn int, offset int, buf []byte) error {
-	if len(buf) == 0 {
-		return nil // Nothing to update
-	}
-
-	path := toFilePath(dda.dataPath, bktID, dataID, sn)
-	// Ensure directory exists
-	os.MkdirAll(filepath.Dir(path), 0o766)
-
-	// Open file for read-write (create if not exists)
-	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o666)
-	if err != nil {
-		return ERR_OPEN_FILE
-	}
-	defer f.Close()
-
-	// Get current file size
-	fi, err := f.Stat()
-	if err != nil {
-		return ERR_READ_FILE
-	}
-	currentSize := fi.Size()
-
-	// Calculate required size
-	requiredSize := int64(offset + len(buf))
-	if requiredSize > currentSize {
-		// Extend file with zeros if needed
-		if err := f.Truncate(requiredSize); err != nil {
-			return ERR_OPEN_FILE
-		}
-		// Seek to end and write zeros if there's a gap
-		if int64(offset) > currentSize {
-			// There's a gap between current size and offset, fill with zeros
-			if _, err := f.Seek(currentSize, io.SeekStart); err != nil {
-				return ERR_OPEN_FILE
-			}
-			zeroPadding := make([]byte, int64(offset)-currentSize)
-			if _, err := f.Write(zeroPadding); err != nil {
-				return ERR_OPEN_FILE
-			}
-		}
-	}
-
-	// Seek to offset and write data
-	if _, err := f.Seek(int64(offset), io.SeekStart); err != nil {
-		return ERR_OPEN_FILE
-	}
-
-	// Use buffered writer for better performance
-	_, err = f.Write(buf)
-	if err != nil {
-		return err
-	}
-
-	f.Sync()
 	return nil
 }
 

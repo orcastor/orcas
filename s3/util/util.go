@@ -7,7 +7,8 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
-	"github.com/orcastor/orcas/sdk"
+	"github.com/orcastor/orcas/core"
+	"github.com/orcastor/orcas/util"
 )
 
 // S3Error represents an S3 error response
@@ -120,34 +121,34 @@ func ParseRangeHeader(rangeHeader string, fileSize int64) *RangeSpec {
 // FormatContentRangeHeader formats the Content-Range header
 // Delegates to sdk.FormatContentRangeHeader for consistency
 func FormatContentRangeHeader(start, end, total int64) string {
-	return sdk.FormatContentRangeHeader(start, end, total)
+	return util.FormatContentRangeHeader(start, end, total)
 }
 
 // FormatETag formats DataID as ETag (hex string with quotes)
-// Delegates to sdk.FormatETag for consistency
+// Delegates to util.FormatETag for consistency
 func FormatETag(dataID int64) string {
-	return sdk.FormatETag(dataID)
+	return util.FormatETag(dataID)
 }
 
 // FormatContentLength formats int64 as Content-Length header value
-// Delegates to sdk.FormatContentLength for consistency
+// Delegates to util.FormatContentLength for consistency
 func FormatContentLength(size int64) string {
-	return sdk.FormatContentLength(size)
+	return util.FormatContentLength(size)
 }
 
 // FormatLastModified formats Unix timestamp as RFC1123 Last-Modified header
-// Delegates to sdk.FormatLastModified for consistency
+// Delegates to util.FormatLastModified for consistency
 func FormatLastModified(mtime int64) string {
-	return sdk.FormatLastModified(mtime)
+	return util.FormatLastModified(mtime)
 }
 
 // SetObjectHeaders sets common object response headers in batch
 // Optimized: reduces multiple c.Header() calls overhead
 func SetObjectHeaders(c *gin.Context, contentLength int64, etag int64, lastModified int64, acceptRanges string) {
 	// Set headers in optimal order (most frequently used first)
-	c.Header("Content-Length", FormatContentLength(contentLength))
-	c.Header("ETag", FormatETag(etag))
-	c.Header("Last-Modified", FormatLastModified(lastModified))
+	c.Header("Content-Length", util.FormatContentLength(contentLength))
+	c.Header("ETag", util.FormatETag(etag))
+	c.Header("Last-Modified", util.FormatLastModified(lastModified))
 	if acceptRanges != "" {
 		c.Header("Accept-Ranges", acceptRanges)
 	}
@@ -157,9 +158,9 @@ func SetObjectHeaders(c *gin.Context, contentLength int64, etag int64, lastModif
 // Optimized: batch header setting for GetObject/HeadObject responses
 func SetObjectHeadersWithContentType(c *gin.Context, contentType string, contentLength int64, etag int64, lastModified int64, acceptRanges string) {
 	c.Header("Content-Type", contentType)
-	c.Header("Content-Length", FormatContentLength(contentLength))
-	c.Header("ETag", FormatETag(etag))
-	c.Header("Last-Modified", FormatLastModified(lastModified))
+	c.Header("Content-Length", util.FormatContentLength(contentLength))
+	c.Header("ETag", util.FormatETag(etag))
+	c.Header("Last-Modified", util.FormatLastModified(lastModified))
 	if acceptRanges != "" {
 		c.Header("Accept-Ranges", acceptRanges)
 	}
@@ -168,23 +169,31 @@ func SetObjectHeadersWithContentType(c *gin.Context, contentType string, content
 // FastSplitPath splits a path string into parts, optimized for performance
 // Delegates to sdk.FastSplitPath for consistency
 func FastSplitPath(path string) []string {
-	return sdk.FastSplitPath(path)
+	return util.FastSplitPath(path)
 }
 
 // FastBase extracts the base name from a path (like filepath.Base but faster)
-// Delegates to sdk.FastBase for consistency
+// Delegates to util.FastBase for consistency
 func FastBase(path string) string {
-	return sdk.FastBase(path)
+	return util.FastBase(path)
 }
 
 // FastDir extracts the directory from a path (like filepath.Dir but faster)
-// Delegates to sdk.FastDir for consistency
+// Delegates to util.FastDir for consistency
 func FastDir(path string) string {
-	return sdk.FastDir(path)
+	return util.FastDir(path)
 }
 
 // FastTrimPrefix removes the leading prefix from a string, optimized version
-// Delegates to sdk.FastTrimPrefix for consistency
+// Delegates to util.FastTrimPrefix for consistency
 func FastTrimPrefix(s, prefix string) string {
-	return sdk.FastTrimPrefix(s, prefix)
+	return util.FastTrimPrefix(s, prefix)
+}
+
+func GetBatchWriterForBucket(handler core.Handler, bktID int64) *util.BatchWriter {
+	return util.GetBatchWriterForBucket(handler, bktID)
+}
+
+func CalculateChecksums(data []byte) (int64, int64, int64, int64, int64, int64) {
+	return core.CalculateChecksums(data)
 }

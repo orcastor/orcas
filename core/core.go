@@ -670,189 +670,6 @@ func (lh *LocalHandler) GetData(c Ctx, bktID, id int64, sn int, offsetOrSize ...
 	return data, err
 }
 
-// GetOrCreateWritingVersion gets or creates a "writing version" (name="0") for a file
-// Writing versions allow direct modification of data blocks without creating new versions
-// This is optimized for scenarios like qBittorrent random writes
-// The version ID is set to creation time (timestamp), and name will be set to completion time when finished
-func (lh *LocalHandler) GetOrCreateWritingVersion(c Ctx, bktID, fileID int64) (*ObjectInfo, error) {
-	if err := lh.acm.CheckPermission(c, MDW, bktID); err != nil {
-		return nil, err
-	}
-
-	// Query for existing writing version (name="0"), include writing versions
-	versions, err := lh.ma.ListVersions(c, bktID, fileID, false)
-	if err != nil {
-		return nil, err
-	}
-
-	// Find writing version (name="0")
-	for _, v := range versions {
-		if v.Name == WritingVersionName {
-			return v, nil
-		}
-	}
-
-	// No writing version exists, create one
-	// Get file object to get current DataID and Size
-	fileObjs, err := lh.ma.GetObj(c, bktID, []int64{fileID})
-	if err != nil {
-		return nil, err
-	}
-	if len(fileObjs) == 0 {
-		return nil, fmt.Errorf("file %d not found", fileID)
-	}
-	fileObj := fileObjs[0]
-
-	// For writing version, we need a separate DataID without compression/encryption
-	// IMPORTANT: Always create new DataID for writing version to avoid modifying completed versions
-	// Even if original data has no compression/encryption, we should not reuse it
-	// This ensures that completed versions remain immutable
-	var writingDataID int64 = 0
-	if fileObj.DataID > 0 && fileObj.DataID != EmptyDataID {
-		dataInfo, err := lh.ma.GetData(c, bktID, fileObj.DataID)
-		if err == nil && dataInfo != nil {
-			// CRITICAL: Always create new DataID for writing version
-			// This prevents modifying completed versions, even if they have no compression/encryption
-			writingDataID = NewID()
-			if writingDataID <= 0 {
-				return nil, fmt.Errorf("failed to create DataID for writing version")
-			}
-			// Create DataInfo for writing version (no compression/encryption)
-			writingDataInfo := &DataInfo{
-				ID:       writingDataID,
-				Size:     0,
-				OrigSize: fileObj.Size,
-				Kind:     DATA_NORMAL, // No compression, no encryption
-			}
-			if dataInfo.Kind&DATA_SPARSE != 0 {
-				writingDataInfo.Kind |= DATA_SPARSE // Preserve sparse flag
-			}
-			_, err = lh.PutDataInfo(c, bktID, []*DataInfo{writingDataInfo})
-			if err != nil {
-				return nil, fmt.Errorf("failed to create DataInfo for writing version: %v", err)
-			}
-		} else {
-			// Failed to get DataInfo, but file has DataID
-			// Create new DataID for writing version anyway
-			writingDataID = NewID()
-			if writingDataID <= 0 {
-				return nil, fmt.Errorf("failed to create DataID for writing version")
-			}
-			writingDataInfo := &DataInfo{
-				ID:       writingDataID,
-				Size:     0,
-				OrigSize: fileObj.Size,
-				Kind:     DATA_NORMAL | DATA_SPARSE,
-			}
-			_, err = lh.PutDataInfo(c, bktID, []*DataInfo{writingDataInfo})
-			if err != nil {
-				return nil, fmt.Errorf("failed to create DataInfo for writing version: %v", err)
-			}
-		}
-	} else if fileObj.DataID == 0 || fileObj.DataID == EmptyDataID {
-		// File has no data yet, create new DataID for writing version
-		writingDataID = NewID()
-		if writingDataID <= 0 {
-			return nil, fmt.Errorf("failed to create DataID for writing version")
-		}
-		// Create DataInfo for writing version (no compression/encryption)
-		writingDataInfo := &DataInfo{
-			ID:       writingDataID,
-			Size:     0,
-			OrigSize: fileObj.Size,
-			Kind:     DATA_NORMAL | DATA_SPARSE, // No compression, no encryption, sparse
-		}
-		_, err = lh.PutDataInfo(c, bktID, []*DataInfo{writingDataInfo})
-		if err != nil {
-			return nil, fmt.Errorf("failed to create DataInfo for writing version: %v", err)
-		}
-	}
-
-	// Create writing version with name="0"
-	// ID is set to creation time (timestamp in seconds)
-	creationTime := Now()
-	writingVersion := &ObjectInfo{
-		ID:     creationTime, // Use creation time as ID
-		PID:    fileID,
-		Type:   OBJ_TYPE_VERSION,
-		Name:   WritingVersionName, // Will be changed to completion time when finished
-		DataID: writingDataID,      // Use DataID without compression/encryption
-		Size:   fileObj.Size,       // Use current file's Size
-		MTime:  creationTime,
-	}
-
-	// Put the writing version (will not trigger version retention policy if name="0")
-	ids, err := lh.Put(c, bktID, []*ObjectInfo{writingVersion})
-	if err != nil {
-		return nil, err
-	}
-	if len(ids) == 0 || ids[0] == 0 {
-		return nil, fmt.Errorf("failed to create writing version")
-	}
-
-	writingVersion.ID = ids[0]
-	return writingVersion, nil
-}
-
-// UpdateData updates part of existing data chunk (for writing versions with name="0")
-// This allows direct modification of data blocks without creating new versions
-// offset: offset within the chunk, buf: data to write at that offset
-// Unlike PutData which creates new data blocks, UpdateData modifies existing ones
-func (lh *LocalHandler) UpdateData(c Ctx, bktID, dataID int64, sn int, offset int, buf []byte) error {
-	if err := lh.acm.CheckPermission(c, DW, bktID); err != nil {
-		return err
-	}
-
-	if len(buf) == 0 {
-		return nil // Nothing to update
-	}
-
-	// For UpdateData, we need to handle quota differently:
-	// If the data block already exists, we need to calculate the size difference
-	// Get old data size if exists
-	oldData, err := lh.da.Read(c, bktID, dataID, sn)
-	oldSize := int64(0)
-	if err == nil {
-		oldSize = int64(len(oldData))
-	}
-
-	// Calculate new size after update
-	newSize := int64(offset + len(buf))
-	if newSize < oldSize {
-		newSize = oldSize // Update doesn't shrink, only extends or modifies
-	}
-
-	sizeDiff := newSize - oldSize
-
-	// Only update quota if size changed (extended)
-	if sizeDiff > 0 {
-		// Get bucket info and check quota
-		buckets, err := lh.ma.GetBkt(c, []int64{bktID})
-		if err != nil {
-			return err
-		}
-		if len(buckets) == 0 {
-			return ERR_QUERY_DB
-		}
-		bucket := buckets[0]
-
-		// If quota >= 0, check if it exceeds quota
-		if bucket.Quota >= 0 {
-			if bucket.RealUsed+sizeDiff > bucket.Quota {
-				return ERR_QUOTA_EXCEED
-			}
-		}
-
-		// Increase usage (only when extending)
-		if err := lh.ma.IncBktRealUsed(c, bktID, sizeDiff); err != nil {
-			return err
-		}
-	}
-
-	// Update data block using DataAdapter.Update (supports partial update)
-	return lh.da.Update(c, bktID, dataID, sn, offset, buf)
-}
-
 // Put creates objects
 // During garbage collection: data without metadata reference is dirty data (need window time)
 // Metadata without data is corrupted data
@@ -863,7 +680,6 @@ func (lh *LocalHandler) Put(c Ctx, bktID int64, o []*ObjectInfo) ([]int64, error
 	}
 
 	// 设置版本对象的时间戳（用于后续的版本保留策略处理）
-	// Note: Writing versions (name="0") do not trigger version retention policy
 	for _, obj := range o {
 		if obj.Type == OBJ_TYPE_VERSION && obj.PID > 0 {
 			// 设置MTime（如果未设置）
@@ -877,7 +693,6 @@ func (lh *LocalHandler) Put(c Ctx, bktID int64, o []*ObjectInfo) ([]int64, error
 		if x.ID == 0 {
 			x.ID = NewID()
 		}
-		// Auto-generate name if empty (writing versions with name="0" keep their name)
 		if x.Name == "" {
 			x.Name = strconv.FormatInt(x.ID, 10)
 		}
@@ -891,17 +706,6 @@ func (lh *LocalHandler) Put(c Ctx, bktID int64, o []*ObjectInfo) ([]int64, error
 	ids, err := lh.ma.PutObj(c, bktID, o)
 	if err != nil {
 		return ids, err
-	}
-
-	// 如果是新版本对象（OBJ_TYPE_VERSION），异步处理版本保留策略
-	// 统一处理时间窗口内的版本合并和版本数量限制
-	// Note: Writing versions (name="0") do not trigger version retention policy
-	for _, obj := range o {
-		if obj.Type == OBJ_TYPE_VERSION && obj.PID > 0 && obj.Name != WritingVersionName {
-			// 异步应用版本保留策略（后置处理：时间窗口合并 + 版本数量限制）
-			// 跳过正在写入的版本（name="0"），它们可以随时修改，不需要版本管理
-			asyncApplyVersionRetention(c, bktID, obj.PID, obj.MTime, lh.ma, lh.da)
-		}
 	}
 
 	// 如果是新版本对象（OBJ_TYPE_VERSION），更新父文件对象的DataID和大小

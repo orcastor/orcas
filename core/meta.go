@@ -2,8 +2,14 @@ package core
 
 import (
 	"context"
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/rand"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"path/filepath"
@@ -53,7 +59,7 @@ const (
 	OBJ_TYPE_DIR
 	OBJ_TYPE_FILE
 	OBJ_TYPE_VERSION
-	OBJ_TYPE_PREVIEW
+	OBJ_TYPE_JOURNAL // Journal snapshot (lightweight version with incremental changes)
 )
 
 type ObjectInfo struct {
@@ -61,12 +67,17 @@ type ObjectInfo struct {
 	PID    int64  `borm:"pid" json:"p,omitempty"` // Parent object ID
 	MTime  int64  `borm:"m" json:"m,omitempty"`   // Update time, second-level timestamp
 	DataID int64  `borm:"did" json:"d,omitempty"` // Data ID, if 0, no data (newly created file, DataID is object ID, serving as first version data)
-	Type   int    `borm:"t" json:"t,omitempty"`   // Object type, -1: malformed, 0: none, 1: dir, 2: file, 3: version, 4: preview(thumb/m3u8/pdf)
-	Name   string `borm:"n" json:"n,omitempty"`   // Object name
+	Type   int    `borm:"t" json:"t,omitempty"`   // Object type, -1: malformed, 0: none, 1: dir, 2: file, 3: version, 4: journal
+	Name   string `borm:"n" json:"n,omitempty"`   // Object name (may be encrypted if MODE_NAME_ENCRYPTED flag is set)
 	Size   int64  `borm:"s" json:"s,omitempty"`   // Object size, directory size is child object count, file size is latest version byte count
-	Mode   uint32 `borm:"md" json:"md,omitempty"` // File mode (permissions), 0 means use default
+	Mode   uint32 `borm:"md" json:"md,omitempty"` // File mode (permissions and flags), 0 means use default. High bit (1<<31) indicates encrypted name
 	Extra  string `borm:"e" json:"e,omitempty"`   // Object extended information
 }
+
+// Mode flags (using high bits to avoid conflict with standard Unix permissions 0-0777)
+const (
+	MODE_NAME_ENCRYPTED uint32 = 1 << 31 // Name field is encrypted (when dataDBKey is set)
+)
 
 // Data status
 const (
@@ -121,6 +132,8 @@ func EmptyDataInfo() *DataInfo {
 	// SHA-256 of empty string: e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
 	return &DataInfo{
 		ID:       EmptyDataID,
+		HdrXXH3:  3244421341483603138,
+		XXH3:     3244421341483603138,
 		SHA256_0: -2039914840885289964, // bytes 0-7
 		SHA256_1: -7278955230309402332, // bytes 8-15
 		SHA256_2: 2859295262623109964,  // bytes 16-23
@@ -239,8 +252,7 @@ type ObjectMetadataAdapter interface {
 	// Query all objects that reference the specified DataID
 	GetObjByDataID(c Ctx, bktID int64, dataID int64) ([]*ObjectInfo, error)
 	// Query all versions of a file (sorted by MTime descending, latest first)
-	// excludeWriting: if true, exclude writing versions (name="0")
-	ListVersions(c Ctx, bktID int64, fileID int64, excludeWriting bool) ([]*ObjectInfo, error)
+	ListVersions(c Ctx, bktID int64, fileID int64) ([]*ObjectInfo, error)
 	// Extended attributes (xattr) operations
 	GetAttr(c Ctx, bktID int64, objID int64, key string) ([]byte, error)     // Get extended attribute value
 	SetAttr(c Ctx, bktID int64, objID int64, key string, value []byte) error // Set extended attribute value
@@ -617,11 +629,6 @@ func (dba *DefaultBaseMetadataAdapter) SetBasePath(basePath string) {
 	dba.basePath = basePath
 }
 
-// SetKey sets the encryption key for the adapter (for main database)
-func (dba *DefaultBaseMetadataAdapter) SetKey(key string) {
-	dba.dbKey = key
-}
-
 // SetBaseKey sets the encryption key for the adapter (for main database)
 func (dba *DefaultBaseMetadataAdapter) SetBaseKey(key string) {
 	dba.dbKey = key
@@ -629,8 +636,9 @@ func (dba *DefaultBaseMetadataAdapter) SetBaseKey(key string) {
 
 // DefaultDataMetadataAdapter implements DataMetadataAdapter
 type DefaultDataMetadataAdapter struct {
-	dataPath string // Path for data file storage and bucket databases
-	dbKey    string // Encryption key for bucket databases (empty means unencrypted)
+	dataPath string      // Path for data file storage and bucket databases
+	dbKey    string      // Encryption key for bucket databases (empty means unencrypted)
+	aead     cipher.AEAD // AEAD cipher for name encryption (created once when key is set)
 }
 
 func (dda *DefaultDataMetadataAdapter) Close() {
@@ -646,14 +654,83 @@ func (dda *DefaultDataMetadataAdapter) SetDataPath(dataPath string) {
 	dda.dataPath = dataPath
 }
 
-// SetKey sets the encryption key for the adapter (for bucket databases)
-func (dda *DefaultDataMetadataAdapter) SetKey(key string) {
-	dda.dbKey = key
-}
-
 // SetDataKey sets the encryption key for the adapter (for bucket databases)
 func (dda *DefaultDataMetadataAdapter) SetDataKey(key string) {
 	dda.dbKey = key
+
+	// Create AEAD cipher for name encryption if key is provided
+	if key != "" {
+		// Derive 32-byte key from dbKey using SHA-256
+		keyHash := sha256.Sum256([]byte(key))
+		block, err := aes.NewCipher(keyHash[:])
+		if err != nil {
+			// Should not happen with valid key size
+			panic(fmt.Sprintf("failed to create AES cipher: %v", err))
+		}
+
+		aead, err := cipher.NewGCM(block)
+		if err != nil {
+			// Should not happen with valid block cipher
+			panic(fmt.Sprintf("failed to create GCM: %v", err))
+		}
+
+		dda.aead = aead
+	} else {
+		dda.aead = nil
+	}
+}
+
+// encryptName encrypts a filename using the pre-created AEAD cipher
+// Returns hex-encoded ciphertext with nonce prepended
+func (dda *DefaultDataMetadataAdapter) encryptName(plaintext string) (string, error) {
+	if dda.aead == nil || plaintext == "" {
+		return plaintext, nil
+	}
+
+	// Generate random nonce
+	nonce := make([]byte, dda.aead.NonceSize())
+	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
+		return "", err
+	}
+
+	// Encrypt (nonce is prepended to ciphertext)
+	ciphertext := dda.aead.Seal(nonce, nonce, []byte(plaintext), nil)
+
+	// Return as hex string (compatible with SQLite TEXT)
+	return hex.EncodeToString(ciphertext), nil
+}
+
+// decryptName decrypts a filename using the pre-created AEAD cipher
+func (dda *DefaultDataMetadataAdapter) decryptName(ciphertext string) (string, error) {
+	if dda.aead == nil || ciphertext == "" {
+		return ciphertext, nil
+	}
+
+	// Decode from hex
+	decoded, err := hex.DecodeString(ciphertext)
+	if err != nil {
+		// Not hex-encoded, assume plaintext (migration support)
+		return ciphertext, nil
+	}
+
+	// Check minimum length
+	nonceSize := dda.aead.NonceSize()
+	if len(decoded) < nonceSize {
+		// Too short, assume plaintext
+		return ciphertext, nil
+	}
+
+	// Extract nonce and decrypt
+	nonce := decoded[:nonceSize]
+	ciphertextOnly := decoded[nonceSize:]
+
+	plaintext, err := dda.aead.Open(nil, nonce, ciphertextOnly, nil)
+	if err != nil {
+		// Decryption failed, assume plaintext (migration support)
+		return ciphertext, nil
+	}
+
+	return string(plaintext), nil
 }
 
 func (dda *DefaultDataMetadataAdapter) ListAllBuckets(c Ctx) (o []*BucketInfo, err error) {
@@ -765,6 +842,56 @@ func (dma *DefaultMetadataAdapter) SetDataKey(key string) {
 
 func (dma *DefaultMetadataAdapter) Close() {
 	// Both adapters are embedded, no need to close separately
+}
+
+// encryptObjNames encrypts object names in-place if dataDBKey is set
+// Sets MODE_NAME_ENCRYPTED flag in Mode field
+func (dma *DefaultMetadataAdapter) encryptObjNames(objs []*ObjectInfo) error {
+	if dma.DefaultDataMetadataAdapter == nil || dma.DefaultDataMetadataAdapter.dbKey == "" {
+		return nil // No encryption key, skip
+	}
+
+	for _, obj := range objs {
+		if obj.Name == "" {
+			continue
+		}
+		// Check if already encrypted
+		if obj.Mode&MODE_NAME_ENCRYPTED != 0 {
+			continue // Already encrypted
+		}
+		encrypted, err := dma.DefaultDataMetadataAdapter.encryptName(obj.Name)
+		if err != nil {
+			return fmt.Errorf("failed to encrypt name: %w", err)
+		}
+		obj.Name = encrypted
+		obj.Mode |= MODE_NAME_ENCRYPTED // Set encrypted flag
+	}
+	return nil
+}
+
+// decryptObjNames decrypts object names in-place if MODE_NAME_ENCRYPTED flag is set
+// Clears MODE_NAME_ENCRYPTED flag after decryption
+func (dma *DefaultMetadataAdapter) decryptObjNames(objs []*ObjectInfo) error {
+	if dma.DefaultDataMetadataAdapter == nil {
+		return nil
+	}
+
+	for _, obj := range objs {
+		if obj.Name == "" {
+			continue
+		}
+		// Check if encrypted
+		if obj.Mode&MODE_NAME_ENCRYPTED == 0 {
+			continue // Not encrypted
+		}
+		decrypted, err := dma.DefaultDataMetadataAdapter.decryptName(obj.Name)
+		if err != nil {
+			return fmt.Errorf("failed to decrypt name: %w", err)
+		}
+		obj.Name = decrypted
+		obj.Mode &^= MODE_NAME_ENCRYPTED // Clear encrypted flag
+	}
+	return nil
 }
 
 // PutBkt overrides DefaultBaseMetadataAdapter.PutBkt to access dataPath from DefaultDataMetadataAdapter
@@ -1482,6 +1609,11 @@ func (dma *DefaultMetadataAdapter) FindSmallPackageData(c Ctx, bktID int64, maxS
 }
 
 func (dma *DefaultMetadataAdapter) PutObj(c Ctx, bktID int64, o []*ObjectInfo) (ids []int64, err error) {
+	// Encrypt object names before storing if dataDBKey is set
+	if err := dma.encryptObjNames(o); err != nil {
+		return nil, fmt.Errorf("failed to encrypt names: %w", err)
+	}
+
 	// Use write connection for object insertion
 	bktDirPath := filepath.Join(dma.DefaultDataMetadataAdapter.dataPath, fmt.Sprint(bktID))
 	db, err := GetWriteDB(bktDirPath, "")
@@ -1521,6 +1653,11 @@ func (dma *DefaultMetadataAdapter) PutObj(c Ctx, bktID int64, o []*ObjectInfo) (
 // PutDataAndObj writes both DataInfo and ObjectInfo in a single transaction
 // This optimization reduces database round trips by combining two separate writes
 func (dma *DefaultMetadataAdapter) PutDataAndObj(c Ctx, bktID int64, d []*DataInfo, o []*ObjectInfo) error {
+	// Encrypt object names before storing if dataDBKey is set
+	if err := dma.encryptObjNames(o); err != nil {
+		return fmt.Errorf("failed to encrypt names: %w", err)
+	}
+
 	// Use write connection for combined write operation
 	bktDirPath := filepath.Join(dma.DefaultDataMetadataAdapter.dataPath, fmt.Sprint(bktID))
 	db, err := GetWriteDB(bktDirPath, "")
@@ -1604,6 +1741,12 @@ func (dma *DefaultMetadataAdapter) GetObj(c Ctx, bktID int64, ids []int64) (o []
 	if _, err = b.TableContext(c, db, OBJ_TBL).Select(&o, b.Where(b.In("id", ids))); err != nil {
 		return nil, fmt.Errorf("%w: GetObj failed (bktID=%d, idsCount=%d): %v", ERR_QUERY_DB, bktID, len(ids), err)
 	}
+
+	// Decrypt object names after reading if they were encrypted
+	if err := dma.decryptObjNames(o); err != nil {
+		return nil, fmt.Errorf("failed to decrypt names: %w", err)
+	}
+
 	return
 }
 
@@ -1812,6 +1955,11 @@ func (dma *DefaultMetadataAdapter) ListObj(c Ctx, bktID, pid int64,
 			b.OrderBy(orderBy),
 			b.Limit(count)); err != nil {
 			return nil, 0, "", fmt.Errorf("%w: ListObj select failed (bktID=%d, pid=%d, wd=%s, count=%d): %v", ERR_QUERY_DB, bktID, pid, wd, count, err)
+		}
+
+		// Decrypt object names after reading if they were encrypted
+		if err := dma.decryptObjNames(o); err != nil {
+			return nil, 0, "", fmt.Errorf("failed to decrypt names: %w", err)
 		}
 
 		if len(o) > 0 {
@@ -2177,7 +2325,7 @@ func (dma *DefaultMetadataAdapter) GetObjByDataID(c Ctx, bktID int64, dataID int
 	return objs, nil
 }
 
-func (dma *DefaultMetadataAdapter) ListVersions(c Ctx, bktID int64, fileID int64, excludeWriting bool) ([]*ObjectInfo, error) {
+func (dma *DefaultMetadataAdapter) ListVersions(c Ctx, bktID int64, fileID int64) ([]*ObjectInfo, error) {
 	// Use read connection for listing versions
 	bktDirPath := filepath.Join(dma.DefaultDataMetadataAdapter.dataPath, fmt.Sprint(bktID))
 	db, err := GetReadDB(bktDirPath, "")
@@ -2188,19 +2336,14 @@ func (dma *DefaultMetadataAdapter) ListVersions(c Ctx, bktID int64, fileID int64
 
 	var versions []*ObjectInfo
 	// Query all version objects (type=3, pid=fileID)
-	// If excludeWriting is true, exclude writing versions (name="0")
 	conds := []interface{}{b.Eq("pid", fileID), b.Eq("t", OBJ_TYPE_VERSION)}
-	if excludeWriting {
-		// Use borm tag "n" instead of "name"
-		conds = append(conds, b.Neq("n", WritingVersionName))
-	}
 	// Use borm tag "m" instead of "mtime"
 	_, err = b.TableContext(c, db, OBJ_TBL).Select(&versions,
 		b.Where(conds...),
 		b.OrderBy("m desc"))
 	if err != nil {
 		// Return ERR_QUERY_DB with detailed error information
-		return nil, fmt.Errorf("%w: ListVersions failed (bktID=%d, fileID=%d, excludeWriting=%v): %v", ERR_QUERY_DB, bktID, fileID, excludeWriting, err)
+		return nil, fmt.Errorf("%w: ListVersions failed (bktID=%d, fileID=%d): %v", ERR_QUERY_DB, bktID, fileID, err)
 	}
 	return versions, nil
 }

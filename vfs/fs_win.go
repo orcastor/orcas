@@ -220,6 +220,18 @@ type MountOptions struct {
 	Debug bool
 	// RequireKey: if true, return EPERM error when EndecKey is not provided in Config
 	RequireKey bool
+	// EndecKey: Encryption key for data encryption/decryption
+	// If empty, encryption key will not be used (data will not be encrypted/decrypted)
+	// This overrides bucket config EndecKey
+	EndecKey string
+	// BaseDBKey: Encryption key for main database (BASE path, SQLCipher)
+	// If empty, database will not be encrypted
+	// This can be set at runtime before mounting
+	BaseDBKey string
+	// DataDBKey: Encryption key for bucket databases (DATA path, SQLCipher)
+	// If empty, bucket databases will not be encrypted
+	// This can be set at runtime before mounting
+	DataDBKey string
 }
 
 // Mount mounts ORCAS filesystem using Dokany (Windows)
@@ -921,8 +933,8 @@ func (instance *DokanyInstance) Unmount() error {
 // This should be called whenever directory contents change (Create, Mkdir, Unlink, Rmdir, Rename)
 // Cache will be rebuilt on next readdir/list operation
 func (n *OrcasNode) invalidateDirListCache(dirID int64) {
-	cacheKey := n.getDirListCacheKey(dirID)
-	dirListCache.Del(cacheKey)
+	// Note: getDirListCacheKey was removed, using dirID directly as key
+	dirListCache.Del(dirID)
 	readdirCache.Del(dirID)
 	readdirCacheStale.Delete(dirID)
 	DebugLog("[VFS invalidateDirListCache] Invalidated directory cache: dirID=%d", dirID)

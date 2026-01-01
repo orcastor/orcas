@@ -71,12 +71,14 @@ type OrcasFS struct {
 	raRegistry sync.Map // map[fileID]*RandomAccessor
 	// Mutex to protect RandomAccessor creation for .tmp files during concurrent writes
 	raCreateMu sync.Mutex // Protects creation of RandomAccessor for same fileID
-	// Temporary write area for large files and random writes
-	tempWriteArea *TempWriteArea
-	// Save pattern detector for automatic version merging
-	savePatternDetector *SavePatternDetector
 	// WAL checkpoint manager for periodic WAL flushing
-	walCheckpointManager *core.WALCheckpointManager
+	walCheckpointManager *WALCheckpointManager
+	// Journal manager for tracking random writes
+	journalMgr *JournalManager
+	// Atomic replace manager for atomic replace adaptation
+	atomicReplaceMgr *AtomicReplaceMgr
+	// Version retention manager for version cleanup
+	retentionMgr *VersionRetentionManager
 	// OnRootDeleted is called when the root node is deleted (entire bucket is deleted)
 	// This callback can be used to perform cleanup operations
 	// Note: If you need to unmount in the callback, use fs.Server.Unmount()
@@ -160,25 +162,31 @@ func NewOrcasFSWithConfig(h core.Handler, c core.Ctx, bktID int64, cfg *core.Con
 		Config:     config,
 	}
 
-	// Initialize temporary write area
-	twaConfig := DefaultTempWriteAreaConfig()
-	if twa, err := NewTempWriteArea(ofs, twaConfig); err != nil {
-		DebugLog("[VFS NewOrcasFSWithConfig] WARNING: Failed to create temp write area: %v", err)
-	} else {
-		ofs.tempWriteArea = twa
-		DebugLog("[VFS NewOrcasFSWithConfig] Temp write area initialized: path=%s", twa.basePath)
+	// Initialize journal manager
+	journalConfig := DefaultJournalConfig()
+	// Sync threshold with temp write area
+	if journalConfig.SmallFileThreshold == 0 {
+		journalConfig.SmallFileThreshold = 10 << 20 // 10MB default
 	}
+	ofs.journalMgr = NewJournalManager(ofs, journalConfig)
+	DebugLog("[VFS NewOrcasFSWithConfig] Journal manager initialized: threshold=%d", journalConfig.SmallFileThreshold)
 
-	// Initialize save pattern detector
-	ofs.savePatternDetector = NewSavePatternDetector(ofs)
-	DebugLog("[VFS NewOrcasFSWithConfig] Save pattern detector initialized")
+	// Initialize deletion manager for atomic replace adaptation
+	ofs.atomicReplaceMgr = NewAtomicReplaceMgr(ofs, 5*time.Second)
+	DebugLog("[VFS NewOrcasFSWithConfig] Deletion manager initialized: delay=5s")
+
+	// Initialize version retention manager
+	retentionPolicy := DefaultVersionRetentionPolicy()
+	ofs.retentionMgr = NewVersionRetentionManager(ofs, retentionPolicy)
+	DebugLog("[VFS NewOrcasFSWithConfig] Version retention manager initialized: enabled=%v",
+		retentionPolicy.Enabled)
 
 	// Initialize WAL checkpoint manager
 	// This periodically flushes WAL to main database to reduce dirty read issues
 	if config.DataPath != "" {
-		walConfig := core.DefaultWALCheckpointConfig()
-		walConfig.CheckpointInterval = 10 * time.Second // 每10秒刷新一次
-		walCheckpointManager := core.NewWALCheckpointManager(config.DataPath, walConfig)
+		walConfig := DefaultWALCheckpointConfig()
+		walConfig.CheckpointInterval = 60 * time.Second // 每60秒刷新一次
+		walCheckpointManager := NewWALCheckpointManager(config.DataPath, walConfig)
 		if err := walCheckpointManager.Start(); err != nil {
 			DebugLog("[VFS NewOrcasFSWithConfig] WARNING: Failed to start WAL checkpoint manager: %v", err)
 		} else {
@@ -259,28 +267,6 @@ func getCmprWayForFS(fs *OrcasFS) uint32 {
 		return 0
 	}
 	return fs.Config.CmprWay
-}
-
-// recordFileOperation records a file operation to the save pattern detector
-// This is a helper function to simplify integration
-func (fs *OrcasFS) recordFileOperation(op SaveOperation, fileID int64, fileName string, parentID int64, dataID int64, size int64, newName string, newParent int64) {
-	if fs == nil || fs.savePatternDetector == nil {
-		return
-	}
-
-	fileOp := &FileOperation{
-		Op:        op,
-		FileID:    fileID,
-		FileName:  fileName,
-		ParentID:  parentID,
-		DataID:    dataID,
-		Size:      size,
-		NewName:   newName,
-		NewParent: newParent,
-		Timestamp: core.Now(),
-	}
-
-	fs.savePatternDetector.RecordOperation(fileOp)
 }
 
 // getCmprQltyForFS returns the compression quality for a given OrcasFS

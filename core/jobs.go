@@ -1,13 +1,14 @@
 package core
 
 import (
-	"bytes"
+	"context"
 	"crypto/md5"
 	"crypto/sha256"
 	"encoding/binary"
 	"fmt"
 	"hash"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -16,10 +17,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/klauspost/compress/zstd"
-	"github.com/mholt/archiver/v3"
-	"github.com/mkmueller/aes256"
-	"github.com/tjfoc/gmsm/sm4"
 	"github.com/zeebo/xxh3"
 )
 
@@ -202,445 +199,6 @@ func delayedDelete(c Ctx, bktID, dataID int64, ma MetadataAdapter, da DataAdapte
 					}
 					deleteDataFiles(dataPath, bktID, dataID, ma, c)
 				}
-			}
-		}
-	}()
-}
-
-// ConvertWritingVersionsResult Result of converting writing versions
-type ConvertWritingVersionsResult struct {
-	ProcessedVersions int   // Number of versions processed
-	ConvertedVersions int   // Number of versions successfully converted
-	FailedVersions    int   // Number of versions that failed to convert
-	FreedSize         int64 // Size of old data freed (bytes)
-	Errors            []string
-}
-
-// ConvertWritingVersions converts writing version data from uncompressed/unencrypted to compressed/encrypted
-// This is a scheduled job that processes completed writing versions in batches
-// It finds versions that need conversion (completed but still using uncompressed/unencrypted DataID)
-// and converts them according to the file's compression/encryption requirements
-// cfg: Config containing compression/encryption settings (CmprWay, CmprQlty, EndecWay, EndecKey)
-func ConvertWritingVersions(c Ctx, bktID int64, lh *LocalHandler, cfg *Config) (*ConvertWritingVersionsResult, error) {
-	// Acquire work lock to ensure only one conversion is processing for the same bucket
-	key := fmt.Sprintf("convert_writing_versions_%d", bktID)
-	acquired, release := acquireWorkLock(key)
-	if !acquired {
-		return nil, fmt.Errorf("convert writing versions operation already in progress for bucket %d", bktID)
-	}
-	defer release()
-
-	result := &ConvertWritingVersionsResult{
-		ProcessedVersions: 0,
-		ConvertedVersions: 0,
-		FailedVersions:    0,
-		FreedSize:         0,
-		Errors:            []string{},
-	}
-
-	// Initialize resource controller
-	rc := NewResourceController(GetResourceControlConfig())
-
-	// Get chunk size from bucket configuration
-	chunkSize := getChunkSize(c, bktID, lh.ma)
-	if chunkSize <= 0 {
-		chunkSize = DEFAULT_CHUNK_SIZE
-	}
-	chunkSizeInt := int(chunkSize)
-
-	// Find all versions that need conversion
-	// Criteria:
-	// 1. Version is completed (name != "0")
-	// 2. Version has DataID
-	// 3. Version's DataID has no compression/encryption (writing version DataID)
-	// 4. File object has compression/encryption requirements
-	// Process by iterating through all files and their versions
-	pageSize := 100
-	offset := 0
-
-	// Get all files in the bucket with pagination
-	for {
-		// Check if should stop
-		if rc.ShouldStop() {
-			break
-		}
-
-		// Query files in batches with pagination
-		// Use ListObjsByType to get files with pagination
-		files, totalCount, err := lh.ma.ListObjsByType(c, bktID, OBJ_TYPE_FILE, offset, pageSize)
-		if err != nil {
-			result.Errors = append(result.Errors, fmt.Sprintf("failed to list files: %v", err))
-			break
-		}
-
-		if len(files) == 0 {
-			break
-		}
-
-		// Process files in current batch
-		processed := 0
-		for _, fileObj := range files {
-
-			// Get all versions for this file (excluding writing versions)
-			versions, err := lh.ma.ListVersions(c, bktID, fileObj.ID, true)
-			if err != nil {
-				result.Errors = append(result.Errors, fmt.Sprintf("failed to list versions for file %d: %v", fileObj.ID, err))
-				continue
-			}
-
-			// Process each version
-			for _, version := range versions {
-				result.ProcessedVersions++
-
-				// Check if version needs conversion
-				needsConversion, originalDataID, err := checkVersionNeedsConversion(c, bktID, version, lh.ma)
-				if err != nil {
-					result.Errors = append(result.Errors, fmt.Sprintf("failed to check version %d: %v", version.ID, err))
-					result.FailedVersions++
-					continue
-				}
-
-				if !needsConversion {
-					continue
-				}
-
-				// Convert version
-				converted, freedSize, err := convertVersionData(c, bktID, version, originalDataID, chunkSizeInt, lh, cfg)
-				if err != nil {
-					result.Errors = append(result.Errors, fmt.Sprintf("failed to convert version %d: %v", version.ID, err))
-					result.FailedVersions++
-					continue
-				}
-
-				if converted {
-					result.ConvertedVersions++
-					result.FreedSize += freedSize
-				}
-
-				processed++
-			}
-		}
-
-		offset += pageSize
-		rc.WaitIfNeeded(processed)
-
-		// If we've processed all files, break
-		if offset >= int(totalCount) {
-			break
-		}
-	}
-
-	return result, nil
-}
-
-// checkVersionNeedsConversion checks if a version needs compression/encryption conversion
-func checkVersionNeedsConversion(c Ctx, bktID int64, version *ObjectInfo, ma MetadataAdapter) (bool, int64, error) {
-	// Version must have DataID
-	if version.DataID == 0 || version.DataID == EmptyDataID {
-		return false, 0, nil
-	}
-
-	// Get version's DataInfo
-	versionDataInfo, err := ma.GetData(c, bktID, version.DataID)
-	if err != nil || versionDataInfo == nil {
-		return false, 0, nil
-	}
-
-	// Check if version's DataID already has compression/encryption
-	hasCompression := versionDataInfo.Kind&DATA_CMPR_MASK != 0
-	hasEncryption := versionDataInfo.Kind&DATA_ENDEC_MASK != 0
-	if hasCompression || hasEncryption {
-		// Already compressed/encrypted, no conversion needed
-		return false, 0, nil
-	}
-
-	// Get file object to check if it needs compression/encryption
-	fileObjs, err := ma.GetObj(c, bktID, []int64{version.PID})
-	if err != nil || len(fileObjs) == 0 {
-		return false, 0, nil
-	}
-	fileObj := fileObjs[0]
-
-	// Check if file has different DataID (with compression/encryption)
-	if fileObj.DataID > 0 && fileObj.DataID != EmptyDataID && fileObj.DataID != version.DataID {
-		fileDataInfo, err := ma.GetData(c, bktID, fileObj.DataID)
-		if err == nil && fileDataInfo != nil {
-			fileHasCompression := fileDataInfo.Kind&DATA_CMPR_MASK != 0
-			fileHasEncryption := fileDataInfo.Kind&DATA_ENDEC_MASK != 0
-			if fileHasCompression || fileHasEncryption {
-				// File needs compression/encryption, version needs conversion
-				return true, fileObj.DataID, nil
-			}
-		}
-	}
-
-	return false, 0, nil
-}
-
-// convertVersionData converts a version's data from uncompressed/unencrypted to compressed/encrypted
-// cfg: Config containing compression/encryption settings (CmprWay, CmprQlty, EndecWay, EndecKey)
-func convertVersionData(c Ctx, bktID int64, version *ObjectInfo, originalDataID int64, chunkSizeInt int, lh *LocalHandler, cfg *Config) (bool, int64, error) {
-	// Get original DataInfo to get compression/encryption settings
-	originalDataInfo, err := lh.ma.GetData(c, bktID, originalDataID)
-	if err != nil || originalDataInfo == nil {
-		return false, 0, fmt.Errorf("failed to get original DataInfo: %v", err)
-	}
-
-	// Get writing DataInfo
-	writingDataInfo, err := lh.ma.GetData(c, bktID, version.DataID)
-	if err != nil || writingDataInfo == nil {
-		return false, 0, fmt.Errorf("failed to get writing DataInfo: %v", err)
-	}
-
-	// Check if conversion is needed
-	needsCompression := originalDataInfo.Kind&DATA_CMPR_MASK != 0
-	needsEncryption := originalDataInfo.Kind&DATA_ENDEC_MASK != 0
-	if !needsCompression && !needsEncryption {
-		// No conversion needed
-		return false, 0, nil
-	}
-
-	// Create new DataID for converted data
-	newDataID := NewID()
-	if newDataID <= 0 {
-		return false, 0, fmt.Errorf("failed to generate new DataID")
-	}
-
-	// Create new DataInfo with compression/encryption flags
-	newDataInfo := &DataInfo{
-		ID:       newDataID,
-		Size:     0,
-		OrigSize: version.Size,
-		Kind:     originalDataInfo.Kind & (DATA_CMPR_MASK | DATA_ENDEC_MASK), // Copy compression/encryption flags
-	}
-	if writingDataInfo.Kind&DATA_SPARSE != 0 {
-		newDataInfo.Kind |= DATA_SPARSE // Preserve sparse flag
-	}
-
-	// Calculate number of chunks
-	numChunks := int((version.Size + int64(chunkSizeInt) - 1) / int64(chunkSizeInt))
-
-	// Check if Config is available for compression/encryption
-	if cfg == nil {
-		// No Config available, cannot perform compression/encryption
-		// Return false to indicate conversion was skipped
-		return false, 0, nil
-	}
-
-	// Read and convert chunks with compression/encryption
-	for sn := 0; sn < numChunks; sn++ {
-		// Read chunk from writing DataID (uncompressed/unencrypted)
-		chunkData, err := lh.da.Read(c, bktID, version.DataID, sn)
-		if err != nil {
-			// Chunk may not exist (sparse file), skip
-			if os.IsNotExist(err) {
-				continue
-			}
-			return false, 0, fmt.Errorf("failed to read chunk %d: %v", sn, err)
-		}
-
-		// Apply compression/encryption
-		processedData, err := processChunkData(chunkData, needsCompression, needsEncryption, originalDataInfo, cfg)
-		if err != nil {
-			return false, 0, fmt.Errorf("failed to process chunk %d: %v", sn, err)
-		}
-
-		// Write processed chunk
-		_, err = lh.PutData(c, bktID, newDataID, sn, processedData)
-		if err != nil {
-			return false, 0, fmt.Errorf("failed to write chunk %d: %v", sn, err)
-		}
-	}
-
-	// Calculate actual size
-	actualSize := int64(0)
-	for sn := 0; sn < numChunks; sn++ {
-		chunkData, err := lh.da.Read(c, bktID, newDataID, sn)
-		if err == nil {
-			actualSize += int64(len(chunkData))
-		}
-	}
-	newDataInfo.Size = actualSize
-
-	// Create DataInfo
-	_, err = lh.PutDataInfo(c, bktID, []*DataInfo{newDataInfo})
-	if err != nil {
-		return false, 0, fmt.Errorf("failed to create DataInfo: %v", err)
-	}
-
-	// Update version object with new DataID
-	updateVersion := &ObjectInfo{
-		ID:     version.ID,
-		DataID: newDataID,
-		Size:   version.Size,
-	}
-	err = lh.ma.SetObj(c, bktID, []string{"did", "s"}, updateVersion)
-	if err != nil {
-		return false, 0, fmt.Errorf("failed to update version: %v", err)
-	}
-
-	// Update file object with new DataID if this is the latest version
-	fileObjs, err := lh.ma.GetObj(c, bktID, []int64{version.PID})
-	if err == nil && len(fileObjs) > 0 {
-		fileObj := fileObjs[0]
-		// Check if this version's DataID matches file's DataID (it's the current version)
-		if fileObj.DataID == version.DataID {
-			updateFileObj := &ObjectInfo{
-				ID:     version.PID,
-				DataID: newDataID,
-				Size:   version.Size,
-			}
-			lh.ma.SetObj(c, bktID, []string{"did", "s"}, updateFileObj)
-		}
-	}
-
-	// Calculate freed size (old DataID size)
-	oldSize := int64(0)
-	for sn := 0; sn < numChunks; sn++ {
-		chunkData, err := lh.da.Read(c, bktID, version.DataID, sn)
-		if err == nil {
-			oldSize += int64(len(chunkData))
-		}
-	}
-
-	// Delete old DataID (release space)
-	// Use delayed delete to ensure safety
-	delayedDelete(c, bktID, version.DataID, lh.ma, lh.da)
-
-	return true, oldSize, nil
-}
-
-// processChunkData processes chunk data with compression and/or encryption
-func processChunkData(originalData []byte, needsCompression, needsEncryption bool, dataInfo *DataInfo, cfg *Config) ([]byte, error) {
-	data := originalData
-
-	// 1. Apply compression (if needed)
-	if needsCompression && cfg.CmprWay > 0 {
-		var cmpr archiver.Compressor
-		if dataInfo.Kind&DATA_CMPR_SNAPPY != 0 {
-			cmpr = &archiver.Snappy{}
-		} else if dataInfo.Kind&DATA_CMPR_ZSTD != 0 {
-			cmpr = &archiver.Zstd{EncoderOptions: []zstd.EOption{zstd.WithEncoderLevel(zstd.EncoderLevelFromZstd(int(cfg.CmprQlty)))}}
-		} else if dataInfo.Kind&DATA_CMPR_GZIP != 0 {
-			cmpr = &archiver.Gz{CompressionLevel: int(cfg.CmprQlty)}
-		} else if dataInfo.Kind&DATA_CMPR_BR != 0 {
-			cmpr = &archiver.Brotli{Quality: int(cfg.CmprQlty)}
-		}
-
-		if cmpr != nil {
-			var cmprBuf bytes.Buffer
-			err := cmpr.Compress(bytes.NewBuffer(data), &cmprBuf)
-			if err == nil && cmprBuf.Len() < len(data) {
-				// Compression succeeded and compressed size is smaller
-				data = cmprBuf.Bytes()
-			}
-			// If compression failed or compressed size is larger, use original data
-		}
-	}
-
-	// 2. Apply encryption (if needed)
-	if needsEncryption && cfg.EndecWay > 0 && cfg.EndecKey != "" {
-		var err error
-		if dataInfo.Kind&DATA_ENDEC_AES256 != 0 {
-			data, err = aes256.Encrypt(cfg.EndecKey, data)
-		} else if dataInfo.Kind&DATA_ENDEC_SM4 != 0 {
-			data, err = sm4.Sm4Cbc([]byte(cfg.EndecKey), data, true)
-		}
-		if err != nil {
-			return nil, fmt.Errorf("encryption failed: %v", err)
-		}
-	}
-
-	return data, nil
-}
-
-// asyncApplyVersionRetention asynchronously applies version retention policy (post-processing)
-// After version creation succeeds, uniformly process:
-// 1. Version merging within time window (delete old versions within time window, keep only latest version)
-// 2. Version count limit (delete oldest versions exceeding the limit)
-// Ensure only one version retention processing is executing for the same parent object at a time
-func asyncApplyVersionRetention(c Ctx, bktID, fileID int64, newVersionTime int64, ma MetadataAdapter, da DataAdapter) {
-	go func() {
-		// Acquire work lock
-		acquired, release := acquireWorkLock(fmt.Sprintf("version_retention_%d_%d", bktID, fileID))
-		if !acquired {
-			// Cannot acquire lock, return directly
-			return
-		}
-		// Ensure lock is released after processing completes
-		defer release()
-		// Wait a short time to ensure version has been created successfully
-		time.Sleep(100 * time.Millisecond)
-
-		// Query all versions of the file (excluding writing versions with name="0")
-		// Writing versions are not finished yet and should not participate in version retention
-		versions, err := ma.ListVersions(c, bktID, fileID, true)
-		if err != nil {
-			// Query failed, don't process
-			return
-		}
-
-		if len(versions) == 0 {
-			return
-		}
-
-		var versionsToDelete []*ObjectInfo
-
-		config := GetVersionRetentionConfig()
-		// 1. Process version merging within time window: delete old versions within time window
-		if config.MinVersionInterval > 0 && len(versions) > 1 {
-			// Latest version is the newly created version (versions[0])
-			// Start checking from the second version, if time interval is less than minimum interval, mark for deletion
-			for i := 1; i < len(versions); i++ {
-				version := versions[i]
-				timeDiff := newVersionTime - version.MTime
-
-				// If time interval is less than minimum interval, need to delete this version (merge)
-				if timeDiff < config.MinVersionInterval {
-					versionsToDelete = append(versionsToDelete, version)
-				} else {
-					// Since versions are sorted by time descending, if this version is not in time window, later versions won't be either
-					break
-				}
-			}
-		}
-
-		// 2. Process version count limit: if total version count (minus versions to delete) still exceeds limit, delete oldest versions
-		remainingVersions := len(versions) - len(versionsToDelete)
-		if config.MaxVersions > 0 && remainingVersions > int(config.MaxVersions) {
-			// Number of additional versions to delete
-			additionalToDelete := remainingVersions - int(config.MaxVersions)
-
-			// Delete oldest versions from back to front (ListVersions returns sorted by MTime descending, so last is oldest)
-			// Skip versions already marked for deletion
-			alreadyMarked := make(map[int64]bool)
-			for _, v := range versionsToDelete {
-				alreadyMarked[v.ID] = true
-			}
-
-			for i := len(versions) - 1; i >= 0 && additionalToDelete > 0; i-- {
-				version := versions[i]
-				// If already in deletion list, skip
-				if alreadyMarked[version.ID] {
-					continue
-				}
-
-				versionsToDelete = append(versionsToDelete, version)
-				additionalToDelete--
-			}
-		}
-
-		// 3. Execute deletion operations
-		for _, versionToDelete := range versionsToDelete {
-			// Delete version object (mark as deleted)
-			if err := ma.DeleteObj(c, bktID, versionToDelete.ID); err != nil {
-				// Deletion failed, record error but continue processing other versions
-				continue
-			}
-
-			// If version has DataID, use delayed delete to handle data files
-			if versionToDelete.DataID > 0 && versionToDelete.DataID != EmptyDataID {
-				delayedDelete(c, bktID, versionToDelete.DataID, ma, da)
 			}
 		}
 	}()
@@ -1176,9 +734,7 @@ func deleteDataFiles(dataPath string, bktID, dataID int64, ma MetadataAdapter, c
 	sn := 0
 	firstFile := true
 	for {
-		fileName := fmt.Sprintf("%d_%d", dataID, sn)
-		hash := fmt.Sprintf("%X", md5.Sum([]byte(fileName)))
-		path := filepath.Join(dataPath, fmt.Sprint(bktID), hash[21:24], hash[8:24], fileName)
+		path := toFilePath(dataPath, bktID, dataID, sn)
 
 		if _, err := os.Stat(path); os.IsNotExist(err) {
 			break // File doesn't exist, deletion complete
@@ -1642,9 +1198,7 @@ func FixScrubIssues(c Ctx, bktID int64, result *ScrubResult, ma MetadataAdapter,
 
 // dataFileExists checks if data file exists
 func dataFileExists(basePath string, bktID, dataID int64, sn int) bool {
-	fileName := fmt.Sprintf("%d_%d", dataID, sn)
-	hash := fmt.Sprintf("%X", md5.Sum([]byte(fileName)))
-	path := filepath.Join(basePath, fmt.Sprint(bktID), hash[21:24], hash[8:24], fileName)
+	path := toFilePath(basePath, bktID, dataID, sn)
 	_, err := os.Stat(path)
 	return err == nil
 }
@@ -1701,9 +1255,7 @@ func scanChunks(basePath string, bktID, dataID int64, dataSize int64, chunkSize 
 		}
 
 		for sn := 0; sn <= scanLimit; sn++ {
-			fileName := fmt.Sprintf("%d_%d", dataID, sn)
-			hash := fmt.Sprintf("%X", md5.Sum([]byte(fileName)))
-			path := filepath.Join(basePath, fmt.Sprint(bktID), hash[21:24], hash[8:24], fileName)
+			path := toFilePath(basePath, bktID, dataID, sn)
 
 			info, err := os.Stat(path)
 			if err != nil {
@@ -1728,9 +1280,7 @@ func scanChunks(basePath string, bktID, dataID int64, dataSize int64, chunkSize 
 		// If data size is unknown, use original logic (until file not found or exceed safety limit)
 		sn := 0
 		for {
-			fileName := fmt.Sprintf("%d_%d", dataID, sn)
-			hash := fmt.Sprintf("%X", md5.Sum([]byte(fileName)))
-			path := filepath.Join(basePath, fmt.Sprint(bktID), hash[21:24], hash[8:24], fileName)
+			path := toFilePath(basePath, bktID, dataID, sn)
 
 			info, err := os.Stat(path)
 			if err != nil {
@@ -2019,9 +1569,7 @@ func verifyChecksum(c Ctx, bktID int64, dataInfo *DataInfo, da DataAdapter, maxS
 
 // createPkgDataReader creates streaming reader for packaged data
 func createPkgDataReader(basePath string, bktID, pkgID int64, offset, size int) (*pkgReader, int64, error) {
-	fileName := fmt.Sprintf("%d_%d", pkgID, 0)
-	hash := fmt.Sprintf("%X", sha256.Sum256([]byte(fileName)))
-	path := filepath.Join(basePath, fmt.Sprint(bktID), hash[58:61], hash[16:48], fileName)
+	path := toFilePath(basePath, bktID, pkgID, 0)
 
 	f, err := os.Open(path)
 	if err != nil {
@@ -2358,10 +1906,8 @@ func Defragment(c Ctx, bktID int64, a Admin, ma MetadataAdapter, da DataAdapter)
 	// Identify holes in existing package files
 	for pkgID, dataList := range pkgDataMap {
 		// Read package file to find holes
-		fileName := fmt.Sprintf("%d_%d", pkgID, 0)
-		hash := fmt.Sprintf("%X", sha256.Sum256([]byte(fileName)))
 		dataPath := getDataPathFromAdapter(ma)
-		pkgPath := filepath.Join(dataPath, fmt.Sprint(bktID), hash[58:61], hash[16:48], fileName)
+		pkgPath := toFilePath(dataPath, bktID, pkgID, 0)
 		pkgFile, err := os.Open(pkgPath)
 		if err != nil {
 			continue
@@ -2712,10 +2258,8 @@ func Defragment(c Ctx, bktID int64, a Admin, ma MetadataAdapter, da DataAdapter)
 	for pkgID, dataList := range pkgDataMap {
 		// Read entire package file
 		// Use same path calculation as in core/data.go
-		fileName := fmt.Sprintf("%d_%d", pkgID, 0)
-		hash := fmt.Sprintf("%X", sha256.Sum256([]byte(fileName)))
 		dataPath := getDataPathFromAdapter(ma)
-		pkgPath := filepath.Join(dataPath, fmt.Sprint(bktID), hash[58:61], hash[16:48], fileName)
+		pkgPath := toFilePath(dataPath, bktID, pkgID, 0)
 		pkgFile, err := os.Open(pkgPath)
 		if err != nil {
 			continue
@@ -2900,4 +2444,661 @@ func Defragment(c Ctx, bktID int64, a Admin, ma MetadataAdapter, da DataAdapter)
 	}
 
 	return result, nil
+}
+
+// ScanOrphanedChunks scans orphaned chunks (chunks without metadata or without object references)
+// Scans all chunk files in the data directory, checks if DataInfo exists and if it's referenced by any ObjectInfo
+// Every 1000 chunks, checks metadata and reference counts. If DataInfo doesn't exist or has no object references,
+// delays and re-checks. If still orphaned after delay, deletes the chunk
+// delaySeconds: delay time in seconds before re-checking and deleting orphaned chunks
+func ScanOrphanedChunks(c Ctx, bktID int64, ma MetadataAdapter, da DataAdapter, delaySeconds int) (*ScanOrphanedChunksResult, error) {
+	result := &ScanOrphanedChunksResult{
+		OrphanedChunks: []int64{},
+		Errors:         []string{},
+	}
+
+	// Get data path
+	dataPath := getDataPathFromAdapter(ma)
+	// Check if dataPath already contains bktID as the last component
+	// If the dataPath ends with bktID, use it directly; otherwise join with bktID
+	bktDataPath := dataPath
+	if filepath.Base(dataPath) != fmt.Sprint(bktID) {
+		bktDataPath = filepath.Join(dataPath, fmt.Sprint(bktID))
+	}
+
+	// Check if bucket data directory exists
+	if _, err := os.Stat(bktDataPath); os.IsNotExist(err) {
+		return result, nil // No data directory, nothing to scan
+	}
+
+	// Initialize resource controller
+	rc := NewResourceController(GetResourceControlConfig())
+
+	// Map to track all chunks by dataID: dataID -> []chunkInfo
+	type chunkInfo struct {
+		path string
+		size int64
+	}
+	chunksByDataID := make(map[int64][]chunkInfo)
+	// Map to track which dataIDs we've already checked
+	checkedDataIDs := make(map[int64]bool)
+	// Map to track orphaned dataIDs (metadata doesn't exist)
+	orphanedDataIDs := make(map[int64]bool)
+
+	// Scan all chunk files in the bucket directory
+	// Chunk files are stored in: dataPath/bktID/hash[21:24]/hash[8:24]/dataID_sn
+	scanCount := 0
+	batchSize := 1000
+
+	// Recursive function to scan directory using os.ReadDir
+	var scanDir func(dirPath string) error
+	scanDir = func(dirPath string) error {
+		// Check if should stop
+		if rc.ShouldStop() {
+			return fmt.Errorf("resource controller requested stop")
+		}
+
+		entries, err := os.ReadDir(dirPath)
+		if err != nil {
+			result.Errors = append(result.Errors, fmt.Sprintf("error reading directory %s: %v", dirPath, err))
+			return nil // Continue with other directories
+		}
+
+		for _, entry := range entries {
+			// Check if should stop
+			if rc.ShouldStop() {
+				return fmt.Errorf("resource controller requested stop")
+			}
+
+			fullPath := filepath.Join(dirPath, entry.Name())
+
+			// If it's a directory, recurse into it
+			if entry.IsDir() {
+				if err := scanDir(fullPath); err != nil {
+					return err
+				}
+				continue
+			}
+
+			// It's a file, process it
+			info, err := entry.Info()
+			if err != nil {
+				result.Errors = append(result.Errors, fmt.Sprintf("error getting file info for %s: %v", fullPath, err))
+				continue
+			}
+
+			// Extract dataID and sn from filename
+			// Filename format: dataID_sn
+			fileName := info.Name()
+			// Skip database files and other non-chunk files
+			if fileName == ".db" || fileName == ".db-shm" || fileName == ".db-wal" {
+				continue
+			}
+			if !strings.Contains(fileName, "_") {
+				continue // Not a chunk file, skip
+			}
+
+			parts := strings.Split(fileName, "_")
+			if len(parts) != 2 {
+				continue // Invalid format, skip
+			}
+
+			dataID, err := strconv.ParseInt(parts[0], 10, 64)
+			if err != nil {
+				continue // Invalid dataID, skip
+			}
+
+			_, err = strconv.ParseInt(parts[1], 10, 64)
+			if err != nil {
+				continue // Invalid sn, skip
+			}
+
+			// Verify this is actually a chunk file by checking path structure
+			// Path should be: dataPath/bktID/hash[21:24]/hash[8:24]/dataID_sn
+			expectedHash := fmt.Sprintf("%X", md5.Sum([]byte(fileName)))
+			if len(expectedHash) < 24 {
+				continue // Invalid hash length, skip
+			}
+			expectedSubDir1 := expectedHash[21:24]
+			expectedSubDir2 := expectedHash[8:24]
+			dir := filepath.Dir(fullPath)
+			// Check if path contains expected hash subdirectories
+			// The path structure is: .../hash[21:24]/hash[8:24]/filename
+			// So we check if the directory path contains both subdirectories
+			// Use a more lenient check: verify the directory path contains both hash parts
+			dirStr := dir
+			if !strings.Contains(dirStr, expectedSubDir1) || !strings.Contains(dirStr, expectedSubDir2) {
+				continue // Path doesn't match expected structure, skip
+			}
+
+			scanCount++
+			result.TotalScanned++
+
+			// Add chunk to dataID mapping
+			if chunksByDataID[dataID] == nil {
+				chunksByDataID[dataID] = []chunkInfo{}
+			}
+			chunksByDataID[dataID] = append(chunksByDataID[dataID], chunkInfo{
+				path: fullPath,
+				size: info.Size(),
+			})
+
+			// Every batchSize chunks, check metadata for collected dataIDs
+			if scanCount%batchSize == 0 {
+				// Get unique dataIDs that haven't been checked yet
+				batchDataIDs := make([]int64, 0)
+				for dataID := range chunksByDataID {
+					if !checkedDataIDs[dataID] {
+						batchDataIDs = append(batchDataIDs, dataID)
+						checkedDataIDs[dataID] = true
+					}
+				}
+
+				// Check metadata and references for all dataIDs in this batch
+				if len(batchDataIDs) > 0 {
+					// First, check which DataInfo exist
+					existingDataIDs := make([]int64, 0)
+					for _, checkDataID := range batchDataIDs {
+						_, err := ma.GetData(c, bktID, checkDataID)
+						if err != nil {
+							// DataInfo doesn't exist, mark as orphaned
+							orphanedDataIDs[checkDataID] = true
+						} else {
+							// DataInfo exists, need to check if it's referenced by any ObjectInfo
+							existingDataIDs = append(existingDataIDs, checkDataID)
+						}
+					}
+
+					// Check reference counts for existing DataInfo
+					if len(existingDataIDs) > 0 {
+						refCounts, err := ma.CountDataRefs(c, bktID, existingDataIDs)
+						if err != nil {
+							// If query fails, mark all as potentially orphaned (safer to re-check later)
+							for _, dataID := range existingDataIDs {
+								orphanedDataIDs[dataID] = true
+							}
+						} else {
+							// Mark dataIDs with refCount == 0 as orphaned
+							for _, dataID := range existingDataIDs {
+								if refCounts[dataID] == 0 {
+									orphanedDataIDs[dataID] = true
+								}
+							}
+						}
+					}
+				}
+
+				// Batch processing interval
+				rc.WaitIfNeeded(batchSize)
+			}
+		}
+
+		return nil
+	}
+
+	// Start scanning from bucket data directory
+	err := scanDir(bktDataPath)
+	if err != nil {
+		result.Errors = append(result.Errors, fmt.Sprintf("error scanning directory: %v", err))
+	}
+
+	// Check remaining dataIDs that weren't checked in batches
+	remainingDataIDs := make([]int64, 0)
+	for dataID := range chunksByDataID {
+		if !checkedDataIDs[dataID] {
+			remainingDataIDs = append(remainingDataIDs, dataID)
+			checkedDataIDs[dataID] = true
+		}
+	}
+
+	// Check remaining dataIDs
+	if len(remainingDataIDs) > 0 {
+		// First, check which DataInfo exist
+		existingDataIDs := make([]int64, 0)
+		for _, dataID := range remainingDataIDs {
+			_, err := ma.GetData(c, bktID, dataID)
+			if err != nil {
+				// DataInfo doesn't exist, mark as orphaned
+				orphanedDataIDs[dataID] = true
+			} else {
+				// DataInfo exists, need to check if it's referenced by any ObjectInfo
+				existingDataIDs = append(existingDataIDs, dataID)
+			}
+		}
+
+		// Check reference counts for existing DataInfo
+		if len(existingDataIDs) > 0 {
+			refCounts, err := ma.CountDataRefs(c, bktID, existingDataIDs)
+			if err != nil {
+				// If query fails, mark all as potentially orphaned (safer to re-check later)
+				for _, dataID := range existingDataIDs {
+					orphanedDataIDs[dataID] = true
+				}
+			} else {
+				// Mark dataIDs with refCount == 0 as orphaned
+				for _, dataID := range existingDataIDs {
+					if refCounts[dataID] == 0 {
+						orphanedDataIDs[dataID] = true
+					}
+				}
+			}
+		}
+	}
+
+	// Collect all orphaned chunks
+	orphanedChunkPaths := make(map[int64][]chunkInfo)
+	for dataID := range orphanedDataIDs {
+		if chunks, ok := chunksByDataID[dataID]; ok {
+			orphanedChunkPaths[dataID] = chunks
+		}
+		result.OrphanedChunks = append(result.OrphanedChunks, dataID)
+	}
+
+	// After scanning, check delayed chunks if delay is configured
+	if len(orphanedChunkPaths) > 0 && delaySeconds > 0 {
+		result.DelayedChunks = len(orphanedChunkPaths)
+		fmt.Printf("Found %d orphaned dataIDs, waiting %d seconds before re-checking...\n", len(orphanedChunkPaths), delaySeconds)
+		time.Sleep(time.Duration(delaySeconds) * time.Second)
+
+		// Re-check metadata and references for delayed chunks
+		recheckDataIDs := make([]int64, 0, len(orphanedChunkPaths))
+		for checkDataID := range orphanedChunkPaths {
+			recheckDataIDs = append(recheckDataIDs, checkDataID)
+		}
+
+		// Check which DataInfo exist
+		existingDataIDs := make([]int64, 0)
+		missingDataIDs := make([]int64, 0)
+		for _, checkDataID := range recheckDataIDs {
+			_, err := ma.GetData(c, bktID, checkDataID)
+			if err != nil {
+				// DataInfo still doesn't exist, mark for deletion
+				missingDataIDs = append(missingDataIDs, checkDataID)
+			} else {
+				// DataInfo exists, need to check references
+				existingDataIDs = append(existingDataIDs, checkDataID)
+			}
+		}
+
+		// Check reference counts for existing DataInfo
+		if len(existingDataIDs) > 0 {
+			refCounts, err := ma.CountDataRefs(c, bktID, existingDataIDs)
+			if err != nil {
+				// If query fails, mark all as potentially orphaned (safer to re-check later)
+				missingDataIDs = append(missingDataIDs, existingDataIDs...)
+			} else {
+				// Mark dataIDs with refCount == 0 as orphaned
+				for _, dataID := range existingDataIDs {
+					if refCounts[dataID] == 0 {
+						missingDataIDs = append(missingDataIDs, dataID)
+					}
+				}
+			}
+		}
+
+		// Delete chunks for dataIDs that are still orphaned
+		for _, checkDataID := range missingDataIDs {
+			chunks, ok := orphanedChunkPaths[checkDataID]
+			if !ok {
+				continue
+			}
+			// Still orphaned, delete all chunks for this dataID
+			result.StillOrphaned++
+			for _, chunk := range chunks {
+				result.FreedSize += chunk.size
+				if err := os.Remove(chunk.path); err != nil {
+					result.Errors = append(result.Errors, fmt.Sprintf("failed to delete chunk %s: %v", chunk.path, err))
+				} else {
+					result.DeletedChunks++
+				}
+			}
+		}
+	} else if len(orphanedChunkPaths) > 0 {
+		// No delay configured, delete immediately
+		for _, chunks := range orphanedChunkPaths {
+			for _, chunk := range chunks {
+				result.FreedSize += chunk.size
+				if err := os.Remove(chunk.path); err != nil {
+					result.Errors = append(result.Errors, fmt.Sprintf("failed to delete chunk %s: %v", chunk.path, err))
+				} else {
+					result.DeletedChunks++
+				}
+			}
+		}
+	}
+
+	// Scan temporary write area for orphaned files
+	scanTempWriteArea(dataPath, delaySeconds, result)
+
+	return result, nil
+}
+
+// scanTempWriteArea scans the temporary write area for orphaned files
+func scanTempWriteArea(dataPath string, delaySeconds int, result *ScanOrphanedChunksResult) {
+	tempDir := filepath.Join(dataPath, ".temp_write")
+
+	// Check if temp directory exists
+	if _, err := os.Stat(tempDir); os.IsNotExist(err) {
+		return // No temp directory, nothing to scan
+	}
+
+	// Read all files in temp directory
+	entries, err := os.ReadDir(tempDir)
+	if err != nil {
+		result.Errors = append(result.Errors, fmt.Sprintf("error reading temp directory %s: %v", tempDir, err))
+		return
+	}
+
+	now := time.Now()
+	retentionPeriod := time.Duration(delaySeconds) * time.Second
+	if retentionPeriod < 24*time.Hour {
+		retentionPeriod = 24 * time.Hour // Minimum 24 hours for temp files
+	}
+
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+
+		// Parse filename: fileID_dataID
+		fileName := entry.Name()
+		var fileID, dataID int64
+		if _, err := fmt.Sscanf(fileName, "%d_%d", &fileID, &dataID); err != nil {
+			// Invalid format, skip
+			continue
+		}
+
+		// Get file info
+		filePath := filepath.Join(tempDir, fileName)
+		fileInfo, err := os.Stat(filePath)
+		if err != nil {
+			continue
+		}
+
+		// Check if file is old enough to be considered orphaned
+		if now.Sub(fileInfo.ModTime()) > retentionPeriod {
+			// File is orphaned, delete it
+			if err := os.Remove(filePath); err != nil {
+				result.Errors = append(result.Errors, fmt.Sprintf("error removing orphaned temp file %s: %v", fileName, err))
+			} else {
+				result.DeletedChunks++
+				result.OrphanedChunks = append(result.OrphanedChunks, dataID)
+			}
+		}
+	}
+}
+
+// DeduplicationConfig configuration for deduplication jobs
+type DeduplicationConfig struct {
+	Enabled           bool          `json:"enabled"`              // Enable deduplication job
+	Schedule          string        `json:"schedule"`             // Cron expression, default "0 2 * * *" (2:00 AM daily)
+	PageSize          int           `json:"page_size"`            // Page size for processing, default 100
+	BatchInterval     time.Duration `json:"batch_interval"`       // Interval between batches, default 100ms
+	MaxDuration       time.Duration `json:"max_duration"`         // Maximum execution time, default 2 hours
+	MaxItemsPerSecond int           `json:"max_items_per_second"` // Max items per second, default 100
+	ConcurrentBuckets int           `json:"concurrent_buckets"`   // Number of buckets to process concurrently, default 1
+}
+
+// DefaultDeduplicationConfig returns default configuration
+func DefaultDeduplicationConfig() DeduplicationConfig {
+	return DeduplicationConfig{
+		Enabled:           true,
+		Schedule:          "0 2 * * *", // 2:00 AM daily
+		PageSize:          100,
+		BatchInterval:     100 * time.Millisecond,
+		MaxDuration:       2 * time.Hour,
+		MaxItemsPerSecond: 100,
+		ConcurrentBuckets: 1,
+	}
+}
+
+// DeduplicationJobResult result of deduplication job
+type DeduplicationJobResult struct {
+	StartTime       time.Time                       `json:"start_time"`        // Start time
+	EndTime         time.Time                       `json:"end_time"`          // End time
+	Duration        time.Duration                   `json:"duration"`          // Execution duration
+	BucketsScanned  int                             `json:"buckets_scanned"`   // Number of buckets scanned
+	BucketResults   map[int64]*MergeDuplicateResult `json:"bucket_results"`    // Results for each bucket
+	TotalFreedSize  int64                           `json:"total_freed_size"`  // Total freed space (bytes)
+	TotalMergedData int                             `json:"total_merged_data"` // Total merged data count
+	Errors          []string                        `json:"errors"`            // Error list
+}
+
+// Global deduplication job lock
+var (
+	dedupJobLock    sync.Mutex
+	dedupJobRunning bool
+	lastDedupResult *DeduplicationJobResult
+	lastDedupTime   time.Time
+)
+
+// RunDeduplicationJob runs deduplication job for all buckets
+// This is the main entry point for scheduled deduplication jobs
+// It iterates through all buckets and calls MergeDuplicateData for each
+func RunDeduplicationJob(ctx context.Context, ma MetadataAdapter, da DataAdapter) (*DeduplicationJobResult, error) {
+	// Acquire global lock to ensure only one deduplication job runs at a time
+	dedupJobLock.Lock()
+	if dedupJobRunning {
+		dedupJobLock.Unlock()
+		return nil, fmt.Errorf("deduplication job already running")
+	}
+	dedupJobRunning = true
+	dedupJobLock.Unlock()
+
+	defer func() {
+		dedupJobLock.Lock()
+		dedupJobRunning = false
+		dedupJobLock.Unlock()
+	}()
+
+	result := &DeduplicationJobResult{
+		StartTime:     time.Now(),
+		BucketResults: make(map[int64]*MergeDuplicateResult),
+		Errors:        make([]string, 0),
+	}
+
+	log.Printf("[Deduplication Job] Started: time=%v", result.StartTime)
+
+	// Get all buckets
+	buckets, err := ma.ListAllBuckets(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list buckets: %w", err)
+	}
+
+	log.Printf("[Deduplication Job] Found %d buckets to process", len(buckets))
+
+	// Get configuration
+	config := GetDeduplicationConfig()
+
+	// Process buckets
+	if config.ConcurrentBuckets > 1 {
+		// Concurrent processing
+		result = processBucketsConcurrent(ctx, buckets, ma, da, config)
+	} else {
+		// Sequential processing
+		result = processBucketsSequential(ctx, buckets, ma, da, config)
+	}
+
+	result.EndTime = time.Now()
+	result.Duration = result.EndTime.Sub(result.StartTime)
+
+	// Calculate totals
+	for _, bucketResult := range result.BucketResults {
+		result.TotalFreedSize += bucketResult.FreedSize
+		result.TotalMergedData += len(bucketResult.MergedData)
+	}
+
+	log.Printf("[Deduplication Job] Completed: duration=%v, bucketsScanned=%d, totalFreedSize=%d bytes, totalMergedData=%d",
+		result.Duration, result.BucketsScanned, result.TotalFreedSize, result.TotalMergedData)
+
+	// Save result for status queries
+	dedupJobLock.Lock()
+	lastDedupResult = result
+	lastDedupTime = time.Now()
+	dedupJobLock.Unlock()
+
+	return result, nil
+}
+
+// processBucketsSequential processes buckets sequentially
+func processBucketsSequential(ctx context.Context, buckets []*BucketInfo, ma MetadataAdapter, da DataAdapter, config DeduplicationConfig) *DeduplicationJobResult {
+	result := &DeduplicationJobResult{
+		StartTime:     time.Now(),
+		BucketResults: make(map[int64]*MergeDuplicateResult),
+		Errors:        make([]string, 0),
+	}
+
+	for _, bucket := range buckets {
+		// Check context cancellation
+		select {
+		case <-ctx.Done():
+			result.Errors = append(result.Errors, "job cancelled by context")
+			return result
+		default:
+		}
+
+		// Check max duration
+		if config.MaxDuration > 0 && time.Since(result.StartTime) >= config.MaxDuration {
+			result.Errors = append(result.Errors, fmt.Sprintf("max duration reached: %v", config.MaxDuration))
+			break
+		}
+
+		log.Printf("[Deduplication Job] Processing bucket: bktID=%d, name=%s", bucket.ID, bucket.Name)
+
+		// Run deduplication for this bucket
+		bucketResult, err := RunDeduplicationForBucket(ctx, bucket.ID, ma, da)
+		if err != nil {
+			errMsg := fmt.Sprintf("bucket %d failed: %v", bucket.ID, err)
+			result.Errors = append(result.Errors, errMsg)
+			log.Printf("[Deduplication Job] ERROR: %s", errMsg)
+			continue
+		}
+
+		result.BucketResults[bucket.ID] = bucketResult
+		result.BucketsScanned++
+
+		log.Printf("[Deduplication Job] Bucket completed: bktID=%d, mergedGroups=%d, freedSize=%d bytes",
+			bucket.ID, bucketResult.MergedGroups, bucketResult.FreedSize)
+	}
+
+	return result
+}
+
+// processBucketsConcurrent processes buckets concurrently
+func processBucketsConcurrent(ctx context.Context, buckets []*BucketInfo, ma MetadataAdapter, da DataAdapter, config DeduplicationConfig) *DeduplicationJobResult {
+	result := &DeduplicationJobResult{
+		StartTime:     time.Now(),
+		BucketResults: make(map[int64]*MergeDuplicateResult),
+		Errors:        make([]string, 0),
+	}
+
+	// Create a semaphore to limit concurrency
+	sem := make(chan struct{}, config.ConcurrentBuckets)
+	var wg sync.WaitGroup
+	var mu sync.Mutex // Protect shared result
+
+	for _, bucket := range buckets {
+		// Check context cancellation
+		select {
+		case <-ctx.Done():
+			mu.Lock()
+			result.Errors = append(result.Errors, "job cancelled by context")
+			mu.Unlock()
+			break
+		default:
+		}
+
+		// Check max duration
+		if config.MaxDuration > 0 && time.Since(result.StartTime) >= config.MaxDuration {
+			mu.Lock()
+			result.Errors = append(result.Errors, fmt.Sprintf("max duration reached: %v", config.MaxDuration))
+			mu.Unlock()
+			break
+		}
+
+		wg.Add(1)
+		go func(bkt *BucketInfo) {
+			defer wg.Done()
+
+			// Acquire semaphore
+			sem <- struct{}{}
+			defer func() { <-sem }()
+
+			log.Printf("[Deduplication Job] Processing bucket: bktID=%d, name=%s", bkt.ID, bkt.Name)
+
+			// Run deduplication for this bucket
+			bucketResult, err := RunDeduplicationForBucket(ctx, bkt.ID, ma, da)
+
+			mu.Lock()
+			defer mu.Unlock()
+
+			if err != nil {
+				errMsg := fmt.Sprintf("bucket %d failed: %v", bkt.ID, err)
+				result.Errors = append(result.Errors, errMsg)
+				log.Printf("[Deduplication Job] ERROR: %s", errMsg)
+				return
+			}
+
+			result.BucketResults[bkt.ID] = bucketResult
+			result.BucketsScanned++
+
+			log.Printf("[Deduplication Job] Bucket completed: bktID=%d, mergedGroups=%d, freedSize=%d bytes",
+				bkt.ID, bucketResult.MergedGroups, bucketResult.FreedSize)
+		}(bucket)
+	}
+
+	wg.Wait()
+	return result
+}
+
+// RunDeduplicationForBucket runs deduplication for a single bucket
+// This wraps the existing MergeDuplicateData function with proper resource control
+func RunDeduplicationForBucket(ctx context.Context, bktID int64, ma MetadataAdapter, da DataAdapter) (*MergeDuplicateResult, error) {
+	// Call the existing MergeDuplicateData function
+	// This function already has:
+	// - Work lock to prevent concurrent execution for same bucket
+	// - Resource controller for rate limiting
+	// - Pagination support
+	// - Error handling
+	return MergeDuplicateData(ctx, bktID, ma, da)
+}
+
+// GetDeduplicationJobStatus returns the status of the last deduplication job
+func GetDeduplicationJobStatus() (running bool, lastResult *DeduplicationJobResult, lastTime time.Time) {
+	dedupJobLock.Lock()
+	defer dedupJobLock.Unlock()
+
+	return dedupJobRunning, lastDedupResult, lastDedupTime
+}
+
+// GetDeduplicationConfig returns the current deduplication configuration
+// TODO: Load from actual configuration file/database
+func GetDeduplicationConfig() DeduplicationConfig {
+	// For now, return default config
+	// In production, this should load from config file or database
+	config := DefaultDeduplicationConfig()
+
+	// Try to load from GetCronJobConfig if available
+	cronConfig := GetCronJobConfig()
+	if cronConfig.DeduplicationSchedule != "" {
+		config.Schedule = cronConfig.DeduplicationSchedule
+	}
+
+	return config
+}
+
+// AddDeduplicationToCron adds deduplication job to the given CronScheduler
+// This should be called during CronScheduler initialization
+func AddDeduplicationToCron(scheduler *CronScheduler) {
+	config := GetDeduplicationConfig()
+
+	if !config.Enabled {
+		log.Printf("[Deduplication Job] Disabled by configuration")
+		return
+	}
+
+	log.Printf("[Deduplication Job] Enabled: schedule=%s", config.Schedule)
+
+	// The actual scheduling will be handled by CronScheduler
+	// based on config.Schedule (which comes from CronJobConfig)
 }

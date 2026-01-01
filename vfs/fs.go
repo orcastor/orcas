@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -21,6 +23,243 @@ import (
 	b "github.com/orca-zhang/borm"
 	"github.com/orcastor/orcas/core"
 )
+
+// MountOptions mount options
+type MountOptions struct {
+	// Mount point path
+	MountPoint string
+	// FUSE mount options
+	FuseOptions []string
+	// Run in foreground (false means background)
+	Foreground bool
+	// Allow other users to access
+	AllowOther bool
+	// Default permissions
+	DefaultPermissions bool
+	// Configuration (for encryption, compression, instant upload, etc.)
+	Config *core.Config
+	// Enable debug mode (verbose output with timestamps)
+	Debug bool
+	// RequireKey: if true, return EPERM error when EndecKey is not provided in Config
+	RequireKey bool
+	// EndecKey: Encryption key for data encryption/decryption
+	// If empty, encryption key will not be used (data will not be encrypted/decrypted)
+	// This overrides bucket config EndecKey
+	EndecKey string
+	// BaseDBKey: Encryption key for main database (BASE path, SQLCipher)
+	// If empty, database will not be encrypted
+	// This can be set at runtime before mounting
+	BaseDBKey string
+	// DataDBKey: Encryption key for bucket databases (DATA path, SQLCipher)
+	// If empty, bucket databases will not be encrypted
+	// This can be set at runtime before mounting
+	DataDBKey string
+}
+
+// Mount mounts ORCAS filesystem
+func Mount(h core.Handler, c core.Ctx, bktID int64, opts *MountOptions) (*fuse.Server, error) {
+	if opts == nil {
+		return nil, fmt.Errorf("mount options cannot be nil")
+	}
+
+	// Check mount point
+	mountPoint, err := filepath.Abs(opts.MountPoint)
+	if err != nil {
+		return nil, fmt.Errorf("invalid mount point: %w", err)
+	}
+
+	// Set debug mode if specified (needed early for logging)
+	if opts.Debug {
+		SetDebugEnabled(true)
+	}
+
+	// Create filesystem with configuration from Config
+	// Use Config if provided, otherwise create empty config
+	var cfg *core.Config
+	if opts.Config != nil {
+		cfg = opts.Config
+		// Override with explicit EndecKey if provided (for backward compatibility)
+		if opts.EndecKey != "" {
+			newCfg := *cfg
+			newCfg.EndecKey = opts.EndecKey
+			cfg = &newCfg
+		}
+	} else if opts.EndecKey != "" {
+		// For backward compatibility: if only EndecKey is provided, create config
+		cfg = &core.Config{
+			EndecKey: opts.EndecKey,
+		}
+	}
+
+	// If config has paths, set them in Handler
+	// Paths are now managed via Handler, not context
+	if cfg != nil && (cfg.BasePath != "" || cfg.DataPath != "") {
+		h.MetadataAdapter().SetBasePath(cfg.BasePath)
+		h.MetadataAdapter().SetDataPath(cfg.DataPath)
+		h.DataAdapter().SetDataPath(cfg.DataPath)
+	}
+
+	// Set database encryption keys if provided
+	if opts.BaseDBKey != "" {
+		h.MetadataAdapter().SetBaseKey(opts.BaseDBKey)
+	}
+	if opts.DataDBKey != "" {
+		h.MetadataAdapter().SetDataKey(opts.DataDBKey)
+	}
+
+	// Check if mount point exists
+	info, err := os.Stat(mountPoint)
+	if err != nil {
+		if os.IsNotExist(err) {
+			// Create mount point directory
+			if err := os.MkdirAll(mountPoint, 0o755); err != nil {
+				return nil, fmt.Errorf("failed to create mount point: %w", err)
+			}
+		} else {
+			return nil, fmt.Errorf("failed to stat mount point: %w", err)
+		}
+	} else if !info.IsDir() {
+		return nil, fmt.Errorf("mount point is not a directory: %s", mountPoint)
+	}
+
+	// Check if RequireKey is set but EndecKey is not provided
+	if opts.RequireKey {
+		var endecKey string
+		if cfg != nil {
+			endecKey = cfg.EndecKey
+		}
+		if opts.EndecKey != "" {
+			endecKey = opts.EndecKey
+		}
+		if endecKey == "" {
+			return nil, fmt.Errorf("RequireKey is enabled but EndecKey is not provided. Please provide encryption key via Config.EndecKey or MountOptions.EndecKey")
+		}
+	}
+
+	// Create filesystem with full configuration
+	var ofs *OrcasFS
+	if cfg != nil {
+		ofs = NewOrcasFSWithConfig(h, c, bktID, cfg, opts.RequireKey)
+	} else {
+		ofs = NewOrcasFS(h, c, bktID, opts.RequireKey)
+	}
+
+	// Build FUSE mount options
+	fuseOpts := &fuse.MountOptions{
+		Options: []string{
+			"default_permissions",
+		},
+	}
+
+	if opts.AllowOther {
+		fuseOpts.Options = append(fuseOpts.Options, "allow_other")
+	}
+	// Note: allow_root is not a standard FUSE option and is not supported by fusermount3
+	// If root access is needed, use allow_other instead (requires user_allow_other in /etc/fuse.conf)
+	// if opts.AllowRoot {
+	// 	fuseOpts.Options = append(fuseOpts.Options, "allow_root")
+	// }
+	if opts.DefaultPermissions {
+		fuseOpts.Options = append(fuseOpts.Options, "default_permissions")
+	}
+
+	// Add custom options
+	if len(opts.FuseOptions) > 0 {
+		fuseOpts.Options = append(fuseOpts.Options, opts.FuseOptions...)
+	}
+
+	// Mount filesystem to mount point
+	server, err := ofs.Mount(mountPoint, fuseOpts)
+	if err != nil {
+		return nil, fmt.Errorf("failed to mount: %w", err)
+	}
+
+	// Note: fs.Mount() returns a server that needs to be started with server.Serve()
+	// Do not call Serve() here, let the caller handle it
+	return server, nil
+}
+
+// Serve runs filesystem service (blocks until unmount)
+// Note: fs.Mount() already starts server.Serve() in a goroutine,
+// so we should NOT call server.Serve() again. We just need to wait
+// for the signal to unmount.
+func Serve(server *fuse.Server, foreground bool) error {
+	if foreground {
+		// Run in foreground, wait for signal
+		// Note: fs.Mount() already started server.Serve() in a goroutine,
+		// so we just need to wait for the signal to unmount
+		sigChan := make(chan os.Signal, 1)
+		signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+
+		// Wait for signal
+		sig := <-sigChan
+		fmt.Printf("\nReceived signal: %v, unmounting...\n", sig)
+
+		// Unmount (this will cause the server to stop)
+		err := server.Unmount()
+		if err != nil {
+			return fmt.Errorf("failed to unmount: %w", err)
+		}
+
+		return nil
+	} else {
+		// Run in background - fs.Mount() already started the server in a goroutine,
+		// so we just wait for the server to finish (which happens when unmounted)
+		server.Wait()
+		return nil
+	}
+}
+
+// Unmount unmounts filesystem using system command
+// This function attempts to unmount the filesystem at the given mount point
+// using fusermount -u (preferred) or umount as fallback
+func Unmount(mountPoint string) error {
+	// Resolve absolute path
+	absMountPoint, err := filepath.Abs(mountPoint)
+	if err != nil {
+		return fmt.Errorf("invalid mount point: %w", err)
+	}
+
+	// Check if mount point exists
+	info, err := os.Stat(absMountPoint)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("mount point does not exist: %s", absMountPoint)
+		}
+		return fmt.Errorf("failed to stat mount point: %w", err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("mount point is not a directory: %s", absMountPoint)
+	}
+
+	// Try fusermount -u first (preferred for FUSE filesystems)
+	// fusermount3 is the newer version, but fusermount should work too
+	cmd := exec.Command("fusermount", "-u", absMountPoint)
+	fusermountErr := cmd.Run()
+	if fusermountErr == nil {
+		DebugLog("[VFS Unmount] Successfully unmounted using fusermount: %s", absMountPoint)
+		return nil
+	}
+
+	// If fusermount fails, try fusermount3 (newer version)
+	cmd = exec.Command("fusermount3", "-u", absMountPoint)
+	fusermount3Err := cmd.Run()
+	if fusermount3Err == nil {
+		DebugLog("[VFS Unmount] Successfully unmounted using fusermount3: %s", absMountPoint)
+		return nil
+	}
+
+	// As fallback, try umount (may require root privileges)
+	cmd = exec.Command("umount", absMountPoint)
+	umountErr := cmd.Run()
+	if umountErr == nil {
+		DebugLog("[VFS Unmount] Successfully unmounted using umount: %s", absMountPoint)
+		return nil
+	}
+
+	// All methods failed
+	return fmt.Errorf("failed to unmount %s: tried fusermount (error: %v), fusermount3 (error: %v), and umount (error: %v), all failed. You may need to use server.Unmount() instead", absMountPoint, fusermountErr, fusermount3Err, umountErr)
+}
 
 // O_LARGEFILE flag for large file support (files > 2GB)
 // On 64-bit systems, this is typically 0 or not needed, but we support it for compatibility
@@ -1463,9 +1702,6 @@ func (n *OrcasNode) Create(ctx context.Context, name string, flags uint32, mode 
 		// Success - use the returned ID
 		fileObj.ID = ids[0]
 		DebugLog("[VFS Create] Successfully created file: name=%s, fileID=%d, parentID=%d", name, fileObj.ID, obj.ID)
-		// Record file creation operation for save pattern detection
-		n.fs.recordFileOperation(OpCreate, fileObj.ID, name, obj.ID, 0, 0, "", 0)
-		// Continue with new file creation logic below (existingFileID is already 0)
 	}
 
 	// If we found an existing file (from duplicate key or zero ID), handle it
@@ -1996,20 +2232,6 @@ func (n *OrcasNode) Unlink(ctx context.Context, name string) syscall.Errno {
 		return syscall.ENOENT
 	}
 
-	// Step 0: Check if this delete should be intercepted for save pattern merge
-	if n.fs.savePatternDetector != nil {
-		if shouldIntercept, match := n.fs.savePatternDetector.ShouldInterceptDelete(targetID, name, obj.ID); shouldIntercept {
-			// Intercept delete operation, mark for pending merge
-			if err := n.fs.savePatternDetector.HandleDeleteWithMerge(match); err != nil {
-				DebugLog("[VFS Unlink] Failed to handle delete with merge: %v", err)
-				return syscall.EIO
-			}
-			// Successfully intercepted, return success without actually deleting
-			DebugLog("[VFS Unlink] Intercepted delete for save pattern merge: name=%s, fileID=%d", name, targetID)
-			return 0
-		}
-	}
-
 	// Step 1: Remove from RandomAccessor registry if present
 	// This ensures the file is removed from pending objects before deletion
 
@@ -2033,9 +2255,6 @@ func (n *OrcasNode) Unlink(ctx context.Context, name string) syscall.Errno {
 		DebugLog("[VFS Unlink] ERROR: Failed to recycle file: fileID=%d, name=%s, parentID=%d, error=%v", targetID, name, obj.ID, err)
 		return syscall.EIO
 	}
-
-	// Record delete operation for save pattern detection
-	n.fs.recordFileOperation(OpDelete, targetID, name, obj.ID, 0, 0, "", 0)
 
 	// Step 2: Update cache immediately
 	// CRITICAL: Clear all caches for the deleted file to prevent data corruption
@@ -2066,20 +2285,121 @@ func (n *OrcasNode) Unlink(ctx context.Context, name string) syscall.Errno {
 	// Invalidate parent directory cache
 	n.invalidateObj()
 
-	// Step 3: Asynchronously delete and clean up (permanent deletion)
-	// This includes physical deletion of data files and metadata
-	go func() {
-		// Use the original context to preserve authentication information
-		// Context is read-only and safe to use in goroutines
-		err := n.fs.h.Delete(n.fs.c, n.fs.bktID, targetID)
-		if err != nil {
-			DebugLog("[VFS Unlink] ERROR: Failed to permanently delete file: fileID=%d, error=%v", targetID, err)
+	// Step 3: Schedule delayed deletion for atomic replace adaptation
+	// Instead of immediately deleting, schedule it for 5 seconds later
+	// This allows Rename to detect atomic replace pattern and merge versions
+	if n.fs.atomicReplaceMgr != nil {
+		if err := n.fs.atomicReplaceMgr.ScheduleDeletion(n.fs.bktID, obj.ID, name, targetID); err != nil {
+			DebugLog("[VFS Unlink] WARNING: Failed to schedule delayed deletion: fileID=%d, error=%v", targetID, err)
+			// Fallback to immediate deletion if scheduling fails
+			go func() {
+				err := n.fs.h.Delete(n.fs.c, n.fs.bktID, targetID)
+				if err != nil {
+					DebugLog("[VFS Unlink] ERROR: Failed to permanently delete file: fileID=%d, error=%v", targetID, err)
+				} else {
+					DebugLog("[VFS Unlink] Successfully permanently deleted file: fileID=%d", targetID)
+				}
+			}()
 		} else {
-			DebugLog("[VFS Unlink] Successfully permanently deleted file: fileID=%d", targetID)
+			DebugLog("[VFS Unlink] Scheduled delayed deletion: fileID=%d, name=%s (will delete in 5s)", targetID, name)
 		}
-	}()
+	} else {
+		// Fallback: Asynchronously delete and clean up (permanent deletion)
+		// This includes physical deletion of data files and metadata
+		go func() {
+			// Use the original context to preserve authentication information
+			// Context is read-only and safe to use in goroutines
+			err := n.fs.h.Delete(n.fs.c, n.fs.bktID, targetID)
+			if err != nil {
+				DebugLog("[VFS Unlink] ERROR: Failed to permanently delete file: fileID=%d, error=%v", targetID, err)
+			} else {
+				DebugLog("[VFS Unlink] Successfully permanently deleted file: fileID=%d", targetID)
+			}
+		}()
+	}
 
 	return 0
+}
+
+// handleAtomicReplace handles atomic replace pattern with version merging
+func (n *OrcasNode) handleAtomicReplace(ctx context.Context, sourceID int64, sourceObj *core.ObjectInfo,
+	newParentID int64, newName string, pd *PendingDeletion) syscall.Errno {
+
+	// Step 1: Update source file's name and parent
+	sourceObj.Name = newName
+	sourceObj.PID = newParentID
+	sourceObj.MTime = core.Now()
+
+	_, err := n.fs.h.Put(n.fs.c, n.fs.bktID, []*core.ObjectInfo{sourceObj})
+	if err != nil {
+		DebugLog("[Atomic Replace] Failed to rename file: sourceID=%d, error=%v", sourceID, err)
+		return syscall.EIO
+	}
+
+	// Step 2: Merge versions from old file to new file
+	if len(pd.Versions) > 0 {
+		if err := n.mergeVersions(pd.FileID, sourceID, pd.Versions); err != nil {
+			DebugLog("[Atomic Replace] WARNING: Failed to merge versions: %v", err)
+			// Continue anyway - rename succeeded, version merge is best-effort
+		} else {
+			DebugLog("[Atomic Replace] Merged %d versions from oldFileID=%d to newFileID=%d",
+				len(pd.Versions), pd.FileID, sourceID)
+		}
+	}
+
+	// Step 3: Delete old file object (versions are already merged)
+	if err := n.fs.h.Delete(n.fs.c, n.fs.bktID, pd.FileID); err != nil {
+		DebugLog("[Atomic Replace] WARNING: Failed to delete old file object: oldFileID=%d, error=%v", pd.FileID, err)
+		// Non-fatal - old file object can be cleaned up later
+	}
+
+	// Step 4: Update caches
+	// Clear cache for old file
+	// First check if old file has data to clear from data caches
+	if cached, ok := fileObjCache.Get(pd.FileID); ok {
+		if oldObj, ok := cached.(*core.ObjectInfo); ok && oldObj != nil && oldObj.DataID > 0 {
+			dataInfoCache.Del(oldObj.DataID)
+			decodingReaderCache.Del(oldObj.DataID)
+		}
+	}
+	fileObjCache.Del(pd.FileID)
+
+	// Update cache for renamed file
+	fileObjCache.Put(sourceID, sourceObj)
+
+	// Invalidate parent directory cache
+	n.invalidateObj()
+	n.invalidateDirListCache(newParentID)
+
+	return 0
+}
+
+// mergeVersions changes the PID of versions from oldFileID to newFileID
+func (n *OrcasNode) mergeVersions(oldFileID, newFileID int64, versionIDs []int64) error {
+	if len(versionIDs) == 0 {
+		return nil
+	}
+
+	// Get all version objects
+	versions, err := n.fs.h.Get(n.fs.c, n.fs.bktID, versionIDs)
+	if err != nil {
+		return fmt.Errorf("failed to get versions: %w", err)
+	}
+
+	// Change PID from oldFileID to newFileID
+	for _, v := range versions {
+		v.PID = newFileID
+	}
+
+	// Update versions
+	_, err = n.fs.h.Put(n.fs.c, n.fs.bktID, versions)
+	if err != nil {
+		return fmt.Errorf("failed to update versions: %w", err)
+	}
+
+	DebugLog("[mergeVersions] Merged %d versions: oldFileID=%d → newFileID=%d", len(versions), oldFileID, newFileID)
+
+	return nil
 }
 
 // Rmdir deletes a directory
@@ -2404,18 +2724,22 @@ func (n *OrcasNode) Rename(ctx context.Context, name string, newParent fs.InodeE
 		return syscall.ENOTDIR
 	}
 
-	// Check if this rename should be intercepted for save pattern merge
-	if n.fs.savePatternDetector != nil && sourceObj.Type == core.OBJ_TYPE_FILE {
-		if shouldIntercept, match := n.fs.savePatternDetector.ShouldInterceptRename(
-			sourceID, sourceObj.Name, newName, obj.ID, newParentObj.ID); shouldIntercept {
-			// Intercept rename operation, execute merge
-			if err := n.fs.savePatternDetector.HandleRenameWithMerge(match); err != nil {
-				DebugLog("[VFS Rename] Failed to handle rename with merge: %v", err)
-				return syscall.EIO
+	// Check for atomic replace pattern (must check before other interceptions)
+	// If there's a pending deletion for the target name, cancel it and merge versions
+	if n.fs.atomicReplaceMgr != nil && sourceObj.Type == core.OBJ_TYPE_FILE {
+		if pd, canceled := n.fs.atomicReplaceMgr.CheckAndCancelDeletion(n.fs.bktID, newParentObj.ID, newName); canceled {
+			DebugLog("[VFS Rename] Detected atomic replace pattern: oldName=%s, newName=%s, oldFileID=%d, newFileID=%d",
+				name, newName, pd.FileID, sourceID)
+
+			// This is an atomic replace operation!
+			// Merge versions from old file to new file
+			if errno := n.handleAtomicReplace(ctx, sourceID, sourceObj, newParentObj.ID, newName, pd); errno != 0 {
+				DebugLog("[VFS Rename] Failed to handle atomic replace: errno=%d", errno)
+				return errno
 			}
-			// Successfully merged, return success without actually renaming
-			DebugLog("[VFS Rename] Intercepted rename for save pattern merge: %s -> %s, fileID=%d",
-				sourceObj.Name, newName, sourceID)
+
+			DebugLog("[VFS Rename] Atomic replace completed successfully: %s → %s (merged %d versions)",
+				name, newName, len(pd.Versions))
 			return 0
 		}
 	}
@@ -3000,9 +3324,6 @@ func (n *OrcasNode) Rename(ctx context.Context, name string, newParent fs.InodeE
 	}
 
 	DebugLog("[VFS Rename] Successfully renamed source file to target name: sourceID=%d, targetID=%d, targetName=%s", sourceID, existingTargetID, newName)
-
-	// Record rename operation for save pattern detection
-	n.fs.recordFileOperation(OpRename, sourceID, name, obj.ID, 0, 0, newName, newParentObj.ID)
 
 	// If moved to different directory, need to move
 	if newParentObj.ID != obj.ID {

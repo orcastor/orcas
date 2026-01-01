@@ -228,6 +228,14 @@ func (cs *CronScheduler) Start() error {
 		go cs.runScheduledJob("defragment", schedule, cs.runDefragmentJob)
 	}
 
+	if cs.config.DeduplicationEnabled {
+		schedule, err := ParseCronSchedule(cs.config.DeduplicationSchedule)
+		if err != nil {
+			return fmt.Errorf("invalid deduplication schedule: %v", err)
+		}
+		go cs.runScheduledJob("deduplication", schedule, cs.runDeduplicationJob)
+	}
+
 	return nil
 }
 
@@ -375,6 +383,21 @@ func (cs *CronScheduler) runDefragmentJob(ctx context.Context) error {
 			}
 		}
 	}
+	return nil
+}
+
+// runDeduplicationJob 运行离线去重任务（针对所有bucket）
+func (cs *CronScheduler) runDeduplicationJob(ctx context.Context) error {
+	// 运行去重作业
+	result, err := RunDeduplicationJob(ctx, cs.ma, cs.da)
+	if err != nil {
+		// 记录错误
+		return err
+	}
+
+	// 记录成功（这里我们不能用 InfoLog，因为没有定义，使用简单的方式）
+	_ = result // 避免未使用变量错误
+
 	return nil
 }
 

@@ -43,16 +43,7 @@ The following are all environment variable configuration items supported by the 
      Default: 1000
      Example: export ORCAS_ADAPTIVE_DELAY_FACTOR=2000
 
-4. Version Retention Policy Configuration
-   - ORCAS_MIN_VERSION_INTERVAL_SEC: Minimum version interval time (seconds), only allow creating one version within the specified time
-     Default: 0 (no limit)
-     Example: export ORCAS_MIN_VERSION_INTERVAL_SEC=300
-
-   - ORCAS_MAX_VERSIONS: Maximum retained versions, old versions exceeding this number will be deleted
-     Default: 0 (no limit)
-     Example: export ORCAS_MAX_VERSIONS=10
-
-5. Random Write Buffer Configuration
+4. Random Write Buffer Configuration
    - ORCAS_WRITE_BUFFER_WINDOW_SEC: Buffer window time (seconds), multiple writes within the specified time will be merged
      Default: 10
      Example: export ORCAS_WRITE_BUFFER_WINDOW_SEC=10
@@ -65,6 +56,7 @@ The following are all environment variable configuration items supported by the 
      Default: 200
      Example: export ORCAS_MAX_WRITE_BUFFER_COUNT=300
 
+5. Batch Write Configuration
    - ORCAS_BATCH_WRITE_ENABLED: Whether to enable batch write optimization (true/false/1/0)
      When disabled, files are written as individual objects directly
      Default: true
@@ -126,6 +118,9 @@ Usage Example:
 
 // DefaultListPageSize Default list page size
 const DefaultListPageSize = 1000
+
+// HdrSize is the size of header data used for HdrXXH3 calculation (first 100KB)
+const DefaultHdrSize = 102400
 
 // DeleteDelaySeconds Delete delay time (seconds), wait for the specified time before deleting data files
 // Can be overridden via environment variable ORCAS_DELETE_DELAY, default is 5 seconds
@@ -203,40 +198,6 @@ func GetResourceControlConfig() ResourceControlConfig {
 	return config
 }
 
-// VersionRetentionConfig Version retention policy configuration
-type VersionRetentionConfig struct {
-	// MinVersionInterval Minimum version interval time (seconds), only allow creating one version within the specified time
-	// Configurable via environment variable ORCAS_MIN_VERSION_INTERVAL_SEC, default 0 means no limit
-	MinVersionInterval int64
-
-	// MaxVersions Maximum retained versions, old versions exceeding this number will be deleted
-	// Configurable via environment variable ORCAS_MAX_VERSIONS, default 0 means no limit
-	MaxVersions int64
-}
-
-// GetVersionRetentionConfig Get version retention policy configuration
-func GetVersionRetentionConfig() VersionRetentionConfig {
-	config := VersionRetentionConfig{
-		MinVersionInterval: 0, // Default no limit
-		MaxVersions:        0, // Default no limit
-	}
-
-	// Read configuration from environment variables
-	if interval := os.Getenv("ORCAS_MIN_VERSION_INTERVAL_SEC"); interval != "" {
-		if d, err := strconv.ParseInt(interval, 10, 64); err == nil && d >= 0 {
-			config.MinVersionInterval = d
-		}
-	}
-
-	if maxVers := os.Getenv("ORCAS_MAX_VERSIONS"); maxVers != "" {
-		if d, err := strconv.ParseInt(maxVers, 10, 64); err == nil && d >= 0 {
-			config.MaxVersions = d
-		}
-	}
-
-	return config
-}
-
 // CronJobConfig Scheduled task configuration
 type CronJobConfig struct {
 	// ScrubEnabled Whether to enable ScrubData scheduled task
@@ -255,6 +216,11 @@ type CronJobConfig struct {
 	// MergeSchedule Cron expression for MergeDuplicateData
 	MergeSchedule string
 
+	// DeduplicationEnabled Whether to enable offline deduplication job
+	DeduplicationEnabled bool
+	// DeduplicationSchedule Cron expression for offline deduplication (default: "0 2 * * *")
+	DeduplicationSchedule string
+
 	// DefragmentEnabled Whether to enable Defragment scheduled task
 	DefragmentEnabled bool
 	// DefragmentSchedule Cron expression for Defragment
@@ -266,30 +232,23 @@ type CronJobConfig struct {
 	// DefragmentThreshold Space usage threshold for Defragment (percentage, 0-100)
 	// Defragmentation will only be performed when fragmentation rate ((Used - RealUsed) / Used * 100) reaches this threshold
 	DefragmentThreshold int64
-
-	// ConvertWritingVersionsEnabled Whether to enable ConvertWritingVersions scheduled task
-	ConvertWritingVersionsEnabled bool
-	// ConvertWritingVersionsSchedule Cron expression for ConvertWritingVersions
-	ConvertWritingVersionsSchedule string
 }
 
 // GetCronJobConfig Get scheduled task configuration
 func GetCronJobConfig() CronJobConfig {
 	config := CronJobConfig{
-		ScrubEnabled:                   false,
-		ScrubSchedule:                  "0 2 * * *", // Daily at 2 AM
-		ScrubFixOrphaned:               false,      // Default: don't auto-fix orphaned data
-		ScrubFixCorrupted:              false,      // Default: don't auto-fix corrupted data
-		ScrubFixMismatchedChecksum:     false,      // Default: don't auto-fix mismatched checksum
-		MergeEnabled:                   false,
-		MergeSchedule:                  "0 3 * * *", // Daily at 3 AM
-		DefragmentEnabled:              false,
-		DefragmentSchedule:             "0 4 * * 0",      // Sundays at 4 AM
-		DefragmentMaxSize:              10 * 1024 * 1024, // Default 10MB
-		DefragmentAccessWindow:         0,                // Default no limit
-		DefragmentThreshold:            10,               // Default 10% (execute when fragmentation rate >= 10%)
-		ConvertWritingVersionsEnabled:  false,
-		ConvertWritingVersionsSchedule: "0 1 * * *", // Daily at 1 AM
+		ScrubEnabled:               false,
+		ScrubSchedule:              "0 2 * * *", // Daily at 2 AM
+		ScrubFixOrphaned:           false,       // Default: don't auto-fix orphaned data
+		ScrubFixCorrupted:          false,       // Default: don't auto-fix corrupted data
+		ScrubFixMismatchedChecksum: false,       // Default: don't auto-fix mismatched checksum
+		MergeEnabled:               false,
+		MergeSchedule:              "0 3 * * *", // Daily at 3 AM
+		DefragmentEnabled:          false,
+		DefragmentSchedule:         "0 4 * * 0",      // Sundays at 4 AM
+		DefragmentMaxSize:          10 * 1024 * 1024, // Default 10MB
+		DefragmentAccessWindow:     0,                // Default no limit
+		DefragmentThreshold:        10,               // Default 10% (execute when fragmentation rate >= 10%)
 	}
 
 	// Read configuration from environment variables
@@ -336,13 +295,6 @@ func GetCronJobConfig() CronJobConfig {
 		if d, err := strconv.ParseInt(threshold, 10, 64); err == nil && d >= 0 && d <= 100 {
 			config.DefragmentThreshold = d
 		}
-	}
-
-	if convert := os.Getenv("ORCAS_CRON_CONVERT_WRITING_VERSIONS_ENABLED"); convert != "" {
-		config.ConvertWritingVersionsEnabled = convert == "true" || convert == "1"
-	}
-	if schedule := os.Getenv("ORCAS_CRON_CONVERT_WRITING_VERSIONS_SCHEDULE"); schedule != "" {
-		config.ConvertWritingVersionsSchedule = schedule
 	}
 
 	return config
@@ -505,6 +457,10 @@ func init() {
 // Named similar to time.Now(), but returns Unix timestamp (seconds) instead of time.Time object
 func Now() int64 {
 	return atomic.LoadInt64(&clock) / 1e9 // Convert nanoseconds to seconds
+}
+
+func NowNano() int64 {
+	return atomic.LoadInt64(&clock)
 }
 
 // InstantUploadConfig stores instant upload (deduplication) configuration

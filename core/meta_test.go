@@ -470,7 +470,7 @@ func TestListObj(t *testing.T) {
 			PID:    pid,
 			MTime:  now + 3,
 			DataID: did4,
-			Type:   OBJ_TYPE_PREVIEW,
+			Type:   OBJ_TYPE_JOURNAL,
 			Name:   "test4",
 			Size:   3,
 			Extra:  "{}",
@@ -480,7 +480,7 @@ func TestListObj(t *testing.T) {
 			PID:    pid,
 			MTime:  now + 4,
 			DataID: did5,
-			Type:   OBJ_TYPE_PREVIEW,
+			Type:   OBJ_TYPE_JOURNAL,
 			Name:   "test5",
 			Size:   4,
 			Extra:  "{}",
@@ -611,14 +611,14 @@ func TestListObj(t *testing.T) {
 			So(err, ShouldBeNil)
 			So(len(o), ShouldEqual, 1)
 			So(cnt, ShouldEqual, 5)
-			So(d, ShouldEqual, fmt.Sprintf("%d:%d", OBJ_TYPE_PREVIEW, id4))
+			So(d, ShouldEqual, fmt.Sprintf("%d:%d", OBJ_TYPE_JOURNAL, id4))
 			So(o, ShouldResemble, []*ObjectInfo{d4})
 
 			o, cnt, d, err = dma.ListObj(c, testBktID, pid, "", d, "-type", 1)
 			So(err, ShouldBeNil)
 			So(len(o), ShouldEqual, 1)
 			So(cnt, ShouldEqual, 5)
-			So(d, ShouldEqual, fmt.Sprintf("%d:%d", OBJ_TYPE_PREVIEW, id5))
+			So(d, ShouldEqual, fmt.Sprintf("%d:%d", OBJ_TYPE_JOURNAL, id5))
 			So(o, ShouldResemble, []*ObjectInfo{d5})
 		})
 
@@ -861,22 +861,6 @@ func TestListVersions(t *testing.T) {
 		_, err := dma.PutObj(c, bktID, []*ObjectInfo{file})
 		So(err, ShouldBeNil)
 
-		// Create writing version
-		writingVersionID, _ := ig.New()
-		writingDid, _ := ig.New()
-		writingVersion := &ObjectInfo{
-			ID:     writingVersionID,
-			PID:    fileID,
-			MTime:  Now(),
-			DataID: writingDid,
-			Type:   OBJ_TYPE_VERSION,
-			Name:   WritingVersionName,
-			Size:   100,
-			Extra:  "{}",
-		}
-		_, err = dma.PutObj(c, bktID, []*ObjectInfo{writingVersion})
-		So(err, ShouldBeNil)
-
 		// Create regular versions
 		var versionIDs []int64
 		for i := 0; i < 3; i++ {
@@ -897,19 +881,10 @@ func TestListVersions(t *testing.T) {
 			So(err, ShouldBeNil)
 		}
 
-		Convey("list versions including writing version", func() {
-			versions, err := dma.ListVersions(c, bktID, fileID, false)
+		Convey("list versions", func() {
+			versions, err := dma.ListVersions(c, bktID, fileID)
 			So(err, ShouldBeNil)
-			So(len(versions), ShouldEqual, 4) // 1 writing + 3 regular
-		})
-
-		Convey("list versions excluding writing version", func() {
-			versions, err := dma.ListVersions(c, bktID, fileID, true)
-			So(err, ShouldBeNil)
-			So(len(versions), ShouldEqual, 3) // Only regular versions
-			for _, v := range versions {
-				So(v.Name, ShouldNotEqual, WritingVersionName)
-			}
+			So(len(versions), ShouldEqual, 3)
 		})
 	})
 }
@@ -1403,5 +1378,243 @@ func TestHandlerWithoutMainDB(t *testing.T) {
 		// Verify bucket database still exists
 		_, err = os.Stat(bktDBPath)
 		So(err, ShouldBeNil) // Should still exist
+	})
+}
+
+// TestMetadataNameEncryption tests file name encryption feature
+func TestMetadataNameEncryption(t *testing.T) {
+	Convey("Metadata Name Encryption", t, func() {
+		// Create temporary directory
+		tmpDir, err := os.MkdirTemp("", "orcas_name_encryption_test_*")
+		So(err, ShouldBeNil)
+		defer os.RemoveAll(tmpDir)
+
+		testBktID := int64(999)
+		encryptionKey := "test-metadata-encryption-key"
+		c := context.Background()
+
+		Convey("Encrypt and decrypt file names", func() {
+			// Initialize bucket with encryption
+			err := InitBucketDB(tmpDir, testBktID)
+			So(err, ShouldBeNil)
+
+			// Create adapter with encryption key
+			dma := &DefaultMetadataAdapter{
+				DefaultBaseMetadataAdapter: &DefaultBaseMetadataAdapter{},
+				DefaultDataMetadataAdapter: &DefaultDataMetadataAdapter{},
+			}
+			dma.DefaultDataMetadataAdapter.SetDataPath(tmpDir)
+			dma.DefaultDataMetadataAdapter.SetDataKey(encryptionKey) // Enable encryption
+
+			// Create test object
+			ig := idgen.NewIDGen(nil, 0)
+			id, _ := ig.New()
+			pid, _ := ig.New()
+			did, _ := ig.New()
+
+			plainName := "secret-document.txt"
+			obj := &ObjectInfo{
+				ID:     id,
+				PID:    pid,
+				MTime:  Now(),
+				DataID: did,
+				Type:   OBJ_TYPE_FILE,
+				Name:   plainName, // Plain name
+				Size:   1024,
+				Mode:   0644,
+				Extra:  "{}",
+			}
+
+			// Put object (should encrypt name automatically)
+			ids, err := dma.PutObj(c, testBktID, []*ObjectInfo{obj})
+			So(err, ShouldBeNil)
+			So(len(ids), ShouldEqual, 1)
+			So(ids[0], ShouldEqual, id)
+
+			// Verify name was encrypted in the object (Mode flag should be set)
+			So(obj.Mode&MODE_NAME_ENCRYPTED, ShouldEqual, MODE_NAME_ENCRYPTED)
+
+			// Get object back (should decrypt name automatically)
+			objs, err := dma.GetObj(c, testBktID, []int64{id})
+			So(err, ShouldBeNil)
+			So(len(objs), ShouldEqual, 1)
+			So(objs[0].Name, ShouldEqual, plainName)                     // Should be decrypted
+			So(objs[0].Mode&MODE_NAME_ENCRYPTED, ShouldEqual, uint32(0)) // Flag should be cleared after decryption
+
+			// List objects (should decrypt names)
+			listObjs, cnt, _, err := dma.ListObj(c, testBktID, pid, "", "", "", 10)
+			So(err, ShouldBeNil)
+			So(cnt, ShouldEqual, 1)
+			So(len(listObjs), ShouldEqual, 1)
+			So(listObjs[0].Name, ShouldEqual, plainName) // Should be decrypted
+		})
+
+		Convey("No encryption when no key is set", func() {
+			// Initialize bucket without encryption
+			err := InitBucketDB(tmpDir, testBktID+1)
+			So(err, ShouldBeNil)
+
+			// Create adapter without encryption key
+			dma := &DefaultMetadataAdapter{
+				DefaultBaseMetadataAdapter: &DefaultBaseMetadataAdapter{},
+				DefaultDataMetadataAdapter: &DefaultDataMetadataAdapter{},
+			}
+			dma.DefaultDataMetadataAdapter.SetDataPath(tmpDir)
+			// No SetDataKey call - encryption disabled
+
+			ig := idgen.NewIDGen(nil, 0)
+			id, _ := ig.New()
+			pid, _ := ig.New()
+			did, _ := ig.New()
+
+			plainName := "public-document.txt"
+			obj := &ObjectInfo{
+				ID:     id,
+				PID:    pid,
+				MTime:  Now(),
+				DataID: did,
+				Type:   OBJ_TYPE_FILE,
+				Name:   plainName,
+				Size:   512,
+				Mode:   0644,
+				Extra:  "{}",
+			}
+
+			// Put object (should NOT encrypt)
+			ids, err := dma.PutObj(c, testBktID+1, []*ObjectInfo{obj})
+			So(err, ShouldBeNil)
+			So(len(ids), ShouldEqual, 1)
+
+			// Verify name was NOT encrypted (Mode flag should NOT be set)
+			So(obj.Mode&MODE_NAME_ENCRYPTED, ShouldEqual, uint32(0))
+
+			// Get object back
+			objs, err := dma.GetObj(c, testBktID+1, []int64{id})
+			So(err, ShouldBeNil)
+			So(len(objs), ShouldEqual, 1)
+			So(objs[0].Name, ShouldEqual, plainName) // Should still be plain
+		})
+
+		Convey("Special characters in filenames", func() {
+			err := InitBucketDB(tmpDir, testBktID+2)
+			So(err, ShouldBeNil)
+
+			dma := &DefaultMetadataAdapter{
+				DefaultBaseMetadataAdapter: &DefaultBaseMetadataAdapter{},
+				DefaultDataMetadataAdapter: &DefaultDataMetadataAdapter{},
+			}
+			dma.DefaultDataMetadataAdapter.SetDataPath(tmpDir)
+			dma.DefaultDataMetadataAdapter.SetDataKey(encryptionKey)
+
+			ig := idgen.NewIDGen(nil, 0)
+
+			testCases := []string{
+				"文件名中文.txt",
+				"file with spaces.pdf",
+				"file-with-dashes.doc",
+				"file_with_underscores.xls",
+				"file.multiple.dots.zip",
+			}
+
+			objIDs := make([]int64, len(testCases))
+			pid, _ := ig.New()
+
+			// Put all test objects
+			for i, name := range testCases {
+				id, _ := ig.New()
+				did, _ := ig.New()
+				objIDs[i] = id
+
+				obj := &ObjectInfo{
+					ID:     id,
+					PID:    pid,
+					MTime:  Now(),
+					DataID: did,
+					Type:   OBJ_TYPE_FILE,
+					Name:   name,
+					Size:   100,
+					Mode:   0644,
+					Extra:  "{}",
+				}
+
+				ids, err := dma.PutObj(c, testBktID+2, []*ObjectInfo{obj})
+				So(err, ShouldBeNil)
+				So(len(ids), ShouldEqual, 1)
+			}
+
+			// Get all objects back and verify
+			objs, err := dma.GetObj(c, testBktID+2, objIDs)
+			So(err, ShouldBeNil)
+			So(len(objs), ShouldEqual, len(testCases))
+
+			// Verify all names are correctly decrypted
+			for i, obj := range objs {
+				So(obj.Name, ShouldEqual, testCases[i])
+			}
+		})
+	})
+}
+
+// TestDataKeyBasedEncryption verifies encryption uses the data DB key
+func TestDataKeyBasedEncryption(t *testing.T) {
+	Convey("Data Key Based Encryption", t, func() {
+		tmpDir, err := os.MkdirTemp("", "orcas_datakey_test_*")
+		So(err, ShouldBeNil)
+		defer os.RemoveAll(tmpDir)
+
+		testBktID := int64(888)
+		key1 := "key-one"
+		key2 := "key-two"
+
+		Convey("Different keys produce different ciphertexts", func() {
+			err := InitBucketDB(tmpDir, testBktID)
+			So(err, ShouldBeNil)
+
+			// Adapter 1 with key1
+			dma1 := &DefaultMetadataAdapter{
+				DefaultBaseMetadataAdapter: &DefaultBaseMetadataAdapter{},
+				DefaultDataMetadataAdapter: &DefaultDataMetadataAdapter{},
+			}
+			dma1.DefaultDataMetadataAdapter.SetDataPath(tmpDir)
+			dma1.DefaultDataMetadataAdapter.SetDataKey(key1)
+
+			// Adapter 2 with key2
+			dma2 := &DefaultMetadataAdapter{
+				DefaultBaseMetadataAdapter: &DefaultBaseMetadataAdapter{},
+				DefaultDataMetadataAdapter: &DefaultDataMetadataAdapter{},
+			}
+			dma2.DefaultDataMetadataAdapter.SetDataPath(tmpDir)
+			dma2.DefaultDataMetadataAdapter.SetDataKey(key2)
+
+			plainName := "test-file.txt"
+
+			// Encrypt with key1
+			encrypted1, err := dma1.DefaultDataMetadataAdapter.encryptName(plainName)
+			So(err, ShouldBeNil)
+
+			// Encrypt with key2
+			encrypted2, err := dma2.DefaultDataMetadataAdapter.encryptName(plainName)
+			So(err, ShouldBeNil)
+
+			// Should be different (due to different keys and random nonces)
+			So(encrypted1, ShouldNotEqual, encrypted2)
+			So(encrypted1, ShouldNotEqual, plainName)
+			So(encrypted2, ShouldNotEqual, plainName)
+
+			// Decrypt with correct keys
+			decrypted1, err := dma1.DefaultDataMetadataAdapter.decryptName(encrypted1)
+			So(err, ShouldBeNil)
+			So(decrypted1, ShouldEqual, plainName)
+
+			decrypted2, err := dma2.DefaultDataMetadataAdapter.decryptName(encrypted2)
+			So(err, ShouldBeNil)
+			So(decrypted2, ShouldEqual, plainName)
+
+			// Decrypt with wrong key (should fail gracefully and return as-is)
+			wrongDecrypt, err := dma1.DefaultDataMetadataAdapter.decryptName(encrypted2)
+			So(err, ShouldBeNil)
+			// Should return ciphertext as-is when decryption fails
+			So(wrongDecrypt, ShouldNotEqual, plainName)
+		})
 	})
 }

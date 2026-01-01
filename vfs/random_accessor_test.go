@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"fmt"
+	"math/rand"
 	"os"
 	"sync/atomic"
 	"testing"
@@ -51,29 +52,29 @@ func TestVFSRandomAccessor(t *testing.T) {
 		dma.DefaultDataMetadataAdapter.SetPath(".")
 		dda := &core.DefaultDataAdapter{}
 
-	// 创建LocalHandler
-	lh := core.NewLocalHandler("", "").(*core.LocalHandler)
-	lh.SetAdapter(dma, dda)
+		// 创建LocalHandler
+		lh := core.NewLocalHandler("", "").(*core.LocalHandler)
+		lh.SetAdapter(dma, dda)
 
-	// 登录以获取上下文
-	testCtx, userInfo, _, err := lh.Login(c, "orcas", "orcas")
-	So(err, ShouldBeNil)
+		// 登录以获取上下文
+		testCtx, userInfo, _, err := lh.Login(c, "orcas", "orcas")
+		So(err, ShouldBeNil)
 
-	// 创建桶（使用登录用户的UID）
-	bucket := &core.BucketInfo{
-		ID:       testBktID,
-		Name:     "test_bucket",
-		Type:     1,
-		Quota:    1000000,
-		Used:     0,
-		RealUsed: 0,
-	}
-	So(dma.PutBkt(testCtx, []*core.BucketInfo{bucket}), ShouldBeNil)
-	err = dma.PutACL(testCtx, testBktID, userInfo.ID, core.ALL)
-	So(err, ShouldBeNil)
+		// 创建桶（使用登录用户的UID）
+		bucket := &core.BucketInfo{
+			ID:       testBktID,
+			Name:     "test_bucket",
+			Type:     1,
+			Quota:    1000000,
+			Used:     0,
+			RealUsed: 0,
+		}
+		So(dma.PutBkt(testCtx, []*core.BucketInfo{bucket}), ShouldBeNil)
+		err = dma.PutACL(testCtx, testBktID, userInfo.ID, core.ALL)
+		So(err, ShouldBeNil)
 
-	// 创建文件对象
-	fileID, _ := ig.New()
+		// 创建文件对象
+		fileID, _ := ig.New()
 		fileObj := &core.ObjectInfo{
 			ID:    fileID,
 			PID:   testBktID,
@@ -250,29 +251,29 @@ func TestVFSRandomAccessorWithSDK(t *testing.T) {
 		dma.DefaultDataMetadataAdapter.SetPath(".")
 		dda := &core.DefaultDataAdapter{}
 
-	// 创建LocalHandler
-	lh := core.NewLocalHandler("", "").(*core.LocalHandler)
-	lh.SetAdapter(dma, dda)
+		// 创建LocalHandler
+		lh := core.NewLocalHandler("", "").(*core.LocalHandler)
+		lh.SetAdapter(dma, dda)
 
-	// 登录以获取上下文
-	testCtx, userInfo, _, err := lh.Login(c, "orcas", "orcas")
-	So(err, ShouldBeNil)
+		// 登录以获取上下文
+		testCtx, userInfo, _, err := lh.Login(c, "orcas", "orcas")
+		So(err, ShouldBeNil)
 
-	// 创建桶（使用登录用户的UID）
-	bucket := &core.BucketInfo{
-		ID:       testBktID,
-		Name:     "test_bucket",
-		Type:     1,
-		Quota:    1000000,
-		Used:     0,
-		RealUsed: 0,
-	}
-	So(dma.PutBkt(testCtx, []*core.BucketInfo{bucket}), ShouldBeNil)
-	err = dma.PutACL(testCtx, testBktID, userInfo.ID, core.ALL)
-	So(err, ShouldBeNil)
+		// 创建桶（使用登录用户的UID）
+		bucket := &core.BucketInfo{
+			ID:       testBktID,
+			Name:     "test_bucket",
+			Type:     1,
+			Quota:    1000000,
+			Used:     0,
+			RealUsed: 0,
+		}
+		So(dma.PutBkt(testCtx, []*core.BucketInfo{bucket}), ShouldBeNil)
+		err = dma.PutACL(testCtx, testBktID, userInfo.ID, core.ALL)
+		So(err, ShouldBeNil)
 
-	// 创建文件对象
-	fileID, _ := ig.New()
+		// 创建文件对象
+		fileID, _ := ig.New()
 		fileObj := &core.ObjectInfo{
 			ID:    fileID,
 			PID:   testBktID,
@@ -2194,27 +2195,27 @@ func TestTruncateAndWrite(t *testing.T) {
 		dma.DefaultDataMetadataAdapter.SetPath(".")
 		dda := &core.DefaultDataAdapter{}
 
-	lh := core.NewLocalHandler("", "").(*core.LocalHandler)
-	lh.SetAdapter(dma, dda)
+		lh := core.NewLocalHandler("", "").(*core.LocalHandler)
+		lh.SetAdapter(dma, dda)
 
-	testCtx, userInfo, _, err := lh.Login(c, "orcas", "orcas")
-	So(err, ShouldBeNil)
+		testCtx, userInfo, _, err := lh.Login(c, "orcas", "orcas")
+		So(err, ShouldBeNil)
 
-	bucket := &core.BucketInfo{
-		ID:       testBktID,
-		Name:     "test_bucket",
-		Type:     1,
-		Quota:    1000000,
-		Used:     0,
-		RealUsed: 0,
-	}
-	So(dma.PutBkt(testCtx, []*core.BucketInfo{bucket}), ShouldBeNil)
-	err = dma.PutACL(testCtx, testBktID, userInfo.ID, core.ALL)
-	So(err, ShouldBeNil)
+		bucket := &core.BucketInfo{
+			ID:       testBktID,
+			Name:     "test_bucket",
+			Type:     1,
+			Quota:    1000000,
+			Used:     0,
+			RealUsed: 0,
+		}
+		So(dma.PutBkt(testCtx, []*core.BucketInfo{bucket}), ShouldBeNil)
+		err = dma.PutACL(testCtx, testBktID, userInfo.ID, core.ALL)
+		So(err, ShouldBeNil)
 
-	ofs := NewOrcasFS(lh, testCtx, testBktID)
+		ofs := NewOrcasFS(lh, testCtx, testBktID)
 
-	Convey("test truncate then write", func() {
+		Convey("test truncate then write", func() {
 			fileID, _ := ig.New()
 			fileObj := &core.ObjectInfo{
 				ID:    fileID,
@@ -2899,6 +2900,871 @@ func TestWriteToExistingFileSizePreservation(t *testing.T) {
 				}
 				So(bytes.Equal(readData2, expectedData), ShouldBeTrue)
 			}
+		})
+	})
+}
+
+// TestFileSizeConsistencyAfterFlush tests that file size remains consistent after flush operations
+// This test is designed to catch WAL dirty read issues where file size might revert to old values
+func TestFileSizeConsistencyAfterFlush(t *testing.T) {
+	Convey("File size consistency after flush operations", t, func() {
+		ig := idgen.NewIDGen(nil, 0)
+		testBktID, _ := ig.New()
+		err := core.InitBucketDB(".", testBktID)
+		So(err, ShouldBeNil)
+
+		dma := &core.DefaultMetadataAdapter{
+			DefaultBaseMetadataAdapter: &core.DefaultBaseMetadataAdapter{},
+			DefaultDataMetadataAdapter: &core.DefaultDataMetadataAdapter{},
+		}
+		dma.DefaultBaseMetadataAdapter.SetPath(".")
+		dma.DefaultDataMetadataAdapter.SetPath(".")
+		dda := &core.DefaultDataAdapter{}
+		dda.SetDataPath(".")
+
+		lh := core.NewLocalHandler(".", ".").(*core.LocalHandler)
+		lh.SetAdapter(dma, dda)
+
+		testCtx, userInfo, _, err := lh.Login(c, "orcas", "orcas")
+		So(err, ShouldBeNil)
+
+		bucket := &core.BucketInfo{
+			ID:       testBktID,
+			Name:     "test_bucket",
+			Type:     1,
+			Quota:    100000000,
+			Used:     0,
+			RealUsed: 0,
+		}
+		So(dma.PutBkt(testCtx, []*core.BucketInfo{bucket}), ShouldBeNil)
+		err = dma.PutACL(testCtx, testBktID, userInfo.ID, core.ALL)
+		So(err, ShouldBeNil)
+
+		// Create OrcasFS with proper DataPath configuration
+		cfg := &core.Config{
+			DataPath: ".",
+		}
+		ofs := NewOrcasFSWithConfig(lh, testCtx, testBktID, cfg)
+
+		Convey("test sequential write file size consistency", func() {
+			// Create a file and write 8MB data sequentially
+			fileID, _ := ig.New()
+			fileObj := &core.ObjectInfo{
+				ID:     fileID,
+				PID:    testBktID,
+				Type:   core.OBJ_TYPE_FILE,
+				Name:   "test_sequential.dat",
+				DataID: 0,
+				Size:   0,
+				MTime:  core.Now(),
+			}
+			_, err = dma.PutObj(testCtx, testBktID, []*core.ObjectInfo{fileObj})
+			So(err, ShouldBeNil)
+
+			ra, err := NewRandomAccessor(ofs, fileID)
+			So(err, ShouldBeNil)
+			defer ra.Close()
+
+			// Write 8MB data
+			dataSize := 8 * 1024 * 1024
+			testData := make([]byte, dataSize)
+			for i := range testData {
+				testData[i] = byte(i % 256)
+			}
+
+			err = ra.Write(0, testData)
+			So(err, ShouldBeNil)
+
+			// Flush and check size
+			versionID, err := ra.Flush()
+			So(err, ShouldBeNil)
+			So(versionID, ShouldBeGreaterThan, 0)
+
+			// Get file object and verify size
+			objs, err := lh.Get(testCtx, testBktID, []int64{fileID})
+			So(err, ShouldBeNil)
+			So(len(objs), ShouldEqual, 1)
+			So(objs[0].Size, ShouldEqual, dataSize)
+
+			// Read back and verify
+			readData, err := ra.Read(0, dataSize)
+			So(err, ShouldBeNil)
+			So(len(readData), ShouldEqual, dataSize)
+			So(bytes.Equal(readData, testData), ShouldBeTrue)
+		})
+
+		Convey("test random write file size consistency", func() {
+			// Create a file with initial data
+			fileID, _ := ig.New()
+			initialSize := 1024 * 1024 // 1MB
+			initialData := make([]byte, initialSize)
+			for i := range initialData {
+				initialData[i] = byte(i % 256)
+			}
+
+			dataID, _ := ig.New()
+			dataInfo := &core.DataInfo{
+				ID:       dataID,
+				Size:     int64(initialSize),
+				OrigSize: int64(initialSize),
+				Kind:     core.DATA_NORMAL,
+			}
+			So(dma.PutData(testCtx, testBktID, []*core.DataInfo{dataInfo}), ShouldBeNil)
+			So(dda.Write(testCtx, testBktID, dataID, 0, initialData), ShouldBeNil)
+
+			fileObj := &core.ObjectInfo{
+				ID:     fileID,
+				PID:    testBktID,
+				Type:   core.OBJ_TYPE_FILE,
+				Name:   "test_random.dat",
+				DataID: dataID,
+				Size:   int64(initialSize),
+				MTime:  core.Now(),
+			}
+			_, err = dma.PutObj(testCtx, testBktID, []*core.ObjectInfo{fileObj})
+			So(err, ShouldBeNil)
+
+			ra, err := NewRandomAccessor(ofs, fileID)
+			So(err, ShouldBeNil)
+			defer ra.Close()
+
+			// Write at offset to extend file
+			extendSize := 8 * 1024 * 1024 // 8MB
+			extendData := make([]byte, 4096)
+			for i := range extendData {
+				extendData[i] = byte(255 - i%256)
+			}
+
+			err = ra.Write(int64(extendSize-4096), extendData)
+			So(err, ShouldBeNil)
+
+			// Flush and check size
+			versionID, err := ra.Flush()
+			So(err, ShouldBeNil)
+			So(versionID, ShouldBeGreaterThan, 0)
+
+			// Get file object from cache (not database, to avoid WAL dirty read)
+			fileObj, err = ra.getFileObj()
+			So(err, ShouldBeNil)
+			So(fileObj.Size, ShouldEqual, extendSize)
+		})
+
+		Convey("test sparse file size consistency", func() {
+			// Create a sparse file (uses temp write area)
+			fileID, _ := ig.New()
+			fileObj := &core.ObjectInfo{
+				ID:     fileID,
+				PID:    testBktID,
+				Type:   core.OBJ_TYPE_FILE,
+				Name:   "test_sparse.dat",
+				DataID: 0,
+				Size:   0,
+				MTime:  core.Now(),
+			}
+			_, err = dma.PutObj(testCtx, testBktID, []*core.ObjectInfo{fileObj})
+			So(err, ShouldBeNil)
+
+			ra, err := NewRandomAccessor(ofs, fileID)
+			So(err, ShouldBeNil)
+			defer ra.Close()
+
+			// Pre-allocate sparse file
+			sparseSize := int64(100 * 1024 * 1024) // 100MB
+			_, err = ra.Truncate(sparseSize)
+			So(err, ShouldBeNil)
+
+			// Write some data at different offsets
+			testData1 := []byte("Hello at offset 0")
+			err = ra.Write(0, testData1)
+			So(err, ShouldBeNil)
+
+			testData2 := []byte("World at 10MB")
+			err = ra.Write(10*1024*1024, testData2)
+			So(err, ShouldBeNil)
+
+			// Flush and check size
+			_, err = ra.Flush()
+			So(err, ShouldBeNil)
+
+			// Get file object from cache (not database, to avoid WAL dirty read)
+			fileObj, err = ra.getFileObj()
+			So(err, ShouldBeNil)
+			// Size should be at least the end of the last write (10MB + len(testData2))
+			expectedMinSize := int64(10*1024*1024 + len(testData2))
+			So(fileObj.Size, ShouldBeGreaterThanOrEqualTo, expectedMinSize)
+
+			// Verify data can be read back correctly
+			readData1, readErr1 := ra.Read(0, len(testData1))
+			So(readErr1, ShouldBeNil)
+			So(bytes.Equal(readData1, testData1), ShouldBeTrue)
+
+			readData2, readErr2 := ra.Read(10*1024*1024, len(testData2))
+			So(readErr2, ShouldBeNil)
+			So(bytes.Equal(readData2, testData2), ShouldBeTrue)
+		})
+
+		Convey("test multiple flush operations size consistency", func() {
+			// Test that multiple flush operations maintain correct size
+			fileID, _ := ig.New()
+			fileObj := &core.ObjectInfo{
+				ID:     fileID,
+				PID:    testBktID,
+				Type:   core.OBJ_TYPE_FILE,
+				Name:   "test_multi_flush.dat",
+				DataID: 0,
+				Size:   0,
+				MTime:  core.Now(),
+			}
+			_, err = dma.PutObj(testCtx, testBktID, []*core.ObjectInfo{fileObj})
+			So(err, ShouldBeNil)
+
+			ra, err := NewRandomAccessor(ofs, fileID)
+			So(err, ShouldBeNil)
+			defer ra.Close()
+
+			// First write and flush
+			data1 := make([]byte, 1024*1024) // 1MB
+			for i := range data1 {
+				data1[i] = byte(i % 256)
+			}
+			err = ra.Write(0, data1)
+			So(err, ShouldBeNil)
+
+			versionID1, err := ra.Flush()
+			So(err, ShouldBeNil)
+			So(versionID1, ShouldBeGreaterThan, 0)
+
+			// Verify size after first flush
+			objs, err := lh.Get(testCtx, testBktID, []int64{fileID})
+			So(err, ShouldBeNil)
+			So(objs[0].Size, ShouldEqual, 1024*1024)
+
+			// Second write and flush (extend)
+			data2 := make([]byte, 2*1024*1024) // 2MB
+			for i := range data2 {
+				data2[i] = byte((i + 100) % 256)
+			}
+			err = ra.Write(1024*1024, data2)
+			So(err, ShouldBeNil)
+
+			versionID2, err := ra.Flush()
+			So(err, ShouldBeNil)
+			So(versionID2, ShouldBeGreaterThan, versionID1)
+
+			// Verify size after second flush (from cache to avoid WAL dirty read)
+			fileObj2, err := ra.getFileObj()
+			So(err, ShouldBeNil)
+			So(fileObj2.Size, ShouldEqual, 3*1024*1024)
+
+			// Third write and flush (partial overwrite, size should not change)
+			data3 := make([]byte, 512*1024) // 512KB
+			for i := range data3 {
+				data3[i] = byte((i + 200) % 256)
+			}
+			err = ra.Write(512*1024, data3)
+			So(err, ShouldBeNil)
+
+			versionID3, err := ra.Flush()
+			So(err, ShouldBeNil)
+			So(versionID3, ShouldBeGreaterThan, versionID2)
+
+			// Verify size remains the same after partial overwrite (from cache to avoid WAL dirty read)
+			fileObj3, err := ra.getFileObj()
+			So(err, ShouldBeNil)
+			So(fileObj3.Size, ShouldEqual, 3*1024*1024)
+		})
+	})
+}
+
+// TestCacheConsistencyAfterWrites tests that cache remains consistent with database after write operations
+// This specifically tests for WAL dirty read issues
+func TestCacheConsistencyAfterWrites(t *testing.T) {
+	Convey("Cache consistency after write operations", t, func() {
+		ig := idgen.NewIDGen(nil, 0)
+		testBktID, _ := ig.New()
+		err := core.InitBucketDB(".", testBktID)
+		So(err, ShouldBeNil)
+
+		dma := &core.DefaultMetadataAdapter{
+			DefaultBaseMetadataAdapter: &core.DefaultBaseMetadataAdapter{},
+			DefaultDataMetadataAdapter: &core.DefaultDataMetadataAdapter{},
+		}
+		dma.DefaultBaseMetadataAdapter.SetPath(".")
+		dma.DefaultDataMetadataAdapter.SetPath(".")
+		dda := &core.DefaultDataAdapter{}
+		dda.SetDataPath(".")
+
+		lh := core.NewLocalHandler(".", ".").(*core.LocalHandler)
+		lh.SetAdapter(dma, dda)
+
+		testCtx, userInfo, _, err := lh.Login(c, "orcas", "orcas")
+		So(err, ShouldBeNil)
+
+		bucket := &core.BucketInfo{
+			ID:       testBktID,
+			Name:     "test_bucket",
+			Type:     1,
+			Quota:    100000000,
+			Used:     0,
+			RealUsed: 0,
+		}
+		So(dma.PutBkt(testCtx, []*core.BucketInfo{bucket}), ShouldBeNil)
+		err = dma.PutACL(testCtx, testBktID, userInfo.ID, core.ALL)
+		So(err, ShouldBeNil)
+
+		// Create OrcasFS with proper DataPath configuration
+		cfg := &core.Config{
+			DataPath: ".",
+		}
+		ofs := NewOrcasFSWithConfig(lh, testCtx, testBktID, cfg)
+
+		Convey("test cache matches database after sequential flush", func() {
+			fileID, _ := ig.New()
+			fileObj := &core.ObjectInfo{
+				ID:     fileID,
+				PID:    testBktID,
+				Type:   core.OBJ_TYPE_FILE,
+				Name:   "test_cache_seq.dat",
+				DataID: 0,
+				Size:   0,
+				MTime:  core.Now(),
+			}
+			_, err = dma.PutObj(testCtx, testBktID, []*core.ObjectInfo{fileObj})
+			So(err, ShouldBeNil)
+
+			ra, err := NewRandomAccessor(ofs, fileID)
+			So(err, ShouldBeNil)
+			defer ra.Close()
+
+			// Write data
+			testData := make([]byte, 5*1024*1024) // 5MB
+			for i := range testData {
+				testData[i] = byte(i % 256)
+			}
+			err = ra.Write(0, testData)
+			So(err, ShouldBeNil)
+
+			// Flush
+			_, err = ra.Flush()
+			So(err, ShouldBeNil)
+
+			// Get from database
+			objsFromDB, err := lh.Get(testCtx, testBktID, []int64{fileID})
+			So(err, ShouldBeNil)
+			So(len(objsFromDB), ShouldEqual, 1)
+
+			// Get from cache (via getFileObj)
+			cachedObj, err := ra.getFileObj()
+			So(err, ShouldBeNil)
+
+			// Verify they match
+			So(cachedObj.Size, ShouldEqual, objsFromDB[0].Size)
+			So(cachedObj.DataID, ShouldEqual, objsFromDB[0].DataID)
+			So(cachedObj.Size, ShouldEqual, len(testData))
+		})
+
+		Convey("test cache matches database after random flush", func() {
+			// Create file with initial data
+			fileID, _ := ig.New()
+			initialData := make([]byte, 2*1024*1024) // 2MB
+			for i := range initialData {
+				initialData[i] = byte(i % 256)
+			}
+
+			dataID, _ := ig.New()
+			dataInfo := &core.DataInfo{
+				ID:       dataID,
+				Size:     int64(len(initialData)),
+				OrigSize: int64(len(initialData)),
+				Kind:     core.DATA_NORMAL,
+			}
+			So(dma.PutData(testCtx, testBktID, []*core.DataInfo{dataInfo}), ShouldBeNil)
+			So(dda.Write(testCtx, testBktID, dataID, 0, initialData), ShouldBeNil)
+
+			fileObj := &core.ObjectInfo{
+				ID:     fileID,
+				PID:    testBktID,
+				Type:   core.OBJ_TYPE_FILE,
+				Name:   "test_cache_random.dat",
+				DataID: dataID,
+				Size:   int64(len(initialData)),
+				MTime:  core.Now(),
+			}
+			_, err = dma.PutObj(testCtx, testBktID, []*core.ObjectInfo{fileObj})
+			So(err, ShouldBeNil)
+
+			ra, err := NewRandomAccessor(ofs, fileID)
+			So(err, ShouldBeNil)
+			defer ra.Close()
+
+			// Random write to extend file
+			extendData := make([]byte, 1024*1024) // 1MB
+			for i := range extendData {
+				extendData[i] = byte(255 - i%256)
+			}
+			err = ra.Write(5*1024*1024, extendData) // Write at 5MB
+			So(err, ShouldBeNil)
+
+			// Flush
+			_, err = ra.Flush()
+			So(err, ShouldBeNil)
+
+			// Get from database
+			objsFromDB, err := lh.Get(testCtx, testBktID, []int64{fileID})
+			So(err, ShouldBeNil)
+			So(len(objsFromDB), ShouldEqual, 1)
+
+			// Get from cache
+			cachedObj, err := ra.getFileObj()
+			So(err, ShouldBeNil)
+
+			// Verify they match
+			So(cachedObj.Size, ShouldEqual, objsFromDB[0].Size)
+			So(cachedObj.DataID, ShouldEqual, objsFromDB[0].DataID)
+			expectedSize := int64(6 * 1024 * 1024) // 5MB + 1MB
+			So(cachedObj.Size, ShouldEqual, expectedSize)
+			So(objsFromDB[0].Size, ShouldEqual, expectedSize)
+		})
+
+		Convey("test TempFileWriter not recreated after file rename", func() {
+			fileID, _ := ig.New()
+			fileObj := &core.ObjectInfo{
+				ID:     fileID,
+				PID:    testBktID,
+				Type:   core.OBJ_TYPE_FILE,
+				Name:   "test.tmp", // Start with .tmp file
+				DataID: core.EmptyDataID,
+				Size:   0,
+				MTime:  core.Now(),
+			}
+			_, err = dma.PutObj(testCtx, testBktID, []*core.ObjectInfo{fileObj})
+			So(err, ShouldBeNil)
+
+			ra, err := NewRandomAccessor(NewOrcasFS(lh, testCtx, testBktID), fileID)
+			So(err, ShouldBeNil)
+
+			// Write some data to .tmp file (should create TempFileWriter)
+			testData1 := bytes.Repeat([]byte("A"), 4096)
+			err = ra.Write(0, testData1)
+			So(err, ShouldBeNil)
+
+			// Verify TempFileWriter was created
+			tempWriterVal1 := ra.tempWriter.Load()
+			So(tempWriterVal1, ShouldNotBeNil)
+			So(tempWriterVal1, ShouldNotEqual, clearedTempWriterMarker)
+
+			// Rename file from .tmp to normal name
+			fileObj.Name = "test.txt"
+			_, err = dma.PutObj(testCtx, testBktID, []*core.ObjectInfo{fileObj})
+			So(err, ShouldBeNil)
+
+			// Update cache with renamed file object
+			fileObjCache.Put(ra.fileObjKey, fileObj)
+
+			// Verify cache was updated
+			cachedFileObj, ok := fileObjCache.Get(ra.fileObjKey)
+			So(ok, ShouldBeTrue)
+			So(cachedFileObj.(*core.ObjectInfo).Name, ShouldEqual, "test.txt")
+
+			// IMPORTANT: Also update the local atomic.Value cache in RandomAccessor
+			// This is critical because Write() checks the local cache first
+			ra.fileObj.Store(fileObj)
+
+			// Try to write again (should fail because file is no longer .tmp)
+			testData2 := bytes.Repeat([]byte("B"), 4096)
+			err = ra.Write(4096, testData2)
+			So(err, ShouldNotBeNil)
+			So(err.Error(), ShouldContainSubstring, "renamed from .tmp")
+
+			// Verify TempFileWriter was cleared
+			tempWriterVal := ra.tempWriter.Load()
+			So(tempWriterVal, ShouldEqual, clearedTempWriterMarker)
+
+			// Close and reopen RandomAccessor
+			ra.Close()
+
+			// Create new RandomAccessor for the renamed file
+			ra2, err := NewRandomAccessor(NewOrcasFS(lh, testCtx, testBktID), fileID)
+			So(err, ShouldBeNil)
+			defer ra2.Close()
+
+			// Write should now work with normal write path (not TempFileWriter)
+			testData3 := bytes.Repeat([]byte("C"), 4096)
+			err = ra2.Write(0, testData3)
+			So(err, ShouldBeNil)
+
+			// Flush and verify
+			_, err = ra2.Flush()
+			So(err, ShouldBeNil)
+
+			fileObjAfterFlush, err := ra2.getFileObj()
+			So(err, ShouldBeNil)
+			So(fileObjAfterFlush.Size, ShouldEqual, 4096)
+		})
+
+		Convey("test TempFileWriter size preserved when recreated", func() {
+			fileID, _ := ig.New()
+			fileObj := &core.ObjectInfo{
+				ID:     fileID,
+				PID:    testBktID,
+				Type:   core.OBJ_TYPE_FILE,
+				Name:   "recreate_test.txt", // Use non-.tmp file to test normal flush
+				DataID: core.EmptyDataID,
+				Size:   0,
+				MTime:  core.Now(),
+			}
+			_, err = dma.PutObj(testCtx, testBktID, []*core.ObjectInfo{fileObj})
+			So(err, ShouldBeNil)
+
+			ra, err := NewRandomAccessor(NewOrcasFS(lh, testCtx, testBktID), fileID)
+			So(err, ShouldBeNil)
+
+			// Write 8MB data
+			dataSize := int64(8 * 1024 * 1024)
+			testData := bytes.Repeat([]byte("X"), int(dataSize))
+			err = ra.Write(0, testData)
+			So(err, ShouldBeNil)
+
+			// Flush to persist data
+			_, err = ra.Flush()
+			So(err, ShouldBeNil)
+
+			// Verify size is correct
+			fileObjAfterFlush, err := ra.getFileObj()
+			So(err, ShouldBeNil)
+			So(fileObjAfterFlush.Size, ShouldEqual, dataSize)
+
+			// Close RandomAccessor
+			ra.Close()
+
+			// Create new RandomAccessor (simulating recreation)
+			ra2, err := NewRandomAccessor(NewOrcasFS(lh, testCtx, testBktID), fileID)
+			So(err, ShouldBeNil)
+			defer ra2.Close()
+
+			// Write additional 1MB data
+			additionalSize := int64(1 * 1024 * 1024)
+			additionalData := bytes.Repeat([]byte("Y"), int(additionalSize))
+			err = ra2.Write(dataSize, additionalData)
+			So(err, ShouldBeNil)
+
+			// Flush again
+			_, err = ra2.Flush()
+			So(err, ShouldBeNil)
+
+			// Verify size is 8MB + 1MB = 9MB, not just 1MB
+			fileObjAfterFlush2, err := ra2.getFileObj()
+			So(err, ShouldBeNil)
+			So(fileObjAfterFlush2.Size, ShouldEqual, dataSize+additionalSize)
+
+			// Verify from database
+			objs, err := dma.GetObj(testCtx, testBktID, []int64{fileID})
+			So(err, ShouldBeNil)
+			So(objs[0].Size, ShouldEqual, dataSize+additionalSize)
+		})
+	})
+}
+
+// TestRandomWriteRedundancy tests random write redundancy for sparse files using Journal
+func TestRandomWriteRedundancy(t *testing.T) {
+	core.InitDB(".", "")
+	ensureTestUser(t)
+
+	ig := idgen.NewIDGen(nil, 0)
+	testBktID, _ := ig.New()
+
+	dma := &core.DefaultMetadataAdapter{
+		DefaultBaseMetadataAdapter: &core.DefaultBaseMetadataAdapter{},
+		DefaultDataMetadataAdapter: &core.DefaultDataMetadataAdapter{},
+	}
+	dma.DefaultBaseMetadataAdapter.SetPath(".")
+	dma.DefaultDataMetadataAdapter.SetPath(".")
+	dda := &core.DefaultDataAdapter{} // Use default options
+	lh := core.NewLocalHandler("", "").(*core.LocalHandler)
+	lh.SetAdapter(dma, dda)
+
+	ctx, userInfo, _, err := lh.Login(context.Background(), "orcas", "orcas")
+	if err != nil {
+		t.Fatalf("Login failed: %v", err)
+	}
+
+	bucket := &core.BucketInfo{
+		ID:    testBktID,
+		Name:  "test",
+		Type:  1,
+		Quota: 10 << 30, // 10GB quota
+	}
+	admin := core.NewLocalAdmin(".", ".")
+	if err := admin.PutBkt(ctx, []*core.BucketInfo{bucket}); err != nil {
+		t.Fatalf("PutBkt failed: %v", err)
+	}
+
+	// Ensure user has ALL permission to write to the bucket
+	if userInfo != nil && userInfo.ID > 0 {
+		if err := admin.PutACL(ctx, testBktID, userInfo.ID, core.ALL); err != nil {
+			t.Fatalf("PutACL failed: %v", err)
+		}
+	}
+
+	fs := &OrcasFS{
+		h:         lh,
+		bktID:     testBktID,
+		c:         ctx,
+		chunkSize: 4 << 20, // 4MB chunks
+	}
+
+	// Initialize Journal Manager for sparse file support
+	journalConfig := DefaultJournalConfig()
+	journalConfig.Enabled = true
+	fs.journalMgr = NewJournalManager(fs, journalConfig)
+
+	// Create a sparse file (1GB)
+	fileID, _ := ig.New()
+	fileSize := int64(1 << 30) // 1GB
+	fileObj := &core.ObjectInfo{
+		ID:     fileID,
+		PID:    0,
+		Type:   core.OBJ_TYPE_FILE,
+		Name:   "test_sparse.bin",
+		DataID: core.EmptyDataID,
+		Size:   0,
+		MTime:  core.Now(),
+	}
+	_, err = lh.Put(ctx, testBktID, []*core.ObjectInfo{fileObj})
+	if err != nil {
+		t.Fatalf("Failed to create file: %v", err)
+	}
+
+	// Mark as sparse file and pre-allocate
+	ra, err := NewRandomAccessor(fs, fileID)
+	if err != nil {
+		t.Fatalf("Failed to create RandomAccessor: %v", err)
+	}
+
+	// Mark as sparse file (this will cause Journal to be used)
+	ra.MarkSparseFile(fileSize)
+
+	// Pre-allocate file size (simulate qBittorrent fallocate)
+	// Journal will handle the sparse file internally
+	updateFileObj := &core.ObjectInfo{
+		ID:     fileID,
+		DataID: core.EmptyDataID,
+		Size:   fileSize,
+		MTime:  core.Now(),
+	}
+	_, err = lh.Put(ctx, testBktID, []*core.ObjectInfo{updateFileObj})
+	if err != nil {
+		t.Fatalf("Failed to pre-allocate file: %v", err)
+	}
+
+	// Statistics
+	var totalWrites int64
+	var totalBytesWritten int64
+	writeOffsets := make(map[int64]int64) // offset -> size, to track overlapping writes
+	var uniqueWriteBytes int64
+
+	// Simulate random writes (typical qBittorrent pattern: 16KB-1MB chunks)
+	// Journal will automatically handle these writes efficiently:
+	// - Merges overlapping writes
+	// - Only stores actual written data (not sparse holes)
+	// - Marks the DataInfo with DATA_SPARSE flag on flush
+	rand.Seed(42)                                               // Fixed seed for reproducibility
+	writeSizes := []int{16 << 10, 64 << 10, 256 << 10, 1 << 20} // 16KB, 64KB, 256KB, 1MB
+	numWrites := 10000                                          // 10K random writes
+
+	startTime := time.Now()
+
+	for i := 0; i < numWrites; i++ {
+		// Random offset within file
+		offset := rand.Int63n(fileSize - 1<<20) // Leave 1MB at end
+		writeSize := writeSizes[rand.Intn(len(writeSizes))]
+		if offset+int64(writeSize) > fileSize {
+			writeSize = int(fileSize - offset)
+		}
+
+		// Generate random data
+		data := make([]byte, writeSize)
+		rand.Read(data)
+
+		// Write to RandomAccessor
+		err := ra.Write(offset, data)
+		if err != nil {
+			t.Fatalf("Failed to write: %v", err)
+		}
+
+		// Statistics
+		totalWrites++
+		totalBytesWritten += int64(writeSize)
+
+		// Track unique writes (simplified: check if this offset range overlaps with previous writes)
+		writeEnd := offset + int64(writeSize)
+		isUnique := true
+		for prevOffset, prevSize := range writeOffsets {
+			prevEnd := prevOffset + prevSize
+			// Check for overlap
+			if !(writeEnd <= prevOffset || offset >= prevEnd) {
+				// Overlapping write - mark as not unique
+				// This is a simplified calculation - in reality, we'd need more sophisticated tracking
+				isUnique = false
+				break
+			}
+		}
+		if isUnique {
+			writeOffsets[offset] = int64(writeSize)
+			uniqueWriteBytes += int64(writeSize)
+		}
+	}
+
+	// Final flush - Journal will create DataInfo with sparse flag and actual data
+	flushStart := time.Now()
+	flushedDataID, err := ra.Flush()
+	if err != nil {
+		t.Fatalf("Failed to flush: %v", err)
+	}
+	flushDuration := time.Since(flushStart)
+
+	totalDuration := time.Since(startTime)
+
+	// Get the actual data size from the flushed DataInfo
+	actualDataSize := int64(0)
+	if flushedDataID > 0 {
+		dataInfo, err := lh.GetDataInfo(ctx, testBktID, flushedDataID)
+		if err == nil && dataInfo != nil {
+			// For sparse files, OrigSize is the actual written data size
+			actualDataSize = dataInfo.OrigSize
+			t.Logf("Flushed DataInfo: ID=%d, Size=%d, OrigSize=%d, Kind=0x%x, IsSparse=%v",
+				dataInfo.ID, dataInfo.Size, dataInfo.OrigSize, dataInfo.Kind,
+				(dataInfo.Kind&core.DATA_SPARSE) != 0)
+		}
+	} else {
+		// Fallback: manually check chunk data (for debugging)
+		chunkSize := int64(4 << 20) // 4MB
+		numChunks := (fileSize + chunkSize - 1) / chunkSize
+		for sn := 0; sn < int(numChunks); sn++ {
+			data, err := lh.GetData(ctx, testBktID, flushedDataID, sn)
+			if err == nil && len(data) > 0 {
+				actualDataSize += int64(len(data))
+			}
+		}
+	}
+
+	// Report statistics
+	fmt.Printf("\n=== Random Write Performance Test Results ===\n")
+	fmt.Printf("File Size: %d bytes (%.2f GB)\n", fileSize, float64(fileSize)/(1<<30))
+	fmt.Printf("Number of Writes: %d\n", totalWrites)
+	fmt.Printf("Total Bytes Written (requests): %d bytes (%.2f GB)\n", totalBytesWritten, float64(totalBytesWritten)/(1<<30))
+	fmt.Printf("Unique Write Bytes (estimated): %d bytes (%.2f GB)\n", uniqueWriteBytes, float64(uniqueWriteBytes)/(1<<30))
+	fmt.Printf("Actual Data Size (on disk): %d bytes (%.2f GB)\n", actualDataSize, float64(actualDataSize)/(1<<30))
+	fmt.Printf("\nWrite Redundancy Ratio: %.2f%% (total writes / file size)\n", float64(totalBytesWritten)*100/float64(fileSize))
+	fmt.Printf("Unique Write Ratio: %.2f%% (unique writes / file size)\n", float64(uniqueWriteBytes)*100/float64(fileSize))
+	fmt.Printf("Actual Storage Ratio: %.2f%% (actual data / file size)\n", float64(actualDataSize)*100/float64(fileSize))
+	fmt.Printf("Write Efficiency: %.2f%% (actual data / total writes)\n", float64(actualDataSize)*100/float64(totalBytesWritten))
+	fmt.Printf("\nTotal Time: %v\n", totalDuration)
+	fmt.Printf("Flush Time: %v\n", flushDuration)
+	fmt.Printf("Average Write Time: %v\n", totalDuration/time.Duration(totalWrites))
+	fmt.Printf("Write Throughput: %.2f MB/s\n", float64(totalBytesWritten)/(1<<20)/totalDuration.Seconds())
+	fmt.Printf("==========================================\n")
+}
+
+// TestTruncateAndReopenWrite tests the scenario where:
+// 1. A file is uploaded (has data)
+// 2. File is truncated to 0 (simulating overwrite)
+// 3. New data is written immediately
+// This reproduces the bug: "file was renamed from .tmp, RandomAccessor must be recreated"
+func TestTruncateAndReopenWrite(t *testing.T) {
+	Convey("Truncate and reopen write", t, func() {
+		ig := idgen.NewIDGen(nil, 0)
+		testBktID, _ := ig.New()
+		err := core.InitBucketDB(".", testBktID)
+		So(err, ShouldBeNil)
+
+		dma := &core.DefaultMetadataAdapter{
+			DefaultBaseMetadataAdapter: &core.DefaultBaseMetadataAdapter{},
+			DefaultDataMetadataAdapter: &core.DefaultDataMetadataAdapter{},
+		}
+		dma.DefaultBaseMetadataAdapter.SetPath(".")
+		dma.DefaultDataMetadataAdapter.SetPath(".")
+		dda := &core.DefaultDataAdapter{}
+		dda.SetDataPath(".")
+
+		lh := core.NewLocalHandler("", "").(*core.LocalHandler)
+		lh.SetAdapter(dma, dda)
+
+		testCtx, userInfo, _, err := lh.Login(c, "orcas", "orcas")
+		So(err, ShouldBeNil)
+
+		bucket := &core.BucketInfo{
+			ID:       testBktID,
+			Name:     "test_bucket",
+			Type:     1,
+			Quota:    100000000, // 100MB
+			Used:     0,
+			RealUsed: 0,
+		}
+		So(dma.PutBkt(testCtx, []*core.BucketInfo{bucket}), ShouldBeNil)
+		err = dma.PutACL(testCtx, testBktID, userInfo.ID, core.ALL)
+		So(err, ShouldBeNil)
+
+		cfg := &core.Config{
+			DataPath: ".",
+			BasePath: ".",
+		}
+		ofs := NewOrcasFSWithConfig(lh, testCtx, testBktID, cfg)
+
+		Convey("test upload then truncate and write", func() {
+			// Step 1: Create file with initial data (simulating upload)
+			fileID, _ := ig.New()
+			initialDataID, _ := ig.New()
+
+			initialData := make([]byte, 1024*1024) // 1MB
+			for i := range initialData {
+				initialData[i] = byte(i % 256)
+			}
+
+			_, err := lh.PutData(testCtx, testBktID, initialDataID, 0, initialData)
+			So(err, ShouldBeNil)
+
+			fileObj := &core.ObjectInfo{
+				ID:     fileID,
+				PID:    testBktID,
+				Type:   core.OBJ_TYPE_FILE,
+				Name:   "boot.log",
+				DataID: initialDataID,
+				Size:   int64(len(initialData)),
+				MTime:  core.Now(),
+			}
+			_, err = dma.PutObj(testCtx, testBktID, []*core.ObjectInfo{fileObj})
+			So(err, ShouldBeNil)
+
+			// Step 2: Truncate to 0 (simulating file overwrite)
+			ra1, err := NewRandomAccessor(ofs, fileID)
+			So(err, ShouldBeNil)
+
+			_, err = ra1.Truncate(0)
+			So(err, ShouldBeNil)
+
+			fileObjAfterTruncate, err := ra1.getFileObj()
+			So(err, ShouldBeNil)
+			So(fileObjAfterTruncate.Size, ShouldEqual, 0)
+
+			ra1.Close()
+
+			// Step 3: Write new data immediately (simulating new upload)
+			// This should NOT fail with "file was renamed from .tmp"
+			ra2, err := NewRandomAccessor(ofs, fileID)
+			So(err, ShouldBeNil)
+			defer ra2.Close()
+
+			newData := []byte("New content after truncate")
+			err = ra2.Write(0, newData)
+			So(err, ShouldBeNil) // This was failing before the fix
+
+			_, err = ra2.Flush()
+			So(err, ShouldBeNil)
+
+			fileObjAfterWrite, err := ra2.getFileObj()
+			So(err, ShouldBeNil)
+			So(fileObjAfterWrite.Size, ShouldEqual, len(newData))
 		})
 	})
 }

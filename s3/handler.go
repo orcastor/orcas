@@ -17,7 +17,6 @@ import (
 	"github.com/orcastor/orcas/core"
 	"github.com/orcastor/orcas/rpc/middleware"
 	"github.com/orcastor/orcas/s3/util"
-	"github.com/orcastor/orcas/sdk"
 )
 
 var (
@@ -855,7 +854,7 @@ func ListObjects(c *gin.Context) {
 	}
 
 	// Merge pending objects from batch writer
-	batchMgr := sdk.GetBatchWriterForBucket(handler, bktID)
+	batchMgr := util.GetBatchWriterForBucket(handler, bktID)
 	if batchMgr != nil {
 		pendingObjsMap := batchMgr.GetPendingObjects()
 		existingKeys := make(map[string]bool)
@@ -1053,7 +1052,7 @@ func GetObject(c *gin.Context) {
 	obj, err := findObjectByPath(c, bktID, key)
 	if err != nil {
 		// Object not found in database, check batch writer for pending objects
-		batchMgr := sdk.GetBatchWriterForBucket(handler, bktID)
+		batchMgr := util.GetBatchWriterForBucket(handler, bktID)
 		if batchMgr != nil {
 			// Try to find object in pending objects by name
 			fileName := util.FastBase(key)
@@ -1128,7 +1127,7 @@ func GetObject(c *gin.Context) {
 	// First check if object is in batch writer (pending flush)
 	var data []byte
 	var startOffset, readSize int64
-	batchMgr := sdk.GetBatchWriterForBucket(handler, bktID)
+	batchMgr := util.GetBatchWriterForBucket(handler, bktID)
 	if batchMgr != nil {
 		// Try to read from pending buffer
 		data = batchMgr.ReadPendingData(obj.ID)
@@ -1211,7 +1210,7 @@ func GetObject(c *gin.Context) {
 			// Read specific range - need to handle multiple chunks
 			// Get chunk size from bucket configuration
 			bktInfo, err := handler.GetBktInfo(ctx, bktID)
-			chunkSize := int64(4 * 1024 * 1024) // Default 4MB
+			chunkSize := int64(10 * 1024 * 1024) // Default 10MB
 			if err == nil && bktInfo != nil && bktInfo.ChunkSize > 0 {
 				chunkSize = bktInfo.ChunkSize
 			}
@@ -1280,7 +1279,7 @@ func GetObject(c *gin.Context) {
 			// Read entire data - need to read all chunks
 			// Get chunk size from bucket configuration
 			// If GetBktInfo fails, use default chunkSize (4MB)
-			chunkSize := int64(4 * 1024 * 1024) // Default 4MB
+			chunkSize := int64(10 * 1024 * 1024) // Default 10MB
 			bktInfo, bktErr := handler.GetBktInfo(ctx, bktID)
 			if bktErr == nil && bktInfo != nil && bktInfo.ChunkSize > 0 {
 				chunkSize = bktInfo.ChunkSize
@@ -1423,38 +1422,35 @@ func PutObject(c *gin.Context) {
 	instantUploadEnabled := core.IsInstantUploadEnabled()
 
 	if dataSize > 0 {
-		var calcErr error
-		hdrXXH3, xxh3Val, sha256_0, sha256_1, sha256_2, sha256_3, calcErr = sdk.CalculateChecksums(data)
-		if calcErr == nil {
-			checksumsCalculated = true
+		hdrXXH3, xxh3Val, sha256_0, sha256_1, sha256_2, sha256_3 = core.CalculateChecksums(data)
+		checksumsCalculated = true
 
-			// Try instant upload (deduplication) before uploading data
-			// Only if instant upload is enabled via configuration
-			if instantUploadEnabled {
-				// Create DataInfo for Ref
-				dataInfo := &core.DataInfo{
-					OrigSize: dataSize,
-					HdrXXH3:  hdrXXH3,
-					XXH3:     xxh3Val,
-					SHA256_0: sha256_0,
-					SHA256_1: sha256_1,
-					SHA256_2: sha256_2,
-					SHA256_3: sha256_3,
-					Kind:     core.DATA_NORMAL, // Default: no compression/encryption
-				}
+		// Try instant upload (deduplication) before uploading data
+		// Only if instant upload is enabled via configuration
+		if instantUploadEnabled {
+			// Create DataInfo for Ref
+			dataInfo := &core.DataInfo{
+				OrigSize: dataSize,
+				HdrXXH3:  hdrXXH3,
+				XXH3:     xxh3Val,
+				SHA256_0: sha256_0,
+				SHA256_1: sha256_1,
+				SHA256_2: sha256_2,
+				SHA256_3: sha256_3,
+				Kind:     core.DATA_NORMAL, // Default: no compression/encryption
+			}
 
-				// Try instant upload
-				refIDs, err := handler.Ref(ctx, bktID, []*core.DataInfo{dataInfo})
-				if err == nil && len(refIDs) > 0 && refIDs[0] != 0 {
-					if refIDs[0] > 0 {
-						// Instant upload succeeded, use existing DataID from database
-						dataID = refIDs[0]
-					} else {
-						// Negative ID means reference to another element in current batch
-						// This should not happen in S3 PutObject (single file upload)
-						// But we handle it for completeness: skip instant upload, use normal upload
-						// The negative reference will be resolved in PutDataInfo
-					}
+			// Try instant upload
+			refIDs, err := handler.Ref(ctx, bktID, []*core.DataInfo{dataInfo})
+			if err == nil && len(refIDs) > 0 && refIDs[0] != 0 {
+				if refIDs[0] > 0 {
+					// Instant upload succeeded, use existing DataID from database
+					dataID = refIDs[0]
+				} else {
+					// Negative ID means reference to another element in current batch
+					// This should not happen in S3 PutObject (single file upload)
+					// But we handle it for completeness: skip instant upload, use normal upload
+					// The negative reference will be resolved in PutDataInfo
 				}
 			}
 		}
@@ -1476,7 +1472,7 @@ func PutObject(c *gin.Context) {
 
 	if useBatchWrite {
 		// Try to use batch writer
-		batchMgr := sdk.GetBatchWriterForBucket(handler, bktID)
+		batchMgr := util.GetBatchWriterForBucket(handler, bktID)
 		if batchMgr != nil {
 			batchMgr.SetFlushContext(ctx)
 			added, batchDataID, err := batchMgr.AddFile(objID, data, pid, fileName, dataSize, 0) // kind=0: S3 API data is raw, no compression/encryption
@@ -1576,7 +1572,7 @@ func PutObject(c *gin.Context) {
 		if dataID == 0 {
 			// Get chunk size from bucket configuration
 			// Use cache to avoid repeated GetBktInfo queries
-			chunkSize := int64(4 * 1024 * 1024) // Default 4MB
+			chunkSize := int64(10 * 1024 * 1024) // Default 10MB
 			if cached, ok := bucketInfoCache.Get(bktID); ok {
 				if bktInfo, ok := cached.(*core.BucketInfo); ok && bktInfo != nil && bktInfo.ChunkSize > 0 {
 					chunkSize = bktInfo.ChunkSize
@@ -1659,20 +1655,18 @@ func PutObject(c *gin.Context) {
 					}
 				} else if dataSize > 0 {
 					// Fallback: calculate checksums if not already calculated
-					calcHdrXXH3, calcXXH3Val, calcSHA256_0, calcSHA256_1, calcSHA256_2, calcSHA256_3, calcErr := sdk.CalculateChecksums(data)
-					if calcErr == nil {
-						dataInfo = &core.DataInfo{
-							ID:       dataID,
-							Size:     dataSize,
-							OrigSize: dataSize,
-							HdrXXH3:  calcHdrXXH3,
-							XXH3:     calcXXH3Val,
-							SHA256_0: calcSHA256_0,
-							SHA256_1: calcSHA256_1,
-							SHA256_2: calcSHA256_2,
-							SHA256_3: calcSHA256_3,
-							Kind:     core.DATA_NORMAL, // Default: no compression/encryption
-						}
+					calcHdrXXH3, calcXXH3Val, calcSHA256_0, calcSHA256_1, calcSHA256_2, calcSHA256_3 := core.CalculateChecksums(data)
+					dataInfo = &core.DataInfo{
+						ID:       dataID,
+						Size:     dataSize,
+						OrigSize: dataSize,
+						HdrXXH3:  calcHdrXXH3,
+						XXH3:     calcXXH3Val,
+						SHA256_0: calcSHA256_0,
+						SHA256_1: calcSHA256_1,
+						SHA256_2: calcSHA256_2,
+						SHA256_3: calcSHA256_3,
+						Kind:     core.DATA_NORMAL, // Default: no compression/encryption
 					}
 				}
 
@@ -1939,7 +1933,7 @@ func copyObject(c *gin.Context) {
 	}
 
 	// Get chunk size for destination bucket
-	chunkSize := int64(4 * 1024 * 1024) // Default 4MB
+	chunkSize := int64(10 * 1024 * 1024) // Default 10MB
 	bktInfo, err := handler.GetBktInfo(ctx, destBktID)
 	if err == nil && bktInfo != nil && bktInfo.ChunkSize > 0 {
 		chunkSize = bktInfo.ChunkSize
@@ -1953,32 +1947,30 @@ func copyObject(c *gin.Context) {
 	// Only if instant upload is enabled via configuration
 	if dataSize > 0 && core.IsInstantUploadEnabled() {
 		// Calculate checksums for instant upload
-		hdrXXH3, xxh3Val, sha256_0, sha256_1, sha256_2, sha256_3, err := sdk.CalculateChecksums(sourceData)
-		if err == nil {
-			// Create DataInfo for Ref
-			dataInfo := &core.DataInfo{
-				OrigSize: dataSize,
-				HdrXXH3:  hdrXXH3,
-				XXH3:     xxh3Val,
-				SHA256_0: sha256_0,
-				SHA256_1: sha256_1,
-				SHA256_2: sha256_2,
-				SHA256_3: sha256_3,
-				Kind:     core.DATA_NORMAL, // Default: no compression/encryption
-			}
+		hdrXXH3, xxh3Val, sha256_0, sha256_1, sha256_2, sha256_3 := core.CalculateChecksums(sourceData)
+		// Create DataInfo for Ref
+		dataInfo := &core.DataInfo{
+			OrigSize: dataSize,
+			HdrXXH3:  hdrXXH3,
+			XXH3:     xxh3Val,
+			SHA256_0: sha256_0,
+			SHA256_1: sha256_1,
+			SHA256_2: sha256_2,
+			SHA256_3: sha256_3,
+			Kind:     core.DATA_NORMAL, // Default: no compression/encryption
+		}
 
-			// Try instant upload
-			refIDs, err := handler.Ref(ctx, destBktID, []*core.DataInfo{dataInfo})
-			if err == nil && len(refIDs) > 0 && refIDs[0] != 0 {
-				if refIDs[0] > 0 {
-					// Instant upload succeeded, use existing DataID from database
-					dataID = refIDs[0]
-				} else {
-					// Negative ID means reference to another element in current batch
-					// This should not happen in S3 CopyObject (single file copy)
-					// But we handle it for completeness: skip instant upload, use normal upload
-					// The negative reference will be resolved in PutDataInfo
-				}
+		// Try instant upload
+		refIDs, err := handler.Ref(ctx, destBktID, []*core.DataInfo{dataInfo})
+		if err == nil && len(refIDs) > 0 && refIDs[0] != 0 {
+			if refIDs[0] > 0 {
+				// Instant upload succeeded, use existing DataID from database
+				dataID = refIDs[0]
+			} else {
+				// Negative ID means reference to another element in current batch
+				// This should not happen in S3 CopyObject (single file copy)
+				// But we handle it for completeness: skip instant upload, use normal upload
+				// The negative reference will be resolved in PutDataInfo
 			}
 		}
 	}
@@ -2175,7 +2167,7 @@ func moveObject(c *gin.Context) {
 		}
 
 		// Get chunk size for destination bucket
-		chunkSize := int64(4 * 1024 * 1024) // Default 4MB
+		chunkSize := int64(10 * 1024 * 1024) // Default 10MB
 		bktInfo, err := handler.GetBktInfo(ctx, destBktID)
 		if err == nil && bktInfo != nil && bktInfo.ChunkSize > 0 {
 			chunkSize = bktInfo.ChunkSize
@@ -2189,32 +2181,31 @@ func moveObject(c *gin.Context) {
 		// Only if instant upload is enabled via configuration
 		if dataSize > 0 && core.IsInstantUploadEnabled() {
 			// Calculate checksums for instant upload
-			hdrXXH3, xxh3Val, sha256_0, sha256_1, sha256_2, sha256_3, err := sdk.CalculateChecksums(sourceData)
-			if err == nil {
-				// Create DataInfo for Ref
-				dataInfo := &core.DataInfo{
-					OrigSize: dataSize,
-					HdrXXH3:  hdrXXH3,
-					XXH3:     xxh3Val,
-					SHA256_0: sha256_0,
-					SHA256_1: sha256_1,
-					SHA256_2: sha256_2,
-					SHA256_3: sha256_3,
-					Kind:     core.DATA_NORMAL, // Default: no compression/encryption
-				}
+			hdrXXH3, xxh3Val, sha256_0, sha256_1, sha256_2, sha256_3 := core.CalculateChecksums(sourceData)
 
-				// Try instant upload
-				refIDs, err := handler.Ref(ctx, destBktID, []*core.DataInfo{dataInfo})
-				if err == nil && len(refIDs) > 0 && refIDs[0] != 0 {
-					if refIDs[0] > 0 {
-						// Instant upload succeeded, use existing DataID from database
-						dataID = refIDs[0]
-					} else {
-						// Negative ID means reference to another element in current batch
-						// This should not happen in S3 MoveObject (single file move)
-						// But we handle it for completeness: skip instant upload, use normal upload
-						// The negative reference will be resolved in PutDataInfo
-					}
+			// Create DataInfo for Ref
+			dataInfo := &core.DataInfo{
+				OrigSize: dataSize,
+				HdrXXH3:  hdrXXH3,
+				XXH3:     xxh3Val,
+				SHA256_0: sha256_0,
+				SHA256_1: sha256_1,
+				SHA256_2: sha256_2,
+				SHA256_3: sha256_3,
+				Kind:     core.DATA_NORMAL, // Default: no compression/encryption
+			}
+
+			// Try instant upload
+			refIDs, err := handler.Ref(ctx, destBktID, []*core.DataInfo{dataInfo})
+			if err == nil && len(refIDs) > 0 && refIDs[0] != 0 {
+				if refIDs[0] > 0 {
+					// Instant upload succeeded, use existing DataID from database
+					dataID = refIDs[0]
+				} else {
+					// Negative ID means reference to another element in current batch
+					// This should not happen in S3 MoveObject (single file move)
+					// But we handle it for completeness: skip instant upload, use normal upload
+					// The negative reference will be resolved in PutDataInfo
 				}
 			}
 		}
@@ -2498,7 +2489,7 @@ func UploadPart(c *gin.Context) {
 
 	// Get chunk size from bucket configuration
 	// If GetBktInfo fails, use default chunkSize (4MB)
-	chunkSize := int64(4 * 1024 * 1024) // Default 4MB
+	chunkSize := int64(10 * 1024 * 1024) // Default 10MB
 	bktInfo, err := handler.GetBktInfo(ctx, bktID)
 	if err == nil && bktInfo != nil && bktInfo.ChunkSize > 0 {
 		chunkSize = bktInfo.ChunkSize
@@ -2660,7 +2651,7 @@ func CompleteMultipartUpload(c *gin.Context) {
 	// Read all parts and concatenate
 	// Get chunk size from bucket configuration
 	// If GetBktInfo fails, use default chunkSize (4MB)
-	chunkSize := int64(4 * 1024 * 1024) // Default 4MB
+	chunkSize := int64(10 * 1024 * 1024) // Default 10MB
 	bktInfo, err := handler.GetBktInfo(ctx, bktID)
 	if err == nil && bktInfo != nil && bktInfo.ChunkSize > 0 {
 		chunkSize = bktInfo.ChunkSize
