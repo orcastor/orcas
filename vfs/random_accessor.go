@@ -6739,6 +6739,49 @@ func (ra *RandomAccessor) flushJournal() bool {
 		return false
 	}
 
+	// Check for atomic replace scenario: if there's a pending deletion for this file,
+	// it means there's an atomic replace operation in progress. In this case, we should
+	// cancel the deletion and merge versions to ensure file integrity.
+	// This is important for sparse files with journal writes that may have non-sequential writes.
+	if ra.fs.atomicReplaceMgr != nil {
+		if pd, canceled := ra.fs.atomicReplaceMgr.CheckAndCancelDeletion(ra.fs.bktID, fileObj.PID, fileObj.Name); canceled {
+			DebugLog("[VFS flushJournal] Detected atomic replace during flush: fileID=%d, oldFileID=%d, versions=%d",
+				ra.fileID, pd.FileID, len(pd.Versions))
+
+			// Merge versions from old file to current file if needed
+			if len(pd.Versions) > 0 {
+				// Get all version objects
+				versions, err := ra.fs.h.Get(ra.fs.c, ra.fs.bktID, pd.Versions)
+				if err != nil {
+					DebugLog("[VFS flushJournal] WARNING: Failed to get versions during atomic replace: %v", err)
+				} else {
+					// Change PID from oldFileID to newFileID
+					for _, v := range versions {
+						v.PID = ra.fileID
+					}
+
+					// Update versions
+					_, err = ra.fs.h.Put(ra.fs.c, ra.fs.bktID, versions)
+					if err != nil {
+						DebugLog("[VFS flushJournal] WARNING: Failed to merge versions during atomic replace: %v", err)
+						// Continue anyway - flush should proceed
+					} else {
+						DebugLog("[VFS flushJournal] Merged %d versions from oldFileID=%d to fileID=%d",
+							len(versions), pd.FileID, ra.fileID)
+					}
+				}
+			}
+
+			// Delete old file object if it's different from current file
+			if pd.FileID != ra.fileID {
+				if err := ra.fs.h.Delete(ra.fs.c, ra.fs.bktID, pd.FileID); err != nil {
+					DebugLog("[VFS flushJournal] WARNING: Failed to delete old file object: oldFileID=%d, error=%v", pd.FileID, err)
+					// Non-fatal - old file object can be cleaned up later
+				}
+			}
+		}
+	}
+
 	// Create new version
 	lh, ok := ra.fs.h.(*core.LocalHandler)
 	if !ok {
