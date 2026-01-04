@@ -5,6 +5,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -181,18 +182,37 @@ func (wcm *WALCheckpointManager) checkpointBucket(bktID int64) error {
 		return nil
 	}
 
-	// 获取数据库连接
+	// 获取数据库写连接（checkpoint 需要写权限）
 	db, err := core.GetWriteDB(bktDirPath)
 	if err != nil {
 		return fmt.Errorf("failed to get database connection: %w", err)
 	}
 	// 注意：不要关闭连接，它来自连接池
 
+	// 检查数据库文件权限
+	dbFilePath := filepath.Join(bktDirPath, ".db")
+	if info, err := os.Stat(dbFilePath); err == nil {
+		// 检查文件权限
+		if info.Mode().Perm()&0200 == 0 {
+			log.Printf("[WAL Checkpoint Manager] WARNING: Database file is not writable for bucket %d (permissions: %v)", 
+				bktID, info.Mode().Perm())
+			return nil
+		}
+	}
+
 	// 执行 WAL checkpoint (TRUNCATE 模式)
 	// TRUNCATE 模式会将 WAL 内容写入主数据库文件，并截断 WAL 文件
 	var busy, logPages, checkpointed int
 	err = db.QueryRow("PRAGMA wal_checkpoint(TRUNCATE)").Scan(&busy, &logPages, &checkpointed)
 	if err != nil {
+		errMsg := err.Error()
+		// 如果是只读错误，记录警告但不返回错误（避免日志污染）
+		if strings.Contains(errMsg, "readonly") || 
+		   strings.Contains(errMsg, "read-only") || 
+		   strings.Contains(errMsg, "attempt to write a readonly database") {
+			log.Printf("[WAL Checkpoint Manager] WARNING: Cannot checkpoint bucket %d: database is read-only (this may be due to file permissions or filesystem mount options)", bktID)
+			return nil
+		}
 		return fmt.Errorf("failed to execute checkpoint: %w", err)
 	}
 

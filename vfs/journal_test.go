@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/orca-zhang/idgen"
 	"github.com/orcastor/orcas/core"
 )
 
@@ -1485,4 +1486,246 @@ func TestSmallFileTruncateRewrite(t *testing.T) {
 			t.Logf("✓ New content verified after truncate!")
 		}
 	})
+}
+
+// TestJournalReadOverlay tests that reads correctly apply journal overlay
+// This reproduces the Office file modification issue where:
+// 1. File is opened and read successfully
+// 2. File is modified with journal writes (without flush)
+// 3. Subsequent reads should see the modified data (journal overlay)
+// 4. Bug was: reads went directly to base data without journal overlay
+func TestJournalReadOverlay(t *testing.T) {
+	// Setup test environment
+	ig := idgen.NewIDGen(nil, 0)
+	testBktID, _ := ig.New()
+	err := core.InitBucketDB(".", testBktID)
+	if err != nil {
+		t.Fatalf("Failed to init bucket DB: %v", err)
+	}
+
+	dma := &core.DefaultMetadataAdapter{
+		DefaultBaseMetadataAdapter: &core.DefaultBaseMetadataAdapter{},
+		DefaultDataMetadataAdapter: &core.DefaultDataMetadataAdapter{},
+	}
+	dma.DefaultBaseMetadataAdapter.SetPath(".")
+	dma.DefaultDataMetadataAdapter.SetPath(".")
+	dda := &core.DefaultDataAdapter{}
+
+	// Create LocalHandler
+	lh := core.NewLocalHandler("", "").(*core.LocalHandler)
+	lh.SetAdapter(dma, dda)
+
+	// Login to get context
+	testCtx, userInfo, _, err := lh.Login(context.Background(), "orcas", "orcas")
+	if err != nil {
+		t.Fatalf("Failed to login: %v", err)
+	}
+
+	// Create bucket
+	bucket := &core.BucketInfo{
+		ID:       testBktID,
+		Name:     "test_journal_bucket",
+		Type:     1,
+		Quota:    1000000000,
+		Used:     0,
+		RealUsed: 0,
+	}
+	if err := dma.PutBkt(testCtx, []*core.BucketInfo{bucket}); err != nil {
+		t.Fatalf("Failed to create bucket: %v", err)
+	}
+	if err := dma.PutACL(testCtx, testBktID, userInfo.ID, core.ALL); err != nil {
+		t.Fatalf("Failed to set ACL: %v", err)
+	}
+
+	// Create file object (empty initially, will write data via RandomAccessor)
+	fileID, _ := ig.New()
+	fileObj := &core.ObjectInfo{
+		ID:    fileID,
+		PID:   testBktID,
+		Type:  core.OBJ_TYPE_FILE,
+		Name:  "test.ppt",
+		Size:  0,
+		MTime: core.Now(),
+	}
+	if _, err := dma.PutObj(testCtx, testBktID, []*core.ObjectInfo{fileObj}); err != nil {
+		t.Fatalf("Failed to create file object: %v", err)
+	}
+
+	// Create VFS
+	ofs := NewOrcasFS(lh, testCtx, testBktID)
+	t.Logf("Created test file: fileID=%d", fileID)
+
+	// Create RandomAccessor
+	ra, err := NewRandomAccessor(ofs, fileID)
+	if err != nil {
+		t.Fatalf("Failed to create RandomAccessor: %v", err)
+	}
+	defer ra.Close()
+
+	// Step 1: Create initial file content (simulating an Office file)
+	// 8MB file with recognizable pattern
+	fileSize := int64(8 * 1024 * 1024)
+	originalData := make([]byte, fileSize)
+	for i := range originalData {
+		originalData[i] = byte(i % 256)
+	}
+
+	// Write initial data and flush (simulating file upload)
+	if err := ra.Write(0, originalData); err != nil {
+		t.Fatalf("Failed to write initial data: %v", err)
+	}
+	if _, err := ra.Flush(); err != nil {
+		t.Fatalf("Failed to flush initial data: %v", err)
+	}
+	t.Logf("✓ Initial file created: size=%d", fileSize)
+
+	// Step 2: Read initial data to verify it's correct
+	data, err := ra.Read(0, 4096)
+	if err != nil {
+		t.Fatalf("Failed to read initial data: %v", err)
+	}
+	if len(data) != 4096 {
+		t.Fatalf("Expected 4096 bytes, got %d", len(data))
+	}
+	if !bytes.Equal(data, originalData[:4096]) {
+		t.Fatalf("Initial read data mismatch")
+	}
+	t.Logf("✓ Initial read successful: read %d bytes at offset 0", len(data))
+
+	// Step 3: Perform random writes (simulating Office modifications)
+	// These writes create journal entries WITHOUT flushing
+
+	// Write 1: Modify 512 bytes at offset 7971328 (similar to Office pattern from logs)
+	writeOffset1 := int64(7971328)
+	writeData1 := make([]byte, 512)
+	for i := range writeData1 {
+		writeData1[i] = 0xFF // Distinct pattern
+	}
+	if err := ra.Write(writeOffset1, writeData1); err != nil {
+		t.Fatalf("Failed to write 1: %v", err)
+	}
+	t.Logf("✓ Write 1 successful: wrote %d bytes at offset %d", len(writeData1), writeOffset1)
+
+	// Write 2: Modify 2560 bytes at offset 7968768 (overlapping/adjacent)
+	writeOffset2 := int64(7968768)
+	writeData2 := make([]byte, 2560)
+	for i := range writeData2 {
+		writeData2[i] = 0xAA // Another distinct pattern
+	}
+	if err := ra.Write(writeOffset2, writeData2); err != nil {
+		t.Fatalf("Failed to write 2: %v", err)
+	}
+	t.Logf("✓ Write 2 successful: wrote %d bytes at offset %d", len(writeData2), writeOffset2)
+
+	// Write 3: Modify 512 bytes at offset 0 (beginning of file)
+	writeOffset3 := int64(0)
+	writeData3 := make([]byte, 512)
+	for i := range writeData3 {
+		writeData3[i] = 0x55 // Yet another distinct pattern
+	}
+	if err := ra.Write(writeOffset3, writeData3); err != nil {
+		t.Fatalf("Failed to write 3: %v", err)
+	}
+	t.Logf("✓ Write 3 successful: wrote %d bytes at offset %d", len(writeData3), writeOffset3)
+
+	// Step 4: Read back the modified regions WITHOUT flushing
+	// This is the CRITICAL test - reads should see journal overlay
+
+	// Test read at write 1 location using RandomAccessor.Read
+	data1, err := ra.Read(writeOffset1, 512)
+	if err != nil {
+		t.Fatalf("Failed to read after write 1: %v", err)
+	}
+	if len(data1) != 512 {
+		t.Fatalf("Expected 512 bytes, got %d", len(data1))
+	}
+	if !bytes.Equal(data1, writeData1) {
+		t.Errorf("❌ FAILED: RandomAccessor.Read after write 1 doesn't match written data")
+		t.Errorf("Expected all 0xFF, got first 16 bytes: %x", data1[:16])
+		t.Fatalf("Journal overlay not applied for write 1")
+	}
+	t.Logf("✓ RandomAccessor.Read after write 1 matches: journal overlay working")
+
+	// Test read at write 2 location
+	data2, err := ra.Read(writeOffset2, 2560)
+	if err != nil {
+		t.Fatalf("Failed to read after write 2: %v", err)
+	}
+	if len(data2) != 2560 {
+		t.Fatalf("Expected 2560 bytes, got %d", len(data2))
+	}
+	if !bytes.Equal(data2, writeData2) {
+		t.Errorf("❌ FAILED: RandomAccessor.Read after write 2 doesn't match written data")
+		t.Errorf("Expected all 0xAA, got first 16 bytes: %x", data2[:16])
+		t.Fatalf("Journal overlay not applied for write 2")
+	}
+	t.Logf("✓ RandomAccessor.Read after write 2 matches: journal overlay working")
+
+	// Test read at write 3 location
+	data3, err := ra.Read(writeOffset3, 512)
+	if err != nil {
+		t.Fatalf("Failed to read after write 3: %v", err)
+	}
+	if len(data3) != 512 {
+		t.Fatalf("Expected 512 bytes, got %d", len(data3))
+	}
+	if !bytes.Equal(data3, writeData3) {
+		t.Errorf("❌ FAILED: RandomAccessor.Read after write 3 doesn't match written data")
+		t.Errorf("Expected all 0x55, got first 16 bytes: %x", data3[:16])
+		t.Fatalf("Journal overlay not applied for write 3")
+	}
+	t.Logf("✓ RandomAccessor.Read after write 3 matches: journal overlay working")
+
+	// Read unmodified region to ensure base data still works
+	unmodifiedOffset := int64(4 * 1024 * 1024) // 4MB offset (not modified)
+	data4, err := ra.Read(unmodifiedOffset, 4096)
+	if err != nil {
+		t.Fatalf("Failed to read unmodified region: %v", err)
+	}
+	if len(data4) != 4096 {
+		t.Fatalf("Expected 4096 bytes, got %d", len(data4))
+	}
+	expectedData := originalData[unmodifiedOffset : unmodifiedOffset+4096]
+	if !bytes.Equal(data4, expectedData) {
+		t.Fatalf("Unmodified region data mismatch - journal corrupted base data")
+	}
+	t.Logf("✓ Unmodified region still correct: base data intact")
+
+	// Step 5: Test spanning read (across modified and unmodified regions)
+	// Note: write2 (offset 7968768, len 2560) and write1 (offset 7971328, len 512) are adjacent
+	// write2 ends at 7971328, write1 starts at 7971328, write1 ends at 7971840
+	spanOffset := writeOffset2 - 1024 // Start before modified region
+	spanSize := 8192                  // Read across modified region
+	dataSpan, err := ra.Read(spanOffset, spanSize)
+	if err != nil {
+		t.Fatalf("Failed to read spanning region: %v", err)
+	}
+	if len(dataSpan) != spanSize {
+		t.Fatalf("Expected %d bytes, got %d", spanSize, len(dataSpan))
+	}
+
+	// Verify the spanning read
+	// First 1024 bytes should be original data
+	if !bytes.Equal(dataSpan[:1024], originalData[spanOffset:spanOffset+1024]) {
+		t.Fatalf("Spanning read: pre-modified region mismatch")
+	}
+	// Next 2560 bytes should be writeData2
+	if !bytes.Equal(dataSpan[1024:1024+2560], writeData2) {
+		t.Errorf("❌ FAILED: Spanning read: modified region doesn't match")
+		t.Errorf("Expected 0xAA, got: %x", dataSpan[1024:1024+16])
+		t.Fatalf("Journal overlay not applied in spanning read")
+	}
+	// Next 512 bytes should be writeData1 (adjacent write)
+	if !bytes.Equal(dataSpan[1024+2560:1024+2560+512], writeData1) {
+		t.Fatalf("Spanning read: write1 region mismatch")
+	}
+	// Remaining bytes should be original data
+	remainingStart := spanOffset + 1024 + 2560 + 512
+	remainingLen := spanSize - 1024 - 2560 - 512
+	if !bytes.Equal(dataSpan[1024+2560+512:], originalData[remainingStart:remainingStart+int64(remainingLen)]) {
+		t.Fatalf("Spanning read: post-modified region mismatch")
+	}
+	t.Logf("✓ Spanning read correct: journal overlay applied correctly")
+
+	t.Logf("\n✅ All RandomAccessor.Read tests passed: Journal overlay working")
 }

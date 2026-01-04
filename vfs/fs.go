@@ -2798,7 +2798,11 @@ func (n *OrcasNode) Rename(ctx context.Context, name string, newParent fs.InodeE
 
 	// Check for atomic replace pattern (must check before other interceptions)
 	// If there's a pending deletion for the target name, cancel it and merge versions
-	if n.fs.atomicReplaceMgr != nil && sourceObj.Type == core.OBJ_TYPE_FILE {
+	// IMPORTANT: Skip atomic replace detection if target is recycle bin (this is a normal delete operation)
+	newParentNameLower := strings.ToLower(newParentObj.Name)
+	isTargetRecycleBin := (newParentNameLower == ".recycle" || newParentNameLower == ".trash")
+
+	if n.fs.atomicReplaceMgr != nil && sourceObj.Type == core.OBJ_TYPE_FILE && !isTargetRecycleBin {
 		if pd, canceled := n.fs.atomicReplaceMgr.CheckAndCancelDeletion(n.fs.bktID, newParentObj.ID, newName); canceled {
 			DebugLog("[VFS Rename] Detected atomic replace pattern: oldName=%s, newName=%s, oldFileID=%d, newFileID=%d",
 				name, newName, pd.FileID, sourceID)
@@ -2814,6 +2818,8 @@ func (n *OrcasNode) Rename(ctx context.Context, name string, newParent fs.InodeE
 				name, newName, len(pd.Versions))
 			return 0
 		}
+	} else if isTargetRecycleBin {
+		DebugLog("[VFS Rename] Skipping atomic replace detection: target is recycle bin (normal delete operation)")
 	}
 
 	// Determine if source is .tmp file that will lose its .tmp suffix
@@ -3490,6 +3496,37 @@ func (n *OrcasNode) readImpl(ctx context.Context, dest []byte, off int64) (fuse.
 		return fuse.ReadResultData(nil), 0
 	}
 
+	// CRITICAL FIX: Check if there's an active RandomAccessor with journal
+	// If so, use it to read (applies journal overlay on top of base data)
+	// This is essential for Office files that read back their own writes before flushing
+	if n.fs != nil {
+		if ra := n.fs.getRandomAccessorByFileID(obj.ID); ra != nil {
+			ra.journalMu.RLock()
+			hasJournal := ra.journal != nil
+			ra.journalMu.RUnlock()
+			
+			if hasJournal {
+				DebugLog("[VFS Read] Using RandomAccessor with journal: objID=%d, offset=%d, size=%d", obj.ID, off, len(dest))
+				data, err := ra.Read(off, len(dest))
+				if err != nil && err != io.EOF {
+					DebugLog("[VFS Read] ERROR: RandomAccessor read failed: objID=%d, offset=%d, size=%d, error=%v", obj.ID, off, len(dest), err)
+					return nil, syscall.EIO
+				}
+				
+				// Copy data to dest buffer
+				nRead := copy(dest, data)
+				
+				// Create result copy (required by go-fuse v2)
+				resultData := make([]byte, nRead)
+				copy(resultData, dest[:nRead])
+				
+				DebugLog("[VFS Read] Successfully read with journal overlay: objID=%d, offset=%d, requested=%d, read=%d", obj.ID, off, len(dest), nRead)
+				return fuse.ReadResultData(resultData), 0
+			}
+		}
+	}
+
+	// No active journal, use regular dataReader (chunkReader)
 	// Get dataReader (cached by dataID, one per file)
 	// DebugLog("[VFS Read] Getting DataReader: objID=%d, DataID=%d, offset=%d", obj.ID, obj.DataID, off)
 	reader, errno := n.getDataReader(off)
