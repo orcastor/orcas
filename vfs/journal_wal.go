@@ -124,8 +124,8 @@ func (jw *JournalWAL) CreateSnapshot(journal *Journal) error {
 	jw.mu.Lock()
 	defer jw.mu.Unlock()
 
-	journal.entriesMu.RLock()
-	defer journal.entriesMu.RUnlock()
+	// NOTE: Do not acquire journal.entriesMu here - caller already holds it
+	// to avoid deadlock when called from Journal.CreateJournalSnapshot
 
 	snapshot := &JournalWALSnapshot{
 		SnapshotID:  time.Now().UnixNano(),

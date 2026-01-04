@@ -541,7 +541,7 @@ func InitSnapshotTables(db *sql.DB) error {
 
 // BeginTransaction begins a database transaction
 func (dma *DefaultMetadataAdapter) BeginTransaction(ctx Ctx) (Transaction, error) {
-	db, err := GetWriteDB(dma.DefaultBaseMetadataAdapter.basePath, dma.DefaultBaseMetadataAdapter.dbKey)
+	db, err := GetWriteDB(dma.DefaultBaseMetadataAdapter.basePath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get write DB: %w", err)
 	}
@@ -569,7 +569,7 @@ func (st *sqlTransaction) Rollback() error {
 
 // InsertBucketSnapshot inserts a new bucket snapshot
 func (dma *DefaultMetadataAdapter) InsertBucketSnapshot(ctx Ctx, snapshot *BucketSnapshot) (int64, error) {
-	db, err := GetWriteDB(dma.DefaultBaseMetadataAdapter.basePath, dma.DefaultBaseMetadataAdapter.dbKey)
+	db, err := GetWriteDB(dma.DefaultBaseMetadataAdapter.basePath)
 	if err != nil {
 		return 0, err
 	}
@@ -628,7 +628,7 @@ func (dma *DefaultMetadataAdapter) InsertBucketSnapshotTx(ctx Ctx, tx Transactio
 
 // UpdateSnapshotStatus updates snapshot status
 func (dma *DefaultMetadataAdapter) UpdateSnapshotStatus(ctx Ctx, snapshotID int64, status SnapshotStatus) error {
-	db, err := GetWriteDB(dma.DefaultBaseMetadataAdapter.basePath, dma.DefaultBaseMetadataAdapter.dbKey)
+	db, err := GetWriteDB(dma.DefaultBaseMetadataAdapter.basePath)
 	if err != nil {
 		return err
 	}
@@ -639,7 +639,7 @@ func (dma *DefaultMetadataAdapter) UpdateSnapshotStatus(ctx Ctx, snapshotID int6
 
 // UpdateSnapshotStats updates snapshot statistics
 func (dma *DefaultMetadataAdapter) UpdateSnapshotStats(ctx Ctx, snapshotID int64, fileCount, totalSize int64, status SnapshotStatus) error {
-	db, err := GetWriteDB(dma.DefaultBaseMetadataAdapter.basePath, dma.DefaultBaseMetadataAdapter.dbKey)
+	db, err := GetWriteDB(dma.DefaultBaseMetadataAdapter.basePath)
 	if err != nil {
 		return err
 	}
@@ -668,7 +668,7 @@ func (dma *DefaultMetadataAdapter) UpdateSnapshotStatsTx(ctx Ctx, tx Transaction
 
 // GetBucketSnapshot gets a snapshot by ID
 func (dma *DefaultMetadataAdapter) GetBucketSnapshot(ctx Ctx, snapshotID int64) (*BucketSnapshot, error) {
-	db, err := GetReadDB(dma.DefaultBaseMetadataAdapter.basePath, dma.DefaultBaseMetadataAdapter.dbKey)
+	db, err := GetReadDB(dma.DefaultBaseMetadataAdapter.basePath)
 	if err != nil {
 		return nil, err
 	}
@@ -703,7 +703,7 @@ func (dma *DefaultMetadataAdapter) GetBucketSnapshot(ctx Ctx, snapshotID int64) 
 
 // GetBucketSnapshotByName gets a snapshot by bucket ID and name
 func (dma *DefaultMetadataAdapter) GetBucketSnapshotByName(ctx Ctx, bktID int64, name string) (*BucketSnapshot, error) {
-	db, err := GetReadDB(dma.DefaultBaseMetadataAdapter.basePath, dma.DefaultBaseMetadataAdapter.dbKey)
+	db, err := GetReadDB(dma.DefaultBaseMetadataAdapter.basePath)
 	if err != nil {
 		return nil, err
 	}
@@ -738,7 +738,7 @@ func (dma *DefaultMetadataAdapter) GetBucketSnapshotByName(ctx Ctx, bktID int64,
 
 // ListBucketSnapshots lists snapshots for a bucket
 func (dma *DefaultMetadataAdapter) ListBucketSnapshots(ctx Ctx, bktID int64, limit, offset int) ([]*BucketSnapshot, error) {
-	db, err := GetReadDB(dma.DefaultBaseMetadataAdapter.basePath, dma.DefaultBaseMetadataAdapter.dbKey)
+	db, err := GetReadDB(dma.DefaultBaseMetadataAdapter.basePath)
 	if err != nil {
 		return nil, err
 	}
@@ -789,7 +789,7 @@ func (dma *DefaultMetadataAdapter) ListBucketSnapshots(ctx Ctx, bktID int64, lim
 
 // DeleteBucketSnapshot deletes a snapshot
 func (dma *DefaultMetadataAdapter) DeleteBucketSnapshot(ctx Ctx, snapshotID int64) error {
-	db, err := GetWriteDB(dma.DefaultBaseMetadataAdapter.basePath, dma.DefaultBaseMetadataAdapter.dbKey)
+	db, err := GetWriteDB(dma.DefaultBaseMetadataAdapter.basePath)
 	if err != nil {
 		return err
 	}
@@ -802,7 +802,7 @@ func (dma *DefaultMetadataAdapter) DeleteBucketSnapshot(ctx Ctx, snapshotID int6
 func (dma *DefaultMetadataAdapter) CopyObjectsToSnapshot(ctx Ctx, snapshotID, bktID int64) (fileCount, totalSize int64, err error) {
 	// Get bucket database path
 	bktPath := filepath.Join(dma.DefaultDataMetadataAdapter.dataPath, fmt.Sprint(bktID))
-	bktDB, err := GetWriteDB(bktPath, dma.DefaultBaseMetadataAdapter.dbKey)
+	bktDB, err := GetWriteDB(bktPath)
 	if err != nil {
 		return 0, 0, fmt.Errorf("failed to get bucket DB: %w", err)
 	}
@@ -844,7 +844,7 @@ func (dma *DefaultMetadataAdapter) CopyObjectsToSnapshotTx(ctx Ctx, tx Transacti
 func (dma *DefaultMetadataAdapter) GetSnapshotObjects(ctx Ctx, snapshotID int64, prefix string, limit, offset int) ([]*SnapshotObject, error) {
 	// Determine which database contains the snapshot_object table
 	// For now, assume it's in the main database
-	db, err := GetReadDB(dma.DefaultBaseMetadataAdapter.basePath, dma.DefaultBaseMetadataAdapter.dbKey)
+	db, err := GetReadDB(dma.DefaultBaseMetadataAdapter.basePath)
 	if err != nil {
 		return nil, err
 	}
@@ -895,7 +895,7 @@ func (dma *DefaultMetadataAdapter) GetObjectsByVersion(ctx Ctx, bktID, version i
 	// For lazy mode, we query objects that existed at the time of the snapshot
 	// This is a simplified implementation - in production, you'd need version tracking
 	bktPath := filepath.Join(dma.DefaultDataMetadataAdapter.dataPath, fmt.Sprint(bktID))
-	db, err := GetReadDB(bktPath, dma.DefaultBaseMetadataAdapter.dbKey)
+	db, err := GetReadDB(bktPath)
 	if err != nil {
 		return nil, err
 	}
@@ -943,7 +943,7 @@ func (dma *DefaultMetadataAdapter) GetObjectsByVersion(ctx Ctx, bktID, version i
 
 // DeleteSnapshotObjects deletes snapshot objects
 func (dma *DefaultMetadataAdapter) DeleteSnapshotObjects(ctx Ctx, snapshotID int64) error {
-	db, err := GetWriteDB(dma.DefaultBaseMetadataAdapter.basePath, dma.DefaultBaseMetadataAdapter.dbKey)
+	db, err := GetWriteDB(dma.DefaultBaseMetadataAdapter.basePath)
 	if err != nil {
 		return err
 	}
@@ -955,7 +955,7 @@ func (dma *DefaultMetadataAdapter) DeleteSnapshotObjects(ctx Ctx, snapshotID int
 // MarkBucketObjectsAsDeleted marks all objects in a bucket as deleted
 func (dma *DefaultMetadataAdapter) MarkBucketObjectsAsDeleted(ctx Ctx, bktID int64) error {
 	bktPath := filepath.Join(dma.DefaultDataMetadataAdapter.dataPath, fmt.Sprint(bktID))
-	db, err := GetWriteDB(bktPath, dma.DefaultBaseMetadataAdapter.dbKey)
+	db, err := GetWriteDB(bktPath)
 	if err != nil {
 		return err
 	}
@@ -973,13 +973,13 @@ func (dma *DefaultMetadataAdapter) MarkBucketObjectsAsDeletedTx(ctx Ctx, tx Tran
 // RestoreObjectsFromSnapshot restores objects from a snapshot
 func (dma *DefaultMetadataAdapter) RestoreObjectsFromSnapshot(ctx Ctx, snapshotID, targetBktID int64) error {
 	bktPath := filepath.Join(dma.DefaultDataMetadataAdapter.dataPath, fmt.Sprint(targetBktID))
-	db, err := GetWriteDB(bktPath, dma.DefaultBaseMetadataAdapter.dbKey)
+	db, err := GetWriteDB(bktPath)
 	if err != nil {
 		return err
 	}
 
 	// Get snapshot objects from main DB
-	mainDB, err := GetReadDB(dma.DefaultBaseMetadataAdapter.basePath, dma.DefaultBaseMetadataAdapter.dbKey)
+	mainDB, err := GetReadDB(dma.DefaultBaseMetadataAdapter.basePath)
 	if err != nil {
 		return err
 	}
@@ -1028,7 +1028,7 @@ func (dma *DefaultMetadataAdapter) RestoreObjectsFromSnapshotTx(ctx Ctx, tx Tran
 func (dda *DefaultDataAdapter) MarkDataAsShared(ctx Ctx, bktID, snapshotID int64) error {
 	// Mark all data blocks in this bucket as shared
 	bktPath := filepath.Join(dda.dataPath, fmt.Sprint(bktID))
-	db, err := GetWriteDB(bktPath, "")
+	db, err := GetWriteDB(bktPath)
 	if err != nil {
 		return fmt.Errorf("failed to get bucket DB: %w", err)
 	}
@@ -1086,7 +1086,7 @@ func (dda *DefaultDataAdapter) CleanupUnreferencedData(ctx Ctx, bktID int64) err
 func (dda *DefaultDataAdapter) WriteWithCOW(ctx Ctx, bktID, objID int64, data []byte) (int64, error) {
 	// Get current data ID for this object
 	bktPath := filepath.Join(dda.dataPath, fmt.Sprint(bktID))
-	db, err := GetReadDB(bktPath, "")
+	db, err := GetReadDB(bktPath)
 	if err != nil {
 		return 0, fmt.Errorf("failed to get bucket DB: %w", err)
 	}

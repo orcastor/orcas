@@ -504,6 +504,7 @@ type RandomAccessor struct {
 	dataInfo     atomic.Value                  // Cached DataInfo (atomic.Value stores *core.DataInfo)
 	journal      *Journal                      // Journal for tracking random writes (protected by JournalManager)
 	journalMu    sync.RWMutex                  // Mutex for journal access
+	flushMu      sync.Mutex                    // Mutex for flush operations (prevents concurrent flushes)
 }
 
 func isTempFile(obj *core.ObjectInfo) bool {
@@ -2595,13 +2596,11 @@ func (ra *RandomAccessor) flushSequentialBuffer() error {
 
 		// Get new write data and offset from sequential buffer
 		// Optimization: avoid unnecessary memory copy by directly using buffer
-		ra.seqBuffer.mu.Lock()
+		// NOTE: seqBuffer.mu is already locked by caller (flushSequentialBuffer at line 2491)
 		writeData := ra.seqBuffer.buffer // Direct reference to buffer
 		writeOffset := ra.seqBuffer.offset - int64(len(ra.seqBuffer.buffer))
 		ra.seqBuffer.buffer = nil  // Clear reference to prevent modification
 		ra.seqBuffer.closed = true // Mark as closed
-		ra.seqBuffer.mu.Unlock()
-		ra.seqBuffer = nil // Clear seqBuffer
 
 		// Restore old DataID and size so applyRandomWritesWithSDK can read existing data
 		// applyRandomWritesWithSDK will use streaming processing to read existing data chunk by chunk
@@ -3237,6 +3236,10 @@ func (ra *RandomAccessor) ForceFlush() (int64, error) {
 // flushInternal is the internal flush implementation
 // force: if true, flush immediately even for .tmp files; if false, schedule delayed flush for .tmp files
 func (ra *RandomAccessor) flushInternal(force bool) (int64, error) {
+	// Serialize flush operations to prevent concurrent access issues
+	ra.flushMu.Lock()
+	defer ra.flushMu.Unlock()
+
 	// Ensure any pending delayed flush entry is cleared before flushing now
 	ra.cancelDelayedFlush()
 
@@ -6478,7 +6481,9 @@ func (ra *RandomAccessor) flushJournal() bool {
 		return false
 	}
 
-	DebugLog("[VFS flushJournal] Flushing journal: fileID=%d, entries=%d", ra.fileID, journal.GetEntryCount())
+	// Note: Don't call journal.GetEntryCount() here as it acquires entriesMu.RLock()
+	// which could block if another thread is in Flush() holding entriesMu.Lock()
+	DebugLog("[VFS flushJournal] Flushing journal: fileID=%d", ra.fileID)
 
 	// Flush journal to create new data block
 	newDataID, newSize, err := journal.Flush()

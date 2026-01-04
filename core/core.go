@@ -214,9 +214,8 @@ type LocalHandler struct {
 	// Paths for database and data storage
 	basePath string // Path for main database and bucket databases
 	dataPath string // Path for data file storage
-	// Database encryption keys
-	baseDBKey string // Encryption key for main database (BASE path)
-	dataDBKey string // Encryption key for bucket databases (DATA path)
+	// Database encryption key for name encryption
+	dataDBKey string // Encryption key for name encryption (DATA path)
 }
 
 // NewLocalHandler creates a new LocalHandler
@@ -238,7 +237,6 @@ func NewLocalHandler(basePath, dataPath string) Handler {
 		acm:       &DefaultAccessCtrlMgr{ma: dma},
 		basePath:  basePath,
 		dataPath:  dataPath,
-		baseDBKey: "",
 		dataDBKey: "",
 	}
 	// Set paths in adapters
@@ -272,7 +270,6 @@ func NewNoAuthHandler(dataPath string) Handler {
 		acm:       &NoAuthAccessCtrlMgr{},
 		basePath:  basePath,
 		dataPath:  dataPath,
-		baseDBKey: "",
 		dataDBKey: "",
 	}
 	// Set paths in adapters
@@ -302,15 +299,16 @@ func (lh *LocalHandler) SetAdapter(ma MetadataAdapter, da DataAdapter) {
 	// This ensures the adapters use the correct paths and keys from handler
 	if dma, ok := ma.(*DefaultMetadataAdapter); ok {
 		// Set paths
-		dma.DefaultBaseMetadataAdapter.SetBasePath(lh.basePath)
-		dma.DefaultDataMetadataAdapter.SetDataPath(lh.dataPath)
-		// Set database keys (if they were previously set in handler)
-		// Note: Keys are stored in adapters, so we preserve them when switching adapters
-		if lh.baseDBKey != "" {
-			dma.DefaultBaseMetadataAdapter.SetBaseKey(lh.baseDBKey)
+		if dma.DefaultBaseMetadataAdapter != nil {
+			dma.DefaultBaseMetadataAdapter.SetBasePath(lh.basePath)
 		}
-		if lh.dataDBKey != "" {
-			dma.DefaultDataMetadataAdapter.SetDataKey(lh.dataDBKey)
+		if dma.DefaultDataMetadataAdapter != nil {
+			dma.DefaultDataMetadataAdapter.SetDataPath(lh.dataPath)
+			// Set database key for name encryption (if it was previously set in handler)
+			// Note: dataDBKey is stored in adapter for name encryption
+			if lh.dataDBKey != "" {
+				dma.DefaultDataMetadataAdapter.SetDataKey(lh.dataDBKey)
+			}
 		}
 	}
 	// Also set data path in data adapter

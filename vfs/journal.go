@@ -424,8 +424,8 @@ func (j *Journal) CreateJournalSnapshot() (versionID int64, err error) {
 	DebugLog("[Journal CreateSnapshot] Creating snapshot: fileID=%d, entries=%d",
 		j.fileID, len(j.entries))
 
-	// Serialize and write journal data
-	journalData, err := j.SerializeJournal()
+	// Serialize and write journal data (use locked version since we already hold the lock)
+	journalData, err := j.serializeJournalLocked()
 	if err != nil {
 		return 0, fmt.Errorf("failed to serialize journal: %w", err)
 	}
@@ -1004,6 +1004,10 @@ func (j *Journal) Flush() (newDataID int64, newSize int64, err error) {
 
 			DebugLog("[Journal Flush] Performance: fileID=%d, duration=%v, avgDuration=%v, totalFlushes=%d",
 				j.fileID, duration, avgDuration, flushCount)
+		} else {
+			// Log error on failure
+			duration := time.Since(startTime)
+			DebugLog("[Journal Flush] ERROR: Failed after %v: fileID=%d, error=%v", duration, j.fileID, err)
 		}
 	}()
 
@@ -1015,8 +1019,10 @@ func (j *Journal) Flush() (newDataID int64, newSize int64, err error) {
 		return j.dataID, j.baseSize, nil
 	}
 
+	// Get entry count before starting (safe since we hold the lock)
+	entryCount := len(j.entries)
 	DebugLog("[Journal Flush] Starting flush: fileID=%d, entries=%d, baseDataID=%d, baseSize=%d",
-		j.fileID, len(j.entries), j.dataID, j.baseSize)
+		j.fileID, entryCount, j.dataID, j.baseSize)
 
 	// Merge entries first to optimize
 	j.mergeEntriesLocked()
@@ -1687,7 +1693,12 @@ func (jm *JournalManager) autoMergeWorker() {
 func (j *Journal) SerializeJournal() ([]byte, error) {
 	j.entriesMu.RLock()
 	defer j.entriesMu.RUnlock()
+	return j.serializeJournalLocked()
+}
 
+// serializeJournalLocked is the internal version that doesn't acquire locks
+// Caller must hold entriesMu (either RLock or Lock)
+func (j *Journal) serializeJournalLocked() ([]byte, error) {
 	// Calculate buffer size
 	// Format: [entryCount:8][currentSize:8][entry1][entry2]...
 	// Each entry: [offset:8][length:8][data]

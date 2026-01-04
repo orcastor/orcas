@@ -185,7 +185,7 @@ func NewOrcasFSWithConfig(h core.Handler, c core.Ctx, bktID int64, cfg *core.Con
 	// This periodically flushes WAL to main database to reduce dirty read issues
 	if config.DataPath != "" {
 		walConfig := DefaultWALCheckpointConfig()
-		walConfig.CheckpointInterval = 60 * time.Second // 每60秒刷新一次
+		walConfig.CheckpointInterval = 300 * time.Second // 每300秒刷新一次
 		walCheckpointManager := NewWALCheckpointManager(config.DataPath, walConfig)
 		if err := walCheckpointManager.Start(); err != nil {
 			DebugLog("[VFS NewOrcasFSWithConfig] WARNING: Failed to start WAL checkpoint manager: %v", err)
@@ -210,6 +210,30 @@ func NewOrcasFSWithConfig(h core.Handler, c core.Ctx, bktID int64, cfg *core.Con
 	// that use ofs.Config.BasePath and ofs.Config.DataPath instead of global ORCAS_BASE and ORCAS_DATA
 
 	return ofs
+}
+
+// Close stops all background managers and cleans up resources
+// This should be called when the filesystem is no longer needed
+func (fs *OrcasFS) Close() error {
+	if fs == nil {
+		return nil
+	}
+
+	// Stop WAL checkpoint manager
+	if fs.walCheckpointManager != nil {
+		fs.walCheckpointManager.Stop()
+		fs.walCheckpointManager = nil
+	}
+
+	// Close all RandomAccessors
+	fs.raRegistry.Range(func(key, value interface{}) bool {
+		if ra, ok := value.(*RandomAccessor); ok {
+			ra.Close()
+		}
+		return true
+	})
+
+	return nil
 }
 
 // GetBasePath returns the base path for metadata (database storage location)

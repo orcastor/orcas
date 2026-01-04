@@ -4333,3 +4333,268 @@ func TestXattrSetGetRemove(t *testing.T) {
 		})
 	})
 }
+
+// TestJournalConcurrentWriteAndFlush tests concurrent writes and flushes
+// to detect potential deadlocks between Write() and Flush() operations
+func TestJournalConcurrentWriteAndFlush(t *testing.T) {
+	testDir := t.TempDir()
+	fs, bktID := setupTestFS(t, testDir)
+	defer cleanupFS(fs)
+
+	// Create a test file
+	fileID := core.NewID()
+	fileObj := &core.ObjectInfo{
+		ID:     fileID,
+		PID:    1,
+		Name:   "concurrent_test.dat",
+		Type:   core.OBJ_TYPE_FILE,
+		Size:   0,
+		DataID: 0,
+		MTime:  core.Now(),
+	}
+	_, err := fs.h.(*core.LocalHandler).Put(fs.c, bktID, []*core.ObjectInfo{fileObj})
+	if err != nil {
+		t.Fatalf("Failed to create test file: %v", err)
+	}
+
+	// Create journal
+	journal := fs.journalMgr.GetOrCreate(fileID, 0, 0)
+
+	// Test concurrent writes and flushes
+	const numWriters = 5
+	const numFlushers = 3
+	const writesPerWriter = 20
+	const flushesPerFlusher = 10
+
+	var wg sync.WaitGroup
+	errors := make(chan error, numWriters+numFlushers)
+	done := make(chan struct{})
+
+	// Timeout detection
+	timeout := time.After(30 * time.Second)
+	go func() {
+		select {
+		case <-timeout:
+			t.Error("Test timed out - potential deadlock detected!")
+			// Print goroutine stack traces
+			buf := make([]byte, 1<<20)
+			stackSize := runtime.Stack(buf, true)
+			t.Logf("Goroutine stack traces:\n%s", buf[:stackSize])
+		case <-done:
+			return
+		}
+	}()
+
+	// Start writers
+	for i := 0; i < numWriters; i++ {
+		wg.Add(1)
+		writerID := i
+		go func() {
+			defer wg.Done()
+			for j := 0; j < writesPerWriter; j++ {
+				data := []byte(fmt.Sprintf("writer%d-write%d", writerID, j))
+				offset := int64(j * 100)
+				if err := journal.Write(offset, data); err != nil {
+					errors <- fmt.Errorf("writer %d failed: %w", writerID, err)
+					return
+				}
+				time.Sleep(time.Millisecond) // Small delay to increase concurrency
+			}
+		}()
+	}
+
+	// Start flushers
+	for i := 0; i < numFlushers; i++ {
+		wg.Add(1)
+		flusherID := i
+		go func() {
+			defer wg.Done()
+			for j := 0; j < flushesPerFlusher; j++ {
+				// Try to flush (may fail if journal is not dirty)
+				_, _, err := journal.Flush()
+				if err != nil {
+					// Log but don't fail - flush can legitimately fail
+					t.Logf("Flusher %d flush %d failed (expected): %v", flusherID, j, err)
+				}
+				time.Sleep(10 * time.Millisecond) // Delay between flushes
+			}
+		}()
+	}
+
+	// Wait for all goroutines
+	wg.Wait()
+	close(done)
+	close(errors)
+
+	// Check for errors
+	for err := range errors {
+		t.Errorf("Concurrent operation error: %v", err)
+	}
+
+	t.Log("No deadlock detected in concurrent write/flush test")
+}
+
+// TestRandomAccessorConcurrentFlush tests concurrent flushes
+// through RandomAccessor to detect potential deadlocks
+func TestRandomAccessorConcurrentFlush(t *testing.T) {
+	testDir := t.TempDir()
+	fs, bktID := setupTestFS(t, testDir)
+	defer cleanupFS(fs)
+
+	// Create a test file
+	fileID := core.NewID()
+	fileObj := &core.ObjectInfo{
+		ID:     fileID,
+		PID:    1,
+		Name:   "flush_test.dat",
+		Type:   core.OBJ_TYPE_FILE,
+		Size:   100,
+		DataID: 0,
+		MTime:  core.Now(),
+	}
+	_, err := fs.h.(*core.LocalHandler).Put(fs.c, bktID, []*core.ObjectInfo{fileObj})
+	if err != nil {
+		t.Fatalf("Failed to create test file: %v", err)
+	}
+
+	// Create RandomAccessor
+	ra, err := NewRandomAccessor(fs, fileID)
+	if err != nil {
+		t.Fatalf("Failed to create RandomAccessor: %v", err)
+	}
+
+	// Write some data to make journal dirty
+	data := []byte("test data for flush")
+	err = ra.Write(0, data)
+	if err != nil {
+		t.Fatalf("Failed to write data: err=%v", err)
+	}
+
+	// Test concurrent flushes
+	const numFlushers = 10
+	var wg sync.WaitGroup
+	errors := make(chan error, numFlushers)
+	done := make(chan struct{})
+
+	// Timeout detection
+	timeout := time.After(30 * time.Second)
+	go func() {
+		select {
+		case <-timeout:
+			t.Error("Test timed out - potential deadlock detected in flushJournal!")
+			buf := make([]byte, 1<<20)
+			stackSize := runtime.Stack(buf, true)
+			t.Logf("Goroutine stack traces:\n%s", buf[:stackSize])
+		case <-done:
+			return
+		}
+	}()
+
+	// Start concurrent flushers
+	for i := 0; i < numFlushers; i++ {
+		wg.Add(1)
+		flusherID := i
+		go func() {
+			defer wg.Done()
+			// Call Flush multiple times
+			for j := 0; j < 5; j++ {
+				_, err := ra.Flush()
+				if err != nil {
+					t.Logf("Flusher %d iteration %d failed (may be expected): %v", flusherID, j, err)
+				}
+				time.Sleep(5 * time.Millisecond)
+			}
+		}()
+	}
+
+	// Wait for all goroutines
+	wg.Wait()
+	close(done)
+	close(errors)
+
+	// Check for errors
+	for err := range errors {
+		t.Errorf("Concurrent flush error: %v", err)
+	}
+
+	t.Log("No deadlock detected in concurrent flush test")
+}
+
+// TestFlushWithPendingWrites tests the scenario where a flush is called
+// while writes are pending, to ensure proper lock handling
+func TestFlushWithPendingWrites(t *testing.T) {
+	testDir := t.TempDir()
+	fs, bktID := setupTestFS(t, testDir)
+	defer cleanupFS(fs)
+
+	// Create a test file
+	fileID := core.NewID()
+	fileObj := &core.ObjectInfo{
+		ID:     fileID,
+		PID:    1,
+		Name:   "pending_writes_test.dat",
+		Type:   core.OBJ_TYPE_FILE,
+		Size:   0,
+		DataID: 0,
+		MTime:  core.Now(),
+	}
+	_, err := fs.h.(*core.LocalHandler).Put(fs.c, bktID, []*core.ObjectInfo{fileObj})
+	if err != nil {
+		t.Fatalf("Failed to create test file: %v", err)
+	}
+
+	// Create RandomAccessor
+	ra, err := NewRandomAccessor(fs, fileID)
+	if err != nil {
+		t.Fatalf("Failed to create RandomAccessor: %v", err)
+	}
+
+	done := make(chan struct{})
+	timeout := time.After(30 * time.Second)
+
+	go func() {
+		select {
+		case <-timeout:
+			t.Error("Test timed out - potential deadlock with pending writes!")
+			buf := make([]byte, 1<<20)
+			stackSize := runtime.Stack(buf, true)
+			t.Logf("Goroutine stack traces:\n%s", buf[:stackSize])
+		case <-done:
+			return
+		}
+	}()
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	// Writer goroutine - continuously writes data
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 50; i++ {
+			data := []byte(fmt.Sprintf("data-%d", i))
+			err := ra.Write(int64(i*10), data)
+			if err != nil {
+				t.Logf("Write %d failed: %v", i, err)
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}()
+
+	// Flusher goroutine - periodically flushes
+	go func() {
+		defer wg.Done()
+		time.Sleep(5 * time.Millisecond) // Let some writes accumulate
+		for i := 0; i < 10; i++ {
+			_, err := ra.Flush()
+			if err != nil {
+				t.Logf("Flush %d failed: %v", i, err)
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}()
+
+	wg.Wait()
+	close(done)
+
+	t.Log("No deadlock detected with pending writes")
+}

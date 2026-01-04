@@ -116,7 +116,7 @@ func flushBucketStats(bktID int64, delta *BucketStatsDelta) {
 		dataPath = "."
 	}
 	bktDirPath := filepath.Join(dataPath, fmt.Sprint(bktID))
-	db, err := GetWriteDB(bktDirPath, "")
+	db, err := GetWriteDB(bktDirPath)
 	if err != nil {
 		return
 	}

@@ -207,7 +207,7 @@ func BenchmarkGetBkt_DirectDB(b *testing.B) {
 
 	// Create bucket directly in database
 	bktDirPath := filepath.Join(dataDir, fmt.Sprint(bktID))
-	db, err := GetWriteDB(bktDirPath, "")
+	db, err := GetWriteDB(bktDirPath)
 	if err != nil {
 		b.Fatalf("GetWriteDB failed: %v", err)
 	}
@@ -225,7 +225,7 @@ func BenchmarkGetBkt_DirectDB(b *testing.B) {
 	}
 
 	// Switch to read connection
-	readDB, err := GetReadDB(bktDirPath, "")
+	readDB, err := GetReadDB(bktDirPath)
 	if err != nil {
 		b.Fatalf("GetReadDB failed: %v", err)
 	}

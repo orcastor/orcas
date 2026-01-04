@@ -654,7 +654,7 @@ func listChildrenDirectly(c Ctx, bktID, pid int64, ma MetadataAdapter) ([]*Objec
 	dataPath := getDataPathFromAdapter(ma)
 	// Use read connection for query operations
 	bktDirPath := filepath.Join(dataPath, fmt.Sprint(bktID))
-	db, err := GetReadDB(bktDirPath, "")
+	db, err := GetReadDB(bktDirPath)
 	if err != nil {
 		return nil, ERR_OPEN_DB
 	}
@@ -686,7 +686,7 @@ func deleteObjFromDB(c Ctx, bktID, id int64, ma MetadataAdapter) error {
 	dataPath := getDataPathFromAdapter(ma)
 	// Use write connection for delete operation
 	bktDirPath := filepath.Join(dataPath, fmt.Sprint(bktID))
-	db, err := GetWriteDB(bktDirPath, "")
+	db, err := GetWriteDB(bktDirPath)
 	if err != nil {
 		return ERR_OPEN_DB
 	}

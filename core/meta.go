@@ -385,7 +385,7 @@ func GetMainDBWithKey(basePathOrKey ...interface{}) (*sql.DB, error) {
 
 // InitDB initializes the main database
 // basePath: path for main database (empty string defaults to current directory ".")
-// key: encryption key (empty string means unencrypted)
+// key: encryption key (deprecated, no longer used for database encryption)
 func InitDB(basePath, key string) error {
 	// Default to current directory if basePath is empty
 	if basePath == "" {
@@ -396,7 +396,8 @@ func InitDB(basePath, key string) error {
 	InitDBPool(10, 5, 5, 0)
 
 	// For initialization, use write connection
-	db, err := GetWriteDB(basePath, key)
+	// Note: key parameter is no longer used for database connections
+	db, err := GetWriteDB(basePath)
 	if err != nil {
 		// Fallback to old method if pool not available
 		db, err = GetMainDBWithKey(basePath, key)
@@ -500,10 +501,7 @@ func InitBucketDB(dataPath string, bktID int64, key ...string) error {
 		dataPath = "."
 	}
 
-	var dbKey string
-	if len(key) > 0 {
-		dbKey = key[0]
-	}
+	// Note: key parameter is deprecated and no longer used for database encryption
 
 	// Initialize connection pool if not already initialized
 	InitDBPool(10, 5, 5, 0)
@@ -511,12 +509,12 @@ func InitBucketDB(dataPath string, bktID int64, key ...string) error {
 	// For initialization, use write connection
 	// Bucket database: use dataPath/<bktID>/
 	bktDirPath := filepath.Join(dataPath, fmt.Sprint(bktID))
-	db, err := GetWriteDB(bktDirPath, dbKey)
+	db, err := GetWriteDB(bktDirPath)
 	if err != nil {
 		// Fallback to old method if pool not available
 		// Bucket database: use dataPath/<bktID>/
 		bktDirPath := filepath.Join(dataPath, fmt.Sprint(bktID))
-		db, err = GetWriteDB(bktDirPath, dbKey)
+		db, err = GetWriteDB(bktDirPath)
 		if err != nil {
 			return fmt.Errorf("%w: %v", ERR_OPEN_DB, err)
 		}
@@ -613,7 +611,6 @@ func InitBucketDB(dataPath string, bktID int64, key ...string) error {
 // DefaultBaseMetadataAdapter implements BaseMetadataAdapter
 type DefaultBaseMetadataAdapter struct {
 	basePath string // Path for main database
-	dbKey    string // Encryption key for main database (empty means unencrypted)
 }
 
 func (dba *DefaultBaseMetadataAdapter) Close() {
@@ -630,14 +627,16 @@ func (dba *DefaultBaseMetadataAdapter) SetBasePath(basePath string) {
 }
 
 // SetBaseKey sets the encryption key for the adapter (for main database)
+// Note: This is kept for API compatibility but not used for database connections anymore
+// Database encryption is no longer used; only name encryption via dataDBKey is supported
 func (dba *DefaultBaseMetadataAdapter) SetBaseKey(key string) {
-	dba.dbKey = key
+	// No-op: dbKey is no longer stored or used
 }
 
 // DefaultDataMetadataAdapter implements DataMetadataAdapter
 type DefaultDataMetadataAdapter struct {
 	dataPath string      // Path for data file storage and bucket databases
-	dbKey    string      // Encryption key for bucket databases (empty means unencrypted)
+	dbKey    string      // Encryption key for name encryption only (not used for database encryption)
 	aead     cipher.AEAD // AEAD cipher for name encryption (created once when key is set)
 }
 
@@ -654,7 +653,7 @@ func (dda *DefaultDataMetadataAdapter) SetDataPath(dataPath string) {
 	dda.dataPath = dataPath
 }
 
-// SetDataKey sets the encryption key for the adapter (for bucket databases)
+// SetDataKey sets the encryption key for the adapter (for name encryption only)
 func (dda *DefaultDataMetadataAdapter) SetDataKey(key string) {
 	dda.dbKey = key
 
@@ -767,12 +766,12 @@ func (dda *DefaultDataMetadataAdapter) ListAllBuckets(c Ctx) (o []*BucketInfo, e
 				return
 			}
 
-			// Cache miss, read from bucket database
-			bktDirPath := filepath.Join(dda.dataPath, fmt.Sprint(id))
-			db, err := GetReadDB(bktDirPath, dda.dbKey)
-			if err != nil {
-				return
-			}
+		// Cache miss, read from bucket database
+		bktDirPath := filepath.Join(dda.dataPath, fmt.Sprint(id))
+		db, err := GetReadDB(bktDirPath)
+		if err != nil {
+			return
+		}
 			// Note: Don't close the connection, it's from the pool
 
 			var bucketInfo []*BucketInfo
@@ -884,6 +883,15 @@ func (dma *DefaultMetadataAdapter) decryptObjNames(objs []*ObjectInfo) error {
 		if obj.Mode&MODE_NAME_ENCRYPTED == 0 {
 			continue // Not encrypted
 		}
+		// Check if decryption key is available
+		if dma.DefaultDataMetadataAdapter.aead == nil {
+			// File name is encrypted but no decryption key available
+			// This can happen if:
+			// 1. User mounted without providing DataDBKey
+			// 2. User provided wrong DataDBKey
+			// Return error to alert user
+			return fmt.Errorf("file name is encrypted but decryption key not available (objID=%d, encrypted name length=%d)", obj.ID, len(obj.Name))
+		}
 		decrypted, err := dma.DefaultDataMetadataAdapter.decryptName(obj.Name)
 		if err != nil {
 			return fmt.Errorf("failed to decrypt name: %w", err)
@@ -916,7 +924,7 @@ func (dma *DefaultMetadataAdapter) PutBkt(c Ctx, o []*BucketInfo) error {
 
 		// Use write connection for bucket database
 		bktDirPath := filepath.Join(dma.DefaultDataMetadataAdapter.dataPath, fmt.Sprint(x.ID))
-		db, err := GetWriteDB(bktDirPath, dma.DefaultDataMetadataAdapter.dbKey)
+		db, err := GetWriteDB(bktDirPath)
 		if err != nil {
 			return fmt.Errorf("%w: PutBkt GetWriteDB failed (bktID=%d): %v", ERR_OPEN_DB, x.ID, err)
 		}
@@ -979,7 +987,7 @@ func (dma *DefaultMetadataAdapter) GetBkt(c Ctx, ids []int64) (o []*BucketInfo, 
 	dbResults := make([]*BucketInfo, 0, len(missingIDs))
 	for _, bktID := range missingIDs {
 		bktDirPath := filepath.Join(dataPath, fmt.Sprint(bktID))
-		db, err := GetReadDB(bktDirPath, dma.DefaultDataMetadataAdapter.dbKey)
+		db, err := GetReadDB(bktDirPath)
 		if err != nil {
 			// If bucket database doesn't exist, skip it
 			continue
@@ -1024,7 +1032,7 @@ func (dma *DefaultMetadataAdapter) GetBkt(c Ctx, ids []int64) (o []*BucketInfo, 
 // ACL is stored in main database, not in bucket database
 func (dba *DefaultBaseMetadataAdapter) PutACL(c Ctx, bktID int64, uid int64, perm int) error {
 	// Use write connection for main database
-	db, err := GetWriteDB(dba.basePath, dba.dbKey)
+	db, err := GetWriteDB(dba.basePath)
 	if err != nil {
 		return fmt.Errorf("%w: PutACL GetWriteDB failed (bktID=%d): %v", ERR_OPEN_DB, bktID, err)
 	}
@@ -1046,7 +1054,7 @@ func (dba *DefaultBaseMetadataAdapter) PutACL(c Ctx, bktID int64, uid int64, per
 
 func (dba *DefaultBaseMetadataAdapter) ListACL(c Ctx, bktID int64) ([]*BucketACL, error) {
 	// Use read connection for main database
-	db, err := GetReadDB(dba.basePath, dba.dbKey)
+	db, err := GetReadDB(dba.basePath)
 	if err != nil {
 		return nil, fmt.Errorf("%w: ListACL GetReadDB failed (bktID=%d): %v", ERR_OPEN_DB, bktID, err)
 	}
@@ -1061,7 +1069,7 @@ func (dba *DefaultBaseMetadataAdapter) ListACL(c Ctx, bktID int64) ([]*BucketACL
 
 func (dba *DefaultBaseMetadataAdapter) DeleteACL(c Ctx, bktID int64, uid int64) error {
 	// Use write connection for main database
-	db, err := GetWriteDB(dba.basePath, dba.dbKey)
+	db, err := GetWriteDB(dba.basePath)
 	if err != nil {
 		return fmt.Errorf("%w: DeleteACL GetWriteDB failed (bktID=%d, uid=%d): %v", ERR_OPEN_DB, bktID, uid, err)
 	}
@@ -1075,7 +1083,7 @@ func (dba *DefaultBaseMetadataAdapter) DeleteACL(c Ctx, bktID int64, uid int64) 
 
 func (dba *DefaultBaseMetadataAdapter) DeleteAllACL(c Ctx, bktID int64) error {
 	// Use write connection for main database
-	db, err := GetWriteDB(dba.basePath, dba.dbKey)
+	db, err := GetWriteDB(dba.basePath)
 	if err != nil {
 		return fmt.Errorf("%w: DeleteAllACL GetWriteDB failed (bktID=%d): %v", ERR_OPEN_DB, bktID, err)
 	}
@@ -1091,7 +1099,7 @@ func (dba *DefaultBaseMetadataAdapter) DeleteAllACL(c Ctx, bktID int64) error {
 // Returns true if the user's ACL permission covers the required action
 func (dba *DefaultBaseMetadataAdapter) CheckPermission(c Ctx, bktID int64, uid int64, action int) (bool, error) {
 	// Use read connection for main database
-	db, err := GetReadDB(dba.basePath, dba.dbKey)
+	db, err := GetReadDB(dba.basePath)
 	if err != nil {
 		return false, fmt.Errorf("%w: CheckPermission GetReadDB failed (bktID=%d): %v", ERR_OPEN_DB, bktID, err)
 	}
@@ -1117,7 +1125,7 @@ func (dba *DefaultBaseMetadataAdapter) CheckPermission(c Ctx, bktID int64, uid i
 
 func (dba *DefaultBaseMetadataAdapter) ListACLByUser(c Ctx, uid int64) ([]*BucketACL, error) {
 	// ACL is stored in main database, query directly
-	db, err := GetReadDB(dba.basePath, dba.dbKey)
+	db, err := GetReadDB(dba.basePath)
 	if err != nil {
 		return nil, fmt.Errorf("%w: ListACLByUser GetReadDB failed (uid=%d): %v", ERR_OPEN_DB, uid, err)
 	}
@@ -1138,7 +1146,7 @@ func (dma *DefaultMetadataAdapter) RefData(c Ctx, bktID int64, d []*DataInfo) ([
 	// Use write connection because we need to create temporary table
 	// Temporary tables require write access
 	bktDirPath := filepath.Join(dma.DefaultDataMetadataAdapter.dataPath, fmt.Sprint(bktID))
-	db, err := GetWriteDB(bktDirPath, "")
+	db, err := GetWriteDB(bktDirPath)
 	if err != nil {
 		return nil, ERR_OPEN_DB
 	}
@@ -1225,7 +1233,7 @@ func (dma *DefaultMetadataAdapter) RefData(c Ctx, bktID int64, d []*DataInfo) ([
 func (dma *DefaultMetadataAdapter) PutData(c Ctx, bktID int64, d []*DataInfo) error {
 	// Use write connection for data insertion
 	bktDirPath := filepath.Join(dma.DefaultDataMetadataAdapter.dataPath, fmt.Sprint(bktID))
-	db, err := GetWriteDB(bktDirPath, "")
+	db, err := GetWriteDB(bktDirPath)
 	if err != nil {
 		return ERR_OPEN_DB
 	}
@@ -1275,7 +1283,7 @@ func (dma *DefaultMetadataAdapter) PutData(c Ctx, bktID int64, d []*DataInfo) er
 func (dma *DefaultMetadataAdapter) GetData(c Ctx, bktID, id int64) (d *DataInfo, err error) {
 	// Use read connection for data retrieval
 	bktDirPath := filepath.Join(dma.DefaultDataMetadataAdapter.dataPath, fmt.Sprint(bktID))
-	db, err := GetReadDB(bktDirPath, "")
+	db, err := GetReadDB(bktDirPath)
 	if err != nil {
 		return nil, ERR_OPEN_DB
 	}
@@ -1323,7 +1331,7 @@ func (dma *DefaultMetadataAdapter) GetData(c Ctx, bktID, id int64) (d *DataInfo,
 func (dma *DefaultMetadataAdapter) ListAllData(c Ctx, bktID int64, offset, limit int) (d []*DataInfo, total int64, err error) {
 	// Use read connection for listing data
 	bktDirPath := filepath.Join(dma.DefaultDataMetadataAdapter.dataPath, fmt.Sprint(bktID))
-	db, err := GetReadDB(bktDirPath, "")
+	db, err := GetReadDB(bktDirPath)
 	if err != nil {
 		return nil, 0, ERR_OPEN_DB
 	}
@@ -1391,7 +1399,7 @@ func (dma *DefaultMetadataAdapter) ListAllData(c Ctx, bktID int64, offset, limit
 func (dma *DefaultMetadataAdapter) FindDuplicateData(c Ctx, bktID int64, offset, limit int) (groups []DuplicateGroup, total int64, err error) {
 	// Use read connection for duplicate data search
 	bktDirPath := filepath.Join(dma.DefaultDataMetadataAdapter.dataPath, fmt.Sprint(bktID))
-	db, err := GetReadDB(bktDirPath, "")
+	db, err := GetReadDB(bktDirPath)
 	if err != nil {
 		return nil, 0, ERR_OPEN_DB
 	}
@@ -1489,7 +1497,7 @@ func (dma *DefaultMetadataAdapter) FindDuplicateData(c Ctx, bktID int64, offset,
 func (dma *DefaultMetadataAdapter) UpdateObjDataID(c Ctx, bktID int64, oldDataID, newDataID int64) error {
 	// Use write connection for update operation
 	bktDirPath := filepath.Join(dma.DefaultDataMetadataAdapter.dataPath, fmt.Sprint(bktID))
-	db, err := GetWriteDB(bktDirPath, "")
+	db, err := GetWriteDB(bktDirPath)
 	if err != nil {
 		return ERR_OPEN_DB
 	}
@@ -1514,7 +1522,7 @@ func (dma *DefaultMetadataAdapter) DeleteData(c Ctx, bktID int64, dataIDs []int6
 	}
 	// Use write connection for delete operation
 	bktDirPath := filepath.Join(dma.DefaultDataMetadataAdapter.dataPath, fmt.Sprint(bktID))
-	db, err := GetWriteDB(bktDirPath, "")
+	db, err := GetWriteDB(bktDirPath)
 	if err != nil {
 		return ERR_OPEN_DB
 	}
@@ -1531,7 +1539,7 @@ func (dma *DefaultMetadataAdapter) DeleteData(c Ctx, bktID int64, dataIDs []int6
 func (dma *DefaultMetadataAdapter) FindSmallPackageData(c Ctx, bktID int64, maxSize int64, offset, limit int) (d []*DataInfo, total int64, err error) {
 	// Use read connection for query operation
 	bktDirPath := filepath.Join(dma.DefaultDataMetadataAdapter.dataPath, fmt.Sprint(bktID))
-	db, err := GetReadDB(bktDirPath, "")
+	db, err := GetReadDB(bktDirPath)
 	if err != nil {
 		return nil, 0, ERR_OPEN_DB
 	}
@@ -1616,7 +1624,7 @@ func (dma *DefaultMetadataAdapter) PutObj(c Ctx, bktID int64, o []*ObjectInfo) (
 
 	// Use write connection for object insertion
 	bktDirPath := filepath.Join(dma.DefaultDataMetadataAdapter.dataPath, fmt.Sprint(bktID))
-	db, err := GetWriteDB(bktDirPath, "")
+	db, err := GetWriteDB(bktDirPath)
 	if err != nil {
 		return nil, ERR_OPEN_DB
 	}
@@ -1660,7 +1668,7 @@ func (dma *DefaultMetadataAdapter) PutDataAndObj(c Ctx, bktID int64, d []*DataIn
 
 	// Use write connection for combined write operation
 	bktDirPath := filepath.Join(dma.DefaultDataMetadataAdapter.dataPath, fmt.Sprint(bktID))
-	db, err := GetWriteDB(bktDirPath, "")
+	db, err := GetWriteDB(bktDirPath)
 	if err != nil {
 		return ERR_OPEN_DB
 	}
@@ -1732,7 +1740,7 @@ func (dma *DefaultMetadataAdapter) PutDataAndObj(c Ctx, bktID int64, d []*DataIn
 func (dma *DefaultMetadataAdapter) GetObj(c Ctx, bktID int64, ids []int64) (o []*ObjectInfo, err error) {
 	// Use read connection for object retrieval
 	bktDirPath := filepath.Join(dma.DefaultDataMetadataAdapter.dataPath, fmt.Sprint(bktID))
-	db, err := GetReadDB(bktDirPath, "")
+	db, err := GetReadDB(bktDirPath)
 	if err != nil {
 		return nil, ERR_OPEN_DB
 	}
@@ -1753,7 +1761,7 @@ func (dma *DefaultMetadataAdapter) GetObj(c Ctx, bktID int64, ids []int64) (o []
 func (dma *DefaultMetadataAdapter) SetObj(c Ctx, bktID int64, fields []string, o *ObjectInfo) error {
 	// Use write connection for update operation
 	bktDirPath := filepath.Join(dma.DefaultDataMetadataAdapter.dataPath, fmt.Sprint(bktID))
-	db, err := GetWriteDB(bktDirPath, "")
+	db, err := GetWriteDB(bktDirPath)
 	if err != nil {
 		return ERR_OPEN_DB
 	}
@@ -1930,7 +1938,7 @@ func (dma *DefaultMetadataAdapter) ListObj(c Ctx, bktID, pid int64,
 
 	// Use read connection for listing objects
 	bktDirPath := filepath.Join(dma.DefaultDataMetadataAdapter.dataPath, fmt.Sprint(bktID))
-	db, err := GetReadDB(bktDirPath, "")
+	db, err := GetReadDB(bktDirPath)
 	if err != nil {
 		return nil, 0, "", fmt.Errorf("%w: ListObj GetReadDB failed (bktID=%d): %v", ERR_OPEN_DB, bktID, err)
 	}
@@ -1971,7 +1979,7 @@ func (dma *DefaultMetadataAdapter) ListObj(c Ctx, bktID, pid int64,
 
 func (dba *DefaultBaseMetadataAdapter) PutUsr(c Ctx, u *UserInfo) error {
 	// Use write connection for user creation/update
-	db, err := GetWriteDB(dba.basePath, dba.dbKey)
+	db, err := GetWriteDB(dba.basePath)
 	if err != nil {
 		return ERR_OPEN_DB
 	}
@@ -1985,7 +1993,7 @@ func (dba *DefaultBaseMetadataAdapter) PutUsr(c Ctx, u *UserInfo) error {
 
 func (dba *DefaultBaseMetadataAdapter) GetUsr(c Ctx, ids []int64) (o []*UserInfo, err error) {
 	// Use read connection for user retrieval
-	db, err := GetReadDB(dba.basePath, dba.dbKey)
+	db, err := GetReadDB(dba.basePath)
 	if err != nil {
 		return nil, ERR_OPEN_DB
 	}
@@ -1999,7 +2007,7 @@ func (dba *DefaultBaseMetadataAdapter) GetUsr(c Ctx, ids []int64) (o []*UserInfo
 
 func (dba *DefaultBaseMetadataAdapter) GetUsr2(c Ctx, usr string) (o *UserInfo, err error) {
 	// Use read connection for user lookup
-	db, err := GetReadDB(dba.basePath, dba.dbKey)
+	db, err := GetReadDB(dba.basePath)
 	if err != nil {
 		return nil, ERR_OPEN_DB
 	}
@@ -2014,7 +2022,7 @@ func (dba *DefaultBaseMetadataAdapter) GetUsr2(c Ctx, usr string) (o *UserInfo, 
 
 func (dba *DefaultBaseMetadataAdapter) SetUsr(c Ctx, fields []string, u *UserInfo) error {
 	// Use write connection for user update
-	db, err := GetWriteDB(dba.basePath, dba.dbKey)
+	db, err := GetWriteDB(dba.basePath)
 	if err != nil {
 		return ERR_OPEN_DB
 	}
@@ -2029,7 +2037,7 @@ func (dba *DefaultBaseMetadataAdapter) SetUsr(c Ctx, fields []string, u *UserInf
 
 func (dba *DefaultBaseMetadataAdapter) ListUsers(c Ctx) (o []*UserInfo, err error) {
 	// Use read connection for listing users
-	db, err := GetReadDB(dba.basePath, dba.dbKey)
+	db, err := GetReadDB(dba.basePath)
 	if err != nil {
 		return nil, ERR_OPEN_DB
 	}
@@ -2049,7 +2057,7 @@ func (dba *DefaultBaseMetadataAdapter) ListUsers(c Ctx) (o []*UserInfo, err erro
 
 func (dba *DefaultBaseMetadataAdapter) DeleteUser(c Ctx, userID int64) error {
 	// Use write connection for user deletion
-	db, err := GetWriteDB(dba.basePath, dba.dbKey)
+	db, err := GetWriteDB(dba.basePath)
 	if err != nil {
 		return ERR_OPEN_DB
 	}
@@ -2085,7 +2093,7 @@ func (dma *DefaultMetadataAdapter) DeleteBkt(c Ctx, bktID int64) error {
 	// Bucket info is now stored in bucket database, not main database
 	// Use write connection for bucket database
 	bktDirPath := filepath.Join(dma.DefaultDataMetadataAdapter.dataPath, fmt.Sprint(bktID))
-	db, err := GetWriteDB(bktDirPath, "")
+	db, err := GetWriteDB(bktDirPath)
 	if err != nil {
 		return fmt.Errorf("%w: DeleteBkt GetWriteDB failed (bktID=%d): %v", ERR_OPEN_DB, bktID, err)
 	}
@@ -2114,7 +2122,7 @@ func (dma *DefaultMetadataAdapter) UpdateBktQuota(c Ctx, bktID int64, quota int6
 		dataPath = "."
 	}
 	bktDirPath := filepath.Join(dataPath, fmt.Sprint(bktID))
-	db, err := GetWriteDB(bktDirPath, "")
+	db, err := GetWriteDB(bktDirPath)
 	if err != nil {
 		return fmt.Errorf("%w: UpdateBktQuota GetWriteDB failed (bktID=%d, path=%s): %v", ERR_OPEN_DB, bktID, bktDirPath, err)
 	}
@@ -2190,7 +2198,7 @@ func (dma *DefaultMetadataAdapter) DecBktDedupSavings(c Ctx, bktID int64, size i
 func (dma *DefaultMetadataAdapter) CountDataRefs(c Ctx, bktID int64, dataIDs []int64) (map[int64]int64, error) {
 	// Use read connection for counting references
 	bktDirPath := filepath.Join(dma.DefaultDataMetadataAdapter.dataPath, fmt.Sprint(bktID))
-	db, err := GetReadDB(bktDirPath, "")
+	db, err := GetReadDB(bktDirPath)
 	if err != nil {
 		return nil, ERR_OPEN_DB
 	}
@@ -2231,7 +2239,7 @@ func (dma *DefaultMetadataAdapter) CountDataRefs(c Ctx, bktID int64, dataIDs []i
 func (dma *DefaultMetadataAdapter) ListObjsByType(c Ctx, bktID int64, objType int, offset, limit int) ([]*ObjectInfo, int64, error) {
 	// Use read connection for listing objects by type
 	bktDirPath := filepath.Join(dma.DefaultDataMetadataAdapter.dataPath, fmt.Sprint(bktID))
-	db, err := GetReadDB(bktDirPath, "")
+	db, err := GetReadDB(bktDirPath)
 	if err != nil {
 		return nil, 0, ERR_OPEN_DB
 	}
@@ -2270,7 +2278,7 @@ func (dma *DefaultMetadataAdapter) ListObjsByType(c Ctx, bktID int64, objType in
 func (dma *DefaultMetadataAdapter) ListChildren(c Ctx, bktID int64, pid int64, offset, limit int) ([]*ObjectInfo, int64, error) {
 	// Use read connection for listing children
 	bktDirPath := filepath.Join(dma.DefaultDataMetadataAdapter.dataPath, fmt.Sprint(bktID))
-	db, err := GetReadDB(bktDirPath, "")
+	db, err := GetReadDB(bktDirPath)
 	if err != nil {
 		return nil, 0, ERR_OPEN_DB
 	}
@@ -2310,7 +2318,7 @@ func (dma *DefaultMetadataAdapter) ListChildren(c Ctx, bktID int64, pid int64, o
 func (dma *DefaultMetadataAdapter) GetObjByDataID(c Ctx, bktID int64, dataID int64) ([]*ObjectInfo, error) {
 	// Use read connection for querying objects by DataID
 	bktDirPath := filepath.Join(dma.DefaultDataMetadataAdapter.dataPath, fmt.Sprint(bktID))
-	db, err := GetReadDB(bktDirPath, "")
+	db, err := GetReadDB(bktDirPath)
 	if err != nil {
 		return nil, ERR_OPEN_DB
 	}
@@ -2328,7 +2336,7 @@ func (dma *DefaultMetadataAdapter) GetObjByDataID(c Ctx, bktID int64, dataID int
 func (dma *DefaultMetadataAdapter) ListVersions(c Ctx, bktID int64, fileID int64) ([]*ObjectInfo, error) {
 	// Use read connection for listing versions
 	bktDirPath := filepath.Join(dma.DefaultDataMetadataAdapter.dataPath, fmt.Sprint(bktID))
-	db, err := GetReadDB(bktDirPath, "")
+	db, err := GetReadDB(bktDirPath)
 	if err != nil {
 		return nil, ERR_QUERY_DB
 	}
@@ -2352,7 +2360,7 @@ func (dma *DefaultMetadataAdapter) ListVersions(c Ctx, bktID int64, fileID int64
 func (dma *DefaultMetadataAdapter) GetAttr(c Ctx, bktID int64, objID int64, key string) ([]byte, error) {
 	// Use read connection for get operation
 	bktDirPath := filepath.Join(dma.DefaultDataMetadataAdapter.dataPath, fmt.Sprint(bktID))
-	db, err := GetReadDB(bktDirPath, "")
+	db, err := GetReadDB(bktDirPath)
 	if err != nil {
 		return nil, ERR_OPEN_DB
 	}
@@ -2377,7 +2385,7 @@ func (dma *DefaultMetadataAdapter) GetAttr(c Ctx, bktID int64, objID int64, key 
 func (dma *DefaultMetadataAdapter) SetAttr(c Ctx, bktID int64, objID int64, key string, value []byte) error {
 	// Use write connection for set operation
 	bktDirPath := filepath.Join(dma.DefaultDataMetadataAdapter.dataPath, fmt.Sprint(bktID))
-	db, err := GetWriteDB(bktDirPath, "")
+	db, err := GetWriteDB(bktDirPath)
 	if err != nil {
 		return ERR_OPEN_DB
 	}
@@ -2404,7 +2412,7 @@ func (dma *DefaultMetadataAdapter) SetAttr(c Ctx, bktID int64, objID int64, key 
 func (dma *DefaultMetadataAdapter) RemoveAttr(c Ctx, bktID int64, objID int64, key string) error {
 	// Use write connection for remove operation
 	bktDirPath := filepath.Join(dma.DefaultDataMetadataAdapter.dataPath, fmt.Sprint(bktID))
-	db, err := GetWriteDB(bktDirPath, "")
+	db, err := GetWriteDB(bktDirPath)
 	if err != nil {
 		return ERR_OPEN_DB
 	}
@@ -2421,7 +2429,7 @@ func (dma *DefaultMetadataAdapter) RemoveAttr(c Ctx, bktID int64, objID int64, k
 func (dma *DefaultMetadataAdapter) ListAttrs(c Ctx, bktID int64, objID int64) ([]string, error) {
 	// Use read connection for list operation
 	bktDirPath := filepath.Join(dma.DefaultDataMetadataAdapter.dataPath, fmt.Sprint(bktID))
-	db, err := GetReadDB(bktDirPath, "")
+	db, err := GetReadDB(bktDirPath)
 	if err != nil {
 		return nil, ERR_OPEN_DB
 	}
@@ -2447,7 +2455,7 @@ func (dma *DefaultMetadataAdapter) ListAttrs(c Ctx, bktID int64, objID int64) ([
 func (dma *DefaultMetadataAdapter) DeleteObj(c Ctx, bktID int64, id int64) error {
 	// Use write connection for delete operation
 	bktDirPath := filepath.Join(dma.DefaultDataMetadataAdapter.dataPath, fmt.Sprint(bktID))
-	db, err := GetWriteDB(bktDirPath, "")
+	db, err := GetWriteDB(bktDirPath)
 	if err != nil {
 		return ERR_OPEN_DB
 	}
@@ -2514,7 +2522,7 @@ func (dma *DefaultMetadataAdapter) DeleteObj(c Ctx, bktID int64, id int64) error
 
 func (dma *DefaultMetadataAdapter) ListDeletedObjs(c Ctx, bktID int64, beforeTime int64, limit int) ([]*ObjectInfo, error) {
 	bktDirPath := filepath.Join(dma.DefaultDataMetadataAdapter.dataPath, fmt.Sprint(bktID))
-	db, err := GetReadDB(bktDirPath, "")
+	db, err := GetReadDB(bktDirPath)
 	if err != nil {
 		return nil, ERR_OPEN_DB
 	}
@@ -2547,7 +2555,7 @@ func (dma *DefaultMetadataAdapter) ListDeletedObjs(c Ctx, bktID int64, beforeTim
 
 func (dma *DefaultMetadataAdapter) ListRecycleBin(c Ctx, bktID int64, opt ListOptions) (o []*ObjectInfo, cnt int64, d string, err error) {
 	bktDirPath := filepath.Join(dma.DefaultDataMetadataAdapter.dataPath, fmt.Sprint(bktID))
-	db, err := GetReadDB(bktDirPath, "")
+	db, err := GetReadDB(bktDirPath)
 	if err != nil {
 		return nil, 0, "", ERR_OPEN_DB
 	}

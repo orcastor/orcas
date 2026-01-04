@@ -1321,7 +1321,7 @@ func TestHandlerWithoutMainDB(t *testing.T) {
 		}
 		// Write bucket info directly to bucket database
 		bktDirPath := filepath.Join(tmpDataDir, fmt.Sprint(bktID))
-		db, err := GetWriteDB(bktDirPath, "")
+		db, err := GetWriteDB(bktDirPath)
 		So(err, ShouldBeNil)
 		bktSlice := []*BucketInfo{bkt}
 		_, err = b.TableContext(ctx, db, BKT_TBL).ReplaceInto(&bktSlice)
@@ -1421,7 +1421,7 @@ func TestMetadataNameEncryption(t *testing.T) {
 				Type:   OBJ_TYPE_FILE,
 				Name:   plainName, // Plain name
 				Size:   1024,
-				Mode:   0644,
+				Mode:   0o644,
 				Extra:  "{}",
 			}
 
@@ -1476,7 +1476,7 @@ func TestMetadataNameEncryption(t *testing.T) {
 				Type:   OBJ_TYPE_FILE,
 				Name:   plainName,
 				Size:   512,
-				Mode:   0644,
+				Mode:   0o644,
 				Extra:  "{}",
 			}
 
@@ -1533,7 +1533,7 @@ func TestMetadataNameEncryption(t *testing.T) {
 					Type:   OBJ_TYPE_FILE,
 					Name:   name,
 					Size:   100,
-					Mode:   0644,
+					Mode:   0o644,
 					Extra:  "{}",
 				}
 
@@ -1615,6 +1615,64 @@ func TestDataKeyBasedEncryption(t *testing.T) {
 			So(err, ShouldBeNil)
 			// Should return ciphertext as-is when decryption fails
 			So(wrongDecrypt, ShouldNotEqual, plainName)
+		})
+
+		Convey("Error when decrypting without key", func() {
+			// Initialize bucket with encryption
+			err := InitBucketDB(tmpDir, testBktID+2)
+			So(err, ShouldBeNil)
+
+			// Create adapter with encryption key and encrypt a file name
+			testEncKey := "test-encryption-key-for-missing-key-test"
+			dma1 := &DefaultMetadataAdapter{
+				DefaultBaseMetadataAdapter: &DefaultBaseMetadataAdapter{},
+				DefaultDataMetadataAdapter: &DefaultDataMetadataAdapter{},
+			}
+			dma1.DefaultDataMetadataAdapter.SetDataPath(tmpDir)
+			dma1.DefaultDataMetadataAdapter.SetDataKey(testEncKey)
+
+			// Create and store an object with encrypted name
+			ig := idgen.NewIDGen(nil, 0)
+			id, _ := ig.New()
+			pid, _ := ig.New()
+			did, _ := ig.New()
+
+			plainName := "encrypted-file.txt"
+			obj := &ObjectInfo{
+				ID:     id,
+				PID:    pid,
+				MTime:  Now(),
+				DataID: did,
+				Type:   OBJ_TYPE_FILE,
+				Name:   plainName,
+				Size:   1024,
+				Mode:   0o644,
+				Extra:  "{}",
+			}
+
+			// Put object (should encrypt name)
+			ids, err := dma1.PutObj(c, testBktID+2, []*ObjectInfo{obj})
+			So(err, ShouldBeNil)
+			So(len(ids), ShouldEqual, 1)
+			So(obj.Mode&MODE_NAME_ENCRYPTED, ShouldEqual, MODE_NAME_ENCRYPTED)
+
+			// Now try to list objects WITHOUT providing decryption key
+			dma2 := &DefaultMetadataAdapter{
+				DefaultBaseMetadataAdapter: &DefaultBaseMetadataAdapter{},
+				DefaultDataMetadataAdapter: &DefaultDataMetadataAdapter{},
+			}
+			dma2.DefaultDataMetadataAdapter.SetDataPath(tmpDir)
+			// No SetDataKey call - no decryption key available
+
+			// Try to list objects (should fail with error about missing key)
+			_, _, _, err = dma2.ListObj(c, testBktID+2, pid, "", "", "", 10)
+			So(err, ShouldNotBeNil)
+			So(err.Error(), ShouldContainSubstring, "decryption key not available")
+
+			// Try to get object (should also fail)
+			_, err = dma2.GetObj(c, testBktID+2, []int64{id})
+			So(err, ShouldNotBeNil)
+			So(err.Error(), ShouldContainSubstring, "decryption key not available")
 		})
 	})
 }

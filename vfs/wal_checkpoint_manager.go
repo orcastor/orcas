@@ -29,7 +29,7 @@ type WALCheckpointConfig struct {
 // DefaultWALCheckpointConfig 返回默认配置
 func DefaultWALCheckpointConfig() *WALCheckpointConfig {
 	return &WALCheckpointConfig{
-		CheckpointInterval: 60 * time.Second, // 每60秒刷新一次
+		CheckpointInterval: 300 * time.Second, // 每300秒刷新一次
 	}
 }
 
@@ -182,7 +182,7 @@ func (wcm *WALCheckpointManager) checkpointBucket(bktID int64) error {
 	}
 
 	// 获取数据库连接
-	db, err := core.GetWriteDB(bktDirPath, "")
+	db, err := core.GetWriteDB(bktDirPath)
 	if err != nil {
 		return fmt.Errorf("failed to get database connection: %w", err)
 	}

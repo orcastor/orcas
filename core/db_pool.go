@@ -74,11 +74,11 @@ func GetDBPool() *DBPool {
 	return globalDBPool
 }
 
-// getDatabasePool gets or creates a database pool for the given path and key
-func (dp *DBPool) getDatabasePool(dirPath, dbKey string) (*DatabasePool, error) {
-	// Create a unique key for this database
+// getDatabasePool gets or creates a database pool for the given path
+func (dp *DBPool) getDatabasePool(dirPath string) (*DatabasePool, error) {
+	// Create a unique key for this database (only use path)
 	dbPath := filepath.Join(dirPath, ".db")
-	poolKey := fmt.Sprintf("%s:%s", dbPath, dbKey)
+	poolKey := dbPath
 
 	// Try to get existing pool (with double-check locking pattern)
 	if pool, ok := dp.pools.Load(poolKey); ok {
@@ -108,19 +108,19 @@ func (dp *DBPool) getDatabasePool(dirPath, dbKey string) (*DatabasePool, error) 
 	// Create new pool
 	dbPool := &DatabasePool{
 		path:     dbPath,
-		key:      dbKey,
+		key:      "", // No longer use dbKey for database operations
 		refCount: 1,
 	}
 
 	// Create read pool
-	readDB, err := dp.createConnection(dbPath, dbKey, true)
+	readDB, err := dp.createConnection(dbPath, true)
 	if err != nil {
 		return nil, err
 	}
 	dbPool.readPool = readDB
 
 	// Create write pool
-	writeDB, err := dp.createConnection(dbPath, dbKey, false)
+	writeDB, err := dp.createConnection(dbPath, false)
 	if err != nil {
 		readDB.Close()
 		return nil, err
@@ -134,17 +134,13 @@ func (dp *DBPool) getDatabasePool(dirPath, dbKey string) (*DatabasePool, error) 
 }
 
 // createConnection creates a database connection with appropriate settings
-func (dp *DBPool) createConnection(dbPath, dbKey string, readOnly bool) (*sql.DB, error) {
+func (dp *DBPool) createConnection(dbPath string, readOnly bool) (*sql.DB, error) {
 	// SQLite connection parameters optimized for performance
 	// Note: For read-only connections, we still use rwc mode because:
 	// 1. SQLite WAL mode allows concurrent reads even with rwc
 	// 2. Read-only mode (ro) prevents temporary table creation which is needed in some operations
 	// 3. WAL mode provides excellent read concurrency without blocking writes
 	param := "?_journal=WAL&cache=shared&mode=rwc&_busy_timeout=10000&_txlock=immediate"
-
-	if dbKey != "" {
-		param += "&key=" + dbKey
-	}
 
 	// Ensure directory exists
 	os.MkdirAll(filepath.Dir(dbPath), 0o766)
@@ -174,8 +170,8 @@ func (dp *DBPool) createConnection(dbPath, dbKey string, readOnly bool) (*sql.DB
 
 // GetDB gets a database connection from the pool
 // connType specifies whether to use read or write connection
-func (dp *DBPool) GetDB(connType DBConnectionType, dirPath, dbKey string) (*sql.DB, error) {
-	dbPool, err := dp.getDatabasePool(dirPath, dbKey)
+func (dp *DBPool) GetDB(connType DBConnectionType, dirPath string) (*sql.DB, error) {
+	dbPool, err := dp.getDatabasePool(dirPath)
 	if err != nil {
 		return nil, err
 	}
@@ -187,9 +183,9 @@ func (dp *DBPool) GetDB(connType DBConnectionType, dirPath, dbKey string) (*sql.
 }
 
 // ReleaseDB releases a reference to a database pool
-func (dp *DBPool) ReleaseDB(dirPath, dbKey string) {
+func (dp *DBPool) ReleaseDB(dirPath string) {
 	dbPath := filepath.Join(dirPath, ".db")
-	poolKey := fmt.Sprintf("%s:%s", dbPath, dbKey)
+	poolKey := dbPath
 
 	if pool, ok := dp.pools.Load(poolKey); ok {
 		if dbPool, ok := pool.(*DatabasePool); ok {
@@ -279,8 +275,7 @@ func (dp *DBPool) GetDBStats() map[string]interface{} {
 
 // GetDBWithType gets a database connection from the pool with specified connection type
 // dirPath: path for database directory (empty string defaults to current directory ".")
-// key: encryption key (optional, empty string means unencrypted)
-func GetDBWithType(connType DBConnectionType, dirPath, key string) (*sql.DB, error) {
+func GetDBWithType(connType DBConnectionType, dirPath string) (*sql.DB, error) {
 	pool := GetDBPool()
 
 	// Default path
@@ -288,19 +283,17 @@ func GetDBWithType(connType DBConnectionType, dirPath, key string) (*sql.DB, err
 		dirPath = "."
 	}
 
-	return pool.GetDB(connType, dirPath, key)
+	return pool.GetDB(connType, dirPath)
 }
 
 // GetReadDB gets a read-only database connection
 // dirPath: path for database directory (empty string defaults to current directory ".")
-// key: encryption key (optional, empty string means unencrypted)
-func GetReadDB(dirPath, key string) (*sql.DB, error) {
-	return GetDBWithType(DBRead, dirPath, key)
+func GetReadDB(dirPath string) (*sql.DB, error) {
+	return GetDBWithType(DBRead, dirPath)
 }
 
 // GetWriteDB gets a write database connection
 // dirPath: path for database directory (empty string defaults to current directory ".")
-// key: encryption key (optional, empty string means unencrypted)
-func GetWriteDB(dirPath, key string) (*sql.DB, error) {
-	return GetDBWithType(DBWrite, dirPath, key)
+func GetWriteDB(dirPath string) (*sql.DB, error) {
+	return GetDBWithType(DBWrite, dirPath)
 }

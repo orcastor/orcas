@@ -718,13 +718,19 @@ func createTestFile(t *testing.T, fs *OrcasFS, bktID int64, fileName string) (in
 }
 
 func cleanupFS(fs *OrcasFS) {
-	// Close all RandomAccessors
-	fs.raRegistry.Range(func(key, value interface{}) bool {
-		if ra, ok := value.(*RandomAccessor); ok {
-			ra.Close()
-		}
-		return true
-	})
+	// Close filesystem (stops WAL checkpoint manager and closes RandomAccessors)
+	if fs != nil {
+		fs.Close()
+	}
+
+	// Close database pool connections
+	pool := core.GetDBPool()
+	if pool != nil {
+		pool.Close()
+	}
+
+	// Small delay to ensure all connections are fully closed
+	time.Sleep(50 * time.Millisecond)
 }
 
 func cleanupTestDir(t *testing.T, testDir string) {

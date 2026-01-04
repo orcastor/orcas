@@ -18,7 +18,7 @@ func TestInitSnapshotTables(t *testing.T) {
 
 	// Initialize main database
 	dbPath := filepath.Join(tmpDir, ".db")
-	db, err := GetWriteDB(tmpDir, "")
+	db, err := GetWriteDB(tmpDir)
 	if err != nil {
 		t.Fatalf("Failed to get write DB: %v", err)
 	}
@@ -79,7 +79,7 @@ func TestSnapshotManager_CreateLazySnapshot(t *testing.T) {
 	dda.SetDataPath(tmpDir)
 
 	// Initialize snapshot tables
-	db, _ := GetWriteDB(tmpDir, "")
+	db, _ := GetWriteDB(tmpDir)
 	if err := InitSnapshotTables(db); err != nil {
 		t.Fatalf("Failed to init snapshot tables: %v", err)
 	}
@@ -148,7 +148,7 @@ func TestSnapshotManager_ListSnapshots(t *testing.T) {
 	dda.SetDataPath(tmpDir)
 
 	// Initialize snapshot tables
-	db, _ := GetWriteDB(tmpDir, "")
+	db, _ := GetWriteDB(tmpDir)
 	if err := InitSnapshotTables(db); err != nil {
 		t.Fatalf("Failed to init snapshot tables: %v", err)
 	}
@@ -212,7 +212,7 @@ func TestSnapshotManager_DeleteSnapshot(t *testing.T) {
 	dda.SetDataPath(tmpDir)
 
 	// Initialize snapshot tables
-	db, _ := GetWriteDB(tmpDir, "")
+	db, _ := GetWriteDB(tmpDir)
 	if err := InitSnapshotTables(db); err != nil {
 		t.Fatalf("Failed to init snapshot tables: %v", err)
 	}
@@ -273,7 +273,7 @@ func TestSnapshotManager_CleanupExpiredSnapshots(t *testing.T) {
 	dda.SetDataPath(tmpDir)
 
 	// Initialize snapshot tables
-	db, _ := GetWriteDB(tmpDir, "")
+	db, _ := GetWriteDB(tmpDir)
 	if err := InitSnapshotTables(db); err != nil {
 		t.Fatalf("Failed to init snapshot tables: %v", err)
 	}
