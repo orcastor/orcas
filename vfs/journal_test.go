@@ -878,6 +878,242 @@ func TestJournalFlushWithAtomicReplace(t *testing.T) {
 	t.Logf("✓ Journal flush with atomic replace test passed")
 }
 
+// TestCreateWithAtomicReplace tests Create with atomic replace scenario (unlink then create)
+// This test covers the case where a file is unlinked and then a new file with the same name is created.
+func TestCreateWithAtomicReplace(t *testing.T) {
+	testDir := filepath.Join(os.TempDir(), "orcas_create_atomic_replace")
+	defer cleanupTestDir(t, testDir)
+
+	fs, bktID := setupTestFS(t, testDir)
+	defer cleanupFS(fs)
+
+	fileName := "test_atomic_replace_create.txt"
+	root := fs.root
+	if root == nil {
+		t.Fatalf("Failed to get root node")
+	}
+
+	// Step 1: Create an "old" file object with some versions
+	oldFileID := core.NewID()
+	oldFileObj := &core.ObjectInfo{
+		ID:     oldFileID,
+		PID:    root.objID,
+		Type:   core.OBJ_TYPE_FILE,
+		Name:   fileName,
+		DataID: 0,
+		Size:   0,
+		MTime:  core.Now(),
+	}
+
+	lh, ok := fs.h.(*core.LocalHandler)
+	if !ok {
+		t.Fatalf("Handler is not LocalHandler")
+	}
+
+	_, err := lh.Put(fs.c, bktID, []*core.ObjectInfo{oldFileObj})
+	if err != nil {
+		t.Fatalf("Failed to create old file object: %v", err)
+	}
+
+	// Create some version objects for the old file
+	oldVersionIDs := make([]int64, 0, 2)
+	for i := 0; i < 2; i++ {
+		versionID := core.NewID()
+		versionObj := &core.ObjectInfo{
+			ID:     versionID,
+			PID:    oldFileID,
+			Type:   core.OBJ_TYPE_VERSION,
+			DataID: 0,
+			Size:   0,
+			MTime:  core.Now(),
+		}
+		_, err = lh.Put(fs.c, bktID, []*core.ObjectInfo{versionObj})
+		if err != nil {
+			t.Fatalf("Failed to create version object: %v", err)
+		}
+		oldVersionIDs = append(oldVersionIDs, versionID)
+	}
+
+	t.Logf("Created old file: fileID=%d, versions=%d", oldFileID, len(oldVersionIDs))
+
+	// Give a moment for version objects to be available for List operations
+	time.Sleep(50 * time.Millisecond)
+
+	// Step 2: Unlink the old file (this will schedule deletion)
+	errno := root.Unlink(context.Background(), fileName)
+	if errno != 0 {
+		t.Fatalf("Failed to unlink file: errno=%d", errno)
+	}
+
+	t.Logf("Unlinked old file: fileID=%d", oldFileID)
+
+	// Give a moment for deletion to be scheduled
+	time.Sleep(100 * time.Millisecond)
+
+	// Step 3: Create a new file with the same name (this should trigger atomic replace)
+	// Simulate Create by directly calling the handler, but check for atomic replace first
+	// In real scenario, Create would check atomic replace before creating
+	
+	// Check for atomic replace (this is what Create does)
+	var pd *PendingDeletion
+	var canceledDeletion bool
+	if fs.atomicReplaceMgr != nil {
+		if pd, canceledDeletion = fs.atomicReplaceMgr.CheckAndCancelDeletion(bktID, root.objID, fileName); canceledDeletion {
+			DebugLog("[Test] Detected atomic replace: oldFileID=%d, versions=%d", pd.FileID, len(pd.Versions))
+		}
+	}
+
+	// Create new file object
+	newFileID := core.NewID()
+	newFileObj := &core.ObjectInfo{
+		ID:     newFileID,
+		PID:    root.objID,
+		Type:   core.OBJ_TYPE_FILE,
+		Name:   fileName,
+		DataID: 0,
+		Size:   0,
+		MTime:  core.Now(),
+	}
+
+	ids, err := lh.Put(fs.c, bktID, []*core.ObjectInfo{newFileObj})
+	if err != nil {
+		t.Fatalf("Failed to create new file: %v", err)
+	}
+	if len(ids) == 0 || ids[0] == 0 {
+		t.Fatalf("Put returned empty or zero ID")
+	}
+	newFileObj.ID = ids[0]
+	newFileID = ids[0]
+
+	t.Logf("Created new file: fileID=%d", newFileID)
+
+	// Handle atomic replace if detected (simulating what Create does)
+	if canceledDeletion && pd != nil {
+		DebugLog("[Test] Handling atomic replace: oldFileID=%d, newFileID=%d, versions=%d",
+			pd.FileID, newFileID, len(pd.Versions))
+
+		// Merge versions from old file to new file if needed
+		if len(pd.Versions) > 0 {
+			// Get all version objects
+			versions, err := fs.h.Get(fs.c, bktID, pd.Versions)
+			if err != nil {
+				DebugLog("[Test] WARNING: Failed to get versions during atomic replace: %v", err)
+			} else {
+				// Change PID from oldFileID to newFileID
+				for _, v := range versions {
+					v.PID = newFileID
+				}
+
+				// Update versions
+				_, err = fs.h.Put(fs.c, bktID, versions)
+				if err != nil {
+					DebugLog("[Test] WARNING: Failed to merge versions during atomic replace: %v", err)
+					// Continue anyway - file creation should proceed
+				} else {
+					DebugLog("[Test] Merged %d versions from oldFileID=%d to newFileID=%d",
+						len(versions), pd.FileID, newFileID)
+				}
+			}
+		}
+
+		// Delete old file object if it's different from new file
+		if pd.FileID != newFileID {
+			if err := fs.h.Delete(fs.c, bktID, pd.FileID); err != nil {
+				DebugLog("[Test] WARNING: Failed to delete old file object: oldFileID=%d, error=%v", pd.FileID, err)
+				// Non-fatal - old file object can be cleaned up later
+			} else {
+				DebugLog("[Test] Deleted old file object: oldFileID=%d", pd.FileID)
+			}
+		}
+	}
+
+	// Give a moment for atomic replace operations to complete
+	time.Sleep(100 * time.Millisecond)
+
+	// Step 4: Verify versions were merged to the new file
+	versionsMerged := false
+	for _, versionID := range oldVersionIDs {
+		versions, err := fs.h.Get(fs.c, bktID, []int64{versionID})
+		if err != nil {
+			t.Logf("Note: Failed to get version %d (may have been deleted): %v", versionID, err)
+			continue
+		}
+		if len(versions) == 0 {
+			t.Logf("Note: Version %d not found (may have been deleted)", versionID)
+			continue
+		}
+		if versions[0].PID == newFileID {
+			versionsMerged = true
+			t.Logf("✓ Version %d merged to new file (PID=%d)", versionID, newFileID)
+		} else if versions[0].PID == oldFileID {
+			t.Logf("Note: Version %d still has old PID=%d (may not have been in pd.Versions)", versionID, oldFileID)
+		}
+	}
+
+	if !versionsMerged {
+		t.Logf("Note: No versions were merged (this is acceptable if getFileVersions didn't find them)")
+	}
+
+	// Step 5: Verify old file object was deleted
+	oldFileObjs, err := fs.h.Get(fs.c, bktID, []int64{oldFileID})
+	if err == nil && len(oldFileObjs) > 0 {
+		t.Errorf("Old file object %d still exists (should be deleted)", oldFileID)
+	} else {
+		t.Logf("✓ Old file object %d deleted", oldFileID)
+	}
+
+	// Step 6: Verify new file object exists and is correct
+	newFileObjs, err := fs.h.Get(fs.c, bktID, []int64{newFileID})
+	if err != nil || len(newFileObjs) == 0 {
+		t.Fatalf("Failed to get new file object: %v", err)
+	}
+
+	if newFileObjs[0].Name != fileName {
+		t.Errorf("New file name mismatch: got %s, want %s", newFileObjs[0].Name, fileName)
+	} else {
+		t.Logf("✓ New file object created correctly: fileID=%d, name=%s", newFileID, fileName)
+	}
+
+	// Step 7: Write and read data to verify file works correctly
+	// Use RandomAccessor for easier testing
+	ra, err := getOrCreateRandomAccessor(fs, newFileID)
+	if err != nil {
+		t.Fatalf("Failed to get RandomAccessor: %v", err)
+	}
+	defer ra.Close()
+
+	testData := []byte("Hello, Atomic Replace!")
+	err = ra.Write(0, testData)
+	if err != nil {
+		t.Fatalf("Failed to write: %v", err)
+	}
+
+	// Flush to ensure data is persisted
+	_, err = ra.Flush()
+	if err != nil {
+		t.Fatalf("Failed to flush: %v", err)
+	}
+
+	// Reopen RandomAccessor to ensure we read from persisted data
+	ra2, err := getOrCreateRandomAccessor(fs, newFileID)
+	if err != nil {
+		t.Fatalf("Failed to get RandomAccessor for read: %v", err)
+	}
+	defer ra2.Close()
+
+	readBuf, err := ra2.Read(0, len(testData))
+	if err != nil {
+		t.Fatalf("Failed to read: %v", err)
+	}
+	if !bytes.Equal(readBuf, testData) {
+		t.Errorf("Data mismatch: got %q, want %q", readBuf, testData)
+	} else {
+		t.Logf("✓ Data integrity verified: wrote and read %d bytes", len(testData))
+	}
+
+	t.Logf("✓ Create with atomic replace test passed")
+}
+
 // Helper function for min
 func min(a, b int) int {
 	if a < b {

@@ -867,10 +867,8 @@ func (n *OrcasNode) getDirListCacheKey(dirID int64) int64 {
 // getDirListWithCache gets directory listing with cache and singleflight
 // Uses singleflight to prevent duplicate concurrent requests for the same directory
 // Thread-safe: uses per-directory mutex to prevent race conditions with cache updates
+// Note: Cache only reads from database, does not merge pending objects
 func (n *OrcasNode) getDirListWithCache(dirID int64) ([]*core.ObjectInfo, syscall.Errno) {
-	// Get pending objects first (these are always fresh and should be included)
-	pendingChildren := n.getPendingObjectsForDir(dirID)
-
 	// Check cache first (with lock to prevent race conditions with cache updates)
 	cacheKey := n.getDirListCacheKey(dirID)
 	mu := getDirListCacheMutex(cacheKey)
@@ -883,6 +881,8 @@ func (n *OrcasNode) getDirListWithCache(dirID int64) ([]*core.ObjectInfo, syscal
 			// CRITICAL: Merge with RandomAccessor to get latest data (even from cache)
 			// This ensures that even if cache is valid, we still get the most recent data
 			// from files that are still in memory (RandomAccessor)
+			// Note: Only merge from fileObjCache and RandomAccessor (already flushed to database),
+			// NOT from pending objects (must be flushed to database first)
 			for i, child := range children {
 				var latestFileObj *core.ObjectInfo
 
@@ -910,83 +910,7 @@ func (n *OrcasNode) getDirListWithCache(dirID int64) ([]*core.ObjectInfo, syscal
 				}
 			}
 
-			// Merge pending objects with cached children
-			// Strategy: Cached entries (from database) are authoritative
-			// Pending entries are only added if they don't exist in cache (by ID or by name)
-			// If same file exists in both, prefer cached entry (with DataID) over pending entry
-
-			// Create maps to track existing children by ID and by name
-			childrenMapByID := make(map[int64]*core.ObjectInfo)
-			childrenMapByName := make(map[string]*core.ObjectInfo)
-
-			// First, add all cached children (these are from database, authoritative)
-			for _, child := range children {
-				childrenMapByID[child.ID] = child
-				// For name-based deduplication, prefer cached entry (with DataID) over pending
-				if existing, exists := childrenMapByName[child.Name]; !exists {
-					childrenMapByName[child.Name] = child
-				} else {
-					// If same name exists, prefer the one with DataID (from database) over pending (DataID=0)
-					if child.DataID > 0 && existing.DataID == 0 {
-						childrenMapByName[child.Name] = child
-					}
-				}
-			}
-
-			// Then, add pending objects that are not already in cache
-			// IMPORTANT: Even if pending object has DataID (already flushed), if it's not in cache,
-			// it might be a race condition where file was flushed but cache wasn't updated yet
-			for _, pending := range pendingChildren {
-				// Check by ID first - if same ID exists in cache, prefer cache entry if it has DataID
-				if existing, exists := childrenMapByID[pending.ID]; exists {
-					// Same ID exists - prefer cache entry if it has DataID, otherwise use pending
-					if existing.DataID > 0 {
-						// Cached entry has DataID (from database), skip pending
-						// DebugLog("[VFS getDirListWithCache] Skipping pending object in cache (same ID in cache with DataID): dirID=%d, fileID=%d, name=%s, cacheDataID=%d", dirID, pending.ID, pending.Name, existing.DataID)
-						continue
-					}
-					// Cache entry has no DataID but pending has DataID, update cache entry with pending data
-					if pending.DataID > 0 {
-						existing.DataID = pending.DataID
-						existing.Size = pending.Size
-						DebugLog("[VFS getDirListWithCache] Updated cache entry with pending DataID: dirID=%d, fileID=%d, name=%s, DataID=%d", dirID, pending.ID, pending.Name, pending.DataID)
-						continue
-					}
-					// Both have no DataID, prefer cache entry
-					// DebugLog("[VFS getDirListWithCache] Skipping pending object in cache (same ID, both no DataID, prefer cache): dirID=%d, fileID=%d, name=%s", dirID, pending.ID, pending.Name)
-					continue
-				}
-
-				// Check by name - if same name exists in cache, prefer cache entry if it has DataID
-				if existing, exists := childrenMapByName[pending.Name]; exists {
-					if existing.DataID > 0 {
-						// Cached entry has DataID (from database), skip pending entry
-						// DebugLog("[VFS getDirListWithCache] Skipping pending object in cache (same name in cache with DataID): dirID=%d, fileID=%d, name=%s, existingFileID=%d, existingDataID=%d", dirID, pending.ID, pending.Name, existing.ID, existing.DataID)
-						continue
-					}
-					// Both are pending (no DataID), but existing is from cache
-					// If pending has DataID, update cache entry
-					if pending.DataID > 0 {
-						existing.DataID = pending.DataID
-						existing.Size = pending.Size
-						DebugLog("[VFS getDirListWithCache] Updated cache entry with pending DataID (by name): dirID=%d, fileID=%d, name=%s, DataID=%d", dirID, pending.ID, pending.Name, pending.DataID)
-						continue
-					}
-					// Both have no DataID, prefer cache entry
-					if existing.ID != pending.ID {
-						// DebugLog("[VFS getDirListWithCache] Skipping pending object in cache (same name, different ID, both no DataID, prefer cache entry): dirID=%d, fileID=%d, name=%s, existingFileID=%d", dirID, pending.ID, pending.Name, existing.ID)
-						continue
-					}
-				}
-
-				// New pending object not in cache, add it
-				childrenMapByID[pending.ID] = pending
-				childrenMapByName[pending.Name] = pending
-				children = append(children, pending)
-				DebugLog("[VFS getDirListWithCache] Added pending object to cached directory listing: dirID=%d, fileID=%d, name=%s, DataID=%d", dirID, pending.ID, pending.Name, pending.DataID)
-			}
-
-			// DebugLog("[VFS getDirListWithCache] Found in cache: dirID=%d, count=%d (with %d pending)", dirID, len(children), len(pendingChildren))
+			// DebugLog("[VFS getDirListWithCache] Found in cache: dirID=%d, count=%d", dirID, len(children))
 			return children, 0
 		}
 	}
@@ -1013,10 +937,12 @@ func (n *OrcasNode) getDirListWithCache(dirID int64) ([]*core.ObjectInfo, syscal
 			return nil, err
 		}
 
-		// CRITICAL: Merge with fileObjCache and RandomAccessor to avoid SQLite WAL dirty read
-		// After Flush(), fileObjCache is immediately updated, but database may have WAL delay
-		// We must merge fileObjCache data into directory listing to ensure consistency
+		// CRITICAL: Merge with fileObjCache and RandomAccessor to get latest data from database
+		// After Flush(), fileObjCache is immediately updated, and database is also updated
+		// We merge fileObjCache data into directory listing to ensure consistency
 		// ALSO: Check RandomAccessor registry for files that are still in memory (even if cache expired)
+		// Note: Only merge from fileObjCache and RandomAccessor (already flushed to database),
+		// NOT from pending objects (must be flushed to database first)
 		for i, child := range children {
 			var latestFileObj *core.ObjectInfo
 
@@ -1052,82 +978,7 @@ func (n *OrcasNode) getDirListWithCache(dirID int64) ([]*core.ObjectInfo, syscal
 			}
 		}
 
-		// Get pending objects from RandomAccessor registry
-		// These are objects that are being written but not yet flushed to database
-		pendingChildren := n.getPendingObjectsForDir(dirID)
-
-		// Merge pending objects with database children
-		// Strategy: Database entries are authoritative (already flushed, have complete metadata)
-		// Pending entries are only added if they don't exist in database (by ID or by name)
-		// If same file exists in both, prefer database entry (with DataID) over pending entry
-
-		// Create maps to track existing children by ID and by name
-		childrenMapByID := make(map[int64]*core.ObjectInfo)
-		childrenMapByName := make(map[string]*core.ObjectInfo)
-
-		// First, add all database children (these are authoritative)
-		for _, child := range children {
-			childrenMapByID[child.ID] = child
-			// For name-based deduplication, prefer database entry (with DataID) over pending
-			if existing, exists := childrenMapByName[child.Name]; !exists {
-				childrenMapByName[child.Name] = child
-			} else {
-				// If same name exists, prefer the one with DataID (from database) over pending (DataID=0)
-				if child.DataID > 0 && existing.DataID == 0 {
-					childrenMapByName[child.Name] = child
-				}
-			}
-		}
-
-		// Then, add pending objects that are not already in database
-		for _, pending := range pendingChildren {
-			// Check by ID first - if same ID exists in database
-			if existing, exists := childrenMapByID[pending.ID]; exists {
-				// Same ID exists - but pending might have newer data (DataID, Size, MTime)
-				// Update database entry with pending data if pending has DataID
-				if pending.DataID > 0 && existing.DataID == 0 {
-					existing.DataID = pending.DataID
-					existing.Size = pending.Size
-					existing.MTime = pending.MTime
-					DebugLog("[VFS getDirListWithCache] Updated database entry with pending DataID: dirID=%d, fileID=%d, name=%s, DataID=%d, size=%d", dirID, pending.ID, pending.Name, pending.DataID, pending.Size)
-					continue
-				}
-				// Database entry is authoritative (has DataID or both have no DataID), skip pending
-				DebugLog("[VFS getDirListWithCache] Skipping pending object (same ID in database): dirID=%d, fileID=%d, name=%s, dbDataID=%d, pendingDataID=%d", dirID, pending.ID, pending.Name, existing.DataID, pending.DataID)
-				continue
-			}
-
-			// Check by name - if same name exists in database
-			if existing, exists := childrenMapByName[pending.Name]; exists {
-				// If database entry has DataID, it's authoritative
-				if existing.DataID > 0 {
-					// Database entry has DataID (already flushed), skip pending entry
-					DebugLog("[VFS getDirListWithCache] Skipping pending object (same name in database with DataID): dirID=%d, fileID=%d, name=%s, existingFileID=%d, existingDataID=%d", dirID, pending.ID, pending.Name, existing.ID, existing.DataID)
-					continue
-				}
-				// Database entry has no DataID, but pending has DataID - update database entry
-				if pending.DataID > 0 {
-					existing.DataID = pending.DataID
-					existing.Size = pending.Size
-					existing.MTime = pending.MTime
-					DebugLog("[VFS getDirListWithCache] Updated database entry with pending DataID (by name): dirID=%d, fileID=%d, name=%s, DataID=%d, size=%d", dirID, pending.ID, pending.Name, pending.DataID, pending.Size)
-					continue
-				}
-				// Both have no DataID, prefer the one from database
-				if existing.ID != pending.ID {
-					DebugLog("[VFS getDirListWithCache] Skipping pending object (same name, different ID, prefer database entry): dirID=%d, fileID=%d, name=%s, existingFileID=%d", dirID, pending.ID, pending.Name, existing.ID)
-					continue
-				}
-			}
-
-			// New pending object not in database, add it
-			childrenMapByID[pending.ID] = pending
-			childrenMapByName[pending.Name] = pending
-			children = append(children, pending)
-			DebugLog("[VFS getDirListWithCache] Added pending object to directory listing: dirID=%d, fileID=%d, name=%s", dirID, pending.ID, pending.Name)
-		}
-
-		// Cache the result (including pending objects) with write lock
+		// Cache the result (from database only, no pending objects) with write lock
 		mu := getDirListCacheMutex(cacheKey)
 		mu.Lock()
 		dirListCache.Put(cacheKey, children)
@@ -1562,6 +1413,17 @@ func (n *OrcasNode) Create(ctx context.Context, name string, flags uint32, mode 
 	// If a directory with the same name exists in database, List will return it and we'll handle it above
 
 	// File doesn't exist and O_CREAT is set, create new file
+	// Before creating, check for atomic replace scenario (unlink then create)
+	// If there's a pending deletion for this name, cancel it and merge versions
+	var pd *PendingDeletion
+	var canceledDeletion bool
+	if n.fs.atomicReplaceMgr != nil {
+		if pd, canceledDeletion = n.fs.atomicReplaceMgr.CheckAndCancelDeletion(n.fs.bktID, obj.ID, name); canceledDeletion {
+			DebugLog("[VFS Create] Detected atomic replace pattern (unlink then create): oldFileID=%d, newName=%s, versions=%d",
+				pd.FileID, name, len(pd.Versions))
+		}
+	}
+
 	fileObj := &core.ObjectInfo{
 		ID:    core.NewID(),
 		PID:   obj.ID,
@@ -1709,6 +1571,46 @@ func (n *OrcasNode) Create(ctx context.Context, name string, flags uint32, mode 
 		// Success - use the returned ID
 		fileObj.ID = ids[0]
 		DebugLog("[VFS Create] Successfully created file: name=%s, fileID=%d, parentID=%d", name, fileObj.ID, obj.ID)
+
+		// Handle atomic replace if detected (unlink then create)
+		if canceledDeletion && pd != nil {
+			DebugLog("[VFS Create] Handling atomic replace: oldFileID=%d, newFileID=%d, versions=%d",
+				pd.FileID, fileObj.ID, len(pd.Versions))
+
+			// Merge versions from old file to new file if needed
+			if len(pd.Versions) > 0 {
+				// Get all version objects
+				versions, err := n.fs.h.Get(n.fs.c, n.fs.bktID, pd.Versions)
+				if err != nil {
+					DebugLog("[VFS Create] WARNING: Failed to get versions during atomic replace: %v", err)
+				} else {
+					// Change PID from oldFileID to newFileID
+					for _, v := range versions {
+						v.PID = fileObj.ID
+					}
+
+					// Update versions
+					_, err = n.fs.h.Put(n.fs.c, n.fs.bktID, versions)
+					if err != nil {
+						DebugLog("[VFS Create] WARNING: Failed to merge versions during atomic replace: %v", err)
+						// Continue anyway - file creation should proceed
+					} else {
+						DebugLog("[VFS Create] Merged %d versions from oldFileID=%d to newFileID=%d",
+							len(versions), pd.FileID, fileObj.ID)
+					}
+				}
+			}
+
+			// Delete old file object if it's different from new file
+			if pd.FileID != fileObj.ID {
+				if err := n.fs.h.Delete(n.fs.c, n.fs.bktID, pd.FileID); err != nil {
+					DebugLog("[VFS Create] WARNING: Failed to delete old file object: oldFileID=%d, error=%v", pd.FileID, err)
+					// Non-fatal - old file object can be cleaned up later
+				} else {
+					DebugLog("[VFS Create] Deleted old file object: oldFileID=%d", pd.FileID)
+				}
+			}
+		}
 	}
 
 	// If we found an existing file (from duplicate key or zero ID), handle it
@@ -3504,7 +3406,7 @@ func (n *OrcasNode) readImpl(ctx context.Context, dest []byte, off int64) (fuse.
 			ra.journalMu.RLock()
 			hasJournal := ra.journal != nil
 			ra.journalMu.RUnlock()
-			
+
 			if hasJournal {
 				DebugLog("[VFS Read] Using RandomAccessor with journal: objID=%d, offset=%d, size=%d", obj.ID, off, len(dest))
 				data, err := ra.Read(off, len(dest))
@@ -3512,14 +3414,14 @@ func (n *OrcasNode) readImpl(ctx context.Context, dest []byte, off int64) (fuse.
 					DebugLog("[VFS Read] ERROR: RandomAccessor read failed: objID=%d, offset=%d, size=%d, error=%v", obj.ID, off, len(dest), err)
 					return nil, syscall.EIO
 				}
-				
+
 				// Copy data to dest buffer
 				nRead := copy(dest, data)
-				
+
 				// Create result copy (required by go-fuse v2)
 				resultData := make([]byte, nRead)
 				copy(resultData, dest[:nRead])
-				
+
 				DebugLog("[VFS Read] Successfully read with journal overlay: objID=%d, offset=%d, requested=%d, read=%d", obj.ID, off, len(dest), nRead)
 				return fuse.ReadResultData(resultData), 0
 			}
