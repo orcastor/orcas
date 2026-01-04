@@ -6157,6 +6157,32 @@ func (ra *RandomAccessor) shouldUseJournal(fileObj *core.ObjectInfo) bool {
 		return false
 	}
 
+	// OPTIMIZATION: Don't use journal for small files after truncate(0) with sequential writes
+	// This is a common pattern: truncate(0) + write new content sequentially
+	// Sequential buffer is more efficient and avoids journal complexity
+	if fileObj.DataID == core.EmptyDataID || fileObj.Size == 0 {
+		// Check if we have sequential write buffer initialized
+		if ra.seqBuffer != nil {
+			ra.seqBuffer.mu.Lock()
+			hasSeqData := ra.seqBuffer.hasData && !ra.seqBuffer.closed
+			ra.seqBuffer.mu.Unlock()
+			if hasSeqData {
+				// Already using sequential buffer, don't switch to journal
+				DebugLog("[VFS shouldUseJournal] Skipping journal for sequential write after truncate: fileID=%d", ra.fileID)
+				return false
+			}
+		}
+
+		// Check if current write is sequential (offset == 0 or continuing from last write)
+		lastOffset := atomic.LoadInt64(&ra.lastOffset)
+		if lastOffset == 0 {
+			// First write after truncate, prefer sequential buffer for small files
+			// Journal is better for large files or random writes
+			DebugLog("[VFS shouldUseJournal] First write after truncate, preferring sequential buffer: fileID=%d", ra.fileID)
+			return false
+		}
+	}
+
 	// PRIORITY CHECK: Sparse files should use Journal
 	// This replaces TempWriteArea for sparse files
 	sparseSize := ra.getSparseSize()
@@ -6166,11 +6192,12 @@ func (ra *RandomAccessor) shouldUseJournal(fileObj *core.ObjectInfo) bool {
 	}
 
 	// PRIORITY CHECK 2: Files that need encryption or compression
-	// Journal handles these during Flush (replaces TempWriteArea)
+	// But only for existing files with data (not after truncate(0))
+	// For new files or after truncate, sequential buffer handles encryption/compression efficiently
 	needsEncrypt := ra.fs.EndecWay > 0 && ra.fs.EndecKey != ""
 	needsCompress := ra.fs.CmprWay > 0 && core.ShouldCompressFileByName(fileObj.Name)
-	if needsEncrypt || needsCompress {
-		DebugLog("[VFS shouldUseJournal] Using journal for encryption/compression: fileID=%d, needsEncrypt=%v, needsCompress=%v",
+	if (needsEncrypt || needsCompress) && fileObj.DataID != 0 && fileObj.DataID != core.EmptyDataID && fileObj.Size > 0 {
+		DebugLog("[VFS shouldUseJournal] Using journal for encryption/compression on existing file: fileID=%d, needsEncrypt=%v, needsCompress=%v",
 			ra.fileID, needsEncrypt, needsCompress)
 		return true
 	}

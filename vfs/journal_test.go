@@ -12,6 +12,33 @@ import (
 	"github.com/orcastor/orcas/core"
 )
 
+// Helper function for tests (not in Windows-specific files)
+func getOrCreateRandomAccessor(ofs *OrcasFS, fileID int64) (*RandomAccessor, error) {
+	return NewRandomAccessor(ofs, fileID)
+}
+
+// setupTestFSWithEncryption creates a test filesystem with encryption enabled
+func setupTestFSWithEncryption(t *testing.T, testDir string, encryptionKey string, cmprWay uint32) (*OrcasFS, int64) {
+	// Use the same setup as journal_test.go
+	fs, bktID := setupTestFS(t, testDir)
+
+	// Add encryption configuration
+	fs.EndecWay = core.DATA_ENDEC_AES256
+	fs.EndecKey = encryptionKey
+	fs.CmprWay = cmprWay
+
+	// Manually initialize root node for testing (since we don't call Mount)
+	if fs.root == nil {
+		fs.root = &OrcasNode{
+			fs:     fs,
+			objID:  bktID,
+			isRoot: true,
+		}
+	}
+
+	return fs, bktID
+}
+
 // TestJournalBasicWriteRead tests basic write and read operations with journal
 func TestJournalBasicWriteRead(t *testing.T) {
 	// Setup test environment
@@ -603,7 +630,7 @@ func TestJournalFlushUpdatesFileObject(t *testing.T) {
 
 func setupTestFS(t *testing.T, testDir string) (*OrcasFS, int64) {
 	// Create test directory
-	if err := os.MkdirAll(testDir, 0755); err != nil {
+	if err := os.MkdirAll(testDir, 0o755); err != nil {
 		t.Fatalf("Failed to create test directory: %v", err)
 	}
 
@@ -715,4 +742,741 @@ func cleanupTestDir(t *testing.T, testDir string) {
 	} else {
 		t.Logf("✓ Cleaned up test directory: %s", testDir)
 	}
+}
+
+// TestJournalEncryptionSimple tests basic encryption without complex journal operations
+func TestJournalEncryptionSimple(t *testing.T) {
+	// Setup test environment
+	testDir := filepath.Join(os.TempDir(), "orcas_journal_encryption_simple_test")
+	defer cleanupTestDir(t, testDir)
+
+	fs, bktID := setupTestFS(t, testDir)
+	defer cleanupFS(fs)
+
+	// Enable encryption
+	fs.EndecWay = core.DATA_ENDEC_AES256
+	fs.EndecKey = "test-encryption-key-32-bytes!!"
+
+	// Disable journal WAL to avoid complexity
+	if fs.journalMgr != nil {
+		// Disable journal WAL is not needed - it has its own mechanism
+	}
+
+	fileName := "test_encryption_simple.txt"
+	fileID, err := createTestFile(t, fs, bktID, fileName)
+	if err != nil {
+		t.Fatalf("Failed to create file: %v", err)
+	}
+
+	originalContent := []byte("This is the original content before truncate.")
+	newContent := []byte("This is the NEW content after truncate. It should be encrypted and decrypted correctly!")
+
+	t.Run("WriteOriginalContent", func(t *testing.T) {
+		ra, err := getOrCreateRandomAccessor(fs, fileID)
+		if err != nil {
+			t.Fatalf("Failed to create RandomAccessor: %v", err)
+		}
+
+		if err := ra.Write(0, originalContent); err != nil {
+			t.Fatalf("Failed to write: %v", err)
+		}
+
+		if _, err := ra.Flush(); err != nil {
+			t.Fatalf("Failed to flush: %v", err)
+		}
+
+		if err := ra.Close(); err != nil {
+			t.Fatalf("Failed to close: %v", err)
+		}
+
+		t.Logf("✓ Original content written and flushed (%d bytes)", len(originalContent))
+	})
+
+	t.Run("TruncateAndRewrite", func(t *testing.T) {
+		ra, err := getOrCreateRandomAccessor(fs, fileID)
+		if err != nil {
+			t.Fatalf("Failed to create RandomAccessor: %v", err)
+		}
+
+		// Truncate to 0
+		if _, err := ra.Truncate(0); err != nil {
+			t.Fatalf("Failed to truncate: %v", err)
+		}
+
+		t.Logf("✓ File truncated to 0")
+
+		// Write new content
+		if err := ra.Write(0, newContent); err != nil {
+			t.Fatalf("Failed to write new content: %v", err)
+		}
+
+		t.Logf("✓ New content written (%d bytes)", len(newContent))
+
+		// Flush
+		if _, err := ra.Flush(); err != nil {
+			t.Fatalf("Failed to flush: %v", err)
+		}
+
+		t.Logf("✓ Content flushed")
+
+		// Close
+		if err := ra.Close(); err != nil {
+			t.Fatalf("Failed to close: %v", err)
+		}
+
+		t.Logf("✓ RandomAccessor closed")
+	})
+
+	t.Run("ReopenAndRead", func(t *testing.T) {
+		// Get file object to check size
+		lh, ok := fs.h.(*core.LocalHandler)
+		if !ok {
+			t.Fatalf("Handler is not LocalHandler")
+		}
+
+		objs, err := lh.Get(fs.c, bktID, []int64{fileID})
+		if err != nil || len(objs) == 0 {
+			t.Fatalf("Failed to get file object: %v", err)
+		}
+		fileObj := objs[0]
+
+		t.Logf("File info: Size=%d, DataID=%d", fileObj.Size, fileObj.DataID)
+
+		// Verify size
+		if fileObj.Size != int64(len(newContent)) {
+			t.Errorf("Size mismatch: expected %d, got %d", len(newContent), fileObj.Size)
+		}
+
+		// Verify DataInfo
+		dataInfo, err := lh.GetDataInfo(fs.c, bktID, fileObj.DataID)
+		if err != nil {
+			t.Fatalf("Failed to get DataInfo: %v", err)
+		}
+
+		t.Logf("DataInfo: ID=%d, OrigSize=%d, Size=%d, Kind=0x%x",
+			dataInfo.ID, dataInfo.OrigSize, dataInfo.Size, dataInfo.Kind)
+
+		// Verify encryption flag
+		if dataInfo.Kind&core.DATA_ENDEC_AES256 == 0 {
+			t.Errorf("Missing AES256 encryption flag: Kind=0x%x", dataInfo.Kind)
+		}
+
+		// Verify sizes
+		if dataInfo.OrigSize != int64(len(newContent)) {
+			t.Errorf("OrigSize mismatch: expected %d, got %d", len(newContent), dataInfo.OrigSize)
+		}
+
+		if dataInfo.Size < dataInfo.OrigSize {
+			t.Errorf("Size should be >= OrigSize for encrypted data: Size=%d, OrigSize=%d",
+				dataInfo.Size, dataInfo.OrigSize)
+		}
+
+		// Create new RandomAccessor and read
+		ra, err := getOrCreateRandomAccessor(fs, fileID)
+		if err != nil {
+			t.Fatalf("Failed to create RandomAccessor: %v", err)
+		}
+		defer ra.Close()
+
+		// Read content
+		readData, err := ra.Read(0, int(fileObj.Size))
+		if err != nil {
+			t.Fatalf("Failed to read content: %v", err)
+		}
+
+		t.Logf("Read %d bytes", len(readData))
+
+		// Verify content
+		if !bytes.Equal(readData, newContent) {
+			t.Errorf("Content mismatch:\nExpected (%d bytes): %s\nGot (%d bytes): %s",
+				len(newContent), string(newContent), len(readData), string(readData))
+			t.Logf("Expected hex: %x", newContent)
+			t.Logf("Got hex: %x", readData)
+		} else {
+			t.Logf("✓ Content verified correctly after reopen!")
+		}
+	})
+}
+
+// TestEncryptionWithoutJournal tests encryption fix without using Journal
+// This verifies that the encryption in flushSmallFile works correctly
+func TestEncryptionWithoutJournal(t *testing.T) {
+	// Setup test environment
+	testDir := filepath.Join(os.TempDir(), "orcas_encryption_no_journal_test")
+	defer cleanupTestDir(t, testDir)
+
+	fs, bktID := setupTestFS(t, testDir)
+	defer cleanupFS(fs)
+
+	// Enable encryption
+	fs.EndecWay = core.DATA_ENDEC_AES256
+	fs.EndecKey = "test-encryption-key-32-bytes!!"
+
+	// Disable journal completely
+	if fs.journalMgr != nil {
+		fs.journalMgr.config.Enabled = false
+	}
+
+	fileName := "test_encryption_no_journal.txt"
+	fileID, err := createTestFile(t, fs, bktID, fileName)
+	if err != nil {
+		t.Fatalf("Failed to create file: %v", err)
+	}
+
+	// Use small content to ensure it goes through flushSmallFile path
+	content := []byte("This content should be encrypted and decrypted correctly!")
+
+	t.Run("WriteAndFlush", func(t *testing.T) {
+		ra, err := getOrCreateRandomAccessor(fs, fileID)
+		if err != nil {
+			t.Fatalf("Failed to create RandomAccessor: %v", err)
+		}
+
+		// Write
+		if err := ra.Write(0, content); err != nil {
+			t.Fatalf("Failed to write: %v", err)
+		}
+
+		// Force sequential buffer flush
+		if _, err := ra.Flush(); err != nil {
+			t.Fatalf("Failed to flush: %v", err)
+		}
+
+		if err := ra.Close(); err != nil {
+			t.Fatalf("Failed to close: %v", err)
+		}
+
+		t.Logf("✓ Content written and flushed (%d bytes)", len(content))
+	})
+
+	t.Run("VerifyEncryption", func(t *testing.T) {
+		lh, ok := fs.h.(*core.LocalHandler)
+		if !ok {
+			t.Fatalf("Handler is not LocalHandler")
+		}
+
+		objs, err := lh.Get(fs.c, bktID, []int64{fileID})
+		if err != nil || len(objs) == 0 {
+			t.Fatalf("Failed to get file object: %v", err)
+		}
+		fileObj := objs[0]
+
+		dataInfo, err := lh.GetDataInfo(fs.c, bktID, fileObj.DataID)
+		if err != nil {
+			t.Fatalf("Failed to get DataInfo: %v", err)
+		}
+
+		t.Logf("DataInfo: ID=%d, OrigSize=%d, Size=%d, Kind=0x%x",
+			dataInfo.ID, dataInfo.OrigSize, dataInfo.Size, dataInfo.Kind)
+
+		// Verify encryption flag
+		if dataInfo.Kind&core.DATA_ENDEC_AES256 == 0 {
+			t.Errorf("Missing AES256 encryption flag: Kind=0x%x", dataInfo.Kind)
+		}
+
+		// Verify sizes
+		if dataInfo.OrigSize != int64(len(content)) {
+			t.Errorf("OrigSize mismatch: expected %d, got %d", len(content), dataInfo.OrigSize)
+		}
+
+		// For encrypted data, Size should be >= OrigSize
+		if dataInfo.Size < dataInfo.OrigSize {
+			t.Errorf("Size should be >= OrigSize: Size=%d, OrigSize=%d",
+				dataInfo.Size, dataInfo.OrigSize)
+		}
+
+		t.Logf("✓ Encryption verified: OrigSize=%d, EncryptedSize=%d", dataInfo.OrigSize, dataInfo.Size)
+	})
+
+	t.Run("ReadAndDecrypt", func(t *testing.T) {
+		ra, err := getOrCreateRandomAccessor(fs, fileID)
+		if err != nil {
+			t.Fatalf("Failed to create RandomAccessor: %v", err)
+		}
+		defer ra.Close()
+
+		readData, err := ra.Read(0, len(content))
+		if err != nil {
+			t.Fatalf("Failed to read: %v", err)
+		}
+
+		if !bytes.Equal(readData, content) {
+			t.Errorf("Content mismatch:\nExpected: %s\nGot: %s", string(content), string(readData))
+			t.Logf("Expected hex: %x", content)
+			t.Logf("Got hex: %x", readData)
+		} else {
+			t.Logf("✓ Content decrypted correctly!")
+		}
+	})
+}
+
+// TestJournalEncryptionAfterTruncate tests that encrypted files can be correctly read after truncate + write + reopen
+// This test verifies the fix for: "decryption failed: cipher: message authentication failed"
+func TestJournalEncryptionAfterTruncate(t *testing.T) {
+	// Setup test environment
+	testDir := filepath.Join(os.TempDir(), "orcas_journal_encryption_test")
+	defer cleanupTestDir(t, testDir)
+
+	encryptionKey := "test-encryption-key-32-bytes!!"
+	fs, bktID := setupTestFSWithEncryption(t, testDir, encryptionKey, 0)
+	defer cleanupFS(fs)
+
+	// Test data
+	originalContent := []byte("This is the original file content with some text.")
+	newContent := []byte("This is the NEW content after truncate and rewrite. It should be encrypted correctly!")
+
+	fileName := "test_encrypted_file.txt"
+	var fileID int64
+
+	t.Run("CreateInitialFile", func(t *testing.T) {
+		// Create file
+		var err error
+		fileID, err = createTestFile(t, fs, bktID, fileName)
+		if err != nil {
+			t.Fatalf("Failed to create file: %v", err)
+		}
+
+		// Write initial content
+		ra, err := getOrCreateRandomAccessor(fs, fileID)
+		if err != nil {
+			t.Fatalf("Failed to create RandomAccessor: %v", err)
+		}
+
+		if err := ra.Write(0, originalContent); err != nil {
+			t.Fatalf("Failed to write initial content: %v", err)
+		}
+
+		if _, err := ra.Flush(); err != nil {
+			t.Fatalf("Failed to flush initial write: %v", err)
+		}
+
+		// Read back and verify
+		readData, err := ra.Read(0, len(originalContent))
+		if err != nil {
+			t.Fatalf("Failed to read initial content: %v", err)
+		}
+
+		if !bytes.Equal(readData, originalContent) {
+			t.Errorf("Initial content mismatch:\nExpected: %s\nGot: %s", originalContent, readData)
+		}
+
+		if err := ra.Close(); err != nil {
+			t.Fatalf("Failed to close RandomAccessor: %v", err)
+		}
+
+		t.Logf("✓ Initial file created and verified: %s (%d bytes)", fileName, len(originalContent))
+	})
+
+	t.Run("TruncateAndRewrite", func(t *testing.T) {
+		// Get file object
+		lh, ok := fs.h.(*core.LocalHandler)
+		if !ok {
+			t.Fatalf("Handler is not LocalHandler")
+		}
+
+		objs, err := lh.Get(fs.c, bktID, []int64{fileID})
+		if err != nil || len(objs) == 0 {
+			t.Fatalf("Failed to get file object: %v", err)
+		}
+		fileObj := objs[0]
+
+		t.Logf("File before truncate: ID=%d, Size=%d, DataID=%d", fileID, fileObj.Size, fileObj.DataID)
+
+		// Create RandomAccessor
+		ra, err := getOrCreateRandomAccessor(fs, fileID)
+		if err != nil {
+			t.Fatalf("Failed to create RandomAccessor: %v", err)
+		}
+
+		// Truncate to 0
+		if _, err := ra.Truncate(0); err != nil {
+			t.Fatalf("Failed to truncate file: %v", err)
+		}
+
+		t.Logf("✓ File truncated to 0")
+
+		// Write new content
+		if err := ra.Write(0, newContent); err != nil {
+			t.Fatalf("Failed to write new content: %v", err)
+		}
+
+		t.Logf("✓ New content written (%d bytes)", len(newContent))
+
+		// Flush
+		if _, err := ra.Flush(); err != nil {
+			t.Fatalf("Failed to flush after write: %v", err)
+		}
+
+		t.Logf("✓ Content flushed")
+
+		// Close
+		if err := ra.Close(); err != nil {
+			t.Fatalf("Failed to close RandomAccessor: %v", err)
+		}
+
+		t.Logf("✓ RandomAccessor closed")
+
+		// Get updated file object
+		objs, err = lh.Get(fs.c, bktID, []int64{fileID})
+		if err != nil || len(objs) == 0 {
+			t.Fatalf("Failed to get updated file object: %v", err)
+		}
+		updatedFileObj := objs[0]
+
+		t.Logf("File after rewrite: ID=%d, Size=%d, DataID=%d", updatedFileObj.ID, updatedFileObj.Size, updatedFileObj.DataID)
+
+		if updatedFileObj.Size != int64(len(newContent)) {
+			t.Errorf("File size mismatch after rewrite: expected %d, got %d", len(newContent), updatedFileObj.Size)
+		}
+
+		// Get DataInfo to verify encryption
+		dataInfo, err := lh.GetDataInfo(fs.c, bktID, updatedFileObj.DataID)
+		if err != nil {
+			t.Fatalf("Failed to get DataInfo: %v", err)
+		}
+
+		t.Logf("DataInfo: ID=%d, Size=%d, OrigSize=%d, Kind=0x%x",
+			dataInfo.ID, dataInfo.Size, dataInfo.OrigSize, dataInfo.Kind)
+
+		// Verify encryption flag is set
+		if dataInfo.Kind&core.DATA_ENDEC_AES256 == 0 {
+			t.Errorf("DataInfo.Kind does not have AES256 encryption flag: Kind=0x%x", dataInfo.Kind)
+		}
+
+		// Verify sizes
+		if dataInfo.OrigSize != int64(len(newContent)) {
+			t.Errorf("DataInfo.OrigSize mismatch: expected %d, got %d", len(newContent), dataInfo.OrigSize)
+		}
+
+		// For encrypted data, Size should be >= OrigSize (due to padding)
+		if dataInfo.Size < dataInfo.OrigSize {
+			t.Errorf("DataInfo.Size should be >= OrigSize for encrypted data: Size=%d, OrigSize=%d",
+				dataInfo.Size, dataInfo.OrigSize)
+		}
+
+		t.Logf("✓ Encryption verified: OrigSize=%d, EncryptedSize=%d", dataInfo.OrigSize, dataInfo.Size)
+	})
+
+	t.Run("ReopenAndRead", func(t *testing.T) {
+		// Get file object
+		lh, ok := fs.h.(*core.LocalHandler)
+		if !ok {
+			t.Fatalf("Handler is not LocalHandler")
+		}
+
+		objs, err := lh.Get(fs.c, bktID, []int64{fileID})
+		if err != nil || len(objs) == 0 {
+			t.Fatalf("Failed to get file object: %v", err)
+		}
+		fileObj := objs[0]
+
+		t.Logf("Reopening file: ID=%d, Size=%d, DataID=%d", fileID, fileObj.Size, fileObj.DataID)
+
+		// Create new RandomAccessor (simulating file reopen)
+		ra, err := getOrCreateRandomAccessor(fs, fileID)
+		if err != nil {
+			t.Fatalf("Failed to create RandomAccessor: %v", err)
+		}
+		defer ra.Close()
+
+		// Read content
+		readData, err := ra.Read(0, int(fileObj.Size))
+		if err != nil {
+			t.Fatalf("Failed to read content after reopen: %v", err)
+		}
+
+		t.Logf("Read data length: %d bytes", len(readData))
+		t.Logf("Read data: %s", string(readData))
+		t.Logf("Expected: %s", string(newContent))
+
+		// Verify content matches what we wrote
+		if !bytes.Equal(readData, newContent) {
+			t.Errorf("Content mismatch after reopen:\nExpected (%d bytes): %s\nGot (%d bytes): %s",
+				len(newContent), string(newContent), len(readData), string(readData))
+
+			// Show hex dump for debugging
+			t.Logf("Expected hex: %x", newContent)
+			t.Logf("Got hex: %x", readData)
+		} else {
+			t.Logf("✓ Content verified correctly after reopen!")
+		}
+	})
+}
+
+// TestJournalMultipleModifications tests multiple sequential modifications with encryption
+func TestJournalMultipleModifications(t *testing.T) {
+	// Setup test environment
+	testDir := filepath.Join(os.TempDir(), "orcas_journal_multi_mod_test")
+	defer cleanupTestDir(t, testDir)
+
+	encryptionKey := "test-encryption-key-32-bytes!!"
+	fs, bktID := setupTestFSWithEncryption(t, testDir, encryptionKey, 0)
+	defer cleanupFS(fs)
+
+	fileName := "test_multi_mod.txt"
+	fileID, err := createTestFile(t, fs, bktID, fileName)
+	if err != nil {
+		t.Fatalf("Failed to create file: %v", err)
+	}
+
+	// Perform multiple modifications
+	modifications := [][]byte{
+		[]byte("Version 1: Initial content"),
+		[]byte("Version 2: Modified content with more text"),
+		[]byte("V3: Short"),
+		[]byte("Version 4: This is a much longer version with lots of text to test encryption properly."),
+	}
+
+	for i, content := range modifications {
+		t.Run(fmt.Sprintf("Modification_%d", i+1), func(t *testing.T) {
+			ra, err := getOrCreateRandomAccessor(fs, fileID)
+			if err != nil {
+				t.Fatalf("Failed to create RandomAccessor: %v", err)
+			}
+
+			// Truncate to 0
+			if _, err := ra.Truncate(0); err != nil {
+				t.Fatalf("Failed to truncate: %v", err)
+			}
+
+			// Write new content
+			if err := ra.Write(0, content); err != nil {
+				t.Fatalf("Failed to write: %v", err)
+			}
+
+			if _, err := ra.Flush(); err != nil {
+				t.Fatalf("Failed to flush: %v", err)
+			}
+
+			if err := ra.Close(); err != nil {
+				t.Fatalf("Failed to close: %v", err)
+			}
+
+			// Reopen and verify
+			ra2, err := getOrCreateRandomAccessor(fs, fileID)
+			if err != nil {
+				t.Fatalf("Failed to reopen: %v", err)
+			}
+			defer ra2.Close()
+
+			readData, err := ra2.Read(0, len(content))
+			if err != nil {
+				t.Fatalf("Failed to read: %v", err)
+			}
+
+			if !bytes.Equal(readData, content) {
+				t.Errorf("Content mismatch in modification %d:\nExpected: %s\nGot: %s",
+					i+1, string(content), string(readData))
+			} else {
+				t.Logf("✓ Modification %d verified (%d bytes)", i+1, len(content))
+			}
+		})
+	}
+}
+
+// TestSequentialBufferEncryption tests encryption via sequential buffer (not journal)
+// This verifies that encryption works correctly in the sequential write path
+func TestSequentialBufferEncryption(t *testing.T) {
+	// Setup test environment
+	testDir := filepath.Join(os.TempDir(), "orcas_encryption_no_journal_test")
+	defer cleanupTestDir(t, testDir)
+
+	fs, bktID := setupTestFS(t, testDir)
+	defer cleanupFS(fs)
+
+	// Enable encryption
+	fs.EndecWay = core.DATA_ENDEC_AES256
+	fs.EndecKey = "test-encryption-key-32-bytes!!"
+
+	// Keep journal enabled but let the optimization decide
+	// For small files after truncate with sequential writes, it should use seqBuffer
+
+	fileName := "test_encryption_no_journal.txt"
+	fileID, err := createTestFile(t, fs, bktID, fileName)
+	if err != nil {
+		t.Fatalf("Failed to create file: %v", err)
+	}
+
+	// Use small content to test the optimization
+	// After truncate(0) + sequential write, should use seqBuffer instead of journal
+	content := []byte("This content should be encrypted via sequential buffer, not journal!")
+
+	t.Run("WriteAndFlush", func(t *testing.T) {
+		ra, err := getOrCreateRandomAccessor(fs, fileID)
+		if err != nil {
+			t.Fatalf("Failed to create RandomAccessor: %v", err)
+		}
+
+		// Write
+		if err := ra.Write(0, content); err != nil {
+			t.Fatalf("Failed to write: %v", err)
+		}
+
+		// Force sequential buffer flush
+		if _, err := ra.Flush(); err != nil {
+			t.Fatalf("Failed to flush: %v", err)
+		}
+
+		if err := ra.Close(); err != nil {
+			t.Fatalf("Failed to close: %v", err)
+		}
+
+		t.Logf("✓ Content written and flushed (%d bytes)", len(content))
+	})
+
+	t.Run("VerifyEncryption", func(t *testing.T) {
+		lh, ok := fs.h.(*core.LocalHandler)
+		if !ok {
+			t.Fatalf("Handler is not LocalHandler")
+		}
+
+		objs, err := lh.Get(fs.c, bktID, []int64{fileID})
+		if err != nil || len(objs) == 0 {
+			t.Fatalf("Failed to get file object: %v", err)
+		}
+		fileObj := objs[0]
+
+		dataInfo, err := lh.GetDataInfo(fs.c, bktID, fileObj.DataID)
+		if err != nil {
+			t.Fatalf("Failed to get DataInfo: %v", err)
+		}
+
+		t.Logf("DataInfo: ID=%d, OrigSize=%d, Size=%d, Kind=0x%x",
+			dataInfo.ID, dataInfo.OrigSize, dataInfo.Size, dataInfo.Kind)
+
+		// Verify encryption flag
+		if dataInfo.Kind&core.DATA_ENDEC_AES256 == 0 {
+			t.Errorf("Missing AES256 encryption flag: Kind=0x%x", dataInfo.Kind)
+		}
+
+		// Verify sizes
+		if dataInfo.OrigSize != int64(len(content)) {
+			t.Errorf("OrigSize mismatch: expected %d, got %d", len(content), dataInfo.OrigSize)
+		}
+
+		// For encrypted data, Size should be >= OrigSize
+		if dataInfo.Size < dataInfo.OrigSize {
+			t.Errorf("Size should be >= OrigSize: Size=%d, OrigSize=%d",
+				dataInfo.Size, dataInfo.OrigSize)
+		}
+
+		t.Logf("✓ Encryption verified via sequential buffer: OrigSize=%d, EncryptedSize=%d", dataInfo.OrigSize, dataInfo.Size)
+	})
+
+	t.Run("ReadAndDecrypt", func(t *testing.T) {
+		ra, err := getOrCreateRandomAccessor(fs, fileID)
+		if err != nil {
+			t.Fatalf("Failed to create RandomAccessor: %v", err)
+		}
+		defer ra.Close()
+
+		readData, err := ra.Read(0, len(content))
+		if err != nil {
+			t.Fatalf("Failed to read: %v", err)
+		}
+
+		if !bytes.Equal(readData, content) {
+			t.Errorf("Content mismatch:\nExpected: %s\nGot: %s", string(content), string(readData))
+			t.Logf("Expected hex: %x", content)
+			t.Logf("Got hex: %x", readData)
+		} else {
+			t.Logf("✓ Content decrypted correctly!")
+		}
+	})
+}
+
+// TestSmallFileTruncateRewrite tests the optimized path: truncate(0) + sequential write
+// With the optimization, small files should use sequential buffer instead of journal
+func TestSmallFileTruncateRewrite(t *testing.T) {
+	testDir := filepath.Join(os.TempDir(), "orcas_encryption_after_truncate_test")
+	defer cleanupTestDir(t, testDir)
+
+	fs, bktID := setupTestFS(t, testDir)
+	defer cleanupFS(fs)
+
+	// Enable encryption
+	fs.EndecWay = core.DATA_ENDEC_AES256
+	fs.EndecKey = "test-encryption-key-32-bytes!!"
+
+	fileName := "test_truncate_rewrite.txt"
+	fileID, err := createTestFile(t, fs, bktID, fileName)
+	if err != nil {
+		t.Fatalf("Failed to create file: %v", err)
+	}
+
+	originalContent := []byte("Original content before truncate.")
+	newContent := []byte("New content after truncate. Should use sequential buffer!")
+
+	t.Run("WriteOriginal", func(t *testing.T) {
+		ra, err := getOrCreateRandomAccessor(fs, fileID)
+		if err != nil {
+			t.Fatalf("Failed to create RandomAccessor: %v", err)
+		}
+
+		if err := ra.Write(0, originalContent); err != nil {
+			t.Fatalf("Failed to write: %v", err)
+		}
+
+		if _, err := ra.Flush(); err != nil {
+			t.Fatalf("Failed to flush: %v", err)
+		}
+
+		if err := ra.Close(); err != nil {
+			t.Fatalf("Failed to close: %v", err)
+		}
+
+		t.Logf("✓ Original content written (%d bytes)", len(originalContent))
+	})
+
+	t.Run("TruncateAndRewrite", func(t *testing.T) {
+		ra, err := getOrCreateRandomAccessor(fs, fileID)
+		if err != nil {
+			t.Fatalf("Failed to create RandomAccessor: %v", err)
+		}
+
+		// Truncate to 0
+		if _, err := ra.Truncate(0); err != nil {
+			t.Fatalf("Failed to truncate: %v", err)
+		}
+
+		t.Logf("✓ File truncated to 0")
+
+		// Write new content sequentially
+		// With optimization, this should use sequential buffer, not journal
+		if err := ra.Write(0, newContent); err != nil {
+			t.Fatalf("Failed to write new content: %v", err)
+		}
+
+		t.Logf("✓ New content written (%d bytes)", len(newContent))
+
+		if _, err := ra.Flush(); err != nil {
+			t.Fatalf("Failed to flush: %v", err)
+		}
+
+		if err := ra.Close(); err != nil {
+			t.Fatalf("Failed to close: %v", err)
+		}
+
+		t.Logf("✓ Flush and close completed")
+	})
+
+	t.Run("VerifyNewContent", func(t *testing.T) {
+		ra, err := getOrCreateRandomAccessor(fs, fileID)
+		if err != nil {
+			t.Fatalf("Failed to create RandomAccessor: %v", err)
+		}
+		defer ra.Close()
+
+		readData, err := ra.Read(0, len(newContent))
+		if err != nil {
+			t.Fatalf("Failed to read: %v", err)
+		}
+
+		if !bytes.Equal(readData, newContent) {
+			t.Errorf("Content mismatch after truncate:\nExpected: %s\nGot: %s",
+				string(newContent), string(readData))
+		} else {
+			t.Logf("✓ New content verified after truncate!")
+		}
+	})
 }

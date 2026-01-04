@@ -1132,19 +1132,45 @@ func (j *Journal) flushSmallFile(newSize int64) (int64, int64, error) {
 
 	sn := 0
 	offset := int64(0)
+	totalProcessedSize := int64(0) // Track total size after compression/encryption
 	for offset < newSize {
 		endOffset := offset + chunkSize
 		if endOffset > newSize {
 			endOffset = newSize
 		}
 
-		// Write chunk
-		if err := da.Write(j.fs.c, j.fs.bktID, newDataID, sn, finalData[offset:endOffset]); err != nil {
+		chunkData := finalData[offset:endOffset]
+		isFirstChunk := sn == 0
+
+		// Process chunk data (compression + encryption) using core.ProcessData
+		processedChunk, err := core.ProcessData(chunkData, &dataInfo.Kind, getCmprQltyForFS(j.fs), getEndecKeyForFS(j.fs), isFirstChunk)
+		if err != nil {
+			DebugLog("[Journal flushSmallFile] ERROR: Failed to process chunk: fileID=%d, sn=%d, error=%v", j.fileID, sn, err)
+			return 0, 0, fmt.Errorf("failed to process chunk %d: %w", sn, err)
+		}
+
+		// Write processed chunk
+		if err := da.Write(j.fs.c, j.fs.bktID, newDataID, sn, processedChunk); err != nil {
 			return 0, 0, fmt.Errorf("failed to write chunk %d: %w", sn, err)
 		}
 
+		// Accumulate processed size
+		totalProcessedSize += int64(len(processedChunk))
+
 		offset = endOffset
 		sn++
+	}
+
+	// Set Size to actual stored size (after compression/encryption)
+	// If no compression/encryption, Size should equal OrigSize
+	if dataInfo.Kind&core.DATA_CMPR_MASK != 0 || dataInfo.Kind&core.DATA_ENDEC_MASK != 0 {
+		dataInfo.Size = totalProcessedSize
+		DebugLog("[Journal flushSmallFile] Set Size to processed size: fileID=%d, OrigSize=%d, Size=%d, Kind=0x%x",
+			j.fileID, dataInfo.OrigSize, dataInfo.Size, dataInfo.Kind)
+	} else {
+		dataInfo.Size = dataInfo.OrigSize
+		DebugLog("[Journal flushSmallFile] No compression/encryption, Size=OrigSize: fileID=%d, Size=%d",
+			j.fileID, dataInfo.Size)
 	}
 
 	// Calculate and set hash values (including HdrXXH3)

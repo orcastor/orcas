@@ -279,8 +279,15 @@ type cachedDirStream struct {
 // initRootNode initializes root node (non-Windows platform implementation)
 // On non-Windows platforms, root node is initialized during Mount, not during NewOrcasFS
 func (ofs *OrcasFS) initRootNode() {
-	// Non-Windows platform: root node is initialized during Mount, not here
-	// This allows proper initialization through FUSE's Inode system during Mount
+	// Initialize root node for testing or non-FUSE usage
+	// For FUSE-based mounting, this will be called again during Mount()
+	if ofs.root == nil {
+		ofs.root = &OrcasNode{
+			fs:     ofs,
+			objID:  ofs.bktID,
+			isRoot: true,
+		}
+	}
 }
 
 // Mount mounts filesystem to specified path (Linux/Unix only)
@@ -2323,8 +2330,8 @@ func (n *OrcasNode) Unlink(ctx context.Context, name string) syscall.Errno {
 
 // handleAtomicReplace handles atomic replace pattern with version merging
 func (n *OrcasNode) handleAtomicReplace(ctx context.Context, sourceID int64, sourceObj *core.ObjectInfo,
-	newParentID int64, newName string, pd *PendingDeletion) syscall.Errno {
-
+	newParentID int64, newName string, pd *PendingDeletion,
+) syscall.Errno {
 	// Step 1: Update source file's name and parent
 	sourceObj.Name = newName
 	sourceObj.PID = newParentID
