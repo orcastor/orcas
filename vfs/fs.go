@@ -2332,71 +2332,16 @@ func (n *OrcasNode) Unlink(ctx context.Context, name string) syscall.Errno {
 func (n *OrcasNode) handleAtomicReplace(ctx context.Context, sourceID int64, sourceObj *core.ObjectInfo,
 	newParentID int64, newName string, pd *PendingDeletion,
 ) syscall.Errno {
-	// IMPORTANT: In atomic replace, we need to determine the correct final location
-	// The goal is to replace the old file with the new file, preserving versions
-
-	oldName := sourceObj.Name
-	oldParentID := sourceObj.PID
-
-	// Determine if newParentID is a recycle bin
-	isNewParentRecycleBin := false
-	if newParentObj, err := n.fs.h.Get(n.fs.c, n.fs.bktID, []int64{newParentID}); err == nil && len(newParentObj) > 0 {
-		newParentName := strings.ToLower(newParentObj[0].Name)
-		isNewParentRecycleBin = (newParentName == ".recycle" || newParentName == ".trash")
-	}
-
-	// Determine if oldParentID is a recycle bin
-	isOldParentRecycleBin := false
-	if oldParentObj, err := n.fs.h.Get(n.fs.c, n.fs.bktID, []int64{oldParentID}); err == nil && len(oldParentObj) > 0 {
-		oldParentName := strings.ToLower(oldParentObj[0].Name)
-		isOldParentRecycleBin = (oldParentName == ".recycle" || oldParentName == ".trash")
-	}
-
-	// Decide whether to update parent directory
-	// Case 1: If new file is in normal directory and target is recycle bin -> keep file in current location (SMB upload case)
-	// Case 2: If both are in same directory -> keep file in current location (rename only)
-	// Case 3: If new file is in recycle bin and target is normal directory -> move file (restore from recycle bin)
-	// Case 4: If cross-directory move between normal directories -> move file
-	shouldUpdateParent := false
-	if oldParentID != newParentID {
-		if !isOldParentRecycleBin && isNewParentRecycleBin {
-			// Case 1: Don't move from normal directory to recycle bin in atomic replace
-			// This is likely a protocol quirk (SMB)
-			DebugLog("[Atomic Replace] Preventing move to recycle bin: sourceID=%d, currentParent=%d, targetParent=%d (recycle bin)",
-				sourceID, oldParentID, newParentID)
-			shouldUpdateParent = false
-		} else if isOldParentRecycleBin && !isNewParentRecycleBin {
-			// Case 3: Move from recycle bin to normal directory (restore)
-			DebugLog("[Atomic Replace] Restoring from recycle bin: sourceID=%d, oldParent=%d (recycle bin), newParent=%d",
-				sourceID, oldParentID, newParentID)
-			shouldUpdateParent = true
-		} else {
-			// Case 4: Normal cross-directory move
-			DebugLog("[Atomic Replace] Cross-directory move: sourceID=%d, oldParent=%d, newParent=%d",
-				sourceID, oldParentID, newParentID)
-			shouldUpdateParent = true
-		}
-	}
-
-	// Update parent if needed
-	if shouldUpdateParent {
-		sourceObj.PID = newParentID
-	}
-
-	// Update name if it changed
-	if oldName != newName {
-		sourceObj.Name = newName
-	}
+	// Step 1: Update source file's name and parent
+	sourceObj.Name = newName
+	sourceObj.PID = newParentID
 	sourceObj.MTime = core.Now()
 
 	_, err := n.fs.h.Put(n.fs.c, n.fs.bktID, []*core.ObjectInfo{sourceObj})
 	if err != nil {
-		DebugLog("[Atomic Replace] Failed to update file: sourceID=%d, error=%v", sourceID, err)
+		DebugLog("[Atomic Replace] Failed to rename file: sourceID=%d, error=%v", sourceID, err)
 		return syscall.EIO
 	}
-
-	DebugLog("[Atomic Replace] Updated file metadata: sourceID=%d, finalParent=%d, finalName=%s, movedParent=%v",
-		sourceID, sourceObj.PID, sourceObj.Name, shouldUpdateParent)
 
 	// Step 2: Merge versions from old file to new file
 	if len(pd.Versions) > 0 {
@@ -2426,19 +2371,12 @@ func (n *OrcasNode) handleAtomicReplace(ctx context.Context, sourceID int64, sou
 	}
 	fileObjCache.Del(pd.FileID)
 
-	// Update cache for updated file
+	// Update cache for renamed file
 	fileObjCache.Put(sourceID, sourceObj)
 
-	// Invalidate parent directory caches
+	// Invalidate parent directory cache
 	n.invalidateObj()
-	if shouldUpdateParent && oldParentID != newParentID {
-		// Invalidate both old and new parent if file was moved
-		n.invalidateDirListCache(oldParentID)
-		n.invalidateDirListCache(newParentID)
-	} else {
-		// Just invalidate the current parent directory
-		n.invalidateDirListCache(sourceObj.PID)
-	}
+	n.invalidateDirListCache(newParentID)
 
 	return 0
 }
@@ -2787,9 +2725,6 @@ func (n *OrcasNode) Rename(ctx context.Context, name string, newParent fs.InodeE
 		DebugLog("[VFS Rename] ERROR: Failed to get new parent object: name=%s, newName=%s, error=%v", name, newName, err)
 		return syscall.ENOENT
 	}
-
-	DebugLog("[VFS Rename] New parent object: newParentID=%d, newParentName=%s, sourceParentID=%d",
-		newParentObj.ID, newParentObj.Name, obj.ID)
 
 	if newParentObj.Type != core.OBJ_TYPE_DIR {
 		DebugLog("[VFS Rename] ERROR: New parent is not a directory: name=%s, newName=%s, newParentID=%d, type=%d", name, newName, newParentObj.ID, newParentObj.Type)
