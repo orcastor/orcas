@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/binary"
+	"encoding/json"
 	"fmt"
 	"hash"
 	"io"
@@ -6384,7 +6385,9 @@ func (ra *RandomAccessor) readFromJournal(offset, length int64) ([]byte, error) 
 	return journal.Read(offset, length, baseReader)
 }
 
-// readBaseData reads data from the base DataID without journal
+// readBaseData reads data from the base DataID, applying all journal snapshots recursively
+// This function handles the case where there are multiple journal snapshots that need to be
+// loaded and applied in the correct order (base -> layer1 -> layer2 -> ...)
 func (ra *RandomAccessor) readBaseData(offset, length int64) ([]byte, error) {
 	fileObj, err := ra.getFileObj()
 	if err != nil {
@@ -6467,7 +6470,244 @@ func (ra *RandomAccessor) readBaseData(offset, length int64) ([]byte, error) {
 		}
 	}
 
+	// CRITICAL FIX: Load and apply all journal snapshots recursively
+	// Journal snapshots are stored as OBJ_TYPE_JOURNAL objects with baseVersionID chain
+	// We need to find all snapshots and apply them in order
+	appliedData, err := ra.applyJournalSnapshots(result, fileObj.DataID, offset, length)
+	if err != nil {
+		DebugLog("[VFS readBaseData] WARNING: Failed to apply journal snapshots: %v, using base data only", err)
+		return result, nil // Return base data if snapshot loading fails
+	}
+
+	return appliedData, nil
+}
+
+// applyJournalSnapshots loads and applies all journal snapshots recursively
+// baseData: the base data read from fileObj.DataID
+// baseDataID: the DataID that journal snapshots are based on
+// offset, length: the read range
+func (ra *RandomAccessor) applyJournalSnapshots(baseData []byte, baseDataID int64, offset, length int64) ([]byte, error) {
+	// List all child objects (versions and journal snapshots) under this file
+	// Journal snapshots may be stored as OBJ_TYPE_JOURNAL with PID = fileID or PID = versionID
+	// We need to recursively find all journal snapshots
+	// Use Count: 1000 to actually retrieve objects (Count: 0 only returns count, not objects)
+	objs, _, _, err := ra.fs.h.List(ra.fs.c, ra.fs.bktID, ra.fileID, core.ListOptions{Count: 1000})
+	if err != nil {
+		return nil, fmt.Errorf("failed to list versions: %w", err)
+	}
+
+	DebugLog("[VFS applyJournalSnapshots] Listed %d objects under fileID=%d, baseDataID=%d", len(objs), ra.fileID, baseDataID)
+
+	// Find all journal snapshots (OBJ_TYPE_JOURNAL) recursively
+	// Journal snapshots may be:
+	// - Directly under file (PID = fileID) - for journals based on base data
+	// - Under version objects (PID = versionID) - for journals based on versions
+	// - Type = OBJ_TYPE_JOURNAL
+	// - DataID = base DataID they're based on
+	// - Extra contains journalDataID and baseVersionID
+	allJournals := make(map[int64]*core.ObjectInfo) // journal versionID -> journal snapshot
+	versionIDs := make(map[int64]bool)              // Track version IDs to recursively search
+	
+	// First pass: find journals directly under file and collect version IDs
+	for _, obj := range objs {
+		DebugLog("[VFS applyJournalSnapshots] Object: ID=%d, PID=%d, Type=%d, DataID=%d, Name=%s",
+			obj.ID, obj.PID, obj.Type, obj.DataID, obj.Name)
+		if obj.Type == core.OBJ_TYPE_JOURNAL {
+			allJournals[obj.ID] = obj
+			DebugLog("[VFS applyJournalSnapshots] Found journal snapshot: ID=%d, PID=%d, DataID=%d, baseDataID=%d, Extra=%s",
+				obj.ID, obj.PID, obj.DataID, baseDataID, obj.Extra)
+		} else if obj.Type == core.OBJ_TYPE_VERSION {
+			versionIDs[obj.ID] = true
+		}
+	}
+	
+	// Second pass: recursively search for journals under version objects
+	for versionID := range versionIDs {
+		versionObjs, _, _, err := ra.fs.h.List(ra.fs.c, ra.fs.bktID, versionID, core.ListOptions{Count: 1000})
+		if err != nil {
+			DebugLog("[VFS applyJournalSnapshots] WARNING: Failed to list objects under version %d: %v", versionID, err)
+			continue
+		}
+		for _, obj := range versionObjs {
+			if obj.Type == core.OBJ_TYPE_JOURNAL {
+				allJournals[obj.ID] = obj
+				DebugLog("[VFS applyJournalSnapshots] Found journal snapshot under version: ID=%d, PID=%d, DataID=%d, Extra=%s",
+					obj.ID, obj.PID, obj.DataID, obj.Extra)
+			}
+		}
+	}
+
+	if len(allJournals) == 0 {
+		// No journal snapshots, return base data as-is
+		DebugLog("[VFS applyJournalSnapshots] No journal snapshots found for fileID=%d, baseDataID=%d", ra.fileID, baseDataID)
+		return baseData, nil
+	}
+
+	// Build journal snapshot chain: find all journals that form a chain from baseDataID
+	// Chain logic:
+	// 1. Journals with DataID == baseDataID are directly based on base data
+	// 2. Journals with baseVersionID pointing to another journal form a chain
+	// 3. We need to apply them in order: base -> layer1 -> layer2 -> ...
+	
+	journalSnapshots := make([]*core.ObjectInfo, 0)
+	processed := make(map[int64]bool)
+	
+	// Step 1: Find journals directly based on baseDataID
+	for _, journal := range allJournals {
+		if journal.DataID == baseDataID {
+			baseVersionID := ra.parseBaseVersionID(journal.Extra)
+			// If baseVersionID is 0 or matches baseDataID, this is a direct child of base
+			if baseVersionID == 0 || baseVersionID == baseDataID {
+				journalSnapshots = append(journalSnapshots, journal)
+				processed[journal.ID] = true
+			}
+		}
+	}
+	
+	// Step 2: Build chain by following baseVersionID references
+	// Continue until we've processed all journals in the chain
+	for {
+		foundNew := false
+		for _, journal := range allJournals {
+			if processed[journal.ID] {
+				continue
+			}
+			
+			baseVersionID := ra.parseBaseVersionID(journal.Extra)
+			if baseVersionID == 0 {
+				continue
+			}
+			
+			// Check if this journal is based on an already processed journal
+			if processed[baseVersionID] {
+				journalSnapshots = append(journalSnapshots, journal)
+				processed[journal.ID] = true
+				foundNew = true
+			}
+		}
+		
+		if !foundNew {
+			break
+		}
+	}
+
+	if len(journalSnapshots) == 0 {
+		// No valid journal snapshots in chain, return base data as-is
+		DebugLog("[VFS applyJournalSnapshots] No journal snapshots in chain for fileID=%d, baseDataID=%d", ra.fileID, baseDataID)
+		return baseData, nil
+	}
+
+	// Sort snapshots by MTime (oldest first) to apply in correct order
+	// Older snapshots should be applied first
+	sort.Slice(journalSnapshots, func(i, j int) bool {
+		return journalSnapshots[i].MTime < journalSnapshots[j].MTime
+	})
+
+	DebugLog("[VFS applyJournalSnapshots] Found %d journal snapshots for fileID=%d, baseDataID=%d",
+		len(journalSnapshots), ra.fileID, baseDataID)
+
+	// Start with base data
+	result := make([]byte, len(baseData))
+	copy(result, baseData)
+
+	// Apply each journal snapshot in order
+	for _, journalSnapshot := range journalSnapshots {
+		// Parse journal snapshot extra data to get journalDataID
+		var extraData map[string]interface{}
+		if err := json.Unmarshal([]byte(journalSnapshot.Extra), &extraData); err != nil {
+			DebugLog("[VFS applyJournalSnapshots] WARNING: Failed to parse journal extra for snapshot %d: %v", journalSnapshot.ID, err)
+			continue
+		}
+
+		journalDataID, ok := extraData["journalDataID"].(float64)
+		if !ok {
+			DebugLog("[VFS applyJournalSnapshots] WARNING: journalDataID not found in snapshot %d", journalSnapshot.ID)
+			continue
+		}
+
+		// Read journal data
+		journalBytes, err := ra.fs.h.GetData(ra.fs.c, ra.fs.bktID, int64(journalDataID), 0)
+		if err != nil {
+			DebugLog("[VFS applyJournalSnapshots] WARNING: Failed to read journal data %d for snapshot %d: %v",
+				int64(journalDataID), journalSnapshot.ID, err)
+			continue
+		}
+
+		// Create a temporary journal to deserialize
+		tempJournal := &Journal{
+			fileID:   ra.fileID,
+			dataID:   baseDataID,
+			baseSize: journalSnapshot.Size,
+			entries:  make([]JournalEntry, 0),
+		}
+
+		// Deserialize journal entries
+		if err := tempJournal.DeserializeJournal(journalBytes); err != nil {
+			DebugLog("[VFS applyJournalSnapshots] WARNING: Failed to deserialize journal for snapshot %d: %v", journalSnapshot.ID, err)
+			continue
+		}
+
+		DebugLog("[VFS applyJournalSnapshots] Applying journal snapshot %d: entries=%d, size=%d",
+			journalSnapshot.ID, len(tempJournal.entries), journalSnapshot.Size)
+
+		// Apply journal entries to result data
+		readEnd := offset + length
+		for i := range tempJournal.entries {
+			entry := &tempJournal.entries[i]
+			entryEnd := entry.Offset + entry.Length
+
+			// Skip entries that don't overlap with read range
+			if entry.Offset >= readEnd || entryEnd <= offset {
+				continue
+			}
+
+			// Calculate overlap region (in absolute file coordinates)
+			overlapStart := entry.Offset
+			if overlapStart < offset {
+				overlapStart = offset
+			}
+
+			overlapEnd := entryEnd
+			if overlapEnd > readEnd {
+				overlapEnd = readEnd
+			}
+
+			// Calculate positions in the result buffer (relative to offset)
+			srcOffset := overlapStart - entry.Offset  // Position in entry.Data
+			dstOffset := overlapStart - offset        // Position in result buffer
+			copyLength := overlapEnd - overlapStart
+
+			// Ensure we don't write beyond the result buffer
+			if dstOffset + copyLength > int64(len(result)) {
+				DebugLog("[VFS applyJournalSnapshots] WARNING: Overlap extends beyond result buffer, truncating")
+				copyLength = int64(len(result)) - dstOffset
+			}
+
+			if copyLength > 0 && dstOffset >= 0 && dstOffset < int64(len(result)) {
+				copy(result[dstOffset:dstOffset+copyLength], entry.Data[srcOffset:srcOffset+copyLength])
+			}
+		}
+	}
+
 	return result, nil
+}
+
+// parseBaseVersionID parses baseVersionID from Extra JSON field
+func (ra *RandomAccessor) parseBaseVersionID(extra string) int64 {
+	if extra == "" {
+		return 0
+	}
+
+	var data map[string]interface{}
+	if err := json.Unmarshal([]byte(extra), &data); err != nil {
+		return 0
+	}
+
+	if baseID, ok := data["baseVersionID"].(float64); ok {
+		return int64(baseID)
+	}
+
+	return 0
 }
 
 // flushJournal flushes the journal to create a new version

@@ -63,20 +63,44 @@ func TestJournalBasicWriteRead(t *testing.T) {
 	}
 	defer ra.Close()
 
-	// Write data using journal
-	testData := []byte("Hello, Journal!")
-	err = ra.Write(0, testData)
+	// First, write some data sequentially (this will use sequential buffer, not journal)
+	// For new files starting at offset 0, sequential buffer is used
+	initialData := []byte("Initial data")
+	err = ra.Write(0, initialData)
 	if err != nil {
-		t.Fatalf("Failed to write: %v", err)
+		t.Fatalf("Failed to write initial data: %v", err)
 	}
 
-	// Read back
-	readBuf, err := ra.Read(0, len(testData))
+	// Flush to commit the sequential buffer, so file has base data
+	_, err = ra.Flush()
 	if err != nil {
-		t.Fatalf("Failed to read: %v", err)
+		t.Fatalf("Failed to flush: %v", err)
+	}
+
+	// Now perform random writes (this will trigger journal usage)
+	// Write at a non-sequential offset to trigger journal
+	testData := []byte("Hello, Journal!")
+	err = ra.Write(100, testData)
+	if err != nil {
+		t.Fatalf("Failed to write at offset 100: %v", err)
+	}
+
+	// Read back initial data
+	readBuf, err := ra.Read(0, len(initialData))
+	if err != nil {
+		t.Fatalf("Failed to read initial data: %v", err)
+	}
+	if !bytes.Equal(readBuf, initialData) {
+		t.Errorf("Initial data mismatch: got %q, want %q", readBuf, initialData)
+	}
+
+	// Read back journal data
+	readBuf, err = ra.Read(100, len(testData))
+	if err != nil {
+		t.Fatalf("Failed to read journal data: %v", err)
 	}
 	if !bytes.Equal(readBuf, testData) {
-		t.Errorf("Data mismatch: got %q, want %q", readBuf, testData)
+		t.Errorf("Journal data mismatch: got %q, want %q", readBuf, testData)
 	}
 
 	t.Logf("✓ Basic write/read test passed")
@@ -261,7 +285,25 @@ func TestJournalConcurrentWrites(t *testing.T) {
 	}
 	defer ra.Close()
 
-	// Concurrent writes
+	// First, write some initial data sequentially to establish base data
+	// This ensures the file has data before concurrent random writes
+	initialData := make([]byte, 50)
+	for i := range initialData {
+		initialData[i] = byte('A')
+	}
+	err = ra.Write(0, initialData)
+	if err != nil {
+		t.Fatalf("Failed to write initial data: %v", err)
+	}
+
+	// Flush to commit the sequential buffer
+	_, err = ra.Flush()
+	if err != nil {
+		t.Fatalf("Failed to flush: %v", err)
+	}
+
+	// Now perform concurrent random writes (these will trigger journal)
+	// Start from offset 100 to avoid sequential write detection
 	numGoroutines := 10
 	writesPerGoroutine := 10
 	done := make(chan bool, numGoroutines)
@@ -270,7 +312,8 @@ func TestJournalConcurrentWrites(t *testing.T) {
 		go func(goroutineID int) {
 			defer func() { done <- true }()
 			for i := 0; i < writesPerGoroutine; i++ {
-				offset := int64(goroutineID*writesPerGoroutine + i)
+				// Start from offset 100 to ensure random writes (not sequential)
+				offset := int64(100 + goroutineID*writesPerGoroutine + i)
 				data := []byte{byte(goroutineID)}
 				err := ra.Write(offset, data)
 				if err != nil {
@@ -287,13 +330,25 @@ func TestJournalConcurrentWrites(t *testing.T) {
 		<-done
 	}
 
-	// Verify all writes
+	// Verify initial data
+	readBuf, err := ra.Read(0, len(initialData))
+	if err != nil {
+		t.Errorf("Failed to read initial data: %v", err)
+	} else if !bytes.Equal(readBuf, initialData) {
+		t.Errorf("Initial data mismatch: got %q, want %q", readBuf, initialData)
+	}
+
+	// Verify all concurrent writes
 	for g := 0; g < numGoroutines; g++ {
 		for i := 0; i < writesPerGoroutine; i++ {
-			offset := int64(g*writesPerGoroutine + i)
+			offset := int64(100 + g*writesPerGoroutine + i)
 			readBuf, err := ra.Read(offset, 1)
 			if err != nil {
 				t.Errorf("Failed to read at offset %d: %v", offset, err)
+				continue
+			}
+			if len(readBuf) == 0 {
+				t.Errorf("Empty read buffer at offset %d", offset)
 				continue
 			}
 			if readBuf[0] != byte(g) {
@@ -1728,4 +1783,1812 @@ func TestJournalReadOverlay(t *testing.T) {
 	t.Logf("✓ Spanning read correct: journal overlay applied correctly")
 
 	t.Logf("\n✅ All RandomAccessor.Read tests passed: Journal overlay working")
+}
+
+// TestJournalMultiLayerRead tests reading with multiple layers of journal snapshots
+// This test verifies that when there are multiple journal snapshots (layers),
+// reads correctly apply all layers in the correct order:
+// 1. Base data (fileObj.DataID)
+// 2. Layer 1 journal snapshot (applied on top of base)
+// 3. Layer 2 journal snapshot (applied on top of layer 1)
+// 4. Current journal entries (applied on top of layer 2)
+func TestJournalMultiLayerRead(t *testing.T) {
+	testDir := filepath.Join(os.TempDir(), "orcas_journal_multilayer_test")
+	defer cleanupTestDir(t, testDir)
+
+	fs, bktID := setupTestFS(t, testDir)
+	defer cleanupFS(fs)
+
+	// Configure journal to create snapshots easily
+	fs.journalMgr.config.SnapshotEntryCount = 3       // Create snapshot after 3 entries
+	fs.journalMgr.config.FullFlushTotalEntries = 1000 // High threshold to avoid full flush
+
+	fileName := "test_multilayer.dat"
+	fileID, err := createTestFile(t, fs, bktID, fileName)
+	if err != nil {
+		t.Fatalf("Failed to create test file: %v", err)
+	}
+
+	// Step 1: Create base data
+	baseData := make([]byte, 1024)
+	for i := range baseData {
+		baseData[i] = byte('A') // Base pattern: all 'A'
+	}
+
+	ra1, err := getOrCreateRandomAccessor(fs, fileID)
+	if err != nil {
+		t.Fatalf("Failed to create RandomAccessor: %v", err)
+	}
+
+	if err := ra1.Write(0, baseData); err != nil {
+		t.Fatalf("Failed to write base data: %v", err)
+	}
+	if _, err := ra1.Flush(); err != nil {
+		t.Fatalf("Failed to flush base data: %v", err)
+	}
+	if err := ra1.Close(); err != nil {
+		t.Fatalf("Failed to close RandomAccessor: %v", err)
+	}
+	t.Logf("✓ Step 1: Base data written (all 'A')")
+
+	// Step 2: Create Layer 1 journal snapshot
+	// Write 3 entries and manually create snapshot
+	ra2, err := getOrCreateRandomAccessor(fs, fileID)
+	if err != nil {
+		t.Fatalf("Failed to create RandomAccessor for layer 1: %v", err)
+	}
+
+	layer1Data1 := []byte("BBB") // Write "BBB" at offset 0
+	layer1Data2 := []byte("CCC") // Write "CCC" at offset 100
+	layer1Data3 := []byte("DDD") // Write "DDD" at offset 200
+
+	if err := ra2.Write(0, layer1Data1); err != nil {
+		t.Fatalf("Failed to write layer1 entry 1: %v", err)
+	}
+	if err := ra2.Write(100, layer1Data2); err != nil {
+		t.Fatalf("Failed to write layer1 entry 2: %v", err)
+	}
+	if err := ra2.Write(200, layer1Data3); err != nil {
+		t.Fatalf("Failed to write layer1 entry 3: %v", err)
+	}
+
+	// Get journal from manager and manually create snapshot
+	fileObj2, err := fs.h.Get(fs.c, bktID, []int64{fileID})
+	if err != nil || len(fileObj2) == 0 {
+		t.Fatalf("Failed to get file object: %v", err)
+	}
+	journal1 := fs.journalMgr.GetOrCreate(fileID, fileObj2[0].DataID, fileObj2[0].Size)
+
+	// Manually create snapshot
+	layer1VersionID, err := journal1.CreateJournalSnapshot()
+	if err != nil {
+		t.Fatalf("Failed to create layer 1 snapshot: %v", err)
+	}
+	if err := ra2.Close(); err != nil {
+		t.Fatalf("Failed to close RandomAccessor: %v", err)
+	}
+	t.Logf("✓ Step 2: Layer 1 journal snapshot created (versionID=%d, 3 entries)", layer1VersionID)
+
+	// Note: We don't verify snapshot creation via List() as journal snapshots may not be listed
+	// The important part is testing the read functionality with multiple layers
+	t.Logf("✓ Layer 1 journal snapshot created (versionID=%d)", layer1VersionID)
+
+	// Step 3: Create Layer 2 journal snapshot
+	// Write 3 more entries and manually create snapshot
+	ra3, err := getOrCreateRandomAccessor(fs, fileID)
+	if err != nil {
+		t.Fatalf("Failed to create RandomAccessor for layer 2: %v", err)
+	}
+
+	layer2Data1 := []byte("EEE") // Write "EEE" at offset 0 (overwrites layer1's "BBB")
+	layer2Data2 := []byte("FFF") // Write "FFF" at offset 300 (new offset)
+	layer2Data3 := []byte("GGG") // Write "GGG" at offset 400 (new offset)
+
+	if err := ra3.Write(0, layer2Data1); err != nil {
+		t.Fatalf("Failed to write layer2 entry 1: %v", err)
+	}
+	if err := ra3.Write(300, layer2Data2); err != nil {
+		t.Fatalf("Failed to write layer2 entry 2: %v", err)
+	}
+	if err := ra3.Write(400, layer2Data3); err != nil {
+		t.Fatalf("Failed to write layer2 entry 3: %v", err)
+	}
+
+	// Get journal from manager and manually create snapshot
+	fileObj3, err := fs.h.Get(fs.c, bktID, []int64{fileID})
+	if err != nil || len(fileObj3) == 0 {
+		t.Fatalf("Failed to get file object: %v", err)
+	}
+	journal2 := fs.journalMgr.GetOrCreate(fileID, fileObj3[0].DataID, fileObj3[0].Size)
+
+	// Manually create snapshot
+	layer2VersionID, err := journal2.CreateJournalSnapshot()
+	if err != nil {
+		t.Fatalf("Failed to create layer 2 snapshot: %v", err)
+	}
+	if err := ra3.Close(); err != nil {
+		t.Fatalf("Failed to close RandomAccessor: %v", err)
+	}
+	t.Logf("✓ Step 3: Layer 2 journal snapshot created (versionID=%d, 3 entries)", layer2VersionID)
+
+	// Note: We don't verify snapshot creation via List() as journal snapshots may not be listed
+	// The important part is testing the read functionality with multiple layers
+	t.Logf("✓ Layer 2 journal snapshot created (versionID=%d)", layer2VersionID)
+
+	// Step 4: Add current journal entries (not flushed yet)
+	ra4, err := getOrCreateRandomAccessor(fs, fileID)
+	if err != nil {
+		t.Fatalf("Failed to create RandomAccessor for current layer: %v", err)
+	}
+	defer ra4.Close()
+
+	currentData1 := []byte("HHH") // Write "HHH" at offset 0 (overwrites layer2's "EEE")
+	currentData2 := []byte("III") // Write "III" at offset 500 (new offset)
+
+	if err := ra4.Write(0, currentData1); err != nil {
+		t.Fatalf("Failed to write current entry 1: %v", err)
+	}
+	if err := ra4.Write(500, currentData2); err != nil {
+		t.Fatalf("Failed to write current entry 2: %v", err)
+	}
+	t.Logf("✓ Step 4: Current journal entries written (2 entries, not flushed)")
+
+	// Step 5: Test reading with all layers
+	// Expected result at each offset:
+	// - Offset 0: "HHH" (current layer overwrites layer2's "EEE", which overwrote layer1's "BBB")
+	// - Offset 100: "CCC" (from layer1, not overwritten)
+	// - Offset 200: "DDD" (from layer1, not overwritten)
+	// - Offset 300: "FFF" (from layer2, not overwritten)
+	// - Offset 400: "GGG" (from layer2, not overwritten)
+	// - Offset 500: "III" (from current layer)
+	// - Other offsets: 'A' (from base data)
+
+	testCases := []struct {
+		name     string
+		offset   int64
+		length   int
+		expected []byte
+	}{
+		{
+			name:     "Offset 0 (current layer)",
+			offset:   0,
+			length:   3,
+			expected: []byte("HHH"),
+		},
+		{
+			name:     "Offset 100 (layer1)",
+			offset:   100,
+			length:   3,
+			expected: []byte("CCC"),
+		},
+		{
+			name:     "Offset 200 (layer1)",
+			offset:   200,
+			length:   3,
+			expected: []byte("DDD"),
+		},
+		{
+			name:     "Offset 300 (layer2)",
+			offset:   300,
+			length:   3,
+			expected: []byte("FFF"),
+		},
+		{
+			name:     "Offset 400 (layer2)",
+			offset:   400,
+			length:   3,
+			expected: []byte("GGG"),
+		},
+		{
+			name:     "Offset 500 (current layer)",
+			offset:   500,
+			length:   3,
+			expected: []byte("III"),
+		},
+		{
+			name:     "Offset 50 (base data, not modified)",
+			offset:   50,
+			length:   1,
+			expected: []byte("A"),
+		},
+		{
+			name:   "Spanning read across multiple layers",
+			offset: 0,
+			length: 600,
+			expected: func() []byte {
+				result := make([]byte, 600)
+				// Fill with base data
+				for i := range result {
+					result[i] = 'A'
+				}
+				// Apply layer1
+				copy(result[0:3], "BBB")
+				copy(result[100:103], "CCC")
+				copy(result[200:203], "DDD")
+				// Apply layer2 (overwrites layer1 at offset 0)
+				copy(result[0:3], "EEE")
+				copy(result[300:303], "FFF")
+				copy(result[400:403], "GGG")
+				// Apply current layer (overwrites layer2 at offset 0)
+				copy(result[0:3], "HHH")
+				copy(result[500:503], "III")
+				return result
+			}(),
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			readData, err := ra4.Read(tc.offset, tc.length)
+			if err != nil {
+				t.Fatalf("Failed to read at offset %d: %v", tc.offset, err)
+			}
+
+			if len(readData) != len(tc.expected) {
+				t.Errorf("Length mismatch at offset %d: got %d, want %d",
+					tc.offset, len(readData), len(tc.expected))
+				return
+			}
+
+			if !bytes.Equal(readData, tc.expected) {
+				t.Errorf("❌ FAILED: Data mismatch at offset %d\n"+
+					"Expected: %q (%x)\n"+
+					"Got:      %q (%x)",
+					tc.offset, tc.expected, tc.expected, readData, readData)
+
+				// Show detailed comparison for debugging
+				minLen := len(readData)
+				if len(tc.expected) < minLen {
+					minLen = len(tc.expected)
+				}
+				for i := 0; i < minLen; i++ {
+					if readData[i] != tc.expected[i] {
+						t.Logf("First difference at position %d: expected 0x%02x ('%c'), got 0x%02x ('%c')",
+							i, tc.expected[i], tc.expected[i], readData[i], readData[i])
+						break
+					}
+				}
+			} else {
+				t.Logf("✓ Read correct at offset %d: %q", tc.offset, readData)
+			}
+		})
+	}
+
+	t.Logf("\n✅ Multi-layer journal read test completed")
+}
+
+// TestJournalMultiLayerReopenRead tests reading with multiple layers after reopening the file
+// This simulates a real-world scenario where:
+// 1. File is written and flushed (base data)
+// 2. Multiple journal snapshots are created
+// 3. File is reopened
+// 4. New journal entries are added
+// 5. Reads should correctly apply all layers including snapshots
+func TestJournalMultiLayerReopenRead(t *testing.T) {
+	testDir := filepath.Join(os.TempDir(), "orcas_journal_multilayer_reopen_test")
+	defer cleanupTestDir(t, testDir)
+
+	fs, bktID := setupTestFS(t, testDir)
+	defer cleanupFS(fs)
+
+	fileName := "test_multilayer_reopen.dat"
+	fileID, err := createTestFile(t, fs, bktID, fileName)
+	if err != nil {
+		t.Fatalf("Failed to create test file: %v", err)
+	}
+
+	// Step 1: Create base data
+	baseData := make([]byte, 2048)
+	for i := range baseData {
+		baseData[i] = byte('X') // Base pattern: all 'X'
+	}
+
+	ra1, err := getOrCreateRandomAccessor(fs, fileID)
+	if err != nil {
+		t.Fatalf("Failed to create RandomAccessor: %v", err)
+	}
+
+	if err := ra1.Write(0, baseData); err != nil {
+		t.Fatalf("Failed to write base data: %v", err)
+	}
+	if _, err := ra1.Flush(); err != nil {
+		t.Fatalf("Failed to flush base data: %v", err)
+	}
+	if err := ra1.Close(); err != nil {
+		t.Fatalf("Failed to close RandomAccessor: %v", err)
+	}
+	t.Logf("✓ Step 1: Base data written (all 'X', %d bytes)", len(baseData))
+
+	// Step 2: Create Layer 1 journal snapshot with overlapping writes
+	ra2, err := getOrCreateRandomAccessor(fs, fileID)
+	if err != nil {
+		t.Fatalf("Failed to create RandomAccessor for layer 1: %v", err)
+	}
+
+	// Write overlapping data at different offsets
+	layer1Data1 := []byte("LAYER1_OFFSET_0")   // 15 bytes at offset 0
+	layer1Data2 := []byte("LAYER1_OFFSET_100") // 16 bytes at offset 100
+	layer1Data3 := []byte("LAYER1_OFFSET_500") // 16 bytes at offset 500
+
+	if err := ra2.Write(0, layer1Data1); err != nil {
+		t.Fatalf("Failed to write layer1 entry 1: %v", err)
+	}
+	if err := ra2.Write(100, layer1Data2); err != nil {
+		t.Fatalf("Failed to write layer1 entry 2: %v", err)
+	}
+	if err := ra2.Write(500, layer1Data3); err != nil {
+		t.Fatalf("Failed to write layer1 entry 3: %v", err)
+	}
+
+	// Get journal and create snapshot
+	fileObj2, err := fs.h.Get(fs.c, bktID, []int64{fileID})
+	if err != nil || len(fileObj2) == 0 {
+		t.Fatalf("Failed to get file object: %v", err)
+	}
+	journal1 := fs.journalMgr.GetOrCreate(fileID, fileObj2[0].DataID, fileObj2[0].Size)
+	layer1VersionID, err := journal1.CreateJournalSnapshot()
+	if err != nil {
+		t.Fatalf("Failed to create layer 1 snapshot: %v", err)
+	}
+	if err := ra2.Close(); err != nil {
+		t.Fatalf("Failed to close RandomAccessor: %v", err)
+	}
+	t.Logf("✓ Step 2: Layer 1 journal snapshot created (versionID=%d)", layer1VersionID)
+
+	// Step 3: Reopen file and create Layer 2 journal snapshot
+	// This simulates the file being closed and reopened
+	ra3, err := getOrCreateRandomAccessor(fs, fileID)
+	if err != nil {
+		t.Fatalf("Failed to create RandomAccessor for layer 2: %v", err)
+	}
+
+	// Write data that overlaps with layer 1
+	layer2Data1 := []byte("LAYER2_OFFSET_0")   // 15 bytes at offset 0 (overwrites layer1)
+	layer2Data2 := []byte("LAYER2_OFFSET_200") // 16 bytes at offset 200 (new)
+	layer2Data3 := []byte("LAYER2_OFFSET_600") // 16 bytes at offset 600 (new)
+
+	if err := ra3.Write(0, layer2Data1); err != nil {
+		t.Fatalf("Failed to write layer2 entry 1: %v", err)
+	}
+	if err := ra3.Write(200, layer2Data2); err != nil {
+		t.Fatalf("Failed to write layer2 entry 2: %v", err)
+	}
+	if err := ra3.Write(600, layer2Data3); err != nil {
+		t.Fatalf("Failed to write layer2 entry 3: %v", err)
+	}
+
+	// Get journal and create snapshot
+	fileObj3, err := fs.h.Get(fs.c, bktID, []int64{fileID})
+	if err != nil || len(fileObj3) == 0 {
+		t.Fatalf("Failed to get file object: %v", err)
+	}
+	journal2 := fs.journalMgr.GetOrCreate(fileID, fileObj3[0].DataID, fileObj3[0].Size)
+	layer2VersionID, err := journal2.CreateJournalSnapshot()
+	if err != nil {
+		t.Fatalf("Failed to create layer 2 snapshot: %v", err)
+	}
+	if err := ra3.Close(); err != nil {
+		t.Fatalf("Failed to close RandomAccessor: %v", err)
+	}
+	t.Logf("✓ Step 3: Layer 2 journal snapshot created (versionID=%d)", layer2VersionID)
+
+	// Step 4: Reopen file again and add current journal entries
+	ra4, err := getOrCreateRandomAccessor(fs, fileID)
+	if err != nil {
+		t.Fatalf("Failed to create RandomAccessor for current layer: %v", err)
+	}
+	defer ra4.Close()
+
+	// Write data that overlaps with previous layers
+	currentData1 := []byte("CURRENT_OFFSET_0")   // 16 bytes at offset 0 (overwrites layer2)
+	currentData2 := []byte("CURRENT_OFFSET_150") // 17 bytes at offset 150 (new, between layer1 and layer2)
+	currentData3 := []byte("CURRENT_OFFSET_700") // 17 bytes at offset 700 (new)
+
+	if err := ra4.Write(0, currentData1); err != nil {
+		t.Fatalf("Failed to write current entry 1: %v", err)
+	}
+	if err := ra4.Write(150, currentData2); err != nil {
+		t.Fatalf("Failed to write current entry 2: %v", err)
+	}
+	if err := ra4.Write(700, currentData3); err != nil {
+		t.Fatalf("Failed to write current entry 3: %v", err)
+	}
+	t.Logf("✓ Step 4: Current journal entries written (3 entries, not flushed)")
+
+	// Step 5: Test reading with all layers
+	// Expected results:
+	// - Offset 0: "CURRENT_OFFSET_0" (current layer overwrites layer2, which overwrote layer1)
+	// - Offset 100: "LAYER1_OFFSET_100" (from layer1, not overwritten)
+	// - Offset 150: "CURRENT_OFFSET_150" (from current layer)
+	// - Offset 200: "LAYER2_OFFSET_200" (from layer2)
+	// - Offset 500: "LAYER1_OFFSET_500" (from layer1, not overwritten)
+	// - Offset 600: "LAYER2_OFFSET_600" (from layer2)
+	// - Offset 700: "CURRENT_OFFSET_700" (from current layer)
+	// - Other offsets: 'X' (from base data)
+
+	testCases := []struct {
+		name     string
+		offset   int64
+		length   int
+		expected []byte
+	}{
+		{
+			name:     "Offset 0 (current layer overwrites all)",
+			offset:   0,
+			length:   16,
+			expected: []byte("CURRENT_OFFSET_0"),
+		},
+		{
+			name:     "Offset 100 (layer1, not overwritten)",
+			offset:   100,
+			length:   len("LAYER1_OFFSET_100"),
+			expected: []byte("LAYER1_OFFSET_100"),
+		},
+		{
+			name:     "Offset 150 (current layer)",
+			offset:   150,
+			length:   len("CURRENT_OFFSET_150"),
+			expected: []byte("CURRENT_OFFSET_150"),
+		},
+		{
+			name:     "Offset 200 (layer2)",
+			offset:   200,
+			length:   len("LAYER2_OFFSET_200"),
+			expected: []byte("LAYER2_OFFSET_200"),
+		},
+		{
+			name:     "Offset 500 (layer1, not overwritten)",
+			offset:   500,
+			length:   len("LAYER1_OFFSET_500"),
+			expected: []byte("LAYER1_OFFSET_500"),
+		},
+		{
+			name:     "Offset 600 (layer2)",
+			offset:   600,
+			length:   len("LAYER2_OFFSET_600"),
+			expected: []byte("LAYER2_OFFSET_600"),
+		},
+		{
+			name:     "Offset 700 (current layer)",
+			offset:   700,
+			length:   len("CURRENT_OFFSET_700"),
+			expected: []byte("CURRENT_OFFSET_700"),
+		},
+		{
+			name:     "Offset 50 (base data, not modified)",
+			offset:   50,
+			length:   1,
+			expected: []byte("X"),
+		},
+		{
+			name:   "Large spanning read (0-800)",
+			offset: 0,
+			length: 800,
+			expected: func() []byte {
+				result := make([]byte, 800)
+				// Fill with base data
+				for i := range result {
+					result[i] = 'X'
+				}
+				// Apply layer1
+				copy(result[0:15], "LAYER1_OFFSET_0")
+				copy(result[100:100+len("LAYER1_OFFSET_100")], "LAYER1_OFFSET_100")
+				copy(result[500:500+len("LAYER1_OFFSET_500")], "LAYER1_OFFSET_500")
+				// Apply layer2 (overwrites layer1 at offset 0)
+				copy(result[0:15], "LAYER2_OFFSET_0")
+				copy(result[200:200+len("LAYER2_OFFSET_200")], "LAYER2_OFFSET_200")
+				copy(result[600:600+len("LAYER2_OFFSET_600")], "LAYER2_OFFSET_600")
+				// Apply current layer (overwrites layer2 at offset 0)
+				copy(result[0:len("CURRENT_OFFSET_0")], "CURRENT_OFFSET_0")
+				copy(result[150:150+len("CURRENT_OFFSET_150")], "CURRENT_OFFSET_150")
+				copy(result[700:700+len("CURRENT_OFFSET_700")], "CURRENT_OFFSET_700")
+				return result
+			}(),
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			readData, err := ra4.Read(tc.offset, tc.length)
+			if err != nil {
+				t.Fatalf("Failed to read at offset %d: %v", tc.offset, err)
+			}
+
+			if len(readData) != len(tc.expected) {
+				t.Errorf("Length mismatch at offset %d: got %d, want %d",
+					tc.offset, len(readData), len(tc.expected))
+				return
+			}
+
+			if !bytes.Equal(readData, tc.expected) {
+				t.Errorf("❌ FAILED: Data mismatch at offset %d\n"+
+					"Expected: %q\n"+
+					"Got:      %q",
+					tc.offset, tc.expected, readData)
+
+				// Show detailed comparison for debugging
+				minLen := len(readData)
+				if len(tc.expected) < minLen {
+					minLen = len(tc.expected)
+				}
+				for i := 0; i < minLen; i++ {
+					if readData[i] != tc.expected[i] {
+						t.Logf("First difference at position %d (absolute offset %d): expected 0x%02x ('%c'), got 0x%02x ('%c')",
+							i, tc.offset+int64(i), tc.expected[i], tc.expected[i], readData[i], readData[i])
+						// Show context around the difference
+						start := i - 10
+						if start < 0 {
+							start = 0
+						}
+						end := i + 10
+						if end > minLen {
+							end = minLen
+						}
+						t.Logf("Expected context: %q", tc.expected[start:end])
+						t.Logf("Got context:      %q", readData[start:end])
+						break
+					}
+				}
+			} else {
+				t.Logf("✓ Read correct at offset %d: %q", tc.offset, readData)
+			}
+		})
+	}
+
+	t.Logf("\n✅ Multi-layer journal reopen read test completed")
+}
+
+// TestJournalMultiLayerOverlappingEntries tests reading with overlapping entries across multiple layers
+// This is a critical test case because overlapping entries can cause issues in multi-layer journal reads
+// Scenario:
+// 1. Base data: all 'Z'
+// 2. Layer 1: Write "AAA" at offset 0-2, "BBB" at offset 5-7 (overlaps with AAA at offset 5)
+// 3. Layer 2: Write "CCC" at offset 1-3 (overlaps with Layer1's AAA), "DDD" at offset 6-8 (overlaps with Layer1's BBB)
+// 4. Current: Write "EEE" at offset 2-4 (overlaps with Layer1's AAA and Layer2's CCC)
+// Expected: Reads should correctly apply all layers with proper overlap resolution
+func TestJournalMultiLayerOverlappingEntries(t *testing.T) {
+	testDir := filepath.Join(os.TempDir(), "orcas_journal_overlap_test")
+	defer cleanupTestDir(t, testDir)
+
+	fs, bktID := setupTestFS(t, testDir)
+	defer cleanupFS(fs)
+
+	fileName := "test_overlap.dat"
+	fileID, err := createTestFile(t, fs, bktID, fileName)
+	if err != nil {
+		t.Fatalf("Failed to create test file: %v", err)
+	}
+
+	// Step 1: Create base data
+	baseData := make([]byte, 1024)
+	for i := range baseData {
+		baseData[i] = byte('Z') // Base pattern: all 'Z'
+	}
+
+	ra1, err := getOrCreateRandomAccessor(fs, fileID)
+	if err != nil {
+		t.Fatalf("Failed to create RandomAccessor: %v", err)
+	}
+
+	if err := ra1.Write(0, baseData); err != nil {
+		t.Fatalf("Failed to write base data: %v", err)
+	}
+	if _, err := ra1.Flush(); err != nil {
+		t.Fatalf("Failed to flush base data: %v", err)
+	}
+	if err := ra1.Close(); err != nil {
+		t.Fatalf("Failed to close RandomAccessor: %v", err)
+	}
+	t.Logf("✓ Step 1: Base data written (all 'Z', %d bytes)", len(baseData))
+
+	// Step 2: Create Layer 1 with overlapping entries
+	ra2, err := getOrCreateRandomAccessor(fs, fileID)
+	if err != nil {
+		t.Fatalf("Failed to create RandomAccessor for layer 1: %v", err)
+	}
+
+	// Layer 1 entries with internal overlap
+	layer1Data1 := []byte("AAA") // offset 0-2
+	layer1Data2 := []byte("BBB")  // offset 5-7 (doesn't overlap with AAA, but will be overlapped by Layer2)
+
+	if err := ra2.Write(0, layer1Data1); err != nil {
+		t.Fatalf("Failed to write layer1 entry 1: %v", err)
+	}
+	if err := ra2.Write(5, layer1Data2); err != nil {
+		t.Fatalf("Failed to write layer1 entry 2: %v", err)
+	}
+
+	// Get journal and create snapshot
+	fileObj2, err := fs.h.Get(fs.c, bktID, []int64{fileID})
+	if err != nil || len(fileObj2) == 0 {
+		t.Fatalf("Failed to get file object: %v", err)
+	}
+	journal1 := fs.journalMgr.GetOrCreate(fileID, fileObj2[0].DataID, fileObj2[0].Size)
+	layer1VersionID, err := journal1.CreateJournalSnapshot()
+	if err != nil {
+		t.Fatalf("Failed to create layer 1 snapshot: %v", err)
+	}
+	if err := ra2.Close(); err != nil {
+		t.Fatalf("Failed to close RandomAccessor: %v", err)
+	}
+	t.Logf("✓ Step 2: Layer 1 journal snapshot created (versionID=%d)", layer1VersionID)
+	t.Logf("  Layer 1 entries: offset 0-2='AAA', offset 5-7='BBB'")
+
+	// Step 3: Create Layer 2 with entries that overlap Layer 1
+	ra3, err := getOrCreateRandomAccessor(fs, fileID)
+	if err != nil {
+		t.Fatalf("Failed to create RandomAccessor for layer 2: %v", err)
+	}
+
+	// Layer 2 entries that overlap Layer 1
+	layer2Data1 := []byte("CCC") // offset 1-3 (overlaps Layer1's AAA at offset 1-2)
+	layer2Data2 := []byte("DDD") // offset 6-8 (overlaps Layer1's BBB at offset 6-7)
+
+	if err := ra3.Write(1, layer2Data1); err != nil {
+		t.Fatalf("Failed to write layer2 entry 1: %v", err)
+	}
+	if err := ra3.Write(6, layer2Data2); err != nil {
+		t.Fatalf("Failed to write layer2 entry 2: %v", err)
+	}
+
+	// Get journal and create snapshot
+	fileObj3, err := fs.h.Get(fs.c, bktID, []int64{fileID})
+	if err != nil || len(fileObj3) == 0 {
+		t.Fatalf("Failed to get file object: %v", err)
+	}
+	journal2 := fs.journalMgr.GetOrCreate(fileID, fileObj3[0].DataID, fileObj3[0].Size)
+	layer2VersionID, err := journal2.CreateJournalSnapshot()
+	if err != nil {
+		t.Fatalf("Failed to create layer 2 snapshot: %v", err)
+	}
+	if err := ra3.Close(); err != nil {
+		t.Fatalf("Failed to close RandomAccessor: %v", err)
+	}
+	t.Logf("✓ Step 3: Layer 2 journal snapshot created (versionID=%d)", layer2VersionID)
+	t.Logf("  Layer 2 entries: offset 1-3='CCC' (overlaps Layer1), offset 6-8='DDD' (overlaps Layer1)")
+
+	// Step 4: Add current journal entries that overlap both previous layers
+	ra4, err := getOrCreateRandomAccessor(fs, fileID)
+	if err != nil {
+		t.Fatalf("Failed to create RandomAccessor for current layer: %v", err)
+	}
+	defer ra4.Close()
+
+	// Current entries that overlap both Layer1 and Layer2
+	currentData1 := []byte("EEE") // offset 2-4 (overlaps Layer1's AAA at offset 2, Layer2's CCC at offset 2-3)
+
+	if err := ra4.Write(2, currentData1); err != nil {
+		t.Fatalf("Failed to write current entry 1: %v", err)
+	}
+	t.Logf("✓ Step 4: Current journal entries written (1 entry, not flushed)")
+	t.Logf("  Current entry: offset 2-4='EEE' (overlaps Layer1 and Layer2)")
+
+	// Step 5: Test reading with overlapping entries
+	// Expected results at each position:
+	// - Offset 0: 'A' (from Layer1, not overwritten)
+	// - Offset 1: 'C' (from Layer2, overwrites Layer1's 'A')
+	// - Offset 2: 'E' (from Current, overwrites Layer2's 'C' and Layer1's 'A')
+	// - Offset 3: 'E' (from Current, overwrites Layer2's 'C')
+	// - Offset 4: 'E' (from Current)
+	// - Offset 5: 'B' (from Layer1, not overwritten)
+	// - Offset 6: 'D' (from Layer2, overwrites Layer1's 'B')
+	// - Offset 7: 'D' (from Layer2, overwrites Layer1's 'B')
+	// - Offset 8: 'D' (from Layer2)
+	// - Other offsets: 'Z' (from base data)
+
+	testCases := []struct {
+		name     string
+		offset   int64
+		length   int
+		expected []byte
+		desc     string
+	}{
+		{
+			name:     "Offset 0 (Layer1 only)",
+			offset:   0,
+			length:   1,
+			expected: []byte("A"),
+			desc:     "Layer1's 'A' at offset 0, not overwritten",
+		},
+		{
+			name:     "Offset 1 (Layer2 overwrites Layer1)",
+			offset:   1,
+			length:   1,
+			expected: []byte("C"),
+			desc:     "Layer2's 'C' overwrites Layer1's 'A'",
+		},
+		{
+			name:     "Offset 2 (Current overwrites both)",
+			offset:   2,
+			length:   1,
+			expected: []byte("E"),
+			desc:     "Current's 'E' overwrites Layer2's 'C' and Layer1's 'A'",
+		},
+		{
+			name:     "Offset 3 (Current overwrites Layer2)",
+			offset:   3,
+			length:   1,
+			expected: []byte("E"),
+			desc:     "Current's 'E' overwrites Layer2's 'C'",
+		},
+		{
+			name:     "Offset 4 (Current only)",
+			offset:   4,
+			length:   1,
+			expected: []byte("E"),
+			desc:     "Current's 'E' at offset 4",
+		},
+		{
+			name:     "Offset 5 (Layer1 only)",
+			offset:   5,
+			length:   1,
+			expected: []byte("B"),
+			desc:     "Layer1's 'B' at offset 5, not overwritten",
+		},
+		{
+			name:     "Offset 6 (Layer2 overwrites Layer1)",
+			offset:   6,
+			length:   1,
+			expected: []byte("D"),
+			desc:     "Layer2's 'D' overwrites Layer1's 'B'",
+		},
+		{
+			name:     "Offset 7 (Layer2 overwrites Layer1)",
+			offset:   7,
+			length:   1,
+			expected: []byte("D"),
+			desc:     "Layer2's 'D' overwrites Layer1's 'B'",
+		},
+		{
+			name:     "Offset 8 (Layer2 only)",
+			offset:   8,
+			length:   1,
+			expected: []byte("D"),
+			desc:     "Layer2's 'D' at offset 8",
+		},
+		{
+			name:     "Offset 10 (Base data, not modified)",
+			offset:   10,
+			length:   1,
+			expected: []byte("Z"),
+			desc:     "Base data 'Z' at offset 10, not modified",
+		},
+		{
+			name:     "Read range 0-9 (all overlapping regions)",
+			offset:   0,
+			length:   10,
+			expected: []byte("ACEEEBDDDZ"),
+			desc:     "Read all overlapping regions: A(0) C(1) E(2-4) B(5) D(6-8) Z(9)",
+		},
+		{
+			name:     "Read range 0-3 (complex overlap)",
+			offset:   0,
+			length:   4,
+			expected: []byte("ACEE"),
+			desc:     "Complex overlap: A(0) C(1) E(2-3) - Layer1, Layer2, Current all overlap",
+		},
+		{
+			name:     "Read range 5-9 (Layer1 and Layer2 overlap)",
+			offset:   5,
+			length:   5,
+			expected: []byte("BDDDZ"),
+			desc:     "Layer1 and Layer2 overlap: B(5) D(6-8) Z(9)",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			readData, err := ra4.Read(tc.offset, tc.length)
+			if err != nil {
+				t.Fatalf("Failed to read at offset %d: %v", tc.offset, err)
+			}
+
+			if len(readData) != len(tc.expected) {
+				t.Errorf("Length mismatch at offset %d: got %d, want %d",
+					tc.offset, len(readData), len(tc.expected))
+				return
+			}
+
+			if !bytes.Equal(readData, tc.expected) {
+				t.Errorf("❌ FAILED: Data mismatch at offset %d\n"+
+					"Description: %s\n"+
+					"Expected: %q (%x)\n"+
+					"Got:      %q (%x)",
+					tc.offset, tc.desc, tc.expected, tc.expected, readData, readData)
+
+				// Show detailed comparison for debugging
+				minLen := len(readData)
+				if len(tc.expected) < minLen {
+					minLen = len(tc.expected)
+				}
+				for i := 0; i < minLen; i++ {
+					if readData[i] != tc.expected[i] {
+						t.Logf("First difference at position %d (absolute offset %d): expected 0x%02x ('%c'), got 0x%02x ('%c')",
+							i, tc.offset+int64(i), tc.expected[i], tc.expected[i], readData[i], readData[i])
+						// Show context around the difference
+						start := i - 5
+						if start < 0 {
+							start = 0
+						}
+						end := i + 5
+						if end > minLen {
+							end = minLen
+						}
+						t.Logf("Expected context: %q", tc.expected[start:end])
+						t.Logf("Got context:      %q", readData[start:end])
+						break
+					}
+				}
+			} else {
+				t.Logf("✓ Read correct at offset %d: %q (%s)", tc.offset, readData, tc.desc)
+			}
+		})
+	}
+
+	t.Logf("\n✅ Multi-layer journal overlapping entries test completed")
+}
+
+// TestJournalMultiLayerComplexOverlap tests complex overlapping scenarios with multiple layers
+// This test creates a scenario where entries in different layers have complex overlaps
+// that require careful ordering when applying journal entries
+func TestJournalMultiLayerComplexOverlap(t *testing.T) {
+	testDir := filepath.Join(os.TempDir(), "orcas_journal_complex_overlap_test")
+	defer cleanupTestDir(t, testDir)
+
+	fs, bktID := setupTestFS(t, testDir)
+	defer cleanupFS(fs)
+
+	fileName := "test_complex_overlap.dat"
+	fileID, err := createTestFile(t, fs, bktID, fileName)
+	if err != nil {
+		t.Fatalf("Failed to create test file: %v", err)
+	}
+
+	// Step 1: Create base data
+	baseData := make([]byte, 2000)
+	for i := range baseData {
+		baseData[i] = byte('0' + (i % 10)) // Base pattern: "0123456789..."
+	}
+
+	ra1, err := getOrCreateRandomAccessor(fs, fileID)
+	if err != nil {
+		t.Fatalf("Failed to create RandomAccessor: %v", err)
+	}
+
+	if err := ra1.Write(0, baseData); err != nil {
+		t.Fatalf("Failed to write base data: %v", err)
+	}
+	if _, err := ra1.Flush(); err != nil {
+		t.Fatalf("Failed to flush base data: %v", err)
+	}
+	if err := ra1.Close(); err != nil {
+		t.Fatalf("Failed to close RandomAccessor: %v", err)
+	}
+	t.Logf("✓ Step 1: Base data written (%d bytes)", len(baseData))
+
+	// Step 2: Layer 1 - Write entries that will be partially overwritten
+	ra2, err := getOrCreateRandomAccessor(fs, fileID)
+	if err != nil {
+		t.Fatalf("Failed to create RandomAccessor for layer 1: %v", err)
+	}
+
+	// Layer 1: Large entry that will be partially overwritten by Layer 2
+	layer1Data1 := bytes.Repeat([]byte("L1"), 100) // 200 bytes at offset 100-299
+
+	if err := ra2.Write(100, layer1Data1); err != nil {
+		t.Fatalf("Failed to write layer1 entry: %v", err)
+	}
+
+	fileObj2, err := fs.h.Get(fs.c, bktID, []int64{fileID})
+	if err != nil || len(fileObj2) == 0 {
+		t.Fatalf("Failed to get file object: %v", err)
+	}
+	journal1 := fs.journalMgr.GetOrCreate(fileID, fileObj2[0].DataID, fileObj2[0].Size)
+	layer1VersionID, err := journal1.CreateJournalSnapshot()
+	if err != nil {
+		t.Fatalf("Failed to create layer 1 snapshot: %v", err)
+	}
+	if err := ra2.Close(); err != nil {
+		t.Fatalf("Failed to close RandomAccessor: %v", err)
+	}
+	t.Logf("✓ Step 2: Layer 1 journal snapshot created (versionID=%d, 200 bytes at offset 100)", layer1VersionID)
+
+	// Step 3: Layer 2 - Write entries that partially overlap Layer 1
+	ra3, err := getOrCreateRandomAccessor(fs, fileID)
+	if err != nil {
+		t.Fatalf("Failed to create RandomAccessor for layer 2: %v", err)
+	}
+
+	// Layer 2: Entry that overlaps with Layer 1's entry
+	// Write "L2" at offset 150-249 (overlaps Layer1's 100-299 at 150-249)
+	layer2Data1 := bytes.Repeat([]byte("L2"), 50) // 100 bytes at offset 150-249
+
+	if err := ra3.Write(150, layer2Data1); err != nil {
+		t.Fatalf("Failed to write layer2 entry: %v", err)
+	}
+
+	fileObj3, err := fs.h.Get(fs.c, bktID, []int64{fileID})
+	if err != nil || len(fileObj3) == 0 {
+		t.Fatalf("Failed to get file object: %v", err)
+	}
+	journal2 := fs.journalMgr.GetOrCreate(fileID, fileObj3[0].DataID, fileObj3[0].Size)
+	layer2VersionID, err := journal2.CreateJournalSnapshot()
+	if err != nil {
+		t.Fatalf("Failed to create layer 2 snapshot: %v", err)
+	}
+	if err := ra3.Close(); err != nil {
+		t.Fatalf("Failed to close RandomAccessor: %v", err)
+	}
+	t.Logf("✓ Step 3: Layer 2 journal snapshot created (versionID=%d, 100 bytes at offset 150, overlaps Layer1)", layer2VersionID)
+
+	// Step 4: Current layer - Write entries that overlap both previous layers
+	ra4, err := getOrCreateRandomAccessor(fs, fileID)
+	if err != nil {
+		t.Fatalf("Failed to create RandomAccessor for current layer: %v", err)
+	}
+	defer ra4.Close()
+
+	// Current: Entry that overlaps with both Layer1 and Layer2
+	// Write "CUR" at offset 120-179 (overlaps Layer1's 100-299 and Layer2's 150-249)
+	currentData1 := bytes.Repeat([]byte("CUR"), 20) // 60 bytes at offset 120-179
+
+	if err := ra4.Write(120, currentData1); err != nil {
+		t.Fatalf("Failed to write current entry: %v", err)
+	}
+	t.Logf("✓ Step 4: Current journal entry written (60 bytes at offset 120, overlaps Layer1 and Layer2)")
+
+	// Step 5: Test reading with complex overlaps
+	// Expected results:
+	// - Offset 100-119: "L1L1..." (from Layer1, not overwritten)
+	// - Offset 120-179: "CURCUR..." (from Current, overwrites Layer1 and Layer2)
+	// - Offset 180-249: "L2L2..." (from Layer2, overwrites Layer1)
+	// - Offset 250-299: "L1L1..." (from Layer1, not overwritten)
+	// - Other offsets: base data
+
+	testCases := []struct {
+		name     string
+		offset   int64
+		length   int
+		expected []byte
+		desc     string
+	}{
+		{
+			name:     "Offset 100-119 (Layer1 only)",
+			offset:   100,
+			length:   20,
+			expected: bytes.Repeat([]byte("L1"), 10), // 20 bytes
+			desc:     "Layer1's data, not overwritten",
+		},
+		{
+			name:     "Offset 120-179 (Current overwrites both)",
+			offset:   120,
+			length:   60,
+			expected: bytes.Repeat([]byte("CUR"), 20), // 60 bytes
+			desc:     "Current's data overwrites Layer1 and Layer2",
+		},
+		{
+			name:     "Offset 180-249 (Layer2 overwrites Layer1)",
+			offset:   180,
+			length:   70,
+			expected: func() []byte {
+				// Layer2's "L2" at offset 150-249, but we're reading from 180
+				// So we get Layer2's data from offset 180-249 (70 bytes = 35 * "L2")
+				return bytes.Repeat([]byte("L2"), 35)
+			}(),
+			desc:     "Layer2's data overwrites Layer1",
+		},
+		{
+			name:     "Offset 250-299 (Layer1 only)",
+			offset:   250,
+			length:   50,
+			expected: bytes.Repeat([]byte("L1"), 25), // 50 bytes
+			desc:     "Layer1's data, not overwritten",
+		},
+		{
+			name:     "Offset 50 (Base data, not modified)",
+			offset:   50,
+			length:   10,
+			expected: []byte("0123456789"),
+			desc:     "Base data, not modified",
+		},
+		{
+			name:     "Large spanning read (100-300)",
+			offset:   100,
+			length:   200,
+			expected: func() []byte {
+				result := make([]byte, 200)
+				// Fill with base data first
+				for i := 0; i < 200; i++ {
+					result[i] = byte('0' + ((100 + i) % 10))
+				}
+				// Apply Layer1 (100-299)
+				layer1Data := bytes.Repeat([]byte("L1"), 100)
+				copy(result[0:200], layer1Data)
+				// Apply Layer2 (150-249, overwrites Layer1)
+				layer2Data := bytes.Repeat([]byte("L2"), 50)
+				copy(result[50:150], layer2Data)
+				// Apply Current (120-179, overwrites both)
+				currentData := bytes.Repeat([]byte("CUR"), 20)
+				copy(result[20:80], currentData)
+				return result
+			}(),
+			desc:     "Large spanning read across all overlapping regions",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			readData, err := ra4.Read(tc.offset, tc.length)
+			if err != nil {
+				t.Fatalf("Failed to read at offset %d: %v", tc.offset, err)
+			}
+
+			if len(readData) != len(tc.expected) {
+				t.Errorf("Length mismatch at offset %d: got %d, want %d",
+					tc.offset, len(readData), len(tc.expected))
+				return
+			}
+
+			if !bytes.Equal(readData, tc.expected) {
+				t.Errorf("❌ FAILED: Data mismatch at offset %d\n"+
+					"Description: %s\n"+
+					"Expected: %q\n"+
+					"Got:      %q",
+					tc.offset, tc.desc, tc.expected, readData)
+
+				// Show first few differences
+				minLen := len(readData)
+				if len(tc.expected) < minLen {
+					minLen = len(tc.expected)
+				}
+				differences := 0
+				for i := 0; i < minLen && differences < 5; i++ {
+					if readData[i] != tc.expected[i] {
+						t.Logf("Difference at position %d (absolute offset %d): expected 0x%02x ('%c'), got 0x%02x ('%c')",
+							i, tc.offset+int64(i), tc.expected[i], tc.expected[i], readData[i], readData[i])
+						differences++
+					}
+				}
+			} else {
+				previewLen := 20
+				if len(readData) < previewLen {
+					previewLen = len(readData)
+				}
+				t.Logf("✓ Read correct at offset %d: %q (%s)", tc.offset, readData[:previewLen], tc.desc)
+			}
+		})
+	}
+
+	t.Logf("\n✅ Multi-layer journal complex overlap test completed")
+}
+
+// TestJournalMultiLayerSnapshotRead tests reading when journal snapshots exist in database
+// This test verifies that when there are journal snapshots stored as OBJ_TYPE_JOURNAL objects,
+// reads correctly apply all snapshot layers before applying current journal entries.
+// This is the critical test case that may reveal the actual bug.
+func TestJournalMultiLayerSnapshotRead(t *testing.T) {
+	testDir := filepath.Join(os.TempDir(), "orcas_journal_snapshot_read_test")
+	defer cleanupTestDir(t, testDir)
+
+	fs, bktID := setupTestFS(t, testDir)
+	defer cleanupFS(fs)
+
+	fileName := "test_snapshot_read.dat"
+	fileID, err := createTestFile(t, fs, bktID, fileName)
+	if err != nil {
+		t.Fatalf("Failed to create test file: %v", err)
+	}
+
+	// Step 1: Create base data
+	baseData := make([]byte, 1000)
+	for i := range baseData {
+		baseData[i] = byte('B') // Base pattern: all 'B'
+	}
+
+	ra1, err := getOrCreateRandomAccessor(fs, fileID)
+	if err != nil {
+		t.Fatalf("Failed to create RandomAccessor: %v", err)
+	}
+
+	if err := ra1.Write(0, baseData); err != nil {
+		t.Fatalf("Failed to write base data: %v", err)
+	}
+	if _, err := ra1.Flush(); err != nil {
+		t.Fatalf("Failed to flush base data: %v", err)
+	}
+	if err := ra1.Close(); err != nil {
+		t.Fatalf("Failed to close RandomAccessor: %v", err)
+	}
+	t.Logf("✓ Step 1: Base data written (all 'B', %d bytes)", len(baseData))
+
+	// Get file object to get base DataID
+	fileObj1, err := fs.h.Get(fs.c, bktID, []int64{fileID})
+	if err != nil || len(fileObj1) == 0 {
+		t.Fatalf("Failed to get file object: %v", err)
+	}
+	baseDataID := fileObj1[0].DataID
+	t.Logf("Base DataID: %d", baseDataID)
+
+	// Step 2: Create Layer 1 journal snapshot manually (simulating what CreateJournalSnapshot does)
+	// This creates a journal with entries and saves it as OBJ_TYPE_JOURNAL
+	journal1 := fs.journalMgr.GetOrCreate(fileID, baseDataID, fileObj1[0].Size)
+	
+	// Write entries to journal1
+	layer1Data1 := []byte("L1_100") // offset 100
+	layer1Data2 := []byte("L1_200") // offset 200
+	if err := journal1.Write(100, layer1Data1); err != nil {
+		t.Fatalf("Failed to write layer1 entry 1: %v", err)
+	}
+	if err := journal1.Write(200, layer1Data2); err != nil {
+		t.Fatalf("Failed to write layer1 entry 2: %v", err)
+	}
+
+	// Create snapshot
+	layer1VersionID, err := journal1.CreateJournalSnapshot()
+	if err != nil {
+		t.Fatalf("Failed to create layer 1 snapshot: %v", err)
+	}
+	t.Logf("✓ Step 2: Layer 1 journal snapshot created (versionID=%d)", layer1VersionID)
+
+	// Step 3: Create Layer 2 journal snapshot
+	// Get the journal again (it should have the same baseDataID but may have been updated)
+	fileObj2, err := fs.h.Get(fs.c, bktID, []int64{fileID})
+	if err != nil || len(fileObj2) == 0 {
+		t.Fatalf("Failed to get file object: %v", err)
+	}
+	
+	// Create a new journal for layer 2, but it should be based on the same baseDataID
+	// The issue is: when we create a new journal, does it correctly load the previous snapshot?
+	journal2 := fs.journalMgr.GetOrCreate(fileID, fileObj2[0].DataID, fileObj2[0].Size)
+	
+	// Write entries to journal2
+	layer2Data1 := []byte("L2_150") // offset 150 (overlaps with Layer1's offset 100-105)
+	layer2Data2 := []byte("L2_250") // offset 250 (new)
+	if err := journal2.Write(150, layer2Data1); err != nil {
+		t.Fatalf("Failed to write layer2 entry 1: %v", err)
+	}
+	if err := journal2.Write(250, layer2Data2); err != nil {
+		t.Fatalf("Failed to write layer2 entry 2: %v", err)
+	}
+
+	// Create snapshot
+	layer2VersionID, err := journal2.CreateJournalSnapshot()
+	if err != nil {
+		t.Fatalf("Failed to create layer 2 snapshot: %v", err)
+	}
+	t.Logf("✓ Step 3: Layer 2 journal snapshot created (versionID=%d)", layer2VersionID)
+
+	// Step 4: Create current journal entries (not flushed)
+	// Close and reopen to simulate real scenario
+	// Get a fresh journal instance
+	fileObj3, err := fs.h.Get(fs.c, bktID, []int64{fileID})
+	if err != nil || len(fileObj3) == 0 {
+		t.Fatalf("Failed to get file object: %v", err)
+	}
+	
+	// Create new RandomAccessor to get fresh journal
+	ra4, err := getOrCreateRandomAccessor(fs, fileID)
+	if err != nil {
+		t.Fatalf("Failed to create RandomAccessor: %v", err)
+	}
+	defer ra4.Close()
+
+	// Write current entries
+	currentData1 := []byte("CUR_120") // offset 120 (overlaps with Layer1 and Layer2)
+	if err := ra4.Write(120, currentData1); err != nil {
+		t.Fatalf("Failed to write current entry: %v", err)
+	}
+	t.Logf("✓ Step 4: Current journal entry written (offset 120)")
+
+	// Step 5: Test reading
+	// Expected results:
+	// - Offset 100-105: "L1_100" (from Layer1, not overwritten by Layer2 or Current)
+	// - Offset 120-125: "CUR_120" (from Current, overwrites Layer1 and Layer2)
+	// - Offset 150-155: "L2_150" (from Layer2, but may be overwritten by Current if overlap)
+	// - Offset 200-205: "L1_200" (from Layer1, not overwritten)
+	// - Offset 250-255: "L2_250" (from Layer2, not overwritten)
+	// - Other offsets: 'B' (from base data)
+
+	testCases := []struct {
+		name     string
+		offset   int64
+		length   int
+		expected []byte
+		desc     string
+	}{
+		{
+			name:     "Offset 100 (Layer1)",
+			offset:   100,
+			length:   6,
+			expected: []byte("L1_100"),
+			desc:     "Layer1's data at offset 100",
+		},
+		{
+			name:     "Offset 120 (Current overwrites)",
+			offset:   120,
+			length:   7,
+			expected: []byte("CUR_120"),
+			desc:     "Current's data overwrites Layer1 and Layer2",
+		},
+		{
+			name:     "Offset 150 (Layer2, may be overwritten)",
+			offset:   150,
+			length:   6,
+			expected: []byte("L2_150"),
+			desc:     "Layer2's data at offset 150 (if Current doesn't overlap)",
+		},
+		{
+			name:     "Offset 200 (Layer1)",
+			offset:   200,
+			length:   6,
+			expected: []byte("L1_200"),
+			desc:     "Layer1's data at offset 200",
+		},
+		{
+			name:     "Offset 250 (Layer2)",
+			offset:   250,
+			length:   6,
+			expected: []byte("L2_250"),
+			desc:     "Layer2's data at offset 250",
+		},
+		{
+			name:     "Offset 50 (Base data)",
+			offset:   50,
+			length:   1,
+			expected: []byte("B"),
+			desc:     "Base data, not modified",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			readData, err := ra4.Read(tc.offset, tc.length)
+			if err != nil {
+				t.Fatalf("Failed to read at offset %d: %v", tc.offset, err)
+			}
+
+			if len(readData) != len(tc.expected) {
+				t.Errorf("Length mismatch at offset %d: got %d, want %d",
+					tc.offset, len(readData), len(tc.expected))
+				return
+			}
+
+			if !bytes.Equal(readData, tc.expected) {
+				t.Errorf("❌ FAILED: Data mismatch at offset %d\n"+
+					"Description: %s\n"+
+					"Expected: %q\n"+
+					"Got:      %q\n"+
+					"This may indicate that journal snapshots are not being applied correctly!",
+					tc.offset, tc.desc, tc.expected, readData)
+			} else {
+				t.Logf("✓ Read correct at offset %d: %q (%s)", tc.offset, readData, tc.desc)
+			}
+		})
+	}
+
+	t.Logf("\n✅ Multi-layer journal snapshot read test completed")
+}
+
+// TestJournalMultiLayerVersionChain tests reading when journal snapshots form a chain
+// This test verifies the critical bug: when there are multiple journal snapshots
+// stored in the database, readBaseData should recursively load and apply all
+// journal snapshot layers, not just read the base DataID directly.
+//
+// Scenario:
+// 1. Base data: DataID1
+// 2. Layer 1 journal snapshot: based on DataID1, creates snapshot with entries
+// 3. Layer 2 journal snapshot: based on Layer 1's versionID, creates snapshot with entries
+// 4. Current journal: should apply Layer 1 + Layer 2 + Current entries
+//
+// The bug: readBaseData only reads fileObj.DataID, it doesn't check for journal snapshots
+// that need to be applied first. This means Layer 1 and Layer 2 entries are skipped!
+func TestJournalMultiLayerVersionChain(t *testing.T) {
+	testDir := filepath.Join(os.TempDir(), "orcas_journal_version_chain_test")
+	defer cleanupTestDir(t, testDir)
+
+	fs, bktID := setupTestFS(t, testDir)
+	defer cleanupFS(fs)
+
+	fileName := "test_version_chain.dat"
+	fileID, err := createTestFile(t, fs, bktID, fileName)
+	if err != nil {
+		t.Fatalf("Failed to create test file: %v", err)
+	}
+
+	// Step 1: Create base data
+	baseData := make([]byte, 500)
+	for i := range baseData {
+		baseData[i] = byte('Z') // Base pattern: all 'Z'
+	}
+
+	ra1, err := getOrCreateRandomAccessor(fs, fileID)
+	if err != nil {
+		t.Fatalf("Failed to create RandomAccessor: %v", err)
+	}
+
+	if err := ra1.Write(0, baseData); err != nil {
+		t.Fatalf("Failed to write base data: %v", err)
+	}
+	if _, err := ra1.Flush(); err != nil {
+		t.Fatalf("Failed to flush base data: %v", err)
+	}
+	if err := ra1.Close(); err != nil {
+		t.Fatalf("Failed to close RandomAccessor: %v", err)
+	}
+
+	// Get base DataID
+	fileObj1, err := fs.h.Get(fs.c, bktID, []int64{fileID})
+	if err != nil || len(fileObj1) == 0 {
+		t.Fatalf("Failed to get file object: %v", err)
+	}
+	baseDataID := fileObj1[0].DataID
+	t.Logf("✓ Step 1: Base data written (DataID=%d, all 'Z')", baseDataID)
+
+	// Step 2: Create Layer 1 journal snapshot
+	// This snapshot is based on baseDataID
+	journal1 := fs.journalMgr.GetOrCreate(fileID, baseDataID, fileObj1[0].Size)
+	
+	layer1Data1 := []byte("L1_100") // offset 100
+	layer1Data2 := []byte("L1_200") // offset 200
+	if err := journal1.Write(100, layer1Data1); err != nil {
+		t.Fatalf("Failed to write layer1 entry 1: %v", err)
+	}
+	if err := journal1.Write(200, layer1Data2); err != nil {
+		t.Fatalf("Failed to write layer1 entry 2: %v", err)
+	}
+
+	layer1VersionID, err := journal1.CreateJournalSnapshot()
+	if err != nil {
+		t.Fatalf("Failed to create layer 1 snapshot: %v", err)
+	}
+	t.Logf("✓ Step 2: Layer 1 journal snapshot created (versionID=%d, based on DataID=%d)", layer1VersionID, baseDataID)
+
+	// Verify Layer 1 snapshot was created
+	versions1, _, _, err := fs.h.List(fs.c, bktID, fileID, core.ListOptions{Count: 0})
+	if err != nil {
+		t.Fatalf("Failed to list versions: %v", err)
+	}
+	layer1Found := false
+	for _, v := range versions1 {
+		if v.Type == core.OBJ_TYPE_JOURNAL && v.ID == layer1VersionID {
+			layer1Found = true
+			t.Logf("  Layer 1 snapshot: ID=%d, DataID=%d, Extra=%s", v.ID, v.DataID, v.Extra)
+			break
+		}
+	}
+	if !layer1Found {
+		t.Logf("⚠️  Warning: Layer 1 snapshot not found in version list (may be expected)")
+	}
+
+	// Step 3: Create Layer 2 journal snapshot
+	// This snapshot should be based on Layer 1's versionID
+	// But when we GetOrCreate, we need to make sure it's based on the correct base
+	// The issue: GetOrCreate uses fileObj.DataID, which is still baseDataID!
+	// So Layer 2 journal doesn't know about Layer 1's entries
+	
+	// Get file object again (DataID should still be baseDataID, not updated)
+	fileObj2, err := fs.h.Get(fs.c, bktID, []int64{fileID})
+	if err != nil || len(fileObj2) == 0 {
+		t.Fatalf("Failed to get file object: %v", err)
+	}
+	
+	// CRITICAL: fileObj2.DataID is still baseDataID, not layer1VersionID!
+	// This means when we create journal2, it's based on baseDataID, not layer1VersionID
+	// So it doesn't know about Layer 1's entries!
+	t.Logf("⚠️  CRITICAL: fileObj.DataID=%d (still base, not updated to layer1 version)", fileObj2[0].DataID)
+	
+	journal2 := fs.journalMgr.GetOrCreate(fileID, fileObj2[0].DataID, fileObj2[0].Size)
+	
+	layer2Data1 := []byte("L2_150") // offset 150 (should overlap with Layer1's "L1_100" at 100-105)
+	layer2Data2 := []byte("L2_250") // offset 250
+	if err := journal2.Write(150, layer2Data1); err != nil {
+		t.Fatalf("Failed to write layer2 entry 1: %v", err)
+	}
+	if err := journal2.Write(250, layer2Data2); err != nil {
+		t.Fatalf("Failed to write layer2 entry 2: %v", err)
+	}
+
+	layer2VersionID, err := journal2.CreateJournalSnapshot()
+	if err != nil {
+		t.Fatalf("Failed to create layer 2 snapshot: %v", err)
+	}
+	t.Logf("✓ Step 3: Layer 2 journal snapshot created (versionID=%d, based on DataID=%d)", layer2VersionID, fileObj2[0].DataID)
+
+	// Step 4: Create current journal entries
+	// Close and reopen to simulate real scenario
+	// Get a fresh journal instance
+	fileObj3, err := fs.h.Get(fs.c, bktID, []int64{fileID})
+	if err != nil || len(fileObj3) == 0 {
+		t.Fatalf("Failed to get file object: %v", err)
+	}
+	
+	// Create new RandomAccessor
+	ra4, err := getOrCreateRandomAccessor(fs, fileID)
+	if err != nil {
+		t.Fatalf("Failed to create RandomAccessor: %v", err)
+	}
+	defer ra4.Close()
+
+	// Write current entries
+	currentData1 := []byte("CUR_120") // offset 120 (should overlap with Layer1 and Layer2)
+	if err := ra4.Write(120, currentData1); err != nil {
+		t.Fatalf("Failed to write current entry: %v", err)
+	}
+	t.Logf("✓ Step 4: Current journal entry written (offset 120)")
+
+	// Step 5: Test reading
+	// Expected results if journal snapshots are correctly applied:
+	// - Offset 100-105: "L1_100" (from Layer1, not overwritten by Layer2 or Current)
+	// - Offset 120-125: "CUR_120" (from Current, overwrites Layer1 and Layer2)
+	// - Offset 150-155: "L2_150" (from Layer2, but may be overwritten by Current if overlap)
+	// - Offset 200-205: "L1_200" (from Layer1, not overwritten)
+	// - Offset 250-255: "L2_250" (from Layer2, not overwritten)
+	// - Other offsets: 'Z' (from base data)
+	//
+	// BUT: If readBaseData doesn't load journal snapshots, then:
+	// - Offset 100-105: 'Z' (base data, Layer1 entries not applied!)
+	// - Offset 200-205: 'Z' (base data, Layer1 entries not applied!)
+	// - Offset 150-155: 'Z' (base data, Layer2 entries not applied!)
+	// - Offset 250-255: 'Z' (base data, Layer2 entries not applied!)
+	// - Only Current entries would be visible
+
+	testCases := []struct {
+		name     string
+		offset   int64
+		length   int
+		expected []byte
+		desc     string
+	}{
+		{
+			name:     "Offset 100 (Layer1 - CRITICAL TEST)",
+			offset:   100,
+			length:   6,
+			expected: []byte("L1_100"),
+			desc:     "Layer1's data - if this fails, journal snapshots are not being loaded!",
+		},
+		{
+			name:     "Offset 120 (Current overwrites)",
+			offset:   120,
+			length:   7,
+			expected: []byte("CUR_120"),
+			desc:     "Current's data overwrites Layer1 and Layer2",
+		},
+		{
+			name:     "Offset 150 (Layer2 - CRITICAL TEST)",
+			offset:   150,
+			length:   6,
+			expected: []byte("L2_150"),
+			desc:     "Layer2's data - if this fails, journal snapshots are not being loaded!",
+		},
+		{
+			name:     "Offset 200 (Layer1 - CRITICAL TEST)",
+			offset:   200,
+			length:   6,
+			expected: []byte("L1_200"),
+			desc:     "Layer1's data - if this fails, journal snapshots are not being loaded!",
+		},
+		{
+			name:     "Offset 250 (Layer2 - CRITICAL TEST)",
+			offset:   250,
+			length:   6,
+			expected: []byte("L2_250"),
+			desc:     "Layer2's data - if this fails, journal snapshots are not being loaded!",
+		},
+		{
+			name:     "Offset 50 (Base data)",
+			offset:   50,
+			length:   1,
+			expected: []byte("Z"),
+			desc:     "Base data, not modified",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			readData, err := ra4.Read(tc.offset, tc.length)
+			if err != nil {
+				t.Fatalf("Failed to read at offset %d: %v", tc.offset, err)
+			}
+
+			if len(readData) != len(tc.expected) {
+				t.Errorf("Length mismatch at offset %d: got %d, want %d",
+					tc.offset, len(readData), len(tc.expected))
+				return
+			}
+
+			if !bytes.Equal(readData, tc.expected) {
+				t.Errorf("❌ FAILED: Data mismatch at offset %d\n"+
+					"Description: %s\n"+
+					"Expected: %q\n"+
+					"Got:      %q\n"+
+					"\n"+
+					"🔴 THIS IS THE BUG: Journal snapshots are not being loaded and applied!\n"+
+					"   readBaseData only reads fileObj.DataID, it doesn't check for journal snapshots.\n"+
+					"   When there are multiple journal snapshots, they need to be recursively loaded\n"+
+					"   and applied in the correct order (base -> layer1 -> layer2 -> current).",
+					tc.offset, tc.desc, tc.expected, readData)
+			} else {
+				t.Logf("✓ Read correct at offset %d: %q (%s)", tc.offset, readData, tc.desc)
+			}
+		})
+	}
+
+	t.Logf("\n✅ Multi-layer journal version chain test completed")
+	t.Logf("⚠️  If any CRITICAL TEST failed, it means journal snapshots are not being loaded!")
+}
+
+// TestJournalMultiLayerReopenFromDatabase tests the critical bug scenario:
+// When a file is closed and reopened, GetOrCreate creates a new journal
+// but doesn't load journal snapshots from the database.
+// readBaseData only reads fileObj.DataID, missing all journal snapshot layers.
+//
+// This test simulates:
+// 1. Create base data and flush
+// 2. Create Layer 1 journal snapshot, close file
+// 3. Reopen file, create Layer 2 journal snapshot, close file
+// 4. Reopen file again, add current entries
+// 5. Read - should see all layers, but may only see current layer if bug exists
+func TestJournalMultiLayerReopenFromDatabase(t *testing.T) {
+	testDir := filepath.Join(os.TempDir(), "orcas_journal_reopen_db_test")
+	defer cleanupTestDir(t, testDir)
+
+	fs, bktID := setupTestFS(t, testDir)
+	defer cleanupFS(fs)
+
+	fileName := "test_reopen_db.dat"
+	fileID, err := createTestFile(t, fs, bktID, fileName)
+	if err != nil {
+		t.Fatalf("Failed to create test file: %v", err)
+	}
+
+	// Step 1: Create base data and flush
+	baseData := make([]byte, 1000)
+	for i := range baseData {
+		baseData[i] = byte('B') // Base pattern: all 'B'
+	}
+
+	ra1, err := getOrCreateRandomAccessor(fs, fileID)
+	if err != nil {
+		t.Fatalf("Failed to create RandomAccessor: %v", err)
+	}
+	if err := ra1.Write(0, baseData); err != nil {
+		t.Fatalf("Failed to write base data: %v", err)
+	}
+	if _, err := ra1.Flush(); err != nil {
+		t.Fatalf("Failed to flush base data: %v", err)
+	}
+	if err := ra1.Close(); err != nil {
+		t.Fatalf("Failed to close RandomAccessor: %v", err)
+	}
+
+	fileObj1, err := fs.h.Get(fs.c, bktID, []int64{fileID})
+	if err != nil || len(fileObj1) == 0 {
+		t.Fatalf("Failed to get file object: %v", err)
+	}
+	baseDataID := fileObj1[0].DataID
+	t.Logf("✓ Step 1: Base data written and flushed (DataID=%d)", baseDataID)
+
+	// Step 2: Create Layer 1 journal snapshot, then close
+	// Use VFS interface: write data, manually create snapshot via journal, then close
+	ra2, err := getOrCreateRandomAccessor(fs, fileID)
+	if err != nil {
+		t.Fatalf("Failed to create RandomAccessor: %v", err)
+	}
+
+	layer1Data := []byte("LAYER1_100") // offset 100
+	if err := ra2.Write(100, layer1Data); err != nil {
+		t.Fatalf("Failed to write layer1: %v", err)
+	}
+
+	// Get journal and manually create snapshot (simulating SmartFlush behavior)
+	// This ensures snapshot is actually created and saved to database
+	fileObj2, err := fs.h.Get(fs.c, bktID, []int64{fileID})
+	if err != nil || len(fileObj2) == 0 {
+		t.Fatalf("Failed to get file object: %v", err)
+	}
+	journal1 := fs.journalMgr.GetOrCreate(fileID, fileObj2[0].DataID, fileObj2[0].Size)
+	layer1VersionID, err := journal1.CreateJournalSnapshot()
+	if err != nil {
+		t.Fatalf("Failed to create layer 1 snapshot: %v", err)
+	}
+
+	// Verify snapshot was created in database
+	versions, _, _, err := fs.h.List(fs.c, bktID, fileID, core.ListOptions{Count: 100})
+	if err == nil {
+		found := false
+		t.Logf("  After Layer 1 creation, listing all objects under fileID=%d:", fileID)
+		for _, v := range versions {
+			t.Logf("    Object: ID=%d, PID=%d, Type=%d, DataID=%d, Name=%s, Extra=%s", v.ID, v.PID, v.Type, v.DataID, v.Name, v.Extra)
+			if v.Type == core.OBJ_TYPE_JOURNAL && v.ID == layer1VersionID {
+				found = true
+				t.Logf("  Verified: Layer 1 snapshot exists in database: ID=%d, DataID=%d", v.ID, v.DataID)
+			}
+		}
+		if !found {
+			t.Logf("⚠️  Warning: Layer 1 snapshot (ID=%d) not found in version list", layer1VersionID)
+		}
+	}
+
+	if err := ra2.Close(); err != nil {
+		t.Fatalf("Failed to close RandomAccessor: %v", err)
+	}
+
+	// CRITICAL: Remove journal from manager to simulate file close
+	// In real scenario, when RandomAccessor closes, journal may stay in manager
+	// But to test the bug, we need to remove it so GetOrCreate creates a new one
+	fs.journalMgr.Remove(fileID)
+
+	// Small delay to ensure cleanup completes
+	time.Sleep(50 * time.Millisecond)
+
+	t.Logf("✓ Step 2: Layer 1 journal snapshot created (versionID=%d), journal removed from manager", layer1VersionID)
+
+	// Step 3: Reopen file, create Layer 2 journal snapshot, then close
+	// When we reopen, GetOrCreate will create a NEW journal (since we removed it)
+	// The question is: does it load Layer 1 snapshot entries from database?
+	ra3, err := getOrCreateRandomAccessor(fs, fileID)
+	if err != nil {
+		t.Fatalf("Failed to create RandomAccessor: %v", err)
+	}
+
+	fileObj3, err := fs.h.Get(fs.c, bktID, []int64{fileID})
+	if err != nil || len(fileObj3) == 0 {
+		t.Fatalf("Failed to get file object: %v", err)
+	}
+	t.Logf("⚠️  After reopen: fileObj.DataID=%d (should still be base DataID, not updated by snapshot)", fileObj3[0].DataID)
+
+	layer2Data := []byte("LAYER2_200") // offset 200
+	if err := ra3.Write(200, layer2Data); err != nil {
+		t.Fatalf("Failed to write layer2: %v", err)
+	}
+
+	// Get journal and manually create snapshot
+	journal2 := fs.journalMgr.GetOrCreate(fileID, fileObj3[0].DataID, fileObj3[0].Size)
+	layer2VersionID, err := journal2.CreateJournalSnapshot()
+	if err != nil {
+		t.Fatalf("Failed to create layer 2 snapshot: %v", err)
+	}
+
+	// Verify both snapshots exist in database
+	versions, _, _, err = fs.h.List(fs.c, bktID, fileID, core.ListOptions{Count: 100})
+	if err == nil {
+		journalCount := 0
+		for _, v := range versions {
+			t.Logf("  Version object: ID=%d, PID=%d, Type=%d, DataID=%d, Name=%s", v.ID, v.PID, v.Type, v.DataID, v.Name)
+			if v.Type == core.OBJ_TYPE_JOURNAL {
+				journalCount++
+				t.Logf("    Journal snapshot: ID=%d, Extra=%s", v.ID, v.Extra)
+			}
+		}
+		t.Logf("  Found %d journal snapshots in database (should be >= 2)", journalCount)
+	} else {
+		t.Logf("  Failed to list versions: %v", err)
+	}
+
+	if err := ra3.Close(); err != nil {
+		t.Fatalf("Failed to close RandomAccessor: %v", err)
+	}
+
+	// CRITICAL: Remove journal from manager again to test the bug
+	fs.journalMgr.Remove(fileID)
+
+	// Small delay to ensure cleanup completes
+	time.Sleep(50 * time.Millisecond)
+
+	t.Logf("✓ Step 3: Layer 2 journal snapshot created (versionID=%d), journal removed from manager", layer2VersionID)
+
+	// Step 4: Reopen file again, add current entries (don't flush, keep in journal)
+	// This simulates a file that's currently open with unflushed journal entries
+	ra4, err := getOrCreateRandomAccessor(fs, fileID)
+	if err != nil {
+		t.Fatalf("Failed to create RandomAccessor: %v", err)
+	}
+	defer ra4.Close()
+
+	fileObj4, err := fs.h.Get(fs.c, bktID, []int64{fileID})
+	if err != nil || len(fileObj4) == 0 {
+		t.Fatalf("Failed to get file object: %v", err)
+	}
+	t.Logf("⚠️  After second reopen: fileObj.DataID=%d (should still be base DataID, not updated by snapshots)", fileObj4[0].DataID)
+
+	currentData := []byte("CURRENT_300") // offset 300
+	if err := ra4.Write(300, currentData); err != nil {
+		t.Fatalf("Failed to write current: %v", err)
+	}
+	
+	// Don't flush - keep entries in current journal to test overlay
+	t.Logf("✓ Step 4: Current journal entry written (offset 300, not flushed)")
+
+	// Step 5: Test reading
+	// Expected if bug exists:
+	// - Offset 100: 'B' (base data, Layer1 entries NOT loaded!)
+	// - Offset 200: 'B' (base data, Layer2 entries NOT loaded!)
+	// - Offset 300: "CURRENT_300" (current entries visible)
+	//
+	// Expected if fixed:
+	// - Offset 100: "LAYER1_100" (Layer1 entries loaded and applied)
+	// - Offset 200: "LAYER2_200" (Layer2 entries loaded and applied)
+	// - Offset 300: "CURRENT_300" (current entries applied)
+
+	testCases := []struct {
+		name     string
+		offset   int64
+		length   int
+		expected []byte
+		desc     string
+	}{
+		{
+			name:     "Offset 100 (Layer1 - BUG TEST)",
+			offset:   100,
+			length:   len("LAYER1_100"),
+			expected: []byte("LAYER1_100"),
+			desc:     "Layer1's data - if this shows 'B', journal snapshots are NOT being loaded from database!",
+		},
+		{
+			name:     "Offset 200 (Layer2 - BUG TEST)",
+			offset:   200,
+			length:   len("LAYER2_200"),
+			expected: []byte("LAYER2_200"),
+			desc:     "Layer2's data - if this shows 'B', journal snapshots are NOT being loaded from database!",
+		},
+		{
+			name:     "Offset 300 (Current)",
+			offset:   300,
+			length:   len("CURRENT_300"),
+			expected: []byte("CURRENT_300"),
+			desc:     "Current's data",
+		},
+		{
+			name:     "Offset 50 (Base data)",
+			offset:   50,
+			length:   1,
+			expected: []byte("B"),
+			desc:     "Base data, not modified",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			readData, err := ra4.Read(tc.offset, tc.length)
+			if err != nil {
+				t.Fatalf("Failed to read at offset %d: %v", tc.offset, err)
+			}
+
+			if len(readData) != len(tc.expected) {
+				t.Errorf("Length mismatch at offset %d: got %d, want %d",
+					tc.offset, len(readData), len(tc.expected))
+				return
+			}
+
+			if !bytes.Equal(readData, tc.expected) {
+				// Check if it's the base data (indicating bug)
+				if bytes.Equal(readData, bytes.Repeat([]byte("B"), len(readData))) {
+					t.Errorf("🔴 BUG CONFIRMED: Data mismatch at offset %d\n"+
+						"Description: %s\n"+
+						"Expected: %q\n"+
+						"Got:      %q (base data 'B')\n"+
+						"\n"+
+						"❌ THIS IS THE BUG:\n"+
+						"   Journal snapshots are NOT being loaded from database when file is reopened!\n"+
+						"   readBaseData only reads fileObj.DataID, it doesn't check for journal snapshots.\n"+
+						"   GetOrCreate doesn't load journal snapshots from database.\n"+
+						"   When there are multiple journal snapshots, they need to be:\n"+
+						"   1. Found by querying OBJ_TYPE_JOURNAL objects\n"+
+						"   2. Loaded in order (by baseVersionID chain)\n"+
+						"   3. Applied recursively when reading base data",
+						tc.offset, tc.desc, tc.expected, readData)
+				} else {
+					t.Errorf("❌ FAILED: Data mismatch at offset %d\n"+
+						"Description: %s\n"+
+						"Expected: %q\n"+
+						"Got:      %q",
+						tc.offset, tc.desc, tc.expected, readData)
+				}
+			} else {
+				t.Logf("✓ Read correct at offset %d: %q (%s)", tc.offset, readData, tc.desc)
+			}
+		})
+	}
+
+	t.Logf("\n✅ Multi-layer journal reopen from database test completed")
 }

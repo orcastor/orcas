@@ -155,13 +155,13 @@ func (jm *JournalManager) GetOrCreate(fileID, dataID, baseSize int64) *Journal {
 		dataID:      dataID,
 		baseSize:    baseSize,
 		entries:     make([]JournalEntry, 0, 32),
-		currentSize: baseSize,
 		isLargeFile: baseSize >= jm.config.SmallFileThreshold,
 		threshold:   jm.config.SmallFileThreshold,
 		fs:          jm.fs,
 		created:     now,
 		modified:    now,
 	}
+	atomic.StoreInt64(&j.currentSize, baseSize)
 	atomic.StoreInt32(&j.isDirty, 0)
 
 	// Initialize JournalWAL for crash recovery
@@ -442,26 +442,48 @@ func (j *Journal) CreateJournalSnapshot() (versionID int64, err error) {
 	}
 
 	// Create version object
-	versionID = core.NewID()
 	currentSize := atomic.LoadInt64(&j.currentSize)
 	mTime := core.Now()
+	// Use nanosecond timestamp for name to ensure uniqueness even if multiple snapshots
+	// are created in the same second
+	nameTimestamp := time.Now().UnixNano()
+
+	// Journal should be under version object if baseVersionID exists, otherwise under file
+	// This allows journal to be sorted under version objects
+	journalPID := j.fileID
+	if j.baseVersionID > 0 {
+		journalPID = j.baseVersionID
+		DebugLog("[Journal CreateSnapshot] Journal under version object: fileID=%d, baseVersionID=%d, journalPID=%d",
+			j.fileID, j.baseVersionID, journalPID)
+	} else {
+		DebugLog("[Journal CreateSnapshot] Journal under file object: fileID=%d, baseVersionID=%d, journalPID=%d",
+			j.fileID, j.baseVersionID, journalPID)
+	}
 
 	versionObj := &core.ObjectInfo{
-		ID:     versionID,
-		PID:    j.fileID,
+		ID:     0,                     // Let Put() generate the ID
+		PID:    journalPID,            // Journal under version object if baseVersionID exists
 		Type:   core.OBJ_TYPE_JOURNAL, // Use JOURNAL type for snapshots
 		DataID: j.dataID,              // References base DataID
 		Size:   currentSize,
 		MTime:  mTime,
-		Name:   fmt.Sprintf("j%d", mTime),
+		Name:   strconv.FormatInt(nameTimestamp, 10), // Use nanosecond timestamp for uniqueness
 		Extra: fmt.Sprintf(`{"versionType":2,"journalDataID":%d,"baseVersionID":%d,"entryCount":%d}`,
 			journalDataID, j.baseVersionID, len(j.entries)),
 	}
 
-	_, err = lh.Put(j.fs.c, j.fs.bktID, []*core.ObjectInfo{versionObj})
+	DebugLog("[Journal CreateSnapshot] Calling Put: PID=%d, Type=%d, DataID=%d, Size=%d, Name=%s",
+		versionObj.PID, versionObj.Type, versionObj.DataID, versionObj.Size, versionObj.Name)
+	ids, err := lh.Put(j.fs.c, j.fs.bktID, []*core.ObjectInfo{versionObj})
 	if err != nil {
 		return 0, fmt.Errorf("failed to create version: %w", err)
 	}
+	DebugLog("[Journal CreateSnapshot] Put returned: ids=%v, len=%d", ids, len(ids))
+	if len(ids) == 0 || ids[0] == 0 {
+		return 0, fmt.Errorf("failed to create version: no ID returned (ids=%v)", ids)
+	}
+	versionID = ids[0]
+	DebugLog("[Journal CreateSnapshot] Created version object: versionID=%d", versionID)
 
 	// Update snapshot statistics (DON'T clear entries!)
 	atomic.StoreInt64(&j.lastSnapshot, time.Now().Unix())
