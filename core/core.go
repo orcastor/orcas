@@ -321,6 +321,18 @@ func (lh *LocalHandler) SetAccessCtrlMgr(acm AccessCtrlMgr) {
 	lh.acm = acm
 }
 
+// SetDBKey sets the encryption key for database (filename encryption)
+// This sets DataDBKey which is used for encrypting object names in the database
+func (lh *LocalHandler) SetDBKey(key string) {
+	lh.dataDBKey = key
+	// Also set the key in MetadataAdapter for immediate effect
+	if dma, ok := lh.ma.(*DefaultMetadataAdapter); ok {
+		if dma.DefaultDataMetadataAdapter != nil {
+			dma.DefaultDataMetadataAdapter.SetDataKey(key)
+		}
+	}
+}
+
 func (lh *LocalHandler) MetadataAdapter() MetadataAdapter {
 	return lh.ma
 }
@@ -679,7 +691,7 @@ func (lh *LocalHandler) Put(c Ctx, bktID int64, o []*ObjectInfo) ([]int64, error
 
 	// 设置版本对象的时间戳（用于后续的版本保留策略处理）
 	for _, obj := range o {
-		if obj.Type == OBJ_TYPE_VERSION && obj.PID > 0 {
+		if obj.Type == OBJ_TYPE_VERSION || obj.Type == OBJ_TYPE_JOURNAL && obj.PID > 0 {
 			// 设置MTime（如果未设置）
 			if obj.MTime == 0 {
 				obj.MTime = Now()

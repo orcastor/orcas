@@ -2614,8 +2614,35 @@ func (ra *RandomAccessor) flushSequentialBuffer() error {
 			fileObj.DataID = ra.seqBuffer.dataID
 			fileObj.Size = newSize
 
-			// Write DataInfo and ObjectInfo together
-			err := ra.fs.h.PutDataInfoAndObj(ra.fs.c, ra.fs.bktID, []*core.DataInfo{ra.seqBuffer.dataInfo}, []*core.ObjectInfo{fileObj})
+			// Create version object for complete overwrite
+			lh, ok := ra.fs.h.(*core.LocalHandler)
+			if !ok {
+				DebugLog("[VFS flushSequentialBuffer] ERROR: Handler is not LocalHandler")
+				return fmt.Errorf("handler is not LocalHandler")
+			}
+
+			versionID := core.NewID()
+			if versionID == 0 {
+				DebugLog("[VFS flushSequentialBuffer] ERROR: Failed to generate version ID")
+				return fmt.Errorf("failed to generate version ID")
+			}
+
+			mTime := core.Now()
+			newVersion := &core.ObjectInfo{
+				ID:     versionID,
+				PID:    ra.fileID,
+				Type:   core.OBJ_TYPE_VERSION,
+				DataID: ra.seqBuffer.dataID,
+				Size:   newSize,
+				MTime:  mTime,
+			}
+
+			// Update file object MTime
+			fileObj.MTime = mTime
+
+			// Write DataInfo, version object, and file object update together
+			objectsToPut := []*core.ObjectInfo{newVersion, fileObj}
+			err := lh.PutDataInfoAndObj(ra.fs.c, ra.fs.bktID, []*core.DataInfo{ra.seqBuffer.dataInfo}, objectsToPut)
 			if err != nil {
 				DebugLog("[VFS flushSequentialBuffer] ERROR: Failed to write DataInfo and ObjectInfo (complete overwrite): fileID=%d, dataID=%d, error=%v", ra.fileID, ra.seqBuffer.dataID, err)
 				return err
@@ -2635,7 +2662,17 @@ func (ra *RandomAccessor) flushSequentialBuffer() error {
 				dirNode.invalidateDirListCache(fileObj.PID)
 			}
 
-			DebugLog("[VFS flushSequentialBuffer] Successfully completed full overwrite: fileID=%d, oldDataID=%d, newDataID=%d, oldSize=%d, newSize=%d", ra.fileID, oldDataID, ra.seqBuffer.dataID, oldSize, newSize)
+			// Trigger version retention cleanup
+			if ra.fs.retentionMgr != nil {
+				go func() {
+					deleted := ra.fs.retentionMgr.CleanupFileVersions(ra.fileID)
+					if deleted > 0 {
+						DebugLog("[VFS flushSequentialBuffer] Cleaned up %d old versions for fileID=%d", deleted, ra.fileID)
+					}
+				}()
+			}
+
+			DebugLog("[VFS flushSequentialBuffer] Successfully completed full overwrite: fileID=%d, oldDataID=%d, newDataID=%d, oldSize=%d, newSize=%d, versionID=%d", ra.fileID, oldDataID, ra.seqBuffer.dataID, oldSize, newSize, versionID)
 			return nil
 		}
 
@@ -2717,15 +2754,42 @@ func (ra *RandomAccessor) flushSequentialBuffer() error {
 	// The offset might not reflect the actual file size if sequential write was interrupted
 	fileObj.Size = newSize
 
-	// Optimization: Use PutDataInfoAndObj to write DataInfo and ObjectInfo together in a single transaction
+	// Create version object for new file sequential write
+	lh, ok := ra.fs.h.(*core.LocalHandler)
+	if !ok {
+		DebugLog("[VFS flushSequentialBuffer] ERROR: Handler is not LocalHandler")
+		return fmt.Errorf("handler is not LocalHandler")
+	}
+
+	versionID := core.NewID()
+	if versionID == 0 {
+		DebugLog("[VFS flushSequentialBuffer] ERROR: Failed to generate version ID")
+		return fmt.Errorf("failed to generate version ID")
+	}
+
+	mTime := core.Now()
+	newVersion := &core.ObjectInfo{
+		ID:     versionID,
+		PID:    ra.fileID,
+		Type:   core.OBJ_TYPE_VERSION,
+		DataID: ra.seqBuffer.dataID,
+		Size:   newSize,
+		MTime:  mTime,
+	}
+
+	// Update file object MTime
+	fileObj.MTime = mTime
+
+	// Optimization: Use PutDataInfoAndObj to write DataInfo, version object, and file object update together
 	// This reduces database round trips and improves performance
-	DebugLog("[VFS flushSequentialBuffer] Writing DataInfo and ObjectInfo to disk: fileID=%d, dataID=%d, size=%d, chunkSize=%d", ra.fileID, ra.seqBuffer.dataID, fileObj.Size, ra.seqBuffer.chunkSize)
-	err = ra.fs.h.PutDataInfoAndObj(ra.fs.c, ra.fs.bktID, []*core.DataInfo{ra.seqBuffer.dataInfo}, []*core.ObjectInfo{fileObj})
+	objectsToPut := []*core.ObjectInfo{newVersion, fileObj}
+	DebugLog("[VFS flushSequentialBuffer] Writing DataInfo, version object, and file object to disk: fileID=%d, dataID=%d, size=%d, versionID=%d, chunkSize=%d", ra.fileID, ra.seqBuffer.dataID, fileObj.Size, versionID, ra.seqBuffer.chunkSize)
+	err = lh.PutDataInfoAndObj(ra.fs.c, ra.fs.bktID, []*core.DataInfo{ra.seqBuffer.dataInfo}, objectsToPut)
 	if err != nil {
 		DebugLog("[VFS flushSequentialBuffer] ERROR: Failed to write DataInfo and ObjectInfo to disk: fileID=%d, dataID=%d, error=%v", ra.fileID, ra.seqBuffer.dataID, err)
 		return err
 	}
-	DebugLog("[VFS flushSequentialBuffer] Successfully wrote DataInfo and ObjectInfo to disk: fileID=%d, dataID=%d, size=%d", ra.fileID, ra.seqBuffer.dataID, fileObj.Size)
+	DebugLog("[VFS flushSequentialBuffer] Successfully wrote DataInfo, version object, and file object to disk: fileID=%d, dataID=%d, size=%d, versionID=%d", ra.fileID, ra.seqBuffer.dataID, fileObj.Size, versionID)
 
 	// Update caches
 	dataInfoCache.Put(ra.seqBuffer.dataID, ra.seqBuffer.dataInfo)
@@ -2743,7 +2807,17 @@ func (ra *RandomAccessor) flushSequentialBuffer() error {
 		DebugLog("[VFS flushSequentialBuffer] Appended file to directory listing cache after sync flush: fileID=%d, dirID=%d, name=%s", ra.fileID, fileObj.PID, fileObj.Name)
 	}
 
-	DebugLog("[VFS flushSequentialBuffer] Successfully flushed sequential buffer: fileID=%d, dataID=%d, size=%d", ra.fileID, fileObj.DataID, fileObj.Size)
+	// Trigger version retention cleanup
+	if ra.fs.retentionMgr != nil {
+		go func() {
+			deleted := ra.fs.retentionMgr.CleanupFileVersions(ra.fileID)
+			if deleted > 0 {
+				DebugLog("[VFS flushSequentialBuffer] Cleaned up %d old versions for fileID=%d", deleted, ra.fileID)
+			}
+		}()
+	}
+
+	DebugLog("[VFS flushSequentialBuffer] Successfully flushed sequential buffer: fileID=%d, dataID=%d, size=%d, versionID=%d", ra.fileID, fileObj.DataID, fileObj.Size, versionID)
 	return nil
 }
 
@@ -6707,21 +6781,19 @@ func (ra *RandomAccessor) applyJournalSnapshots(baseData []byte, baseDataID int6
 
 	// Apply each journal snapshot in order
 	for _, journalSnapshot := range journalSnapshots {
-		// Parse journal snapshot extra data to get journalDataID
-		var extraData map[string]interface{}
-		if err := json.Unmarshal([]byte(journalSnapshot.Extra), &extraData); err != nil {
+		// Parse journal snapshot extra data to get journalDataID (supports both JSON and binary formats)
+		journalDataID, err := GetJournalDataID(journalSnapshot.Extra)
+		if err != nil {
 			DebugLog("[VFS applyJournalSnapshots] WARNING: Failed to parse journal extra for snapshot %d: %v", journalSnapshot.ID, err)
 			continue
 		}
-
-		journalDataID, ok := extraData["journalDataID"].(float64)
-		if !ok {
+		if journalDataID == 0 {
 			DebugLog("[VFS applyJournalSnapshots] WARNING: journalDataID not found in snapshot %d", journalSnapshot.ID)
 			continue
 		}
 
 		// Read journal data
-		journalBytes, err := ra.fs.h.GetData(ra.fs.c, ra.fs.bktID, int64(journalDataID), 0)
+		journalBytes, err := ra.fs.h.GetData(ra.fs.c, ra.fs.bktID, journalDataID, 0)
 		if err != nil {
 			DebugLog("[VFS applyJournalSnapshots] WARNING: Failed to read journal data %d for snapshot %d: %v",
 				int64(journalDataID), journalSnapshot.ID, err)

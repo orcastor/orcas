@@ -468,8 +468,13 @@ func (j *Journal) CreateJournalSnapshot() (versionID int64, err error) {
 		Size:   currentSize,
 		MTime:  mTime,
 		Name:   strconv.FormatInt(nameTimestamp, 10), // Use nanosecond timestamp for uniqueness
-		Extra: fmt.Sprintf(`{"versionType":2,"journalDataID":%d,"baseVersionID":%d,"entryCount":%d}`,
-			journalDataID, j.baseVersionID, len(j.entries)),
+		Extra: EncodeJournalExtra(&JournalExtraData{
+			VersionType:   2,
+			JournalDataID: journalDataID,
+			BaseVersionID: j.baseVersionID,
+			EntryCount:    len(j.entries),
+			Merged:        false,
+		}),
 	}
 
 	DebugLog("[Journal CreateSnapshot] Calling Put: PID=%d, Type=%d, DataID=%d, Size=%d, Name=%s",
@@ -543,7 +548,13 @@ func (j *Journal) SmartFlush() (versionID int64, err error) {
 			Size:   newSize,
 			MTime:  mTime,
 			Name:   strconv.FormatInt(mTime, 10),
-			Extra:  `{"versionType":1}`,
+			Extra: EncodeJournalExtra(&JournalExtraData{
+				VersionType:   1,
+				JournalDataID: 0,
+				BaseVersionID: 0,
+				EntryCount:    0,
+				Merged:        false,
+			}),
 		}
 
 		// Get file object to update

@@ -1,7 +1,6 @@
 package vfs
 
 import (
-	"encoding/json"
 	"fmt"
 	"sort"
 	"sync"
@@ -238,22 +237,9 @@ func (vrm *VersionRetentionManager) buildDependencyMap(journals []*core.ObjectIn
 	return dependencies
 }
 
-// parseBaseVersionID parses baseVersionID from Extra JSON field
+// parseBaseVersionID parses baseVersionID from Extra field (supports both JSON and binary formats)
 func parseBaseVersionID(extra string) int64 {
-	if extra == "" {
-		return 0
-	}
-
-	var data map[string]interface{}
-	if err := json.Unmarshal([]byte(extra), &data); err != nil {
-		return 0
-	}
-
-	if baseID, ok := data["baseVersionID"].(float64); ok {
-		return int64(baseID)
-	}
-
-	return 0
+	return ParseBaseVersionID(extra)
 }
 
 // selectVersionsToDelete applies all retention rules and selects versions to delete
@@ -599,19 +585,17 @@ func (vrm *VersionRetentionManager) mergeBaseAndJournalsInMemory(
 	// Step 3: Apply each journal to base data
 	currentSize := baseSize
 	for _, jVersion := range journalsToMerge {
-		// Parse journal extra data to get journalDataID
-		var extraData map[string]interface{}
-		if err := json.Unmarshal([]byte(jVersion.Extra), &extraData); err != nil {
-			return fmt.Errorf("failed to parse journal extra: %w", err)
+		// Parse journal extra data to get journalDataID (supports both JSON and binary formats)
+		journalDataID, err := GetJournalDataID(jVersion.Extra)
+		if err != nil {
+			return fmt.Errorf("failed to parse journal extra for journal %d: %w", jVersion.ID, err)
 		}
-
-		journalDataID, ok := extraData["journalDataID"].(float64)
-		if !ok {
+		if journalDataID == 0 {
 			return fmt.Errorf("journalDataID not found in journal %d", jVersion.ID)
 		}
 
 		// Read journal data
-		journalBytes, err := vrm.fs.h.GetData(vrm.fs.c, vrm.fs.bktID, int64(journalDataID), 0)
+		journalBytes, err := vrm.fs.h.GetData(vrm.fs.c, vrm.fs.bktID, journalDataID, 0)
 		if err != nil {
 			return fmt.Errorf("failed to read journal data %d: %w", int64(journalDataID), err)
 		}
@@ -729,7 +713,13 @@ func (vrm *VersionRetentionManager) mergeBaseAndJournalsInMemory(
 		Size:   currentSize,
 		MTime:  mTime,
 		Name:   fmt.Sprintf("%d", mTime),
-		Extra:  `{"versionType":1,"merged":true}`,
+			Extra: EncodeJournalExtra(&JournalExtraData{
+				VersionType:   1,
+				JournalDataID: 0,
+				BaseVersionID: 0,
+				EntryCount:    0,
+				Merged:        true,
+			}),
 	}
 
 	_, err = lh.Put(vrm.fs.c, vrm.fs.bktID, []*core.ObjectInfo{newVersionObj})
@@ -744,16 +734,16 @@ func (vrm *VersionRetentionManager) mergeBaseAndJournalsInMemory(
 	if len(remainingJournals) > 0 {
 		updatedJournals := make([]*core.ObjectInfo, 0, len(remainingJournals))
 		for _, jVersion := range remainingJournals {
-			// Parse and update extra data
-			var extraData map[string]interface{}
-			if err := json.Unmarshal([]byte(jVersion.Extra), &extraData); err != nil {
+			// Parse and update extra data (supports both JSON and binary formats)
+			extraData, err := DecodeJournalExtra(jVersion.Extra)
+			if err != nil {
 				DebugLog("[VersionRetention MergeJournals] WARNING: Failed to parse journal extra for %d: %v", jVersion.ID, err)
 				continue
 			}
 
 			// Update baseVersionID to point to new merged version
-			extraData["baseVersionID"] = float64(newVersionID)
-			updatedExtra, _ := json.Marshal(extraData)
+			extraData.BaseVersionID = newVersionID
+			updatedExtra := EncodeJournalExtra(extraData)
 
 			updatedJournal := &core.ObjectInfo{
 				ID:     jVersion.ID,
@@ -763,7 +753,7 @@ func (vrm *VersionRetentionManager) mergeBaseAndJournalsInMemory(
 				Size:   jVersion.Size,
 				MTime:  jVersion.MTime,
 				Name:   jVersion.Name,
-				Extra:  string(updatedExtra),
+				Extra:  updatedExtra,
 			}
 			updatedJournals = append(updatedJournals, updatedJournal)
 		}
@@ -834,17 +824,16 @@ func (vrm *VersionRetentionManager) mergeBaseAndJournalsStreaming(
 	allEntries := make([]journalEntryWithID, 0)
 
 	for _, jVersion := range journalsToMerge {
-		var extraData map[string]interface{}
-		if err := json.Unmarshal([]byte(jVersion.Extra), &extraData); err != nil {
-			return fmt.Errorf("failed to parse journal extra: %w", err)
+		// Parse journal extra data to get journalDataID (supports both JSON and binary formats)
+		journalDataID, err := GetJournalDataID(jVersion.Extra)
+		if err != nil {
+			return fmt.Errorf("failed to parse journal extra for journal %d: %w", jVersion.ID, err)
 		}
-
-		journalDataID, ok := extraData["journalDataID"].(float64)
-		if !ok {
+		if journalDataID == 0 {
 			return fmt.Errorf("journalDataID not found in journal %d", jVersion.ID)
 		}
 
-		journalBytes, err := vrm.fs.h.GetData(vrm.fs.c, vrm.fs.bktID, int64(journalDataID), 0)
+		journalBytes, err := vrm.fs.h.GetData(vrm.fs.c, vrm.fs.bktID, journalDataID, 0)
 		if err != nil {
 			return fmt.Errorf("failed to read journal data: %w", err)
 		}
@@ -1109,7 +1098,13 @@ func (vrm *VersionRetentionManager) finalizeMerge(
 		Size:   currentSize,
 		MTime:  mTime,
 		Name:   fmt.Sprintf("%d", mTime),
-		Extra:  `{"versionType":1,"merged":true}`,
+			Extra: EncodeJournalExtra(&JournalExtraData{
+				VersionType:   1,
+				JournalDataID: 0,
+				BaseVersionID: 0,
+				EntryCount:    0,
+				Merged:        true,
+			}),
 	}
 
 	_, err = lh.Put(vrm.fs.c, vrm.fs.bktID, []*core.ObjectInfo{newVersionObj})
@@ -1124,14 +1119,15 @@ func (vrm *VersionRetentionManager) finalizeMerge(
 	if len(remainingJournals) > 0 {
 		updatedJournals := make([]*core.ObjectInfo, 0, len(remainingJournals))
 		for _, jVersion := range remainingJournals {
-			var extraData map[string]interface{}
-			if err := json.Unmarshal([]byte(jVersion.Extra), &extraData); err != nil {
+			// Parse and update extra data (supports both JSON and binary formats)
+			extraData, err := DecodeJournalExtra(jVersion.Extra)
+			if err != nil {
 				DebugLog("[VersionRetention Finalize] WARNING: Failed to parse journal extra for %d: %v", jVersion.ID, err)
 				continue
 			}
 
-			extraData["baseVersionID"] = float64(newVersionID)
-			updatedExtra, _ := json.Marshal(extraData)
+			extraData.BaseVersionID = newVersionID
+			updatedExtra := EncodeJournalExtra(extraData)
 
 			updatedJournal := &core.ObjectInfo{
 				ID:     jVersion.ID,
@@ -1141,7 +1137,7 @@ func (vrm *VersionRetentionManager) finalizeMerge(
 				Size:   jVersion.Size,
 				MTime:  jVersion.MTime,
 				Name:   jVersion.Name,
-				Extra:  string(updatedExtra),
+				Extra:  updatedExtra,
 			}
 			updatedJournals = append(updatedJournals, updatedJournal)
 		}
