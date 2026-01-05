@@ -3256,7 +3256,9 @@ func (n *OrcasNode) Rename(ctx context.Context, name string, newParent fs.InodeE
 					}
 
 					// Check if still unique constraint error
-					if err != nil && (err == core.ERR_DUP_KEY || strings.Contains(err.Error(), "UNIQUE constraint failed")) {
+					// Note: err cannot be nil here because we're in the else branch of if err == nil
+					isUniqueError := err == core.ERR_DUP_KEY || strings.Contains(err.Error(), "UNIQUE constraint failed")
+					if isUniqueError {
 						if retry < maxRetries-1 {
 							DebugLog("[VFS Rename] Still unique constraint error after delete, retrying (retry %d/%d): sourceID=%d, targetName=%s", retry+1, maxRetries, sourceID, newName)
 							time.Sleep(100 * time.Millisecond * time.Duration(retry+1)) // Exponential backoff
@@ -3449,21 +3451,16 @@ func (n *OrcasNode) readImpl(ctx context.Context, dest []byte, off int64) (fuse.
 		// DebugLog("[VFS Read] ERROR: Read failed: objID=%d, DataID=%d, offset=%d, size=%d, error=%v, errorType=%T", obj.ID, obj.DataID, off, len(dest), err, err)
 		return nil, syscall.EIO
 	}
-	if err == io.EOF {
-		// DebugLog("[VFS Read] Read reached EOF: objID=%d, DataID=%d, offset=%d, requested=%d, read=%d", obj.ID, obj.DataID, off, len(dest), nRead)
-	} else {
-		// DebugLog("[VFS Read] Successfully read data: objID=%d, DataID=%d, offset=%d, requested=%d, read=%d", obj.ID, obj.DataID, off, len(dest), nRead)
-	}
+	// Note: err == io.EOF is expected for end of file reads
+	// DebugLog("[VFS Read] Read data: objID=%d, DataID=%d, offset=%d, requested=%d, read=%d, EOF=%v", obj.ID, obj.DataID, off, len(dest), nRead, err == io.EOF)
 
 	// Verify read data integrity (for debugging - can be disabled in production)
 	// Only verify on first read (offset=0) to avoid performance impact
-	if off == 0 && nRead > 0 {
-		// Note: Full verification is expensive, so we only log a warning if size seems wrong
-		// Full verification can be triggered manually via VerifyFileData()
-		if obj.Size > 0 && int64(nRead) > obj.Size {
-			// DebugLog("[VFS Read] WARNING: Read more than file size: objID=%d, read=%d, fileSize=%d", obj.ID, nRead, obj.Size)
-		}
-	}
+	// Note: Full verification is expensive, so we only log a warning if size seems wrong
+	// Full verification can be triggered manually via VerifyFileData()
+	// if off == 0 && nRead > 0 && obj.Size > 0 && int64(nRead) > obj.Size {
+	//     DebugLog("[VFS Read] WARNING: Read more than file size: objID=%d, read=%d, fileSize=%d", obj.ID, nRead, obj.Size)
+	// }
 
 	// CRITICAL: In go-fuse v2:
 	// - Read(ctx, buf, off) 的 buf 一定会复用
@@ -5111,7 +5108,6 @@ func (n *OrcasNode) Getxattr(ctx context.Context, attr string, dest []byte) (uin
 
 			return uint32(len(value)), 0
 		}
-	} else {
 	}
 	// If MetadataAdapter is not available, return ENOTSUP (operation not supported)
 	// This indicates that extended attributes are not supported at all,
@@ -5137,7 +5133,6 @@ func (n *OrcasNode) Setxattr(ctx context.Context, attr string, data []byte, flag
 
 			return 0
 		}
-	} else {
 	}
 	// If MetadataAdapter is not available, return ENOTSUP (operation not supported)
 	// This tells macOS that extended attributes are not supported, which is better than ENODATA
@@ -5174,7 +5169,6 @@ func (n *OrcasNode) Removexattr(ctx context.Context, attr string) syscall.Errno 
 
 			return 0
 		}
-	} else {
 	}
 	// If MetadataAdapter is not available, return ENOTSUP (operation not supported)
 	return syscall.ENOTSUP
@@ -5197,9 +5191,7 @@ func (n *OrcasNode) Listxattr(ctx context.Context, dest []byte) (uint32, syscall
 			if err != nil {
 				return 0, syscall.EIO
 			}
-		} else {
 		}
-	} else {
 	}
 
 	// If no attributes found, return 0 (success with empty list)

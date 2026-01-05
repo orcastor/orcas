@@ -2603,6 +2603,42 @@ func (ra *RandomAccessor) flushSequentialBuffer() error {
 		ra.seqBuffer.buffer = nil  // Clear reference to prevent modification
 		ra.seqBuffer.closed = true // Mark as closed
 
+		// Optimization: If this is a complete overwrite from offset 0 (writeOffset == 0 and new data covers entire old file),
+		// we can directly replace instead of merging, which avoids reading and decrypting old data
+		// This is important for encrypted files to avoid decryption errors and improve performance
+		isCompleteOverwrite := writeOffset == 0 && int64(len(writeData)) >= oldSize
+		if isCompleteOverwrite {
+			DebugLog("[VFS flushSequentialBuffer] Complete overwrite detected (offset=0, newSize=%d >= oldSize=%d), directly replacing without merging: fileID=%d", len(writeData), oldSize, ra.fileID)
+			// Directly use sequential buffer data, no need to merge with old data
+			// This creates a new version (new DataID) and avoids reading/decrypting old encrypted data
+			fileObj.DataID = ra.seqBuffer.dataID
+			fileObj.Size = newSize
+
+			// Write DataInfo and ObjectInfo together
+			err := ra.fs.h.PutDataInfoAndObj(ra.fs.c, ra.fs.bktID, []*core.DataInfo{ra.seqBuffer.dataInfo}, []*core.ObjectInfo{fileObj})
+			if err != nil {
+				DebugLog("[VFS flushSequentialBuffer] ERROR: Failed to write DataInfo and ObjectInfo (complete overwrite): fileID=%d, dataID=%d, error=%v", ra.fileID, ra.seqBuffer.dataID, err)
+				return err
+			}
+
+			// Update caches
+			dataInfoCache.Put(ra.seqBuffer.dataID, ra.seqBuffer.dataInfo)
+			fileObjCache.Put(ra.fileObjKey, fileObj)
+			ra.fileObj.Store(fileObj)
+
+			// Invalidate directory listing cache
+			if fileObj.PID > 0 {
+				dirNode := &OrcasNode{
+					fs:    ra.fs,
+					objID: fileObj.PID,
+				}
+				dirNode.invalidateDirListCache(fileObj.PID)
+			}
+
+			DebugLog("[VFS flushSequentialBuffer] Successfully completed full overwrite: fileID=%d, oldDataID=%d, newDataID=%d, oldSize=%d, newSize=%d", ra.fileID, oldDataID, ra.seqBuffer.dataID, oldSize, newSize)
+			return nil
+		}
+
 		// Restore old DataID and size so applyRandomWritesWithSDK can read existing data
 		// applyRandomWritesWithSDK will use streaming processing to read existing data chunk by chunk
 		// and merge with new writes, avoiding loading entire file into memory
@@ -3257,10 +3293,10 @@ func (ra *RandomAccessor) flushInternal(force bool) (int64, error) {
 	}
 
 	// PRIORITY 1: Flush journal if exists (replaces TempWriteFile)
-	journalFlushed := ra.flushJournal()
+	versionID, journalFlushed := ra.flushJournal()
 	if journalFlushed {
-		DebugLog("[VFS RandomAccessor Flush] Successfully flushed journal: fileID=%d", ra.fileID)
-		return core.NewID(), nil
+		DebugLog("[VFS RandomAccessor Flush] Successfully flushed journal: fileID=%d, versionID=%d", ra.fileID, versionID)
+		return versionID, nil
 	}
 
 	// For .tmp files, check final file size before flushing TempFileWriter
@@ -3494,7 +3530,7 @@ func (ra *RandomAccessor) flushInternal(force bool) (int64, error) {
 	for i, op := range mergedOps {
 		DebugLog("[VFS RandomAccessor Flush] MergedOp[%d]: offset=%d, size=%d", i, op.Offset, len(op.Data))
 	}
-	versionID, err := ra.applyRandomWritesWithSDK(fileObj, mergedOps)
+	versionID, err = ra.applyRandomWritesWithSDK(fileObj, mergedOps)
 	if err != nil {
 		return 0, err
 	}
@@ -4875,7 +4911,7 @@ func (cr *chunkReader) ReadAt(buf []byte, offset int64) (int, error) {
 					break
 				}
 				// Try to read next chunk (sn+1) to see if it exists
-				
+
 				nextChunkData, nextErr := cr.getChunk(nextSn)
 				if nextErr != nil {
 					// Next chunk doesn't exist or failed to read, check if we've reached the end of file
@@ -6566,7 +6602,7 @@ func (ra *RandomAccessor) applyJournalSnapshots(baseData []byte, baseDataID int6
 	// - Extra contains journalDataID and baseVersionID
 	allJournals := make(map[int64]*core.ObjectInfo) // journal versionID -> journal snapshot
 	versionIDs := make(map[int64]bool)              // Track version IDs to recursively search
-	
+
 	// First pass: find journals directly under file and collect version IDs
 	for _, obj := range objs {
 		DebugLog("[VFS applyJournalSnapshots] Object: ID=%d, PID=%d, Type=%d, DataID=%d, Name=%s",
@@ -6579,7 +6615,7 @@ func (ra *RandomAccessor) applyJournalSnapshots(baseData []byte, baseDataID int6
 			versionIDs[obj.ID] = true
 		}
 	}
-	
+
 	// Second pass: recursively search for journals under version objects
 	for versionID := range versionIDs {
 		versionObjs, _, _, err := ra.fs.h.List(ra.fs.c, ra.fs.bktID, versionID, core.ListOptions{Count: 1000})
@@ -6607,10 +6643,10 @@ func (ra *RandomAccessor) applyJournalSnapshots(baseData []byte, baseDataID int6
 	// 1. Journals with DataID == baseDataID are directly based on base data
 	// 2. Journals with baseVersionID pointing to another journal form a chain
 	// 3. We need to apply them in order: base -> layer1 -> layer2 -> ...
-	
+
 	journalSnapshots := make([]*core.ObjectInfo, 0)
 	processed := make(map[int64]bool)
-	
+
 	// Step 1: Find journals directly based on baseDataID
 	for _, journal := range allJournals {
 		if journal.DataID == baseDataID {
@@ -6622,7 +6658,7 @@ func (ra *RandomAccessor) applyJournalSnapshots(baseData []byte, baseDataID int6
 			}
 		}
 	}
-	
+
 	// Step 2: Build chain by following baseVersionID references
 	// Continue until we've processed all journals in the chain
 	for {
@@ -6631,12 +6667,12 @@ func (ra *RandomAccessor) applyJournalSnapshots(baseData []byte, baseDataID int6
 			if processed[journal.ID] {
 				continue
 			}
-			
+
 			baseVersionID := ra.parseBaseVersionID(journal.Extra)
 			if baseVersionID == 0 {
 				continue
 			}
-			
+
 			// Check if this journal is based on an already processed journal
 			if processed[baseVersionID] {
 				journalSnapshots = append(journalSnapshots, journal)
@@ -6644,7 +6680,7 @@ func (ra *RandomAccessor) applyJournalSnapshots(baseData []byte, baseDataID int6
 				foundNew = true
 			}
 		}
-		
+
 		if !foundNew {
 			break
 		}
@@ -6732,12 +6768,12 @@ func (ra *RandomAccessor) applyJournalSnapshots(baseData []byte, baseDataID int6
 			}
 
 			// Calculate positions in the result buffer (relative to offset)
-			srcOffset := overlapStart - entry.Offset  // Position in entry.Data
-			dstOffset := overlapStart - offset        // Position in result buffer
+			srcOffset := overlapStart - entry.Offset // Position in entry.Data
+			dstOffset := overlapStart - offset       // Position in result buffer
 			copyLength := overlapEnd - overlapStart
 
 			// Ensure we don't write beyond the result buffer
-			if dstOffset + copyLength > int64(len(result)) {
+			if dstOffset+copyLength > int64(len(result)) {
 				DebugLog("[VFS applyJournalSnapshots] WARNING: Overlap extends beyond result buffer, truncating")
 				copyLength = int64(len(result)) - dstOffset
 			}
@@ -6770,14 +6806,14 @@ func (ra *RandomAccessor) parseBaseVersionID(extra string) int64 {
 }
 
 // flushJournal flushes the journal to create a new version
-// Returns true if journal was flushed, false if no journal or not dirty
-func (ra *RandomAccessor) flushJournal() bool {
+// Returns (versionID, true) if journal was flushed, (0, false) if no journal or not dirty
+func (ra *RandomAccessor) flushJournal() (int64, bool) {
 	ra.journalMu.RLock()
 	journal := ra.journal
 	ra.journalMu.RUnlock()
 
 	if journal == nil || !journal.IsDirty() {
-		return false
+		return 0, false
 	}
 
 	// Note: Don't call journal.GetEntryCount() here as it acquires entriesMu.RLock()
@@ -6788,14 +6824,14 @@ func (ra *RandomAccessor) flushJournal() bool {
 	newDataID, newSize, err := journal.Flush()
 	if err != nil {
 		DebugLog("[VFS flushJournal] ERROR: Failed to flush journal: %v", err)
-		return false
+		return 0, false
 	}
 
 	// Get file object
 	fileObj, err := ra.getFileObj()
 	if err != nil {
 		DebugLog("[VFS flushJournal] ERROR: Failed to get file object: %v", err)
-		return false
+		return 0, false
 	}
 
 	// Check for atomic replace scenario: if there's a pending deletion for this file,
@@ -6845,13 +6881,13 @@ func (ra *RandomAccessor) flushJournal() bool {
 	lh, ok := ra.fs.h.(*core.LocalHandler)
 	if !ok {
 		DebugLog("[VFS flushJournal] ERROR: Handler is not LocalHandler")
-		return false
+		return 0, false
 	}
 
 	versionID := core.NewID()
 	if versionID == 0 {
 		DebugLog("[VFS flushJournal] ERROR: Failed to generate version ID")
-		return false
+		return 0, false
 	}
 
 	mTime := core.Now()
@@ -6880,7 +6916,7 @@ func (ra *RandomAccessor) flushJournal() bool {
 	_, err = lh.Put(ra.fs.c, ra.fs.bktID, objectsToPut)
 	if err != nil {
 		DebugLog("[VFS flushJournal] ERROR: Failed to update file object: %v", err)
-		return false
+		return 0, false
 	}
 
 	// Update cache
@@ -6895,7 +6931,7 @@ func (ra *RandomAccessor) flushJournal() bool {
 	DebugLog("[VFS flushJournal] Successfully flushed journal: fileID=%d, newDataID=%d, newSize=%d, versionID=%d",
 		ra.fileID, newDataID, newSize, versionID)
 
-	return true
+	return versionID, true
 }
 
 // closeJournal closes the journal and removes it from the manager
@@ -6912,11 +6948,12 @@ func (ra *RandomAccessor) closeJournal() error {
 	// If journal has uncommitted changes, flush them
 	if journal.IsDirty() {
 		DebugLog("[VFS closeJournal] Journal has uncommitted changes, flushing: fileID=%d", ra.fileID)
-		flushed := ra.flushJournal()
+		versionID, flushed := ra.flushJournal()
 		if !flushed {
 			DebugLog("[VFS closeJournal] WARNING: Failed to flush journal")
 			return fmt.Errorf("failed to flush journal")
 		}
+		DebugLog("[VFS closeJournal] Successfully flushed journal before close: fileID=%d, versionID=%d", ra.fileID, versionID)
 	}
 
 	// Remove journal from manager

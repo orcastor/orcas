@@ -899,7 +899,7 @@ func (j *Journal) Read(offset, length int64, baseReader func(offset, length int6
 
 	currentSize := atomic.LoadInt64(&j.currentSize)
 	if offset >= currentSize {
-		DebugLog("[Journal Read] Offset beyond current size: fileID=%d, offset=%d, currentSize=%d, isSparse=%v", 
+		DebugLog("[Journal Read] Offset beyond current size: fileID=%d, offset=%d, currentSize=%d, isSparse=%v",
 			j.fileID, offset, currentSize, j.isSparse)
 		return nil, io.EOF
 	}
@@ -918,7 +918,7 @@ func (j *Journal) Read(offset, length int64, baseReader func(offset, length int6
 	}
 
 	// If no base data, create zero buffer
-	if baseData == nil || len(baseData) == 0 {
+	if len(baseData) == 0 {
 		baseData = make([]byte, length)
 	} else if int64(len(baseData)) < length {
 		// Extend base data with zeros if needed
