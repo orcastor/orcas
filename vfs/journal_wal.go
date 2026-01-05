@@ -348,6 +348,46 @@ func (jw *JournalWAL) Close() error {
 	return jw.walFile.Close()
 }
 
+// DeleteFiles 删除所有 WAL 相关文件（包括 .jwal 和 .jwal.snap）
+// 应该在文件删除时调用，确保清理所有 WAL 文件
+func (jw *JournalWAL) DeleteFiles() error {
+	if !jw.enabled {
+		return nil
+	}
+
+	jw.mu.Lock()
+	defer jw.mu.Unlock()
+
+	// Close file handle first if open
+	if jw.walFile != nil {
+		jw.walFile.Close()
+		jw.walFile = nil
+	}
+
+	// Delete WAL file
+	if jw.walPath != "" {
+		if err := os.Remove(jw.walPath); err != nil && !os.IsNotExist(err) {
+			DebugLog("[Journal WAL] WARNING: Failed to delete WAL file: fileID=%d, path=%s, error=%v", jw.fileID, jw.walPath, err)
+			// Continue to delete snapshot even if WAL deletion fails
+		} else {
+			DebugLog("[Journal WAL] Deleted WAL file: fileID=%d, path=%s", jw.fileID, jw.walPath)
+		}
+	}
+
+	// Delete snapshot file
+	if jw.walPath != "" {
+		snapPath := filepath.Join(filepath.Dir(jw.walPath), fmt.Sprintf("%d.jwal.snap", jw.fileID))
+		if err := os.Remove(snapPath); err != nil && !os.IsNotExist(err) {
+			DebugLog("[Journal WAL] WARNING: Failed to delete snapshot file: fileID=%d, path=%s, error=%v", jw.fileID, snapPath, err)
+			return fmt.Errorf("failed to delete snapshot file: %w", err)
+		} else {
+			DebugLog("[Journal WAL] Deleted snapshot file: fileID=%d, path=%s", jw.fileID, snapPath)
+		}
+	}
+
+	return nil
+}
+
 // GetWALSize 获取 WAL 文件大小
 func (jw *JournalWAL) GetWALSize() (int64, error) {
 	if !jw.enabled || jw.walFile == nil {

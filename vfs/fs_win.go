@@ -1064,6 +1064,13 @@ func (n *OrcasNode) Unlink(ctx context.Context, name string) syscall.Errno {
 	fileObjCache.Del(targetID)
 	DebugLog("[VFS Unlink] Cleared file object cache for deleted file: fileID=%d", targetID)
 
+	// CRITICAL: Remove journal and clean up jwal files
+	// This ensures jwal files are deleted even if RandomAccessor was already closed
+	if n.fs.journalMgr != nil {
+		n.fs.journalMgr.Remove(targetID)
+		DebugLog("[VFS Unlink] Removed journal and cleaned up jwal files: fileID=%d", targetID)
+	}
+
 	// Invalidate parent directory cache
 	n.invalidateObj()
 

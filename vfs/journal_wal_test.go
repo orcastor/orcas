@@ -1351,3 +1351,65 @@ func TestJournalWALVFSIntegration(t *testing.T) {
 	t.Log("  ✅ 崩溃后可以完整恢复")
 	t.Log("  ✅ 数据完整性得到保证")
 }
+
+// TestJournalWALDeleteFiles 测试删除 jwal 文件
+func TestJournalWALDeleteFiles(t *testing.T) {
+	testDir := filepath.Join(os.TempDir(), "orcas_test_journal_wal_delete")
+	defer os.RemoveAll(testDir)
+
+	fileID := int64(2001)
+	config := DefaultJournalWALConfig()
+	config.Enabled = true
+
+	// 创建 Journal WAL
+	jwal, err := NewJournalWAL(fileID, testDir, config)
+	if err != nil {
+		t.Fatalf("Failed to create Journal WAL: %v", err)
+	}
+
+	// 写入一些条目
+	if err := jwal.WriteEntry(0, 10, []byte("test data")); err != nil {
+		t.Fatalf("Failed to write entry: %v", err)
+	}
+
+	// 创建快照
+	journal := &Journal{
+		fileID:      fileID,
+		dataID:      100,
+		baseSize:    0,
+		virtualSize: 0,
+		entries: []JournalEntry{
+			{Offset: 0, Length: 10, Data: []byte("test data")},
+		},
+	}
+	if err := jwal.CreateSnapshot(journal); err != nil {
+		t.Fatalf("Failed to create snapshot: %v", err)
+	}
+
+	// 验证文件存在
+	journalDir := filepath.Join(testDir, "journals")
+	walPath := filepath.Join(journalDir, fmt.Sprintf("%d.jwal", fileID))
+	snapPath := filepath.Join(journalDir, fmt.Sprintf("%d.jwal.snap", fileID))
+
+	if _, err := os.Stat(walPath); os.IsNotExist(err) {
+		t.Fatalf("WAL file should exist: %s", walPath)
+	}
+	if _, err := os.Stat(snapPath); os.IsNotExist(err) {
+		t.Fatalf("Snapshot file should exist: %s", snapPath)
+	}
+
+	// 删除文件
+	if err := jwal.DeleteFiles(); err != nil {
+		t.Fatalf("Failed to delete WAL files: %v", err)
+	}
+
+	// 验证文件已被删除
+	if _, err := os.Stat(walPath); !os.IsNotExist(err) {
+		t.Errorf("WAL file should be deleted: %s", walPath)
+	}
+	if _, err := os.Stat(snapPath); !os.IsNotExist(err) {
+		t.Errorf("Snapshot file should be deleted: %s", snapPath)
+	}
+
+	t.Logf("✅ DeleteFiles test passed")
+}

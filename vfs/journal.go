@@ -213,9 +213,13 @@ func (jm *JournalManager) Remove(fileID int64) {
 		memUsage := atomic.LoadInt64(&j.memoryUsage)
 		atomic.AddInt64(&jm.totalMemory, -memUsage)
 
-		// Close WAL if exists
+		// Delete WAL files if exists (including .jwal and .jwal.snap)
 		if j.wal != nil {
-			j.wal.Close()
+			if err := j.wal.DeleteFiles(); err != nil {
+				DebugLog("[Journal Remove] WARNING: Failed to delete WAL files: fileID=%d, error=%v", fileID, err)
+			} else {
+				DebugLog("[Journal Remove] Deleted WAL files: fileID=%d", fileID)
+			}
 		}
 
 		DebugLog("[Journal Remove] Removed journal: fileID=%d, freedMemory=%d", fileID, memUsage)
