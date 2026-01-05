@@ -1425,14 +1425,15 @@ func TestMetadataNameEncryption(t *testing.T) {
 				Extra:  "{}",
 			}
 
-			// Put object (should encrypt name automatically)
+			// Put object (should encrypt name automatically during storage)
 			ids, err := dma.PutObj(c, testBktID, []*ObjectInfo{obj})
 			So(err, ShouldBeNil)
 			So(len(ids), ShouldEqual, 1)
 			So(ids[0], ShouldEqual, id)
 
-			// Verify name was encrypted in the object (Mode flag should be set)
-			So(obj.Mode&MODE_NAME_ENCRYPTED, ShouldEqual, MODE_NAME_ENCRYPTED)
+			// After Put returns, object should have decrypted name (Put returns decrypted names)
+			So(obj.Name, ShouldEqual, plainName)                     // Should be decrypted after Put returns
+			So(obj.Mode&MODE_NAME_ENCRYPTED, ShouldEqual, uint32(0)) // Flag should be cleared after Put returns
 
 			// Get object back (should decrypt name automatically)
 			objs, err := dma.GetObj(c, testBktID, []int64{id})
@@ -1673,6 +1674,242 @@ func TestDataKeyBasedEncryption(t *testing.T) {
 			_, err = dma2.GetObj(c, testBktID+2, []int64{id})
 			So(err, ShouldNotBeNil)
 			So(err.Error(), ShouldContainSubstring, "decryption key not available")
+		})
+	})
+}
+
+// TestPutObjReturnsDecryptedName tests that PutObj returns objects with decrypted names
+func TestPutObjReturnsDecryptedName(t *testing.T) {
+	Convey("PutObj Returns Decrypted Name", t, func() {
+		tmpDir, err := os.MkdirTemp("", "orcas_put_decrypt_test_*")
+		So(err, ShouldBeNil)
+		defer os.RemoveAll(tmpDir)
+
+		testBktID := int64(777)
+		encryptionKey := "test-put-decrypt-key"
+		testCtx := context.Background()
+
+		err = InitBucketDB(tmpDir, testBktID)
+		So(err, ShouldBeNil)
+
+		dma := &DefaultMetadataAdapter{
+			DefaultBaseMetadataAdapter: &DefaultBaseMetadataAdapter{},
+			DefaultDataMetadataAdapter: &DefaultDataMetadataAdapter{},
+		}
+		dma.DefaultDataMetadataAdapter.SetDataPath(tmpDir)
+		dma.DefaultDataMetadataAdapter.SetDataKey(encryptionKey)
+
+		ig := idgen.NewIDGen(nil, 0)
+		plainName := "test-file-after-put.txt"
+
+		Convey("PutObj should return decrypted name", func() {
+			id, _ := ig.New()
+			pid, _ := ig.New()
+			did, _ := ig.New()
+
+			obj := &ObjectInfo{
+				ID:     id,
+				PID:    pid,
+				MTime:  Now(),
+				DataID: did,
+				Type:   OBJ_TYPE_FILE,
+				Name:   plainName,
+				Size:   1024,
+				Mode:   0o644,
+			}
+
+			// Put object - name should be encrypted during storage
+			ids, err := dma.PutObj(testCtx, testBktID, []*ObjectInfo{obj})
+			So(err, ShouldBeNil)
+			So(len(ids), ShouldEqual, 1)
+
+			// After Put returns, object should have decrypted name
+			So(obj.Name, ShouldEqual, plainName)
+			So(obj.Mode&MODE_NAME_ENCRYPTED, ShouldEqual, uint32(0))
+		})
+
+		Convey("PutDataAndObj should return decrypted name", func() {
+			id, _ := ig.New()
+			pid, _ := ig.New()
+			did, _ := ig.New()
+
+			obj := &ObjectInfo{
+				ID:     id,
+				PID:    pid,
+				MTime:  Now(),
+				DataID: did,
+				Type:   OBJ_TYPE_FILE,
+				Name:   plainName,
+				Size:   2048,
+				Mode:   0o644,
+			}
+
+			dataInfo := &DataInfo{
+				ID:       did,
+				Size:     2048,
+				OrigSize: 2048,
+			}
+
+			// PutDataAndObj - name should be encrypted during storage
+			err := dma.PutDataAndObj(testCtx, testBktID, []*DataInfo{dataInfo}, []*ObjectInfo{obj})
+			So(err, ShouldBeNil)
+
+			// After PutDataAndObj returns, object should have decrypted name
+			So(obj.Name, ShouldEqual, plainName)
+			So(obj.Mode&MODE_NAME_ENCRYPTED, ShouldEqual, uint32(0))
+		})
+
+		Convey("SetObj should return decrypted name when updating name", func() {
+			// First create an object
+			id, _ := ig.New()
+			pid, _ := ig.New()
+			did, _ := ig.New()
+
+			obj := &ObjectInfo{
+				ID:     id,
+				PID:    pid,
+				MTime:  Now(),
+				DataID: did,
+				Type:   OBJ_TYPE_FILE,
+				Name:   "original-name.txt",
+				Size:   1024,
+				Mode:   0o644,
+			}
+
+			_, err := dma.PutObj(testCtx, testBktID, []*ObjectInfo{obj})
+			So(err, ShouldBeNil)
+
+			// Now rename it
+			newName := "renamed-file.txt"
+			renameObj := &ObjectInfo{
+				ID:   id,
+				Name: newName,
+			}
+
+			err = dma.SetObj(testCtx, testBktID, []string{"n"}, renameObj)
+			So(err, ShouldBeNil)
+
+			// After SetObj returns, object should have decrypted name
+			So(renameObj.Name, ShouldEqual, newName)
+			So(renameObj.Mode&MODE_NAME_ENCRYPTED, ShouldEqual, uint32(0))
+		})
+	})
+}
+
+// TestListOperationsReturnDecryptedNames tests that all List operations return decrypted names
+func TestListOperationsReturnDecryptedNames(t *testing.T) {
+	Convey("List Operations Return Decrypted Names", t, func() {
+		tmpDir, err := os.MkdirTemp("", "orcas_list_decrypt_test_*")
+		So(err, ShouldBeNil)
+		defer os.RemoveAll(tmpDir)
+
+		testBktID := int64(666)
+		encryptionKey := "test-list-decrypt-key"
+		testCtx := context.Background()
+
+		err = InitBucketDB(tmpDir, testBktID)
+		So(err, ShouldBeNil)
+
+		dma := &DefaultMetadataAdapter{
+			DefaultBaseMetadataAdapter: &DefaultBaseMetadataAdapter{},
+			DefaultDataMetadataAdapter: &DefaultDataMetadataAdapter{},
+		}
+		dma.DefaultDataMetadataAdapter.SetDataPath(tmpDir)
+		dma.DefaultDataMetadataAdapter.SetDataKey(encryptionKey)
+
+		ig := idgen.NewIDGen(nil, 0)
+		pid, _ := ig.New()
+
+		// Create multiple test files
+		testFiles := []string{
+			"file1.txt",
+			"file2.txt",
+			"file3.txt",
+		}
+
+		fileIDs := make([]int64, len(testFiles))
+		for i, name := range testFiles {
+			id, _ := ig.New()
+			did, _ := ig.New()
+			fileIDs[i] = id
+
+			obj := &ObjectInfo{
+				ID:     id,
+				PID:    pid,
+				MTime:  Now(),
+				DataID: did,
+				Type:   OBJ_TYPE_FILE,
+				Name:   name,
+				Size:   100,
+				Mode:   0o644,
+			}
+
+			_, err := dma.PutObj(testCtx, testBktID, []*ObjectInfo{obj})
+			So(err, ShouldBeNil)
+		}
+
+		Convey("ListObj should return decrypted names", func() {
+			objs, cnt, _, err := dma.ListObj(testCtx, testBktID, pid, "", "", "", 10)
+			So(err, ShouldBeNil)
+			So(cnt, ShouldEqual, int64(len(testFiles)))
+
+			for _, obj := range objs {
+				So(obj.Mode&MODE_NAME_ENCRYPTED, ShouldEqual, uint32(0))
+				// Verify name is in the original list
+				found := false
+				for _, originalName := range testFiles {
+					if obj.Name == originalName {
+						found = true
+						break
+					}
+				}
+				So(found, ShouldBeTrue)
+			}
+		})
+
+		Convey("ListChildren should return decrypted names", func() {
+			children, cnt, err := dma.ListChildren(testCtx, testBktID, pid, 0, 10)
+			So(err, ShouldBeNil)
+			So(cnt, ShouldEqual, int64(len(testFiles)))
+
+			for _, child := range children {
+				So(child.Mode&MODE_NAME_ENCRYPTED, ShouldEqual, uint32(0))
+				found := false
+				for _, originalName := range testFiles {
+					if child.Name == originalName {
+						found = true
+						break
+					}
+				}
+				So(found, ShouldBeTrue)
+			}
+		})
+
+		Convey("ListObjsByType should return decrypted names", func() {
+			objs, cnt, err := dma.ListObjsByType(testCtx, testBktID, OBJ_TYPE_FILE, 0, 10)
+			So(err, ShouldBeNil)
+			So(cnt, ShouldBeGreaterThanOrEqualTo, int64(len(testFiles)))
+
+			for _, obj := range objs {
+				So(obj.Mode&MODE_NAME_ENCRYPTED, ShouldEqual, uint32(0))
+			}
+		})
+
+		Convey("GetObjByDataID should return decrypted names", func() {
+			// Get one file's dataID
+			objs, err := dma.GetObj(testCtx, testBktID, []int64{fileIDs[0]})
+			So(err, ShouldBeNil)
+			So(len(objs), ShouldEqual, 1)
+			dataID := objs[0].DataID
+
+			// Query by dataID
+			objsByDataID, err := dma.GetObjByDataID(testCtx, testBktID, dataID)
+			So(err, ShouldBeNil)
+			So(len(objsByDataID), ShouldBeGreaterThan, 0)
+
+			for _, obj := range objsByDataID {
+				So(obj.Mode&MODE_NAME_ENCRYPTED, ShouldEqual, uint32(0))
+			}
 		})
 	})
 }

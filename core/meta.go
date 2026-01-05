@@ -1655,6 +1655,16 @@ func (dma *DefaultMetadataAdapter) PutObj(c Ctx, bktID int64, o []*ObjectInfo) (
 			}
 		}
 	}
+
+	// Decrypt object names after storing (so caller gets decrypted names)
+	// Names are encrypted before storing, but we decrypt them before returning
+	if err := dma.decryptObjNames(o); err != nil {
+		// Log error but don't fail - data was stored successfully
+		// This can happen if decryption key is not available, but that's rare
+		// since we just encrypted with the same key
+		return ids, fmt.Errorf("failed to decrypt names after Put: %w", err)
+	}
+
 	return
 }
 
@@ -1734,6 +1744,15 @@ func (dma *DefaultMetadataAdapter) PutDataAndObj(c Ctx, bktID int64, d []*DataIn
 		return fmt.Errorf("%w: PutObjAndData Commit transaction failed (bktID=%d): %v", ERR_EXEC_DB, bktID, err)
 	}
 
+	// Decrypt object names after storing (so caller gets decrypted names)
+	// Names are encrypted before storing, but we decrypt them before returning
+	if err := dma.decryptObjNames(o); err != nil {
+		// Log error but don't fail - data was stored successfully
+		// This can happen if decryption key is not available, but that's rare
+		// since we just encrypted with the same key
+		return fmt.Errorf("failed to decrypt names after PutDataAndObj: %w", err)
+	}
+
 	return nil
 }
 
@@ -1759,6 +1778,22 @@ func (dma *DefaultMetadataAdapter) GetObj(c Ctx, bktID int64, ids []int64) (o []
 }
 
 func (dma *DefaultMetadataAdapter) SetObj(c Ctx, bktID int64, fields []string, o *ObjectInfo) error {
+	// Check if Name field is being updated
+	updatingName := false
+	for _, field := range fields {
+		if field == "n" {
+			updatingName = true
+			break
+		}
+	}
+
+	// Encrypt object name before storing if Name field is being updated and dataDBKey is set
+	if updatingName {
+		if err := dma.encryptObjNames([]*ObjectInfo{o}); err != nil {
+			return fmt.Errorf("failed to encrypt name: %w", err)
+		}
+	}
+
 	// Use write connection for update operation
 	bktDirPath := filepath.Join(dma.DefaultDataMetadataAdapter.dataPath, fmt.Sprint(bktID))
 	db, err := GetWriteDB(bktDirPath)
@@ -1774,6 +1809,18 @@ func (dma *DefaultMetadataAdapter) SetObj(c Ctx, bktID int64, fields []string, o
 		}
 		return fmt.Errorf("%w: SetObj failed (bktID=%d, objID=%d, fields=%v): %v", ERR_EXEC_DB, bktID, o.ID, fields, err)
 	}
+
+	// Decrypt object name after storing (so caller gets decrypted name)
+	// Names are encrypted before storing, but we decrypt them before returning
+	if updatingName {
+		if err := dma.decryptObjNames([]*ObjectInfo{o}); err != nil {
+			// Log error but don't fail - data was stored successfully
+			// This can happen if decryption key is not available, but that's rare
+			// since we just encrypted with the same key
+			return fmt.Errorf("failed to decrypt name after SetObj: %w", err)
+		}
+	}
+
 	return nil
 }
 
@@ -2272,6 +2319,12 @@ func (dma *DefaultMetadataAdapter) ListObjsByType(c Ctx, bktID int64, objType in
 			return nil, 0, ERR_QUERY_DB
 		}
 	}
+
+	// Decrypt object names after reading if they were encrypted
+	if err := dma.decryptObjNames(objs); err != nil {
+		return nil, 0, fmt.Errorf("failed to decrypt names: %w", err)
+	}
+
 	return objs, cnt, nil
 }
 
@@ -2312,6 +2365,12 @@ func (dma *DefaultMetadataAdapter) ListChildren(c Ctx, bktID int64, pid int64, o
 			return nil, 0, ERR_QUERY_DB
 		}
 	}
+
+	// Decrypt object names after reading if they were encrypted
+	if err := dma.decryptObjNames(children); err != nil {
+		return nil, 0, fmt.Errorf("failed to decrypt names: %w", err)
+	}
+
 	return children, cnt, nil
 }
 
@@ -2330,6 +2389,12 @@ func (dma *DefaultMetadataAdapter) GetObjByDataID(c Ctx, bktID int64, dataID int
 	if err != nil {
 		return nil, fmt.Errorf("%w: GetObjByDataID failed (bktID=%d, dataID=%d): %v", ERR_QUERY_DB, bktID, dataID, err)
 	}
+
+	// Decrypt object names after reading if they were encrypted
+	if err := dma.decryptObjNames(objs); err != nil {
+		return nil, fmt.Errorf("failed to decrypt names: %w", err)
+	}
+
 	return objs, nil
 }
 
@@ -2353,6 +2418,12 @@ func (dma *DefaultMetadataAdapter) ListVersions(c Ctx, bktID int64, fileID int64
 		// Return ERR_QUERY_DB with detailed error information
 		return nil, fmt.Errorf("%w: ListVersions failed (bktID=%d, fileID=%d): %v", ERR_QUERY_DB, bktID, fileID, err)
 	}
+
+	// Decrypt object names after reading if they were encrypted
+	if err := dma.decryptObjNames(versions); err != nil {
+		return nil, fmt.Errorf("failed to decrypt names: %w", err)
+	}
+
 	return versions, nil
 }
 
@@ -2550,6 +2621,12 @@ func (dma *DefaultMetadataAdapter) ListDeletedObjs(c Ctx, bktID int64, beforeTim
 			return nil, fmt.Errorf("%w: ListRecycleBin select all failed (bktID=%d): %v", ERR_QUERY_DB, bktID, err)
 		}
 	}
+
+	// Decrypt object names after reading if they were encrypted
+	if err := dma.decryptObjNames(objs); err != nil {
+		return nil, fmt.Errorf("failed to decrypt names: %w", err)
+	}
+
 	return objs, nil
 }
 
@@ -2651,6 +2728,11 @@ func (dma *DefaultMetadataAdapter) ListRecycleBin(c Ctx, bktID int64, opt ListOp
 
 		if len(o) > 0 {
 			d = toDelim(order, o[len(o)-1])
+		}
+
+		// Decrypt object names after reading if they were encrypted
+		if err := dma.decryptObjNames(o); err != nil {
+			return nil, 0, "", fmt.Errorf("failed to decrypt names: %w", err)
 		}
 	}
 	return
