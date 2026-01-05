@@ -292,3 +292,4 @@ func (j *JournalHelper) Entries() []vfs.JournalEntry {
 	return j.entries
 }
 
+

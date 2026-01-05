@@ -6518,13 +6518,35 @@ func (ra *RandomAccessor) readFromJournal(offset, length int64) ([]byte, error) 
 // readBaseData reads data from the base DataID, applying all journal snapshots recursively
 // This function handles the case where there are multiple journal snapshots that need to be
 // loaded and applied in the correct order (base -> layer1 -> layer2 -> ...)
+// CRITICAL: When reading during Journal flush, use Journal's baseDataID instead of fileObj.DataID
+// to avoid reading from the new dataID that hasn't been fully written yet
 func (ra *RandomAccessor) readBaseData(offset, length int64) ([]byte, error) {
+	// CRITICAL FIX: Check if Journal exists and use its baseDataID
+	// This prevents reading from a new dataID during flush that hasn't been fully written
+	ra.journalMu.RLock()
+	journal := ra.journal
+	var baseDataID int64 = 0
+	var baseSize int64 = 0
+	if journal != nil {
+		// Use Journal's baseDataID instead of fileObj.DataID
+		// This ensures we read from the correct base data during flush
+		baseDataID = journal.dataID
+		baseSize = journal.baseSize
+	}
+	ra.journalMu.RUnlock()
+
 	fileObj, err := ra.getFileObj()
 	if err != nil {
 		return nil, err
 	}
 
-	if fileObj.DataID == 0 || fileObj.DataID == core.EmptyDataID {
+	// Use Journal's baseDataID if available, otherwise use fileObj.DataID
+	dataIDToRead := baseDataID
+	if dataIDToRead == 0 || dataIDToRead == core.EmptyDataID {
+		dataIDToRead = fileObj.DataID
+	}
+
+	if dataIDToRead == 0 || dataIDToRead == core.EmptyDataID {
 		// No data, return zeros
 		// CRITICAL: For sparse files, Journal.Read has already adjusted the length
 		// based on currentSize (which is set to sparseSize). So we should return
@@ -6544,9 +6566,23 @@ func (ra *RandomAccessor) readBaseData(offset, length int64) ([]byte, error) {
 		return nil, fmt.Errorf("handler is not LocalHandler")
 	}
 
-	dataInfo, err := lh.GetDataInfo(ra.fs.c, ra.fs.bktID, fileObj.DataID)
+	dataInfo, err := lh.GetDataInfo(ra.fs.c, ra.fs.bktID, dataIDToRead)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get data info: %w", err)
+		// If reading from baseDataID fails and we have a journal, log a warning
+		// but don't fail - this might be a transient issue during flush
+		if journal != nil {
+			DebugLog("[VFS readBaseData] WARNING: Failed to get DataInfo for baseDataID=%d, trying fileObj.DataID=%d: %v", baseDataID, fileObj.DataID, err)
+			// Fallback to fileObj.DataID if baseDataID read fails
+			if fileObj.DataID != 0 && fileObj.DataID != core.EmptyDataID && fileObj.DataID != baseDataID {
+				dataInfo, err = lh.GetDataInfo(ra.fs.c, ra.fs.bktID, fileObj.DataID)
+				if err == nil {
+					dataIDToRead = fileObj.DataID
+				}
+			}
+		}
+		if err != nil {
+			return nil, fmt.Errorf("failed to get data info: %w", err)
+		}
 	}
 
 	// Calculate chunk size
@@ -6565,9 +6601,14 @@ func (ra *RandomAccessor) readBaseData(offset, length int64) ([]byte, error) {
 		// But don't limit here - let Journal.Read handle it
 		// This ensures we return zeros for unwritten regions
 	} else {
-		// For non-sparse files, limit based on fileObj.Size
-		if offset+length > fileObj.Size {
-			length = fileObj.Size - offset
+		// For non-sparse files, limit based on baseSize or fileObj.Size
+		// Use baseSize if available (from Journal), otherwise use fileObj.Size
+		sizeLimit := fileObj.Size
+		if baseSize > 0 {
+			sizeLimit = baseSize
+		}
+		if offset+length > sizeLimit {
+			length = sizeLimit - offset
 		}
 		if length <= 0 {
 			return []byte{}, nil
@@ -6580,9 +6621,10 @@ func (ra *RandomAccessor) readBaseData(offset, length int64) ([]byte, error) {
 
 	// Read chunks and assemble result
 	// CRITICAL: GetData returns encrypted/compressed raw data, need to decrypt/decompress
+	// CRITICAL: Use dataIDToRead instead of fileObj.DataID to read from correct base data
 	result := make([]byte, 0, length)
 	for sn := startChunk; sn <= endChunk; sn++ {
-		rawChunk, err := ra.fs.h.GetData(ra.fs.c, ra.fs.bktID, fileObj.DataID, sn)
+		rawChunk, err := ra.fs.h.GetData(ra.fs.c, ra.fs.bktID, dataIDToRead, sn)
 		if err != nil {
 			// If chunk doesn't exist for sparse file, fill with zeros (decrypted/uncompressed)
 			if dataInfo.Kind&core.DATA_SPARSE != 0 {

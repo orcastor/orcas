@@ -3768,3 +3768,157 @@ func TestTruncateAndReopenWrite(t *testing.T) {
 		})
 	})
 }
+
+// TestRandomWriteWithConcurrentRead tests the scenario where:
+// 1. File is opened and written with random writes (out of order)
+// 2. Concurrent reads happen during writes
+// 3. Flush happens while reads are in progress
+// This reproduces the bug: "decryption failed: cipher: message authentication failed"
+func TestRandomWriteWithConcurrentRead(t *testing.T) {
+	Convey("Random write with concurrent read", t, func() {
+		ig := idgen.NewIDGen(nil, 0)
+		testBktID, _ := ig.New()
+		err := core.InitBucketDB(".", testBktID)
+		So(err, ShouldBeNil)
+
+		dma := &core.DefaultMetadataAdapter{
+			DefaultBaseMetadataAdapter: &core.DefaultBaseMetadataAdapter{},
+			DefaultDataMetadataAdapter: &core.DefaultDataMetadataAdapter{},
+		}
+		dma.DefaultBaseMetadataAdapter.SetPath(".")
+		dma.DefaultDataMetadataAdapter.SetPath(".")
+		dda := &core.DefaultDataAdapter{}
+		dda.SetDataPath(".")
+
+		lh := core.NewLocalHandler("", "").(*core.LocalHandler)
+		lh.SetAdapter(dma, dda)
+
+		testCtx, userInfo, _, err := lh.Login(c, "orcas", "orcas")
+		So(err, ShouldBeNil)
+
+		bucket := &core.BucketInfo{
+			ID:       testBktID,
+			Name:     "test_bucket",
+			Type:     1,
+			Quota:    100000000, // 100MB - increased for test with encryption
+			Used:     0,
+			RealUsed: 0,
+		}
+		So(dma.PutBkt(testCtx, []*core.BucketInfo{bucket}), ShouldBeNil)
+		err = dma.PutACL(testCtx, testBktID, userInfo.ID, core.ALL)
+		So(err, ShouldBeNil)
+
+		// Create file object with initial data
+		fileID, _ := ig.New()
+		fileObj := &core.ObjectInfo{
+			ID:    fileID,
+			PID:   testBktID,
+			Type:  core.OBJ_TYPE_FILE,
+			Name:  "test_file.ppt",
+			Size:  0,
+			MTime: core.Now(),
+		}
+		_, err = dma.PutObj(testCtx, testBktID, []*core.ObjectInfo{fileObj})
+		So(err, ShouldBeNil)
+
+		// Create OrcasFS with encryption enabled (to reproduce decryption error)
+		ofs := NewOrcasFS(lh, testCtx, testBktID)
+		ofs.EndecWay = core.DATA_ENDEC_AES256
+		ofs.EndecKey = "test-encryption-key-32-bytes-long!!"
+
+		// Create RandomAccessor and write initial data
+		ra, err := NewRandomAccessor(ofs, fileID)
+		So(err, ShouldBeNil)
+		defer ra.Close()
+
+		// Write initial data (1MB)
+		initialData := make([]byte, 1024*1024)
+		for i := range initialData {
+			initialData[i] = byte(i % 256)
+		}
+		err = ra.Write(0, initialData)
+		So(err, ShouldBeNil)
+
+		// Flush to create base data
+		_, err = ra.Flush()
+		So(err, ShouldBeNil)
+
+		// Simulate Office file behavior: random writes in reverse order
+		// This mimics the log: writes at 1139711, 1139712, 1137152, 1138688, 0
+		writeOffsets := []int64{1139711, 1139712, 1137152, 1138688, 0}
+		writeSizes := []int{1, 512, 1536, 1024, 512}
+
+		// Start concurrent reads
+		readErrors := make(chan error, 10)
+		readDone := make(chan bool, 1)
+		go func() {
+			defer close(readDone)
+			for i := 0; i < 100; i++ {
+				// Read from various offsets
+				readOffset := int64(i * 10000)
+				data, err := ra.Read(readOffset, 4096)
+				if err != nil {
+					readErrors <- fmt.Errorf("read failed at offset %d: %w", readOffset, err)
+					return
+				}
+				// Verify we got some data (might be empty if beyond file size)
+				_ = data
+				time.Sleep(1 * time.Millisecond) // Small delay to allow writes
+			}
+		}()
+
+		// Perform random writes (out of order)
+		for i, offset := range writeOffsets {
+			data := make([]byte, writeSizes[i])
+			for j := range data {
+				data[j] = byte((offset + int64(j)) % 256)
+			}
+			err = ra.Write(offset, data)
+			So(err, ShouldBeNil)
+
+			// Trigger flush after some writes (simulating Office file behavior)
+			if i == 2 {
+				_, err = ra.Flush()
+				So(err, ShouldBeNil)
+			}
+		}
+
+		// Final flush
+		_, err = ra.Flush()
+		So(err, ShouldBeNil)
+
+		// Wait for reads to complete
+		<-readDone
+
+		// Check for read errors
+		select {
+		case readErr := <-readErrors:
+			t.Fatalf("Concurrent read failed: %v", readErr)
+		default:
+			// No errors, good
+		}
+
+		// Verify final file content
+		finalData, err := ra.Read(0, 1024*1024+2048)
+		So(err, ShouldBeNil)
+		So(len(finalData), ShouldBeGreaterThan, 0)
+
+		// Verify writes were applied correctly
+		for i, offset := range writeOffsets {
+			if offset < int64(len(finalData)) {
+				readSize := writeSizes[i]
+				if offset+int64(readSize) > int64(len(finalData)) {
+					readSize = len(finalData) - int(offset)
+				}
+				if readSize > 0 {
+					readData := finalData[offset : offset+int64(readSize)]
+					expectedData := make([]byte, readSize)
+					for j := range expectedData {
+						expectedData[j] = byte((offset + int64(j)) % 256)
+					}
+					So(bytes.Equal(readData, expectedData), ShouldBeTrue)
+				}
+			}
+		}
+	})
+}

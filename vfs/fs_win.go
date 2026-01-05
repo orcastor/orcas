@@ -4,6 +4,7 @@
 package vfs
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -917,6 +918,30 @@ func getRandomAccessor(ofs *OrcasFS, fileID int64) (*RandomAccessor, error) {
 	return NewRandomAccessor(ofs, fileID)
 }
 
+// getObj gets the object info for this node
+func (n *OrcasNode) getObj() (*core.ObjectInfo, error) {
+	if n.obj != nil {
+		return n.obj, nil
+	}
+	if n.fs == nil {
+		return nil, fmt.Errorf("filesystem not initialized")
+	}
+	objs, err := n.fs.h.Get(n.fs.c, n.fs.bktID, []int64{n.objID})
+	if err != nil {
+		return nil, err
+	}
+	if len(objs) == 0 {
+		return nil, fmt.Errorf("object not found: %d", n.objID)
+	}
+	n.obj = objs[0]
+	return n.obj, nil
+}
+
+// invalidateObj invalidates the cached object info
+func (n *OrcasNode) invalidateObj() {
+	n.obj = nil
+}
+
 // Unmount unmounts the Dokany filesystem
 func (instance *DokanyInstance) Unmount() error {
 	if dokanUnmountProc == nil {
@@ -927,6 +952,150 @@ func (instance *DokanyInstance) Unmount() error {
 	// Note: This is a simplified implementation
 	// For now, return success (actual unmount would be done by Dokany driver)
 	return nil
+}
+
+// Unlink deletes a file (Windows implementation)
+// This is a simplified version that uses handler methods directly
+func (n *OrcasNode) Unlink(ctx context.Context, name string) syscall.Errno {
+	DebugLog("[VFS Unlink] Entry: name=%s, parentID=%d", name, n.objID)
+	// Check if KEY is required
+	if errno := n.fs.checkKey(); errno != 0 {
+		DebugLog("[VFS Unlink] ERROR: checkKey failed: name=%s, parentID=%d, errno=%d", name, n.objID, errno)
+		return errno
+	}
+
+	obj, err := n.getObj()
+	if err != nil {
+		DebugLog("[VFS Unlink] ERROR: Failed to get parent object: name=%s, parentID=%d, error=%v", name, n.objID, err)
+		return syscall.ENOENT
+	}
+
+	if obj.Type != core.OBJ_TYPE_DIR {
+		DebugLog("[VFS Unlink] ERROR: Parent is not a directory: name=%s, parentID=%d, type=%d", name, n.objID, obj.Type)
+		return syscall.ENOTDIR
+	}
+
+	// Find child object
+	var targetID int64
+	var targetObj *core.ObjectInfo
+
+	// Try to find from RandomAccessor registry first
+	if n.fs != nil {
+		n.fs.raRegistry.Range(func(key, value interface{}) bool {
+			if fileID, ok := key.(int64); ok {
+				if ra, ok := value.(*RandomAccessor); ok && ra != nil {
+					fileObj, err := ra.getFileObj()
+					if err == nil && fileObj != nil && fileObj.PID == obj.ID && fileObj.Name == name && fileObj.Type == core.OBJ_TYPE_FILE {
+						targetID = fileID
+						targetObj = fileObj
+						DebugLog("[VFS Unlink] Found target file from RandomAccessor registry: fileID=%d, name=%s", targetID, name)
+						return false // Stop iteration
+					}
+				}
+			}
+			return true // Continue iteration
+		})
+	}
+
+	// If not found in RandomAccessor registry, try to find from List
+	if targetID == 0 {
+		children, _, _, err := n.fs.h.List(n.fs.c, n.fs.bktID, obj.ID, core.ListOptions{
+			Count: core.DefaultListPageSize,
+		})
+		if err != nil {
+			DebugLog("[VFS Unlink] ERROR: Failed to list directory children: name=%s, parentID=%d, error=%v", name, obj.ID, err)
+			return syscall.EIO
+		}
+
+		for _, child := range children {
+			if child.Name == name && child.Type == core.OBJ_TYPE_FILE {
+				targetID = child.ID
+				targetObj = child
+				DebugLog("[VFS Unlink] Found target file from List: fileID=%d, name=%s", targetID, name)
+				break
+			}
+		}
+	}
+
+	if targetID == 0 {
+		DebugLog("[VFS Unlink] ERROR: Target file not found: name=%s, parentID=%d", name, obj.ID)
+		return syscall.ENOENT
+	}
+
+	// Remove from RandomAccessor registry if present
+	if n.fs != nil {
+		if targetRA := n.fs.getRandomAccessorByFileID(targetID); targetRA != nil {
+			// Force flush before deletion to ensure data is saved
+			if _, err := targetRA.ForceFlush(); err != nil {
+				DebugLog("[VFS Unlink] WARNING: Failed to flush file before deletion: fileID=%d, error=%v", targetID, err)
+			}
+			// Unregister RandomAccessor
+			n.fs.unregisterRandomAccessor(targetID, targetRA)
+			DebugLog("[VFS Unlink] Removed file from RandomAccessor registry: fileID=%d", targetID)
+		}
+	}
+
+	// Remove from parent directory first (mark as deleted)
+	err = n.fs.h.Recycle(n.fs.c, n.fs.bktID, targetID)
+	if err != nil {
+		DebugLog("[VFS Unlink] ERROR: Failed to recycle file: fileID=%d, name=%s, parentID=%d, error=%v", targetID, name, obj.ID, err)
+		return syscall.EIO
+	}
+
+	// Update cache immediately
+	n.invalidateDirListCache(obj.ID)
+
+	// Get file object to get DataID before clearing cache
+	if targetObj == nil {
+		targetObjs, err := n.fs.h.Get(n.fs.c, n.fs.bktID, []int64{targetID})
+		if err == nil && len(targetObjs) > 0 {
+			targetObj = targetObjs[0]
+		}
+	}
+	if targetObj != nil && targetObj.DataID > 0 && targetObj.DataID != core.EmptyDataID {
+		// Clear DataInfo cache for the deleted file's DataID
+		dataInfoCacheKey := targetObj.DataID
+		dataInfoCache.Del(dataInfoCacheKey)
+		decodingReaderCache.Del(dataInfoCacheKey)
+		DebugLog("[VFS Unlink] Cleared DataInfo cache for deleted file: fileID=%d, dataID=%d", targetID, dataInfoCacheKey)
+	}
+
+	// Clear file object cache
+	fileObjCache.Del(targetID)
+	DebugLog("[VFS Unlink] Cleared file object cache for deleted file: fileID=%d", targetID)
+
+	// Invalidate parent directory cache
+	n.invalidateObj()
+
+	// Schedule delayed deletion for atomic replace adaptation
+	if n.fs.atomicReplaceMgr != nil {
+		if err := n.fs.atomicReplaceMgr.ScheduleDeletion(n.fs.bktID, obj.ID, name, targetID); err != nil {
+			DebugLog("[VFS Unlink] WARNING: Failed to schedule delayed deletion: fileID=%d, error=%v", targetID, err)
+			// Fallback to immediate deletion if scheduling fails
+			go func() {
+				err := n.fs.h.Delete(n.fs.c, n.fs.bktID, targetID)
+				if err != nil {
+					DebugLog("[VFS Unlink] ERROR: Failed to permanently delete file: fileID=%d, error=%v", targetID, err)
+				} else {
+					DebugLog("[VFS Unlink] Successfully permanently deleted file: fileID=%d", targetID)
+				}
+			}()
+		} else {
+			DebugLog("[VFS Unlink] Scheduled delayed deletion: fileID=%d, name=%s (will delete in 5s)", targetID, name)
+		}
+	} else {
+		// Fallback: Asynchronously delete and clean up (permanent deletion)
+		go func() {
+			err := n.fs.h.Delete(n.fs.c, n.fs.bktID, targetID)
+			if err != nil {
+				DebugLog("[VFS Unlink] ERROR: Failed to permanently delete file: fileID=%d, error=%v", targetID, err)
+			} else {
+				DebugLog("[VFS Unlink] Successfully permanently deleted file: fileID=%d", targetID)
+			}
+		}()
+	}
+
+	return 0
 }
 
 // invalidateDirListCache invalidates directory listing cache for a directory

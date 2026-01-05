@@ -14,11 +14,6 @@ import (
 	"github.com/orcastor/orcas/core"
 )
 
-// Helper function for tests (not in Windows-specific files)
-func getOrCreateRandomAccessor(ofs *OrcasFS, fileID int64) (*RandomAccessor, error) {
-	return NewRandomAccessor(ofs, fileID)
-}
-
 // setupTestFSWithEncryption creates a test filesystem with encryption enabled
 func setupTestFSWithEncryption(t *testing.T, testDir string, encryptionKey string, cmprWay uint32) (*OrcasFS, int64) {
 	// Use the same setup as journal_test.go
