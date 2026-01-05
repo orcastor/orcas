@@ -714,11 +714,9 @@ func (vrm *VersionRetentionManager) mergeBaseAndJournalsInMemory(
 		MTime:  mTime,
 		Name:   fmt.Sprintf("%d", mTime),
 			Extra: EncodeJournalExtra(&JournalExtraData{
-				VersionType:   1,
 				JournalDataID: 0,
 				BaseVersionID: 0,
 				EntryCount:    0,
-				Merged:        true,
 			}),
 	}
 
@@ -1099,11 +1097,9 @@ func (vrm *VersionRetentionManager) finalizeMerge(
 		MTime:  mTime,
 		Name:   fmt.Sprintf("%d", mTime),
 			Extra: EncodeJournalExtra(&JournalExtraData{
-				VersionType:   1,
 				JournalDataID: 0,
 				BaseVersionID: 0,
 				EntryCount:    0,
-				Merged:        true,
 			}),
 	}
 

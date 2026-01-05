@@ -95,12 +95,19 @@ func DefaultJournalConfig() JournalConfig {
 		Enabled:             true,
 		SmallFileThreshold:  10 << 20, // 10MB
 		MergeInterval:       30 * time.Second,
-		MaxEntriesSmall:     100,
-		MaxEntriesLarge:     1000,
+		MaxEntriesSmall:     500,  // Increased from 100 to reduce journal count
+		MaxEntriesLarge:     5000, // Increased from 1000 to reduce journal count
 		EnableAutoMerge:     true,
 		MaxMemoryPerJournal: 50 << 20,  // 50MB per journal
 		MaxTotalMemory:      200 << 20, // 200MB total
 		EnableMemoryLimit:   true,
+		// Snapshot configuration - increased thresholds to reduce journal snapshots
+		SnapshotEntryCount:   500,              // Increased from 100 to reduce snapshot frequency
+		SnapshotMemorySize:   50 << 20,         // Increased from 10MB to 50MB
+		SnapshotTimeInterval: 10 * time.Minute, // Increased from 5min to 10min
+		// Full flush configuration
+		FullFlushJournalCount: 20,   // Increased from 10 to allow more snapshots before full flush
+		FullFlushTotalEntries: 5000, // Increased from 1000 to allow more entries before full flush
 	}
 }
 
@@ -444,9 +451,6 @@ func (j *Journal) CreateJournalSnapshot() (versionID int64, err error) {
 	// Create version object
 	currentSize := atomic.LoadInt64(&j.currentSize)
 	mTime := core.Now()
-	// Use nanosecond timestamp for name to ensure uniqueness even if multiple snapshots
-	// are created in the same second
-	nameTimestamp := time.Now().UnixNano()
 
 	// Journal should be under version object if baseVersionID exists, otherwise under file
 	// This allows journal to be sorted under version objects
@@ -460,25 +464,29 @@ func (j *Journal) CreateJournalSnapshot() (versionID int64, err error) {
 			j.fileID, j.baseVersionID, journalPID)
 	}
 
+	// Generate journal object ID first, then use it as the name
+	// This ensures the name is unique and directly references the journal object
+	journalObjID := core.NewID()
+	if journalObjID == 0 {
+		return 0, fmt.Errorf("failed to generate journal object ID")
+	}
+
 	versionObj := &core.ObjectInfo{
-		ID:     0,                     // Let Put() generate the ID
+		ID:     journalObjID,          // Use pre-generated ID
 		PID:    journalPID,            // Journal under version object if baseVersionID exists
 		Type:   core.OBJ_TYPE_JOURNAL, // Use JOURNAL type for snapshots
 		DataID: j.dataID,              // References base DataID
 		Size:   currentSize,
 		MTime:  mTime,
-		Name:   strconv.FormatInt(nameTimestamp, 10), // Use nanosecond timestamp for uniqueness
 		Extra: EncodeJournalExtra(&JournalExtraData{
-			VersionType:   2,
 			JournalDataID: journalDataID,
 			BaseVersionID: j.baseVersionID,
 			EntryCount:    len(j.entries),
-			Merged:        false,
 		}),
 	}
 
-	DebugLog("[Journal CreateSnapshot] Calling Put: PID=%d, Type=%d, DataID=%d, Size=%d, Name=%s",
-		versionObj.PID, versionObj.Type, versionObj.DataID, versionObj.Size, versionObj.Name)
+	DebugLog("[Journal CreateSnapshot] Calling Put: PID=%d, Type=%d, DataID=%d, Size=%d, Name=%s (journalObjID=%d)",
+		versionObj.PID, versionObj.Type, versionObj.DataID, versionObj.Size, versionObj.Name, journalObjID)
 	ids, err := lh.Put(j.fs.c, j.fs.bktID, []*core.ObjectInfo{versionObj})
 	if err != nil {
 		return 0, fmt.Errorf("failed to create version: %w", err)
@@ -488,7 +496,13 @@ func (j *Journal) CreateJournalSnapshot() (versionID int64, err error) {
 		return 0, fmt.Errorf("failed to create version: no ID returned (ids=%v)", ids)
 	}
 	versionID = ids[0]
-	DebugLog("[Journal CreateSnapshot] Created version object: versionID=%d", versionID)
+
+	// Verify that the returned ID matches the pre-generated ID
+	if versionID != journalObjID {
+		DebugLog("[Journal CreateSnapshot] WARNING: Returned ID (%d) doesn't match pre-generated ID (%d), using returned ID", versionID, journalObjID)
+	}
+
+	DebugLog("[Journal CreateSnapshot] Created version object: versionID=%d, name=%s (journal object ID)", versionID, versionObj.Name)
 
 	// Update snapshot statistics (DON'T clear entries!)
 	atomic.StoreInt64(&j.lastSnapshot, time.Now().Unix())
@@ -547,13 +561,10 @@ func (j *Journal) SmartFlush() (versionID int64, err error) {
 			DataID: newDataID,
 			Size:   newSize,
 			MTime:  mTime,
-			Name:   strconv.FormatInt(mTime, 10),
 			Extra: EncodeJournalExtra(&JournalExtraData{
-				VersionType:   1,
 				JournalDataID: 0,
 				BaseVersionID: 0,
 				EntryCount:    0,
-				Merged:        false,
 			}),
 		}
 
