@@ -4843,10 +4843,11 @@ func (cr *chunkReader) ReadAt(buf []byte, offset int64) (int, error) {
 		// Check if we've read all data from this chunk (use actual data size, not chunkSize)
 		if currentOffsetInChunk >= actualChunkDataSize {
 			// Current offset is beyond this chunk's data, move to next chunk
-			// Check if we've reached the end of file
-			if actualChunkEnd >= cr.origSize {
-				// End of file
-				DebugLog("[VFS chunkReader ReadAt] Reached end of file: dataID=%d, actualChunkEnd=%d, origSize=%d", cr.dataID, actualChunkEnd, cr.origSize)
+			// CRITICAL: Check if we've reached the end of file FIRST before trying next chunk
+			// This prevents attempting to read non-existent chunks (e.g., sn=1 when file only has sn=0)
+			if actualChunkEnd >= cr.origSize || currentOffset >= cr.origSize {
+				// End of file - we've read all available data
+				DebugLog("[VFS chunkReader ReadAt] Reached end of file: dataID=%d, actualChunkEnd=%d, origSize=%d, currentOffset=%d", cr.dataID, actualChunkEnd, cr.origSize, currentOffset)
 				break
 			}
 			// Move to next chunk
@@ -4857,24 +4858,43 @@ func (cr *chunkReader) ReadAt(buf []byte, offset int64) (int, error) {
 			// For uncompressed files, actualChunkEnd should equal chunkStart + chunkSize (except last chunk)
 			if currentOffset >= actualChunkEnd {
 				// We're already past this chunk, try to read next chunk
-				// Check if we've reached the end of file
-				if actualChunkEnd >= cr.origSize {
-					DebugLog("[VFS chunkReader ReadAt] Reached end of file: dataID=%d, actualChunkEnd=%d, origSize=%d", cr.dataID, actualChunkEnd, cr.origSize)
+				// CRITICAL: Double-check if we've reached the end of file before trying next chunk
+				// This is important for files where chunk data size is smaller than expected
+				if actualChunkEnd >= cr.origSize || currentOffset >= cr.origSize {
+					DebugLog("[VFS chunkReader ReadAt] Reached end of file before next chunk: dataID=%d, actualChunkEnd=%d, origSize=%d, currentOffset=%d", cr.dataID, actualChunkEnd, cr.origSize, currentOffset)
+					break
+				}
+				// CRITICAL: Before attempting to read next chunk, verify it's within file bounds
+				// This prevents decryption errors when trying to read non-existent chunks
+				// Calculate next chunk start to verify it's within file bounds
+				nextSn := currentSn + 1
+				nextChunkStart := int64(nextSn) * cr.chunkSize
+				if nextChunkStart >= cr.origSize {
+					// Next chunk would be beyond file size, we've reached the end
+					DebugLog("[VFS chunkReader ReadAt] Next chunk beyond file size, reached end: dataID=%d, nextChunkStart=%d, origSize=%d, currentOffset=%d", cr.dataID, nextChunkStart, cr.origSize, currentOffset)
 					break
 				}
 				// Try to read next chunk (sn+1) to see if it exists
-				nextSn := currentSn + 1
+				
 				nextChunkData, nextErr := cr.getChunk(nextSn)
 				if nextErr != nil {
-					// Next chunk doesn't exist, check if we've reached the end of file
-					if actualChunkEnd >= cr.origSize {
-						DebugLog("[VFS chunkReader ReadAt] Next chunk doesn't exist, reached end: dataID=%d, actualChunkEnd=%d, origSize=%d", cr.dataID, actualChunkEnd, cr.origSize)
+					// Next chunk doesn't exist or failed to read, check if we've reached the end of file
+					if actualChunkEnd >= cr.origSize || currentOffset >= cr.origSize {
+						DebugLog("[VFS chunkReader ReadAt] Next chunk doesn't exist, reached end: dataID=%d, actualChunkEnd=%d, origSize=%d, currentOffset=%d", cr.dataID, actualChunkEnd, cr.origSize, currentOffset)
 						break
 					}
 					// If we've read some data, return it
 					if totalRead > 0 {
 						DebugLog("[VFS chunkReader ReadAt] Next chunk doesn't exist, returning partial read: dataID=%d, totalRead=%d, actualChunkEnd=%d, origSize=%d", cr.dataID, totalRead, actualChunkEnd, cr.origSize)
 						return totalRead, nil
+					}
+					// No data read yet, but check if error is decryption failure for non-existent chunk
+					// If it's a decryption error and we're at or beyond origSize, treat as EOF
+					if strings.Contains(nextErr.Error(), "decryption") || strings.Contains(nextErr.Error(), "authentication") {
+						if currentOffset >= cr.origSize || actualChunkEnd >= cr.origSize {
+							DebugLog("[VFS chunkReader ReadAt] Decryption error for non-existent chunk, reached end: dataID=%d, currentOffset=%d, origSize=%d, error=%v", cr.dataID, currentOffset, cr.origSize, nextErr)
+							break
+						}
 					}
 					// No data read yet, return error
 					return 0, nextErr
@@ -6396,12 +6416,15 @@ func (ra *RandomAccessor) readBaseData(offset, length int64) ([]byte, error) {
 
 	if fileObj.DataID == 0 || fileObj.DataID == core.EmptyDataID {
 		// No data, return zeros
-		if length > fileObj.Size-offset {
-			length = fileObj.Size - offset
-		}
+		// CRITICAL: For sparse files, Journal.Read has already adjusted the length
+		// based on currentSize (which is set to sparseSize). So we should return
+		// the requested length (zero-filled), and let Journal.Read handle size limits.
+		// This ensures that sparse files correctly return zeros for unwritten regions.
 		if length <= 0 {
 			return []byte{}, nil
 		}
+		// Return zero-filled buffer of requested length
+		// Journal.Read will handle the actual size adjustment based on currentSize
 		return make([]byte, length), nil
 	}
 
@@ -6423,11 +6446,22 @@ func (ra *RandomAccessor) readBaseData(offset, length int64) ([]byte, error) {
 	}
 
 	// Adjust length if needed
-	if offset+length > fileObj.Size {
-		length = fileObj.Size - offset
-	}
-	if length <= 0 {
-		return []byte{}, nil
+	// CRITICAL: For sparse files, don't limit length based on fileObj.Size
+	// Journal.Read will handle size limits based on currentSize (which is sparseSize)
+	// This ensures sparse files correctly return zeros for unwritten regions
+	sparseSize := atomic.LoadInt64(&ra.sparseSize)
+	if sparseSize > 0 {
+		// For sparse files, use sparseSize as the effective size limit
+		// But don't limit here - let Journal.Read handle it
+		// This ensures we return zeros for unwritten regions
+	} else {
+		// For non-sparse files, limit based on fileObj.Size
+		if offset+length > fileObj.Size {
+			length = fileObj.Size - offset
+		}
+		if length <= 0 {
+			return []byte{}, nil
+		}
 	}
 
 	// Calculate which chunks we need to read
@@ -6435,16 +6469,41 @@ func (ra *RandomAccessor) readBaseData(offset, length int64) ([]byte, error) {
 	endChunk := int((offset + length - 1) / chunkSize)
 
 	// Read chunks and assemble result
+	// CRITICAL: GetData returns encrypted/compressed raw data, need to decrypt/decompress
 	result := make([]byte, 0, length)
 	for sn := startChunk; sn <= endChunk; sn++ {
-		chunkData, err := ra.fs.h.GetData(ra.fs.c, ra.fs.bktID, fileObj.DataID, sn)
+		rawChunk, err := ra.fs.h.GetData(ra.fs.c, ra.fs.bktID, fileObj.DataID, sn)
 		if err != nil {
-			// If chunk doesn't exist for sparse file, fill with zeros
+			// If chunk doesn't exist for sparse file, fill with zeros (decrypted/uncompressed)
 			if dataInfo.Kind&core.DATA_SPARSE != 0 {
-				chunkData = make([]byte, chunkSize)
+				// For sparse files, return zero-filled plain data (not encrypted)
+				chunkData := make([]byte, chunkSize)
+				chunkStart := int64(sn) * chunkSize
+				readStart := offset
+				if readStart < chunkStart {
+					readStart = chunkStart
+				}
+				readEnd := offset + length
+				chunkEnd := chunkStart + chunkSize
+				if readEnd > chunkEnd {
+					readEnd = chunkEnd
+				}
+				if readStart < readEnd {
+					startInChunk := readStart - chunkStart
+					endInChunk := readEnd - chunkStart
+					result = append(result, chunkData[startInChunk:endInChunk]...)
+				}
+				continue
 			} else {
 				return nil, fmt.Errorf("failed to read chunk %d: %w", sn, err)
 			}
+		}
+
+		// CRITICAL: Decrypt and decompress the raw chunk data
+		// Use UnprocessData to handle encryption/compression (same as chunkReader.getChunk)
+		chunkData, err := core.UnprocessData(rawChunk, dataInfo.Kind, ra.fs.EndecKey)
+		if err != nil {
+			return nil, fmt.Errorf("failed to unprocess chunk %d: %w", sn, err)
 		}
 
 		// Calculate the range within this chunk that we need

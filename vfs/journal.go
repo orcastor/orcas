@@ -763,7 +763,9 @@ func (j *Journal) Write(offset int64, data []byte) error {
 	// Update current size if write extends the file
 	endOffset := offset + int64(len(data))
 	currentSize := atomic.LoadInt64(&j.currentSize)
-	if endOffset > currentSize {
+	// For sparse files, currentSize should remain at baseSize (sparseSize)
+	// Don't update currentSize for sparse files based on write operations
+	if !j.isSparse && endOffset > currentSize {
 		atomic.StoreInt64(&j.currentSize, endOffset)
 	}
 
@@ -897,12 +899,16 @@ func (j *Journal) Read(offset, length int64, baseReader func(offset, length int6
 
 	currentSize := atomic.LoadInt64(&j.currentSize)
 	if offset >= currentSize {
+		DebugLog("[Journal Read] Offset beyond current size: fileID=%d, offset=%d, currentSize=%d, isSparse=%v", 
+			j.fileID, offset, currentSize, j.isSparse)
 		return nil, io.EOF
 	}
 
 	// Adjust length if reading beyond current size
 	if offset+length > currentSize {
 		length = currentSize - offset
+		DebugLog("[Journal Read] Adjusted length: fileID=%d, offset=%d, requestedLength=%d, adjustedLength=%d, currentSize=%d, isSparse=%v",
+			j.fileID, offset, length, length, currentSize, j.isSparse)
 	}
 
 	// Read base data first
