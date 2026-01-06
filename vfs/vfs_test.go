@@ -1291,7 +1291,7 @@ func TestVFSOverwriteUploadDownload(t *testing.T) {
 		So(err, ShouldBeNil)
 
 		// Get user info for bucket creation
-		_, _, _, err = handler.Login(ctx, "orcas", "orcas")
+		ctx, userInfo, _, err := handler.Login(ctx, "orcas", "orcas")
 		So(err, ShouldBeNil)
 
 		// Create bucket
@@ -1305,6 +1305,11 @@ func TestVFSOverwriteUploadDownload(t *testing.T) {
 		}
 		err = admin.PutBkt(ctx, []*core.BucketInfo{bkt})
 		So(err, ShouldBeNil)
+		// Set ACL to allow access to the bucket
+		if userInfo != nil && userInfo.ID > 0 {
+			err = admin.PutACL(ctx, testBktID, userInfo.ID, core.ALL)
+			So(err, ShouldBeNil)
+		}
 
 		// Create filesystem
 		ofs := NewOrcasFS(handler, ctx, testBktID)
@@ -3348,7 +3353,7 @@ func TestTempFileWriterLargeFileWithEncryption(t *testing.T) {
 		lh := core.NewLocalHandler("", "").(*core.LocalHandler)
 		lh.SetAdapter(dma, dda)
 
-		testCtx, _, _, err := lh.Login(context.Background(), "orcas", "orcas")
+		testCtx, userInfo, _, err := lh.Login(context.Background(), "orcas", "orcas")
 		So(err, ShouldBeNil)
 
 		// Create bucket with encryption enabled
@@ -3362,6 +3367,9 @@ func TestTempFileWriterLargeFileWithEncryption(t *testing.T) {
 			ChunkSize: 10 * 1024 * 1024, // 10MB chunk size
 		}
 		So(dma.PutBkt(testCtx, []*core.BucketInfo{bucket}), ShouldBeNil)
+		// Set ACL to allow access to the bucket
+		err = dma.PutACL(testCtx, testBktID, userInfo.ID, core.ALL)
+		So(err, ShouldBeNil)
 
 		// Create filesystem with encryption configuration (not from bucket config)
 		encryptionKey := "this-is-a-test-encryption-key-that-is-long-enough-for-aes256-encryption-12345678901234567890"
@@ -3764,7 +3772,7 @@ func TestTempFileWriterMemoryEfficiency(t *testing.T) {
 		lh := core.NewLocalHandler("", "").(*core.LocalHandler)
 		lh.SetAdapter(dma, dda)
 
-		testCtx, _, _, err := lh.Login(context.Background(), "orcas", "orcas")
+		testCtx, userInfo, _, err := lh.Login(context.Background(), "orcas", "orcas")
 		So(err, ShouldBeNil)
 
 		bucket := &core.BucketInfo{
@@ -3777,6 +3785,9 @@ func TestTempFileWriterMemoryEfficiency(t *testing.T) {
 			ChunkSize: 10 * 1024 * 1024,
 		}
 		So(dma.PutBkt(testCtx, []*core.BucketInfo{bucket}), ShouldBeNil)
+		// Set ACL to allow access to the bucket
+		err = dma.PutACL(testCtx, testBktID, userInfo.ID, core.ALL)
+		So(err, ShouldBeNil)
 
 		// Create filesystem with encryption configuration (not from bucket config)
 		encryptionKey := "this-is-a-test-encryption-key-that-is-long-enough-for-aes256-encryption-12345678901234567890"
@@ -4653,13 +4664,13 @@ func TestVFSRecycleBinDelete(t *testing.T) {
 			ra, err := NewRandomAccessor(ofs, fileID)
 			So(err, ShouldBeNil)
 			ofs.registerRandomAccessor(fileID, ra)
-			
+
 			err = ra.Write(0, testContent)
 			So(err, ShouldBeNil)
-			
+
 			_, err = ra.ForceFlush()
 			So(err, ShouldBeNil)
-			
+
 			ofs.unregisterRandomAccessor(fileID, ra)
 			ra.Close()
 
@@ -4699,7 +4710,7 @@ func TestVFSRecycleBinDelete(t *testing.T) {
 			So(fileObjs[0].PID, ShouldEqual, recycleBinID)
 			So(fileObjs[0].Name, ShouldEqual, testFileName)
 
-			t.Logf("Verified file in recycle bin: ID=%d, PID=%d, name=%s", 
+			t.Logf("Verified file in recycle bin: ID=%d, PID=%d, name=%s",
 				fileObjs[0].ID, fileObjs[0].PID, fileObjs[0].Name)
 		})
 
@@ -4773,7 +4784,7 @@ func TestVFSRecycleBinDelete(t *testing.T) {
 			fileObjs, err := handler.Get(ctx, testBktID, []int64{fileID1, fileID2})
 			So(err, ShouldBeNil)
 			So(len(fileObjs), ShouldEqual, 2)
-			
+
 			for _, obj := range fileObjs {
 				So(obj.PID, ShouldEqual, recycleBinID)
 				t.Logf("Verified file in recycle bin: ID=%d, name=%s", obj.ID, obj.Name)
@@ -4782,77 +4793,77 @@ func TestVFSRecycleBinDelete(t *testing.T) {
 
 		// TODO: Fix this test - it has API signature issues
 		/*
-		SkipConvey("Restore file from recycle bin should work", func() {
-			testFileName := "restore-test.txt"
-			testContent := []byte("File to be restored")
+			SkipConvey("Restore file from recycle bin should work", func() {
+				testFileName := "restore-test.txt"
+				testContent := []byte("File to be restored")
 
-			// Create root node
-			rootNode := &OrcasNode{
-				fs:     ofs,
-				objID:  testBktID,
-				isRoot: true,
-			}
+				// Create root node
+				rootNode := &OrcasNode{
+					fs:     ofs,
+					objID:  testBktID,
+					isRoot: true,
+				}
 
-			// Create file
-			fileNode, errno := rootNode.Create(testFileName, 0o644, 0)
-			So(errno, ShouldEqual, 0)
-			fileObj, err := fileNode.getObj()
-			So(err, ShouldBeNil)
-			fileID := fileObj.ID
-
-			ra, err := NewRandomAccessor(ofs, fileID)
-			So(err, ShouldBeNil)
-			ofs.registerRandomAccessor(fileID, ra)
-			
-			err = ra.Write(0, testContent)
-			So(err, ShouldBeNil)
-			
-			_, err = ra.ForceFlush()
-			So(err, ShouldBeNil)
-			
-			fileObj, err = ra.getFileObj()
-			So(err, ShouldBeNil)
-			
-			ofs.unregisterRandomAccessor(fileID, ra)
-			ra.Close()
-
-			// Create .recycle if not exists
-			recycleBinNode, errno := rootNode.Lookup(".recycle")
-			if errno == syscall.ENOENT {
-				recycleBinNode, errno = rootNode.Mkdir(".recycle", 0o755)
+				// Create file
+				fileNode, errno := rootNode.Create(testFileName, 0o644, 0)
 				So(errno, ShouldEqual, 0)
-			}
+				fileObj, err := fileNode.getObj()
+				So(err, ShouldBeNil)
+				fileID := fileObj.ID
 
-			// Move to recycle bin
-			errno = rootNode.Rename(testFileName, recycleBinNode, testFileName, 0)
-			So(errno, ShouldEqual, 0)
+				ra, err := NewRandomAccessor(ofs, fileID)
+				So(err, ShouldBeNil)
+				ofs.registerRandomAccessor(fileID, ra)
 
-			t.Logf("Moved file to recycle bin: ID=%d", fileID)
+				err = ra.Write(0, testContent)
+				So(err, ShouldBeNil)
 
-			// Verify file is in recycle bin
-			_, errno = recycleBinNode.Lookup(testFileName)
-			So(errno, ShouldEqual, 0)
+				_, err = ra.ForceFlush()
+				So(err, ShouldBeNil)
 
-			// Restore file from recycle bin
-			errno = recycleBinNode.Rename(testFileName, rootNode, testFileName, 0)
-			So(errno, ShouldEqual, 0)
+				fileObj, err = ra.getFileObj()
+				So(err, ShouldBeNil)
 
-			t.Logf("Restored file from recycle bin: ID=%d", fileID)
+				ofs.unregisterRandomAccessor(fileID, ra)
+				ra.Close()
 
-			// Verify file is back in root directory
-			restoredNode, errno := rootNode.Lookup(testFileName)
-			So(errno, ShouldEqual, 0)
-			restoredObj, err := restoredNode.getObj()
-			So(err, ShouldBeNil)
-			So(restoredObj.ID, ShouldEqual, fileID)
-			So(restoredObj.PID, ShouldNotEqual, recycleBinNode)
+				// Create .recycle if not exists
+				recycleBinNode, errno := rootNode.Lookup(".recycle")
+				if errno == syscall.ENOENT {
+					recycleBinNode, errno = rootNode.Mkdir(".recycle", 0o755)
+					So(errno, ShouldEqual, 0)
+				}
 
-			// Verify file is no longer in recycle bin
-			_, errno = recycleBinNode.Lookup(testFileName)
-			So(errno, ShouldEqual, syscall.ENOENT)
+				// Move to recycle bin
+				errno = rootNode.Rename(testFileName, recycleBinNode, testFileName, 0)
+				So(errno, ShouldEqual, 0)
 
-			t.Logf("Verified file restored successfully")
-		})
+				t.Logf("Moved file to recycle bin: ID=%d", fileID)
+
+				// Verify file is in recycle bin
+				_, errno = recycleBinNode.Lookup(testFileName)
+				So(errno, ShouldEqual, 0)
+
+				// Restore file from recycle bin
+				errno = recycleBinNode.Rename(testFileName, rootNode, testFileName, 0)
+				So(errno, ShouldEqual, 0)
+
+				t.Logf("Restored file from recycle bin: ID=%d", fileID)
+
+				// Verify file is back in root directory
+				restoredNode, errno := rootNode.Lookup(testFileName)
+				So(errno, ShouldEqual, 0)
+				restoredObj, err := restoredNode.getObj()
+				So(err, ShouldBeNil)
+				So(restoredObj.ID, ShouldEqual, fileID)
+				So(restoredObj.PID, ShouldNotEqual, recycleBinNode)
+
+				// Verify file is no longer in recycle bin
+				_, errno = recycleBinNode.Lookup(testFileName)
+				So(errno, ShouldEqual, syscall.ENOENT)
+
+				t.Logf("Verified file restored successfully")
+			})
 		*/
 	})
 }

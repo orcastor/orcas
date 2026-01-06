@@ -1081,8 +1081,24 @@ func (j *Journal) Flush() (newDataID int64, newSize int64, err error) {
 	// Merge entries first to optimize
 	j.mergeEntriesLocked()
 
-	// Calculate new size
-	newSize = atomic.LoadInt64(&j.currentSize)
+	// Calculate new size based on entries and baseSize
+	// CRITICAL: newSize must be calculated from actual entries to ensure no data loss
+	// currentSize may be incorrect due to race conditions or multiple flushes
+	newSize = j.baseSize
+	for i := range j.entries {
+		entryEnd := j.entries[i].Offset + j.entries[i].Length
+		if entryEnd > newSize {
+			newSize = entryEnd
+		}
+	}
+
+	// Also check currentSize as a fallback (should be >= calculated size)
+	currentSize := atomic.LoadInt64(&j.currentSize)
+	if currentSize > newSize {
+		DebugLog("[Journal Flush] WARNING: currentSize > calculated size: fileID=%d, currentSize=%d, calculated=%d, using currentSize",
+			j.fileID, currentSize, newSize)
+		newSize = currentSize
+	}
 
 	// If no entries and size matches base, nothing to do
 	if len(j.entries) == 0 && newSize == j.baseSize {
@@ -1101,6 +1117,23 @@ func (j *Journal) Flush() (newDataID int64, newSize int64, err error) {
 
 // flushSmallFile creates a complete new data block for small files
 func (j *Journal) flushSmallFile(newSize int64) (int64, int64, error) {
+	// CRITICAL: Recalculate newSize from entries to ensure no data loss
+	// This is a defensive check in case newSize was calculated incorrectly
+	calculatedSize := j.baseSize
+	for i := range j.entries {
+		entryEnd := j.entries[i].Offset + j.entries[i].Length
+		if entryEnd > calculatedSize {
+			calculatedSize = entryEnd
+		}
+	}
+
+	// Use the larger of the two sizes to ensure no data is lost
+	if calculatedSize > newSize {
+		DebugLog("[Journal flushSmallFile] WARNING: Calculated size > provided newSize: fileID=%d, calculated=%d, provided=%d, using calculated",
+			j.fileID, calculatedSize, newSize)
+		newSize = calculatedSize
+	}
+
 	// Create new buffer with final data
 	finalData := make([]byte, newSize)
 
@@ -1119,18 +1152,33 @@ func (j *Journal) flushSmallFile(newSize int64) (int64, int64, error) {
 	}
 
 	// Apply all journal entries
+	// CRITICAL: All entries must be applied, no skipping or truncation
 	for i := range j.entries {
 		entry := &j.entries[i]
+		entryEnd := entry.Offset + entry.Length
+
+		// Skip if entry is completely beyond newSize (should not happen after recalculation)
 		if entry.Offset >= newSize {
+			DebugLog("[Journal flushSmallFile] WARNING: Entry beyond newSize (should not happen): fileID=%d, offset=%d, length=%d, newSize=%d",
+				j.fileID, entry.Offset, entry.Length, newSize)
 			continue
 		}
 
+		// Copy entire entry (newSize should already account for all entries)
 		copyLen := entry.Length
-		if entry.Offset+copyLen > newSize {
+		if entryEnd > newSize {
+			// This should not happen after recalculation, but handle it defensively
+			DebugLog("[Journal flushSmallFile] ERROR: Entry extends beyond newSize (data loss risk): fileID=%d, offset=%d, length=%d, entryEnd=%d, newSize=%d, truncating to %d",
+				j.fileID, entry.Offset, entry.Length, entryEnd, newSize, newSize-entry.Offset)
 			copyLen = newSize - entry.Offset
+			if copyLen < 0 {
+				copyLen = 0
+			}
 		}
 
-		copy(finalData[entry.Offset:entry.Offset+copyLen], entry.Data[:copyLen])
+		if copyLen > 0 {
+			copy(finalData[entry.Offset:entry.Offset+copyLen], entry.Data[:copyLen])
+		}
 	}
 
 	// Write final data using SDK
@@ -1267,6 +1315,10 @@ func (j *Journal) flushSmallFile(newSize int64) (int64, int64, error) {
 	j.entries = j.entries[:0]
 	j.dataID = newDataID
 	j.baseSize = newSize
+	// CRITICAL: Reset currentSize to newSize after flush
+	// This ensures that currentSize reflects the actual file size after flush
+	// Without this, currentSize may accumulate incorrectly if there are multiple flushes
+	atomic.StoreInt64(&j.currentSize, newSize)
 	atomic.StoreInt32(&j.isDirty, 0)
 
 	// Delete WAL snapshot after successful flush
@@ -1350,6 +1402,23 @@ func (j *Journal) calculateModifiedBytes() int64 {
 // Only modified chunks are written, unmodified chunks reference the original DataID
 func (j *Journal) flushLargeFileChunked(newSize int64) (int64, int64, error) {
 	startTime := time.Now()
+
+	// CRITICAL: Recalculate newSize from entries to ensure no data loss
+	// This is a defensive check in case newSize was calculated incorrectly
+	calculatedSize := j.baseSize
+	for i := range j.entries {
+		entryEnd := j.entries[i].Offset + j.entries[i].Length
+		if entryEnd > calculatedSize {
+			calculatedSize = entryEnd
+		}
+	}
+
+	// Use the larger of the two sizes to ensure no data is lost
+	if calculatedSize > newSize {
+		DebugLog("[Journal flushLargeFileChunked] WARNING: Calculated size > provided newSize: fileID=%d, calculated=%d, provided=%d, using calculated",
+			j.fileID, calculatedSize, newSize)
+		newSize = calculatedSize
+	}
 
 	chunkSize := j.fs.chunkSize
 	if chunkSize <= 0 {
@@ -1502,6 +1571,10 @@ func (j *Journal) flushLargeFileChunked(newSize int64) (int64, int64, error) {
 	j.entries = j.entries[:0]
 	j.dataID = newDataID
 	j.baseSize = newSize
+	// CRITICAL: Reset currentSize to newSize after flush
+	// This ensures that currentSize reflects the actual file size after flush
+	// Without this, currentSize may accumulate incorrectly if there are multiple flushes
+	atomic.StoreInt64(&j.currentSize, newSize)
 	atomic.StoreInt32(&j.isDirty, 0)
 
 	// Delete WAL snapshot after successful flush

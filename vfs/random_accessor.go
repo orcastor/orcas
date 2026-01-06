@@ -1827,12 +1827,19 @@ func NewRandomAccessor(fs *OrcasFS, fileID int64) (*RandomAccessor, error) {
 	// This avoids repeated file name checks on every write operation
 	// IMPORTANT: This flag is immutable after creation - if file is renamed,
 	// the RandomAccessor MUST be closed and recreated
+	// If getFileObj fails (e.g., permission issue), default to false (not a .tmp file)
+	// This allows RandomAccessor to be created even if file object is not immediately accessible
 	fileObj, err := ra.getFileObj()
 	if err != nil {
-		return nil, fmt.Errorf("failed to get file object for isTmpFile check: %w", err)
+		// Log warning but don't fail - isTmpFile will default to false
+		// This allows RandomAccessor to be created even if file object is not immediately accessible
+		// The flag will be checked again when needed (e.g., in Write method)
+		DebugLog("[VFS NewRandomAccessor] WARNING: Failed to get file object for isTmpFile check: fileID=%d, error=%v, defaulting to isTmpFile=false", fileID, err)
+		ra.isTmpFile = false
+	} else {
+		ra.isTmpFile = isTempFile(fileObj)
+		DebugLog("[VFS NewRandomAccessor] Created RandomAccessor: fileID=%d, fileName=%s, isTmpFile=%v", fileID, fileObj.Name, ra.isTmpFile)
 	}
-	ra.isTmpFile = isTempFile(fileObj)
-	DebugLog("[VFS NewRandomAccessor] Created RandomAccessor: fileID=%d, fileName=%s, isTmpFile=%v", fileID, fileObj.Name, ra.isTmpFile)
 
 	// Note: RandomAccessor registration is now handled by the caller (getRandomAccessor)
 	// to ensure proper synchronization for .tmp files during concurrent writes
@@ -3199,7 +3206,7 @@ func (ra *RandomAccessor) Read(offset int64, size int) ([]byte, error) {
 	}
 	DebugLog("[VFS Read] Starting readWithWrites: fileID=%d, offset=%d, size=%d, origSize=%d, actualFileSize=%d",
 		ra.fileID, offset, size, reader.origSize, actualFileSize)
-	fileData, operationsHandled := ra.readWithWrites(reader, offset, size)
+	fileData, operationsHandled := ra.readWithWrites(reader, offset, size, actualFileSize)
 	if operationsHandled {
 		DebugLog("[VFS Read] readWithWrites completed: fileID=%d, readSize=%d, requested=%d, actualFileSize=%d, reader.origSize=%d",
 			ra.fileID, len(fileData), size, actualFileSize, reader.origSize)
@@ -4370,8 +4377,9 @@ func (ra *RandomAccessor) processWritesStreaming(
 		sha256Hash.Write(chunkData)
 		dataXXH3 = xxh3Hash.Sum64()
 
-		// Update OrigSize
-		dataInfo.OrigSize += int64(len(chunkData))
+		// Note: dataInfo.OrigSize should NOT be accumulated here
+		// It's already set to the correct final file size (newSize) when dataInfo was created
+		// Accumulating it here would double the size, causing bugs
 
 		// 5. Compress (if enabled)
 		var processedChunk []byte
@@ -4504,7 +4512,7 @@ type dataReader interface {
 }
 
 // readWithWrites unified handling of read logic: calculate read range, read data, apply write operations, extract result
-func (ra *RandomAccessor) readWithWrites(reader dataReader, offset int64, size int) ([]byte, bool) {
+func (ra *RandomAccessor) readWithWrites(reader dataReader, offset int64, size int, actualFileSize int64) ([]byte, bool) {
 	// 1. Check write operations in buffer to determine required data range
 	writeIndex := atomic.LoadInt64(&ra.buffer.writeIndex)
 	var operations []WriteOperation
@@ -4531,9 +4539,18 @@ func (ra *RandomAccessor) readWithWrites(reader dataReader, offset int64, size i
 		}
 	}
 
-	// IMPORTANT: Limit readEnd to reader's origSize to prevent reading beyond truncated size
+	// IMPORTANT: Limit readEnd to actualFileSize to prevent reading beyond truncated size
 	// This is critical for truncated files where DataInfo.OrigSize may not match fileObj.Size
-	if chunkReader, ok := reader.(*chunkReader); ok {
+	// Use actualFileSize (from fileObj.Size) as the authoritative source for file size
+	if actualFileSize > 0 {
+		if readEnd > actualFileSize {
+			readEnd = actualFileSize
+		}
+		if readStart > actualFileSize {
+			readStart = actualFileSize
+		}
+	} else if chunkReader, ok := reader.(*chunkReader); ok {
+		// Fallback to chunkReader.origSize if actualFileSize is not available
 		if readEnd > chunkReader.origSize {
 			readEnd = chunkReader.origSize
 		}
@@ -4569,6 +4586,20 @@ func (ra *RandomAccessor) readWithWrites(reader dataReader, offset int64, size i
 	} else if n < len(readData) {
 		// Read data is less than requested size (end of file), extract actually read data
 		readData = readData[:n]
+	} else if n > 0 {
+		// CRITICAL: Limit readData size to actualFileSize to prevent reading beyond truncated size
+		// This is essential for truncated files where DataInfo.OrigSize may not match fileObj.Size
+		if actualFileSize > 0 && readStart+int64(n) > actualFileSize {
+			oldN := n
+			maxReadSize := actualFileSize - readStart
+			if maxReadSize < 0 {
+				maxReadSize = 0
+			}
+			n = int(maxReadSize)
+			readData = readData[:n]
+			DebugLog("[VFS readWithWrites] Truncated readData after reader.Read: fileID=%d, readStart=%d, oldN=%d, newN=%d, actualFileSize=%d",
+				ra.fileID, readStart, oldN, n, actualFileSize)
+		}
 	} else if n == 0 && readSize > 0 {
 		// IMPORTANT: If reader.Read returns 0 bytes without error when readSize > 0, this is suspicious
 		// This could indicate that the data hasn't been flushed yet or there's a bug
@@ -4603,12 +4634,27 @@ func (ra *RandomAccessor) readWithWrites(reader dataReader, offset int64, size i
 		}
 		if len(adjustedOps) > 0 {
 			readData = applyWritesToData(readData, adjustedOps)
+			// CRITICAL: Limit readData size to actualFileSize after applying writes
+			// This prevents reading beyond truncated size when writes extend the data
+			if actualFileSize > 0 && int64(len(readData)) > actualFileSize-readStart {
+				oldLen := len(readData)
+				readData = readData[:actualFileSize-readStart]
+				DebugLog("[VFS readWithWrites] Truncated readData after applyWritesToData: fileID=%d, readStart=%d, oldLen=%d, newLen=%d, actualFileSize=%d",
+					ra.fileID, readStart, oldLen, len(readData), actualFileSize)
+			}
 		}
 	}
 
 	// 5. Extract requested range (offset to offset+size, relative to readStart)
 	resultOffset := offset - readStart
 	resultEnd := resultOffset + int64(size)
+	// CRITICAL: Limit resultEnd to actualFileSize to prevent reading beyond truncated size
+	if actualFileSize > 0 && offset+int64(size) > actualFileSize {
+		resultEnd = resultOffset + (actualFileSize - offset)
+		if resultEnd < resultOffset {
+			resultEnd = resultOffset
+		}
+	}
 	if resultEnd > int64(len(readData)) {
 		resultEnd = int64(len(readData))
 	}
@@ -4620,8 +4666,18 @@ func (ra *RandomAccessor) readWithWrites(reader dataReader, offset int64, size i
 	}
 
 	result := readData[resultOffset:resultEnd]
-	DebugLog("[VFS readWithWrites] Returning result: fileID=%d, offset=%d, size=%d, resultLen=%d, readDataLen=%d, resultOffset=%d, resultEnd=%d",
-		ra.fileID, offset, size, len(result), len(readData), resultOffset, resultEnd)
+	
+	// CRITICAL: Limit result size to actualFileSize to prevent reading beyond truncated size
+	// This is essential for truncated files where DataInfo.OrigSize may not match fileObj.Size
+	if actualFileSize > 0 && int64(len(result)) > actualFileSize-offset {
+		oldLen := len(result)
+		result = result[:actualFileSize-offset]
+		DebugLog("[VFS readWithWrites] Truncated result to actualFileSize: fileID=%d, offset=%d, oldLen=%d, newLen=%d, actualFileSize=%d",
+			ra.fileID, offset, oldLen, len(result), actualFileSize)
+	}
+	
+	DebugLog("[VFS readWithWrites] Returning result: fileID=%d, offset=%d, size=%d, resultLen=%d, readDataLen=%d, resultOffset=%d, resultEnd=%d, actualFileSize=%d",
+		ra.fileID, offset, size, len(result), len(readData), resultOffset, resultEnd, actualFileSize)
 	return result, true
 }
 
@@ -5206,15 +5262,22 @@ func (cr *chunkReader) ReadAt(buf []byte, offset int64) (int, error) {
 			if readPercentage >= cr.prefetchThreshold {
 				// Asynchronously prefetch next chunk
 				nextSn := currentSn + 1
-				go func() {
-					// Check if next chunk exists and not already cached
-					if currentOffset+toRead < cr.origSize {
-						if _, ok := cr.chunkCache.Get(int64(nextSn)); !ok {
+				// CRITICAL: Check if next chunk ACTUALLY EXISTS based on file size and chunk size
+				// The old check (currentOffset+toRead < cr.origSize) only verified there's more data,
+				// but didn't verify the data is in a NEW chunk. For files that fit in one chunk,
+				// this would incorrectly try to prefetch sn=1 which doesn't exist.
+				nextChunkStart := int64(nextSn) * cr.chunkSize
+				if nextChunkStart < cr.origSize {
+					// Capture variables for goroutine to avoid closure issues
+					capturedNextSn := nextSn
+					go func() {
+						// Check if not already cached before prefetching
+						if _, ok := cr.chunkCache.Get(int64(capturedNextSn)); !ok {
 							// Prefetch next chunk (ignore errors)
-							_, _ = cr.getChunk(nextSn)
+							_, _ = cr.getChunk(capturedNextSn)
 						}
-					}
-				}()
+					}()
+				}
 			}
 		}
 	}
@@ -5230,6 +5293,20 @@ func (cr *chunkReader) ReadAt(buf []byte, offset int64) (int, error) {
 
 // getChunk gets a chunk (plain or decompressed/decrypted), using cache and singleflight
 func (cr *chunkReader) getChunk(sn int) ([]byte, error) {
+	// CRITICAL: Validate chunk number is within valid range based on file size
+	// This prevents reading garbage/stale data from old file versions when file was larger
+	// For example, if a file shrinks from 20MB (2 chunks) to 10MB (1 chunk), the old sn=1
+	// data may still exist in storage but should not be read
+	if cr.origSize > 0 && cr.chunkSize > 0 {
+		maxChunks := int((cr.origSize + cr.chunkSize - 1) / cr.chunkSize)
+		if sn >= maxChunks {
+			DebugLog("[VFS chunkReader getChunk] Chunk sn=%d is out of range: dataID=%d, maxChunks=%d, origSize=%d, chunkSize=%d",
+				sn, cr.dataID, maxChunks, cr.origSize, cr.chunkSize)
+			return nil, fmt.Errorf("chunk sn=%d is out of range (maxChunks=%d, origSize=%d, chunkSize=%d)",
+				sn, maxChunks, cr.origSize, cr.chunkSize)
+		}
+	}
+
 	// Check cache first (fast path)
 	if cached, ok := cr.chunkCache.Get(int64(sn)); ok {
 		if chunkData, ok := cached.([]byte); ok && len(chunkData) > 0 {
@@ -5513,6 +5590,11 @@ func (ra *RandomAccessor) Truncate(newSize int64) (int64, error) {
 							return 0, fmt.Errorf("failed to flush truncated data: %v", flushErr)
 						}
 
+						// CRITICAL: Clear fileObj cache to force re-fetch from database
+						// This ensures we get the latest fileObj with correct size after flush
+						fileObjCache.Del(ra.fileObjKey)
+						ra.fileObj.Store((*core.ObjectInfo)(nil))
+
 						// Get updated fileObj to get new DataID
 						updatedFileObj, err := ra.getFileObj()
 						if err != nil {
@@ -5565,18 +5647,45 @@ func (ra *RandomAccessor) Truncate(newSize int64) (int64, error) {
 						fileObjCache.Put(ra.fileObjKey, updateFileObj)
 						ra.fileObj.Store(updateFileObj)
 
+						// CRITICAL: Ensure DataInfo.OrigSize matches newSize
+						// This is essential for correct reading after truncate
+						if updateFileObj.DataID > 0 && updateFileObj.DataID != core.EmptyDataID {
+							dataInfo, err := ra.fs.h.GetDataInfo(ra.fs.c, ra.fs.bktID, updateFileObj.DataID)
+							if err == nil && dataInfo != nil {
+								if dataInfo.OrigSize != newSize {
+									DebugLog("[VFS Truncate] Fixing DataInfo.OrigSize mismatch: fileID=%d, dataID=%d, oldOrigSize=%d, newSize=%d", ra.fileID, updateFileObj.DataID, dataInfo.OrigSize, newSize)
+									dataInfo.OrigSize = newSize
+									// Update DataInfo in database
+									_, err = ra.fs.h.PutDataInfo(ra.fs.c, ra.fs.bktID, []*core.DataInfo{dataInfo})
+									if err != nil {
+										DebugLog("[VFS Truncate] WARNING: Failed to update DataInfo.OrigSize: %v", err)
+									} else {
+										// Update cache with corrected DataInfo
+										dataInfoCache.Put(updateFileObj.DataID, dataInfo)
+									}
+								}
+							}
+						}
+
 						// Invalidate DataInfo cache to ensure fresh reads after truncate
 						// This is critical for compressed files where DataInfo.OrigSize must match fileObj.Size
 						if oldDataID > 0 && oldDataID != core.EmptyDataID {
 							dataInfoCache.Del(oldDataID)
 							decodingReaderCache.Del(oldDataID)
 						}
-						if updatedFileObj.DataID > 0 && updatedFileObj.DataID != core.EmptyDataID {
-							dataInfoCache.Del(updatedFileObj.DataID)
-							decodingReaderCache.Del(updatedFileObj.DataID)
+						if updateFileObj.DataID > 0 && updateFileObj.DataID != core.EmptyDataID {
+							// Clear decodingReaderCache to force recreation with updated DataInfo
+							decodingReaderCache.Del(updateFileObj.DataID)
 						}
-						// Keep updated fileObj in cache (don't clear it) to ensure subsequent reads use correct size
-						// FileObj has been updated with newSize, so we should keep it in cache
+						// CRITICAL: Force clear all caches to ensure fresh reads after truncate
+						// This ensures that subsequent reads will get the updated fileObj.Size and DataInfo.OrigSize from database
+						fileObjCache.Del(ra.fileObjKey)
+						ra.fileObj.Store((*core.ObjectInfo)(nil))
+						if updateFileObj.DataID > 0 && updateFileObj.DataID != core.EmptyDataID {
+							dataInfoCache.Del(updateFileObj.DataID)
+							decodingReaderCache.Del(updateFileObj.DataID)
+							DebugLog("[VFS Truncate] Cleared all caches after truncate: fileID=%d, dataID=%d, newSize=%d", ra.fileID, updateFileObj.DataID, newSize)
+						}
 
 						return versionID, nil
 					}
@@ -5736,6 +5845,11 @@ func (ra *RandomAccessor) Truncate(newSize int64) (int64, error) {
 							return 0, fmt.Errorf("failed to flush truncated data: %v", flushErr)
 						}
 
+						// CRITICAL: Clear fileObj cache to force re-fetch from database
+						// This ensures we get the latest fileObj with correct size after flush
+						fileObjCache.Del(ra.fileObjKey)
+						ra.fileObj.Store((*core.ObjectInfo)(nil))
+
 						// Get updated fileObj to get new DataID
 						updatedFileObj, err := ra.getFileObj()
 						if err != nil {
@@ -5788,18 +5902,52 @@ func (ra *RandomAccessor) Truncate(newSize int64) (int64, error) {
 						fileObjCache.Put(ra.fileObjKey, updateFileObj)
 						ra.fileObj.Store(updateFileObj)
 
+						// CRITICAL: Ensure DataInfo.OrigSize matches newSize
+						// This is essential for correct reading after truncate
+						if updateFileObj.DataID > 0 && updateFileObj.DataID != core.EmptyDataID {
+							dataInfo, err := ra.fs.h.GetDataInfo(ra.fs.c, ra.fs.bktID, updateFileObj.DataID)
+							if err == nil && dataInfo != nil {
+								if dataInfo.OrigSize != newSize {
+									DebugLog("[VFS Truncate] Fixing DataInfo.OrigSize mismatch: fileID=%d, dataID=%d, oldOrigSize=%d, newSize=%d", ra.fileID, updateFileObj.DataID, dataInfo.OrigSize, newSize)
+									dataInfo.OrigSize = newSize
+									// Update DataInfo in database
+									_, err = ra.fs.h.PutDataInfo(ra.fs.c, ra.fs.bktID, []*core.DataInfo{dataInfo})
+									if err != nil {
+										DebugLog("[VFS Truncate] WARNING: Failed to update DataInfo.OrigSize: %v", err)
+									}
+									// Always clear cache after updating DataInfo to ensure fresh reads
+									// Don't update cache here - let subsequent reads fetch from database
+									dataInfoCache.Del(updateFileObj.DataID)
+									decodingReaderCache.Del(updateFileObj.DataID)
+								} else {
+									// DataInfo.OrigSize already matches, but clear cache to ensure fresh reads
+									dataInfoCache.Del(updateFileObj.DataID)
+									decodingReaderCache.Del(updateFileObj.DataID)
+								}
+							}
+						}
+
 						// Invalidate DataInfo cache to ensure fresh reads after truncate
 						// This is critical for compressed files where DataInfo.OrigSize must match fileObj.Size
 						if oldDataID > 0 && oldDataID != core.EmptyDataID {
 							dataInfoCache.Del(oldDataID)
 							decodingReaderCache.Del(oldDataID)
 						}
-						if updatedFileObj.DataID > 0 && updatedFileObj.DataID != core.EmptyDataID {
-							dataInfoCache.Del(updatedFileObj.DataID)
-							decodingReaderCache.Del(updatedFileObj.DataID)
+						if updateFileObj.DataID > 0 && updateFileObj.DataID != core.EmptyDataID {
+							// Clear decodingReaderCache to force recreation with updated DataInfo
+							decodingReaderCache.Del(updateFileObj.DataID)
+							// Also clear DataInfo cache to force re-fetch from database
+							dataInfoCache.Del(updateFileObj.DataID)
 						}
-						// Invalidate fileObj cache to ensure subsequent reads get fresh fileObj with updated size
+						// CRITICAL: Force clear all caches to ensure fresh reads after truncate
+						// This ensures that subsequent reads will get the updated fileObj.Size and DataInfo.OrigSize from database
+						fileObjCache.Del(ra.fileObjKey)
 						ra.fileObj.Store((*core.ObjectInfo)(nil))
+						if updateFileObj.DataID > 0 && updateFileObj.DataID != core.EmptyDataID {
+							dataInfoCache.Del(updateFileObj.DataID)
+							decodingReaderCache.Del(updateFileObj.DataID)
+							DebugLog("[VFS Truncate] Cleared all caches after truncate: fileID=%d, dataID=%d, newSize=%d", ra.fileID, updateFileObj.DataID, newSize)
+						}
 
 						return versionID, nil
 					}

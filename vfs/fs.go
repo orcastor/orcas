@@ -950,8 +950,8 @@ func (n *OrcasNode) getDirListWithCache(dirID int64) ([]*core.ObjectInfo, syscal
 			if cached, ok := fileObjCache.Get(child.ID); ok {
 				if fileObj, ok := cached.(*core.ObjectInfo); ok && fileObj != nil && fileObj.DataID > 0 {
 					latestFileObj = fileObj
-					DebugLog("[VFS getDirListWithCache] Found in fileObjCache: dirID=%d, fileID=%d, name=%s, size=%d, dataID=%d",
-						dirID, child.ID, child.Name, fileObj.Size, fileObj.DataID)
+					// DebugLog("[VFS getDirListWithCache] Found in fileObjCache: dirID=%d, fileID=%d, name=%s, size=%d, dataID=%d",
+					//	dirID, child.ID, child.Name, fileObj.Size, fileObj.DataID)
 				}
 			}
 
@@ -961,8 +961,8 @@ func (n *OrcasNode) getDirListWithCache(dirID int64) ([]*core.ObjectInfo, syscal
 				if ra := n.fs.getRandomAccessorByFileID(child.ID); ra != nil {
 					if fileObj, err := ra.getFileObj(); err == nil && fileObj != nil && fileObj.DataID > 0 {
 						latestFileObj = fileObj
-						DebugLog("[VFS getDirListWithCache] Found in RandomAccessor: dirID=%d, fileID=%d, name=%s, size=%d, dataID=%d",
-							dirID, child.ID, child.Name, fileObj.Size, fileObj.DataID)
+						// DebugLog("[VFS getDirListWithCache] Found in RandomAccessor: dirID=%d, fileID=%d, name=%s, size=%d, dataID=%d",
+						//	dirID, child.ID, child.Name, fileObj.Size, fileObj.DataID)
 					}
 				}
 			}
@@ -973,8 +973,8 @@ func (n *OrcasNode) getDirListWithCache(dirID int64) ([]*core.ObjectInfo, syscal
 				children[i].DataID = latestFileObj.DataID
 				children[i].Size = latestFileObj.Size
 				children[i].MTime = latestFileObj.MTime
-				DebugLog("[VFS getDirListWithCache] Merged latest data into dir list: dirID=%d, fileID=%d, name=%s, size=%d, mtime=%d",
-					dirID, child.ID, child.Name, latestFileObj.Size, latestFileObj.MTime)
+				// DebugLog("[VFS getDirListWithCache] Merged latest data into dir list: dirID=%d, fileID=%d, name=%s, size=%d, mtime=%d",
+				//	dirID, child.ID, child.Name, latestFileObj.Size, latestFileObj.MTime)
 			}
 		}
 
@@ -5343,4 +5343,10 @@ func (n *OrcasNode) Symlink(ctx context.Context, target, name string, out *fuse.
 	// Default implementation: return ENOTSUP (not supported)
 	DebugLog("[VFS Symlink] ERROR: Not supported: target=%s, name=%s, parentID=%d", target, name, n.objID)
 	return nil, syscall.ENOTSUP
+}
+
+// getOrCreateRandomAccessor creates or retrieves a RandomAccessor for the given file ID
+// This is a helper function to match the Windows implementation
+func getOrCreateRandomAccessor(ofs *OrcasFS, fileID int64) (*RandomAccessor, error) {
+	return NewRandomAccessor(ofs, fileID)
 }
