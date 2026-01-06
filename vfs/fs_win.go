@@ -6,6 +6,7 @@ package vfs
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,6 +14,25 @@ import (
 
 	"github.com/orcastor/orcas/core"
 )
+
+// FileHandle is a mock interface for Windows compatibility
+// In Linux version, this is fs.FileHandle from go-fuse
+type FileHandle interface{}
+
+// FileFsyncer is a mock interface for Windows compatibility
+type FileFsyncer interface {
+	Fsync(ctx context.Context, flags uint32) syscall.Errno
+}
+
+// FileReleaser is a mock interface for Windows compatibility
+type FileReleaser interface {
+	Release(ctx context.Context) syscall.Errno
+}
+
+// FileFlusher is a mock interface for Windows compatibility
+type FileFlusher interface {
+	Flush(ctx context.Context) syscall.Errno
+}
 
 // OrcasNode minimal implementation on Windows (currently only for testing and RandomAccessor API)
 // Dokany support is now implemented for complete filesystem mounting functionality
@@ -1114,4 +1134,412 @@ func (n *OrcasNode) invalidateDirListCache(dirID int64) {
 	readdirCache.Del(dirID)
 	readdirCacheStale.Delete(dirID)
 	DebugLog("[VFS invalidateDirListCache] Invalidated directory cache: dirID=%d", dirID)
+}
+
+// O_LARGEFILE constant for Windows compatibility
+const O_LARGEFILE = 0x8000
+
+// Open opens a file and returns a file handle (mock implementation for Windows)
+// This is a mock implementation that uses RandomAccessor internally
+func (n *OrcasNode) Open(ctx context.Context, flags uint32) (fh FileHandle, fuseFlags uint32, errno syscall.Errno) {
+	DebugLog("[VFS Open] Entry: objID=%d, flags=0x%x", n.objID, flags)
+
+	// Check if KEY is required
+	if errno := n.fs.checkKey(); errno != 0 {
+		DebugLog("[VFS Open] ERROR: checkKey failed: objID=%d, flags=0x%x, errno=%d", n.objID, flags, errno)
+		return nil, 0, errno
+	}
+
+	obj, err := n.getObj()
+	if err != nil {
+		DebugLog("[VFS Open] ERROR: Failed to get object: objID=%d, error=%v, flags=0x%x", n.objID, err, flags)
+		return nil, 0, syscall.ENOENT
+	}
+
+	DebugLog("[VFS Open] Object info: objID=%d, type=%d (FILE=%d, DIR=%d), name=%s, PID=%d, flags=0x%x",
+		obj.ID, obj.Type, core.OBJ_TYPE_FILE, core.OBJ_TYPE_DIR, obj.Name, obj.PID, flags)
+
+	if obj.Type != core.OBJ_TYPE_FILE {
+		DebugLog("[VFS Open] ERROR: Object is not a file (type=%d, expected FILE=%d): objID=%d, name=%s, PID=%d",
+			obj.Type, core.OBJ_TYPE_FILE, obj.ID, obj.Name, obj.PID)
+		return nil, 0, syscall.EISDIR
+	}
+
+	// Check if O_TRUNC is set - if so, truncate file to size 0
+	if flags&syscall.O_TRUNC != 0 {
+		DebugLog("[VFS Open] O_TRUNC flag set, truncating file: fileID=%d", obj.ID)
+		if errno := n.truncateFile(0); errno != 0 {
+			DebugLog("[VFS Open] ERROR: Failed to truncate file: fileID=%d, errno=%d", obj.ID, errno)
+			return nil, 0, errno
+		}
+		// Update object size
+		obj.Size = 0
+		n.obj = obj
+	}
+
+	// Return the node itself as FileHandle (same as Linux version)
+	DebugLog("[VFS Open] Opened file: fileID=%d, flags=0x%x", obj.ID, flags)
+	DebugLog("[VFS Open] Returning FileHandle: fileID=%d, fuseFlags=0x%x, FileHandle type=*vfs.OrcasNode", obj.ID, 0)
+	return n, 0, 0
+}
+
+// getRandomAccessor gets or creates a RandomAccessor for this node (Windows version)
+func (n *OrcasNode) getRandomAccessor() (*RandomAccessor, error) {
+	if n.ra != nil {
+		return n.ra, nil
+	}
+
+	obj, err := n.getObj()
+	if err != nil {
+		return nil, err
+	}
+
+	if obj.Type != core.OBJ_TYPE_FILE {
+		return nil, fmt.Errorf("object is not a file")
+	}
+
+	// Create new RandomAccessor
+	ra, err := NewRandomAccessor(n.fs, obj.ID)
+	if err != nil {
+		return nil, err
+	}
+
+	n.ra = ra
+	return ra, nil
+}
+
+// Write writes data to the file at the specified offset (mock implementation for Windows)
+func (n *OrcasNode) Write(ctx context.Context, data []byte, off int64) (written uint32, errno syscall.Errno) {
+	DebugLog("[VFS Write] Write called: objID=%d, offset=%d, size=%d", n.objID, off, len(data))
+
+	// Check if KEY is required
+	if errno := n.fs.checkKey(); errno != 0 {
+		DebugLog("[VFS Write] ERROR: checkKey failed: objID=%d, errno=%d", n.objID, errno)
+		return 0, errno
+	}
+
+	obj, err := n.getObj()
+	if err != nil {
+		DebugLog("[VFS Write] ERROR: Failed to get object: objID=%d, error=%v", n.objID, err)
+		return 0, syscall.ENOENT
+	}
+
+	DebugLog("[VFS Write] Object info: objID=%d, type=%d (FILE=%d, DIR=%d), name=%s, PID=%d",
+		obj.ID, obj.Type, core.OBJ_TYPE_FILE, core.OBJ_TYPE_DIR, obj.Name, obj.PID)
+
+	if obj.Type != core.OBJ_TYPE_FILE {
+		DebugLog("[VFS Write] ERROR: Object is not a file (type=%d, expected FILE=%d): objID=%d, name=%s, PID=%d",
+			obj.Type, core.OBJ_TYPE_FILE, obj.ID, obj.Name, obj.PID)
+		return 0, syscall.EISDIR
+	}
+
+	// Get or create RandomAccessor
+	ra, err := n.getRandomAccessor()
+	if err != nil {
+		DebugLog("[VFS Write] ERROR: Failed to get RandomAccessor for file objID=%d: %v", obj.ID, err)
+		return 0, syscall.EIO
+	}
+
+	// Write data
+	DebugLog("[VFS Write] Writing data: fileID=%d, offset=%d, size=%d", obj.ID, off, len(data))
+	err = ra.Write(off, data)
+	if err != nil {
+		DebugLog("[VFS Write] ERROR: Failed to write data: fileID=%d, offset=%d, size=%d, error=%v", obj.ID, off, len(data), err)
+		return 0, syscall.EIO
+	}
+
+	// Invalidate object cache
+	n.invalidateObj()
+
+	DebugLog("[VFS Write] Successfully wrote data: fileID=%d, offset=%d, size=%d, written=%d", obj.ID, off, len(data), len(data))
+	return uint32(len(data)), 0
+}
+
+// Fsync flushes file data to storage (mock implementation for Windows)
+func (n *OrcasNode) Fsync(ctx context.Context, f FileHandle, flags uint32) syscall.Errno {
+	DebugLog("[VFS Fsync] Entry: objID=%d, FileHandle=%v, flags=0x%x", n.objID, f, flags)
+
+	// Forward to FileHandle if it implements FileFsyncer
+	if f != nil {
+		if fileFsyncer, ok := f.(FileFsyncer); ok {
+			errno := fileFsyncer.Fsync(ctx, flags)
+			DebugLog("[VFS Fsync] Forwarded to FileHandle: objID=%d, errno=%d", n.objID, errno)
+			return errno
+		}
+	}
+
+	// Otherwise use our own implementation
+	return n.fsyncImpl(ctx, flags)
+}
+
+// fsyncImpl is the actual fsync implementation
+func (n *OrcasNode) fsyncImpl(ctx context.Context, flags uint32) syscall.Errno {
+	DebugLog("[VFS fsyncImpl] Entry: objID=%d, flags=0x%x", n.objID, flags)
+
+	// Flush RandomAccessor first
+	if errno := n.Flush(ctx, nil); errno != 0 {
+		DebugLog("[VFS Fsync] ERROR: Flush failed: objID=%d, flags=0x%x, errno=%d", n.objID, flags, errno)
+		return errno
+	}
+
+	// Flush object cache
+	n.invalidateObj()
+	return 0
+}
+
+// Release releases the file handle (mock implementation for Windows)
+func (n *OrcasNode) Release(ctx context.Context, f FileHandle) syscall.Errno {
+	DebugLog("[VFS Release] Entry: objID=%d, FileHandle=%v", n.objID, f)
+
+	// Forward to FileHandle if it implements FileReleaser
+	if f != nil {
+		if fileReleaser, ok := f.(FileReleaser); ok {
+			errno := fileReleaser.Release(ctx)
+			DebugLog("[VFS Release] Forwarded to FileHandle: objID=%d, errno=%d", n.objID, errno)
+			return errno
+		}
+	}
+
+	// Otherwise use our own implementation
+	return n.releaseImpl(ctx)
+}
+
+// releaseImpl is the actual release implementation
+func (n *OrcasNode) releaseImpl(ctx context.Context) syscall.Errno {
+	DebugLog("[VFS releaseImpl] Entry: objID=%d", n.objID)
+
+	if !n.isRoot {
+		if errno := n.fs.checkKey(); errno != 0 {
+			return errno
+		}
+	}
+
+	// Flush RandomAccessor before release
+	if n.ra != nil {
+		_, err := n.ra.Flush()
+		if err != nil {
+			DebugLog("[VFS Release] ERROR: Failed to flush RandomAccessor: objID=%d, error=%v", n.objID, err)
+			return syscall.EIO
+		}
+	}
+
+	// Clear RandomAccessor reference (but don't close it, as it may be reused)
+	// In Windows version, we just clear the reference
+	n.ra = nil
+
+	DebugLog("[VFS Release] Successfully released file: objID=%d", n.objID)
+	return 0
+}
+
+// truncateFile truncates the file to the specified size (helper method)
+func (n *OrcasNode) truncateFile(size int64) syscall.Errno {
+	obj, err := n.getObj()
+	if err != nil {
+		return syscall.ENOENT
+	}
+
+	if obj.Type != core.OBJ_TYPE_FILE {
+		return syscall.EISDIR
+	}
+
+	// Get or create RandomAccessor
+	_, err = n.getRandomAccessor()
+	if err != nil {
+		return syscall.EIO
+	}
+
+	// Truncate by writing empty data or using Setattr
+	// For simplicity, we'll use Setattr via updating the object
+	// In a real implementation, we might need to handle this differently
+	obj.Size = size
+	n.obj = obj
+
+	// If RandomAccessor exists, we might need to clear its buffers
+	// For now, just update the object size
+	return 0
+}
+
+// Flush flushes file data (Windows version)
+func (n *OrcasNode) Flush(ctx context.Context, f FileHandle) syscall.Errno {
+	DebugLog("[VFS Flush] Entry: objID=%d, FileHandle=%v", n.objID, f)
+
+	// Forward to FileHandle if it implements FileFlusher
+	if f != nil {
+		if fileFlusher, ok := f.(FileFlusher); ok {
+			errno := fileFlusher.Flush(ctx)
+			DebugLog("[VFS Flush] Forwarded to FileHandle: objID=%d, errno=%d", n.objID, errno)
+			return errno
+		}
+	}
+
+	// Otherwise use our own implementation
+	return n.flushImpl(ctx)
+}
+
+// flushImpl is the actual flush implementation
+func (n *OrcasNode) flushImpl(ctx context.Context) syscall.Errno {
+	DebugLog("[VFS flushImpl] Entry: objID=%d", n.objID)
+
+	if errno := n.fs.checkKey(); errno != 0 {
+		DebugLog("[VFS Flush] ERROR: checkKey failed: objID=%d, errno=%d", n.objID, errno)
+		return errno
+	}
+
+	if n.ra == nil {
+		return 0
+	}
+
+	// Execute Flush
+	obj, err := n.getObj()
+	if err == nil && obj != nil {
+		DebugLog("[VFS Flush] Flushing file: fileID=%d, currentSize=%d", obj.ID, obj.Size)
+	}
+
+	versionID, err := n.ra.Flush()
+	if err != nil {
+		fileID := n.objID
+		if obj != nil {
+			fileID = obj.ID
+		}
+		DebugLog("[VFS Flush] ERROR: Failed to flush file: fileID=%d, error=%v", fileID, err)
+		return syscall.EIO
+	}
+
+	// Get updated object from RandomAccessor's cache
+	var updatedObj *core.ObjectInfo
+	if cachedObj := n.ra.fileObj.Load(); cachedObj != nil {
+		if loadedObj, ok := cachedObj.(*core.ObjectInfo); ok && loadedObj != nil {
+			updatedObj = loadedObj
+			DebugLog("[VFS Flush] Got updated object from RandomAccessor cache: fileID=%d, size=%d, dataID=%d, mtime=%d",
+				updatedObj.ID, updatedObj.Size, updatedObj.DataID, updatedObj.MTime)
+		}
+	}
+
+	// Update local cache
+	if updatedObj != nil {
+		n.obj = updatedObj
+		DebugLog("[VFS Flush] Updated file object cache: fileID=%d, size=%d, dataID=%d, mtime=%d",
+			updatedObj.ID, updatedObj.Size, updatedObj.DataID, updatedObj.MTime)
+	}
+
+	DebugLog("[VFS Flush] Successfully flushed file: fileID=%d, versionID=%d", n.objID, versionID)
+	return 0
+}
+
+// readResultWrapper wraps byte slice as io.Reader for Windows compatibility
+type readResultWrapper struct {
+	data []byte
+	pos  int
+}
+
+func (r *readResultWrapper) Read(p []byte) (n int, err error) {
+	if r.pos >= len(r.data) {
+		return 0, io.EOF
+	}
+	n = copy(p, r.data[r.pos:])
+	r.pos += n
+	if r.pos >= len(r.data) {
+		return n, io.EOF
+	}
+	return n, nil
+}
+
+// Read reads data from the file at the specified offset (mock implementation for Windows)
+func (n *OrcasNode) Read(ctx context.Context, dest []byte, off int64) (io.Reader, syscall.Errno) {
+	DebugLog("[VFS Read] Entry: objID=%d, offset=%d, size=%d", n.objID, off, len(dest))
+
+	// Check if KEY is required
+	if errno := n.fs.checkKey(); errno != 0 {
+		DebugLog("[VFS Read] ERROR: checkKey failed: objID=%d, offset=%d, size=%d, errno=%d", n.objID, off, len(dest), errno)
+		return nil, errno
+	}
+
+	// Force refresh object cache to get latest DataID (important after writes)
+	n.invalidateObj()
+
+	obj, err := n.getObj()
+	if err != nil {
+		DebugLog("[VFS Read] ERROR: Failed to get object: objID=%d, offset=%d, size=%d, error=%v", n.objID, off, len(dest), err)
+		return nil, syscall.ENOENT
+	}
+
+	if obj.Type != core.OBJ_TYPE_FILE {
+		DebugLog("[VFS Read] ERROR: Object is not a file: objID=%d, type=%d, offset=%d, size=%d", n.objID, obj.Type, off, len(dest))
+		return nil, syscall.EISDIR
+	}
+
+	if obj.DataID == 0 || obj.DataID == core.EmptyDataID {
+		// Empty file
+		return &readResultWrapper{data: nil}, 0
+	}
+
+	// Check if there's an active RandomAccessor with journal
+	if n.fs != nil {
+		if ra := n.fs.getRandomAccessorByFileID(obj.ID); ra != nil {
+			ra.journalMu.RLock()
+			hasJournal := ra.journal != nil
+			ra.journalMu.RUnlock()
+
+			if hasJournal {
+				DebugLog("[VFS Read] Using RandomAccessor with journal: objID=%d, offset=%d, size=%d", obj.ID, off, len(dest))
+				data, err := ra.Read(off, len(dest))
+				if err != nil && err != io.EOF {
+					DebugLog("[VFS Read] ERROR: RandomAccessor read failed: objID=%d, offset=%d, size=%d, error=%v", obj.ID, off, len(dest), err)
+					return nil, syscall.EIO
+				}
+				// Return data as ReadResult wrapper
+				return &readResultWrapper{data: data}, 0
+			}
+		}
+	}
+
+	// Use DataReader for reading
+	dataReader, errno := n.getDataReader(off)
+	if errno != 0 {
+		DebugLog("[VFS Read] ERROR: Failed to get DataReader: objID=%d, offset=%d, size=%d, errno=%d", n.objID, off, len(dest), errno)
+		return nil, errno
+	}
+
+	// Read data using dataReader interface
+	nRead, err := dataReader.Read(dest, off)
+	if err != nil && err != io.EOF {
+		DebugLog("[VFS Read] ERROR: DataReader read failed: objID=%d, offset=%d, size=%d, error=%v", n.objID, off, len(dest), err)
+		return nil, syscall.EIO
+	}
+
+	// Create a copy of the data (required for FUSE compatibility)
+	resultData := make([]byte, nRead)
+	copy(resultData, dest[:nRead])
+	return &readResultWrapper{data: resultData}, 0
+}
+
+// getDataReader gets or creates DataReader (Windows version)
+func (n *OrcasNode) getDataReader(offset int64) (dataReader, syscall.Errno) {
+	obj, err := n.getObj()
+	if err != nil {
+		return nil, syscall.ENOENT
+	}
+
+	if obj.DataID == 0 || obj.DataID == core.EmptyDataID {
+		return nil, syscall.EIO
+	}
+
+	// Get DataInfo
+	dataInfo, err := n.fs.h.GetDataInfo(n.fs.c, n.fs.bktID, obj.DataID)
+	if err != nil {
+		return nil, syscall.EIO
+	}
+	if dataInfo == nil {
+		return nil, syscall.EIO
+	}
+
+	// Get chunk size
+	chunkSize := n.fs.chunkSize
+	if chunkSize <= 0 {
+		chunkSize = 10 << 20 // Default 10MB
+	}
+
+	// Create chunk reader
+	reader := newChunkReader(n.fs.c, n.fs.h, n.fs.bktID, dataInfo, n.fs.EndecKey, chunkSize)
+	return reader, 0
 }

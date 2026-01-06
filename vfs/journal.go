@@ -1709,14 +1709,43 @@ func (j *Journal) readBaseData(offset, length int64) ([]byte, error) {
 	// Read chunks and assemble result
 	result := make([]byte, 0, length)
 	for sn := startChunk; sn <= endChunk; sn++ {
-		chunkData, err := j.fs.h.GetData(j.fs.c, j.fs.bktID, j.dataID, sn)
+		rawChunk, err := j.fs.h.GetData(j.fs.c, j.fs.bktID, j.dataID, sn)
 		if err != nil {
 			// If chunk doesn't exist for sparse file, fill with zeros
 			if dataInfo.Kind&core.DATA_SPARSE != 0 {
-				chunkData = make([]byte, chunkSize)
+				chunkData := make([]byte, chunkSize)
+				// Calculate the range within this chunk that we need
+				chunkStart := int64(sn) * chunkSize
+				chunkEnd := chunkStart + int64(len(chunkData))
+
+				// Calculate the overlap with our requested range
+				readStart := offset
+				if readStart < chunkStart {
+					readStart = chunkStart
+				}
+
+				readEnd := offset + length
+				if readEnd > chunkEnd {
+					readEnd = chunkEnd
+				}
+
+				if readStart < readEnd {
+					// Extract the relevant portion from this chunk
+					startInChunk := readStart - chunkStart
+					endInChunk := readEnd - chunkStart
+					result = append(result, chunkData[startInChunk:endInChunk]...)
+				}
+				continue
 			} else {
 				return nil, fmt.Errorf("failed to read chunk %d: %w", sn, err)
 			}
+		}
+
+		// CRITICAL: Decrypt and decompress the raw chunk data
+		// Use UnprocessData to handle encryption/compression (same as RandomAccessor.readBaseData)
+		chunkData, err := core.UnprocessData(rawChunk, dataInfo.Kind, j.fs.EndecKey)
+		if err != nil {
+			return nil, fmt.Errorf("failed to unprocess chunk %d: %w", sn, err)
 		}
 
 		// Calculate the range within this chunk that we need

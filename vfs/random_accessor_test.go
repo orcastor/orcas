@@ -4866,6 +4866,7 @@ func TestVFSWriteAppendAndPrepend(t *testing.T) {
 
 		// Step 1: Open file (O_RDWR flag)
 		ctx := context.Background()
+		const O_LARGEFILE = 0x8000
 		fh, flags, errno := fileNode.Open(ctx, syscall.O_RDWR|O_LARGEFILE)
 		So(errno, ShouldEqual, syscall.Errno(0))
 		So(fh, ShouldNotBeNil)
