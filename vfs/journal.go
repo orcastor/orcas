@@ -1504,6 +1504,22 @@ func (j *Journal) flushLargeFileChunked(newSize int64) (int64, int64, error) {
 		return 0, 0, fmt.Errorf("failed to get DataAdapter")
 	}
 
+	// Determine if compression/encryption is needed BEFORE writing chunks
+	needsCompress := j.fs.CmprWay > 0 && core.ShouldCompressFileByName(fileObj[0].Name)
+	needsEncrypt := j.fs.EndecWay > 0 && j.fs.EndecKey != ""
+
+	// Prepare kind for ProcessData (will be modified by ProcessData if compression is ineffective)
+	processKind := core.DATA_NORMAL
+	if needsCompress && j.fs.CmprWay > 0 {
+		processKind |= j.fs.CmprWay
+	}
+	if needsEncrypt && j.fs.EndecWay > 0 {
+		processKind |= j.fs.EndecWay
+	}
+
+	DebugLog("[Journal flushLargeFileChunked] Processing config: needsCompress=%v, needsEncrypt=%v, processKind=0x%x, endecKey length=%d",
+		needsCompress, needsEncrypt, processKind, len(j.fs.EndecKey))
+
 	// 3. Process each modified chunk
 	for chunkIdx := range modifiedChunks {
 		chunkOffset := int64(chunkIdx) * chunkSize
@@ -1518,6 +1534,19 @@ func (j *Journal) flushLargeFileChunked(newSize int64) (int64, int64, error) {
 			return 0, 0, fmt.Errorf("failed to generate chunk %d data: %w", chunkIdx, err)
 		}
 
+		// CRITICAL: Process chunk data (compress + encrypt) before writing
+		// This is the fix for the decryption error - data must be processed before storage
+		if needsCompress || needsEncrypt {
+			chunkKind := processKind // Copy kind for each chunk (ProcessData may modify it)
+			processedChunk, procErr := core.ProcessData(chunkData, &chunkKind, j.fs.CmprQlty, j.fs.EndecKey, chunkIdx == 0)
+			if procErr != nil {
+				return 0, 0, fmt.Errorf("failed to process chunk %d: %w", chunkIdx, procErr)
+			}
+			chunkData = processedChunk
+			DebugLog("[Journal flushLargeFileChunked] Processed chunk %d: original=%d, processed=%d, kind=0x%x",
+				chunkIdx, chunkLength, len(chunkData), chunkKind)
+		}
+
 		// Write chunk to new DataID
 		if err := da.Write(j.fs.c, j.fs.bktID, newDataID, chunkIdx, chunkData); err != nil {
 			return 0, 0, fmt.Errorf("failed to write chunk %d: %w", chunkIdx, err)
@@ -1529,6 +1558,9 @@ func (j *Journal) flushLargeFileChunked(newSize int64) (int64, int64, error) {
 
 	// 4. For unmodified chunks, copy reference from original DataID
 	// This implements Copy-on-Write at chunk level
+	// NOTE: For unmodified chunks from encrypted files, we need to:
+	// 1. Read the encrypted chunk data directly (not decrypted)
+	// 2. Write it as-is to maintain encryption consistency
 	if j.dataID > 0 && j.dataID != core.EmptyDataID {
 		for chunkIdx := 0; chunkIdx < totalChunks; chunkIdx++ {
 			if modifiedChunks[chunkIdx] {
@@ -1544,25 +1576,67 @@ func (j *Journal) flushLargeFileChunked(newSize int64) (int64, int64, error) {
 				continue // Beyond original file size
 			}
 
-			// Read chunk from original DataID
-			originalChunkData, err := j.fs.h.GetData(j.fs.c, j.fs.bktID, j.dataID, chunkIdx)
+			// Read raw chunk from original DataID (encrypted data if original was encrypted)
+			// NOTE: GetData returns encrypted data, we need to decrypt then re-encrypt for consistency
+			// OR we could copy raw bytes if encryption settings are the same
+
+			// Get original DataInfo to check if it was encrypted
+			originalDataInfo, err := lh.GetDataInfo(j.fs.c, j.fs.bktID, j.dataID)
 			if err != nil {
-				// If can't read (sparse or missing), write zeros
-				originalChunkData = make([]byte, chunkLength)
+				return 0, 0, fmt.Errorf("failed to get original DataInfo: %w", err)
+			}
+
+			// Read raw encrypted chunk data directly using DataAdapter
+			rawChunkData, err := da.Read(j.fs.c, j.fs.bktID, j.dataID, chunkIdx)
+			if err != nil {
+				// If can't read (sparse or missing), create zero data and process it
+				rawChunkData = make([]byte, chunkLength)
+				if needsCompress || needsEncrypt {
+					chunkKind := processKind
+					processedChunk, procErr := core.ProcessData(rawChunkData, &chunkKind, j.fs.CmprQlty, j.fs.EndecKey, false)
+					if procErr != nil {
+						return 0, 0, fmt.Errorf("failed to process zero chunk %d: %w", chunkIdx, procErr)
+					}
+					rawChunkData = processedChunk
+				}
+			} else {
+				// If original was encrypted with same settings, copy as-is
+				// Otherwise, decrypt and re-encrypt
+				originalEncrypted := originalDataInfo.Kind&core.DATA_ENDEC_MASK != 0
+				if originalEncrypted && needsEncrypt {
+					// Same encryption, copy raw data as-is
+					DebugLog("[Journal flushLargeFileChunked] Copying encrypted chunk %d as-is", chunkIdx)
+				} else if originalEncrypted && !needsEncrypt {
+					// Original was encrypted but new doesn't need encryption - decrypt it
+					decrypted, decErr := core.UnprocessData(rawChunkData, originalDataInfo.Kind, j.fs.EndecKey)
+					if decErr != nil {
+						return 0, 0, fmt.Errorf("failed to decrypt original chunk %d: %w", chunkIdx, decErr)
+					}
+					rawChunkData = decrypted
+				} else if !originalEncrypted && needsEncrypt {
+					// Original was not encrypted but new needs encryption - encrypt it
+					chunkKind := processKind
+					processedChunk, procErr := core.ProcessData(rawChunkData, &chunkKind, j.fs.CmprQlty, j.fs.EndecKey, false)
+					if procErr != nil {
+						return 0, 0, fmt.Errorf("failed to encrypt unmodified chunk %d: %w", chunkIdx, procErr)
+					}
+					rawChunkData = processedChunk
+				}
+				// If neither was encrypted, copy as-is
 			}
 
 			// Write to new DataID (Copy-on-Write)
-			if err := da.Write(j.fs.c, j.fs.bktID, newDataID, chunkIdx, originalChunkData); err != nil {
+			if err := da.Write(j.fs.c, j.fs.bktID, newDataID, chunkIdx, rawChunkData); err != nil {
 				return 0, 0, fmt.Errorf("failed to copy chunk %d: %w", chunkIdx, err)
 			}
 		}
 	}
 
-	// 5. Prepare DataInfo
+	// 5. Prepare DataInfo (use the processKind determined earlier)
 	dataInfo := &core.DataInfo{
 		ID:       newDataID,
 		OrigSize: newSize,
-		Kind:     core.DATA_NORMAL,
+		Kind:     processKind, // Use the same kind used for processing chunks
 	}
 
 	// Mark as sparse if this is a sparse file
@@ -1572,19 +1646,8 @@ func (j *Journal) flushLargeFileChunked(newSize int64) (int64, int64, error) {
 			j.virtualSize, newSize)
 	}
 
-	// Determine if compression/encryption is needed
-	needsCompress := j.fs.CmprWay > 0 && core.ShouldCompressFileByName(fileObj[0].Name)
-	needsEncrypt := j.fs.EndecWay > 0 && j.fs.EndecKey != ""
-
-	// Set compression kind based on VFS config
-	if needsCompress && j.fs.CmprWay > 0 {
-		dataInfo.Kind |= j.fs.CmprWay
-	}
-
-	// Set encryption kind if needed
-	if needsEncrypt && j.fs.EndecWay > 0 {
-		dataInfo.Kind |= j.fs.EndecWay
-	}
+	DebugLog("[Journal flushLargeFileChunked] DataInfo prepared: Kind=0x%x, needsCompress=%v, needsEncrypt=%v",
+		dataInfo.Kind, needsCompress, needsEncrypt)
 
 	// Calculate hash for the entire file
 	// Note: For chunked flush, we need to read all chunks to calculate hash
@@ -1786,7 +1849,7 @@ func (j *Journal) readBaseData(offset, length int64) ([]byte, error) {
 					endInChunk := readEnd - chunkStart
 					result = append(result, chunkData[startInChunk:endInChunk]...)
 				}
-				DebugLog("[Journal readBaseData] Chunk %d doesn't exist (sparse=%v, beyondBaseSize=%v), filling with zeros: fileID=%d, chunkStart=%d, baseSize=%d", 
+				DebugLog("[Journal readBaseData] Chunk %d doesn't exist (sparse=%v, beyondBaseSize=%v), filling with zeros: fileID=%d, chunkStart=%d, baseSize=%d",
 					sn, dataInfo.Kind&core.DATA_SPARSE != 0, isBeyondBaseSize, j.fileID, chunkStart, j.baseSize)
 				continue
 			} else {

@@ -5635,6 +5635,20 @@ func (ra *RandomAccessor) Truncate(newSize int64) (int64, error) {
 						if ra.seqBuffer != nil {
 							ra.seqBuffer = nil
 						}
+						
+						// CRITICAL: Remove existing journal before writing truncated data
+						// This ensures journal.baseSize doesn't carry over the old (larger) size
+						// which would cause flushSmallFile to use the wrong size
+						ra.fs.journalMgr.Remove(ra.fileID)
+						DebugLog("[VFS Truncate] Removed existing journal before writing truncated data: fileID=%d", ra.fileID)
+						
+						// CRITICAL: Update fileObj.Size to newSize BEFORE writing truncated data
+						// This ensures that getOrCreateJournal uses the new (smaller) size as baseSize
+						// Without this, the new journal would use the old (larger) size
+						fileObj.Size = newSize
+						fileObjCache.Put(ra.fileObjKey, fileObj)
+						ra.fileObj.Store(fileObj)
+						DebugLog("[VFS Truncate] Updated fileObj.Size to %d before writing truncated data: fileID=%d", newSize, ra.fileID)
 
 						// Write truncated data (will be compressed/encrypted if needed)
 						if err := ra.Write(0, readData); err != nil {
@@ -5890,6 +5904,20 @@ func (ra *RandomAccessor) Truncate(newSize int64) (int64, error) {
 						if ra.seqBuffer != nil {
 							ra.seqBuffer = nil
 						}
+						
+						// CRITICAL: Remove existing journal before writing truncated data
+						// This ensures journal.baseSize doesn't carry over the old (larger) size
+						// which would cause flushSmallFile to use the wrong size
+						ra.fs.journalMgr.Remove(ra.fileID)
+						DebugLog("[VFS Truncate] Removed existing journal before writing truncated data: fileID=%d", ra.fileID)
+						
+						// CRITICAL: Update fileObj.Size to newSize BEFORE writing truncated data
+						// This ensures that getOrCreateJournal uses the new (smaller) size as baseSize
+						// Without this, the new journal would use the old (larger) size
+						fileObj.Size = newSize
+						fileObjCache.Put(ra.fileObjKey, fileObj)
+						ra.fileObj.Store(fileObj)
+						DebugLog("[VFS Truncate] Updated fileObj.Size to %d before writing truncated data: fileID=%d", newSize, ra.fileID)
 
 						// Write truncated data (will be compressed/encrypted if needed)
 						if err := ra.Write(0, readData); err != nil {

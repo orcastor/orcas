@@ -6377,3 +6377,484 @@ func TestLogBasedReadWritePatternWithNode(t *testing.T) {
 	t.Logf("   Final size: %d bytes", fileObj.Size)
 	t.Logf("   Size increase: %d bytes", fileObj.Size-initialSize)
 }
+
+// TestJournalDecryptionErrorOnSecondFlush reproduces the exact scenario from the logs
+// where a second flush fails to decrypt chunk 1 when reading base data
+//
+// Usage:
+//   # Run test without debug logs
+//   go test -v -run TestJournalDecryptionErrorOnSecondFlush ./vfs
+//
+//   # Run test with debug logs (recommended for debugging)
+//   ORCAS_DEBUG=1 go test -v -run TestJournalDecryptionErrorOnSecondFlush ./vfs
+//
+//   # The ORCAS_DEBUG environment variable enables detailed VFS debug logging:
+//   # - Journal operations (write, flush, read)
+//   # - RandomAccessor operations
+//   # - Chunk read/write operations
+//   # - Encryption/decryption operations
+//   # - File object updates
+func TestJournalDecryptionErrorOnSecondFlush(t *testing.T) {
+	// Enable debug logging for this test if ORCAS_DEBUG is set
+	if os.Getenv("ORCAS_DEBUG") != "" && os.Getenv("ORCAS_DEBUG") != "0" {
+		SetDebugEnabled(true)
+		t.Logf("Debug logging enabled via ORCAS_DEBUG environment variable")
+	}
+
+	testDir := filepath.Join(os.TempDir(), "orcas_journal_test_decrypt_error")
+	defer cleanupTestDir(t, testDir)
+
+	// Setup filesystem with encryption enabled (as in the logs)
+	fs, bktID := setupTestFSWithEncryption(t, testDir, "test-encryption-key-32-bytes-long!!", 0)
+	defer cleanupFS(fs)
+
+	// Set chunk size to match the logs (10MB)
+	fs.chunkSize = 10 << 20
+
+	fileName := "xxxx.ppt"
+	fileID, err := createTestFile(t, fs, bktID, fileName)
+	if err != nil {
+		t.Fatalf("Failed to create test file: %v", err)
+	}
+
+	ra, err := getOrCreateRandomAccessor(fs, fileID)
+	if err != nil {
+		t.Fatalf("Failed to get RandomAccessor: %v", err)
+	}
+	defer ra.Close()
+
+	// Step 1: Create initial file with size 11575808 bytes (matching logs)
+	// This file has 2 chunks: chunk 0 (10485760 bytes) and chunk 1 (1090048 bytes)
+	fileSize := int64(11575808)
+	chunk0Size := int64(10485760)  // 10MB
+	chunk1Size := fileSize - chunk0Size // 1090048 bytes
+
+	// Write initial data to create the base file
+	// Write chunk 0 data
+	chunk0Data := make([]byte, chunk0Size)
+	for i := range chunk0Data {
+		chunk0Data[i] = byte(i % 256)
+	}
+	err = ra.Write(0, chunk0Data)
+	if err != nil {
+		t.Fatalf("Failed to write chunk 0: %v", err)
+	}
+
+	// Write chunk 1 data
+	chunk1Data := make([]byte, chunk1Size)
+	for i := range chunk1Data {
+		chunk1Data[i] = byte((i + 1000) % 256)
+	}
+	err = ra.Write(chunk0Size, chunk1Data)
+	if err != nil {
+		t.Fatalf("Failed to write chunk 1: %v", err)
+	}
+
+	// Flush to create base data
+	_, err = ra.Flush()
+	if err != nil {
+		t.Fatalf("Failed to flush initial data: %v", err)
+	}
+
+	// Step 2: Perform read operations matching the logs
+	// Read from offset 0, size 131072
+	readBuf, err := ra.Read(0, 131072)
+	if err != nil {
+		t.Fatalf("Failed to read at offset 0: %v", err)
+	}
+	if len(readBuf) != 131072 {
+		t.Fatalf("Read size mismatch: got %d, want %d", len(readBuf), 131072)
+	}
+	// Verify data matches
+	for i := 0; i < 131072; i++ {
+		if readBuf[i] != byte(i%256) {
+			t.Errorf("Data mismatch at position %d: got %d, want %d", i, readBuf[i], byte(i%256))
+			break
+		}
+	}
+
+	// Read from offset 11513856, size 65536 (this is in chunk 1)
+	// Note: file size is 11575808, so offset 11513856 + 65536 = 11579392 > 11575808
+	// So we can only read up to 11575808 - 11513856 = 61952 bytes
+	readSize := int(fileSize - 11513856)
+	if readSize > 65536 {
+		readSize = 65536
+	}
+	readBuf, err = ra.Read(11513856, readSize)
+	if err != nil {
+		t.Fatalf("Failed to read at offset 11513856: %v", err)
+	}
+	if len(readBuf) != readSize {
+		t.Fatalf("Read size mismatch: got %d, want %d", len(readBuf), readSize)
+	}
+
+	// Step 3: First write operation at offset 11571200, size 4608
+	write1Data := make([]byte, 4608)
+	for i := range write1Data {
+		write1Data[i] = byte((i + 2000) % 256)
+	}
+	err = ra.Write(11571200, write1Data)
+	if err != nil {
+		t.Fatalf("Failed to write at offset 11571200 (first write): %v", err)
+	}
+
+	// Step 4: First flush (this should succeed)
+	t.Logf("\n[DEBUG] Before first flush:")
+	fileObj, err := fs.h.Get(fs.c, bktID, []int64{fileID})
+	if err == nil && len(fileObj) > 0 {
+		t.Logf("  File state: fileID=%d, dataID=%d, size=%d", fileID, fileObj[0].DataID, fileObj[0].Size)
+	}
+	
+	_, err = ra.Flush()
+	if err != nil {
+		t.Fatalf("Failed to flush after first write: %v", err)
+	}
+	
+	t.Logf("[DEBUG] After first flush:")
+	fileObj, err = fs.h.Get(fs.c, bktID, []int64{fileID})
+	if err == nil && len(fileObj) > 0 {
+		t.Logf("  File state: fileID=%d, dataID=%d, size=%d", fileID, fileObj[0].DataID, fileObj[0].Size)
+		firstFlushDataID := fileObj[0].DataID
+		t.Logf("  First flush created new dataID: %d", firstFlushDataID)
+	}
+
+	// Step 5: Second write operation at offset 11571200, size 4096 (overlapping with first write)
+	write2Data := make([]byte, 4096)
+	for i := range write2Data {
+		write2Data[i] = byte((i + 3000) % 256)
+	}
+	err = ra.Write(11571200, write2Data)
+	if err != nil {
+		t.Fatalf("Failed to write at offset 11571200 (second write): %v", err)
+	}
+
+	// Step 6: Second flush (this is where the decryption error occurs in the logs)
+	t.Logf("\n[DEBUG] Before second flush:")
+	fileObj, err = fs.h.Get(fs.c, bktID, []int64{fileID})
+	if err == nil && len(fileObj) > 0 {
+		t.Logf("  File state: fileID=%d, dataID=%d, size=%d", fileID, fileObj[0].DataID, fileObj[0].Size)
+		baseDataID := fileObj[0].DataID
+		t.Logf("  Base dataID (from first flush): %d", baseDataID)
+		t.Logf("  This dataID will be used by generateChunkData to read base data")
+	}
+	
+	_, err = ra.Flush()
+	if err != nil {
+		t.Fatalf("Failed to flush after second write: %v", err)
+	}
+	
+	t.Logf("[DEBUG] After second flush:")
+	fileObj, err = fs.h.Get(fs.c, bktID, []int64{fileID})
+	if err == nil && len(fileObj) > 0 {
+		t.Logf("  File state: fileID=%d, dataID=%d, size=%d", fileID, fileObj[0].DataID, fileObj[0].Size)
+		secondFlushDataID := fileObj[0].DataID
+		t.Logf("  Second flush created new dataID: %d", secondFlushDataID)
+	}
+
+	// Step 7: Verify data integrity by reading back
+	t.Logf("\n[DEBUG] Starting verification reads after second flush...")
+	
+	// Get current file state for debugging
+	fileObj, err = fs.h.Get(fs.c, bktID, []int64{fileID})
+	if err == nil && len(fileObj) > 0 {
+		t.Logf("  Current file state: fileID=%d, dataID=%d, size=%d", fileID, fileObj[0].DataID, fileObj[0].Size)
+		
+		// Get DataInfo for debugging
+		lh, ok := fs.h.(*core.LocalHandler)
+		if ok {
+			dataInfo, err := lh.GetDataInfo(fs.c, bktID, fileObj[0].DataID)
+			if err == nil {
+				t.Logf("  DataInfo: dataID=%d, OrigSize=%d, Size=%d, Kind=0x%x", 
+					dataInfo.ID, dataInfo.OrigSize, dataInfo.Size, dataInfo.Kind)
+				t.Logf("    Encryption: %v, Compression: %v", 
+					dataInfo.Kind&core.DATA_ENDEC_AES256 != 0,
+					dataInfo.Kind&core.DATA_CMPR_ZSTD != 0)
+				if dataInfo.Size == 0 && dataInfo.OrigSize > 0 {
+					t.Logf("    ⚠️  WARNING: DataInfo.Size=0 but OrigSize=%d - this may indicate a problem!", dataInfo.OrigSize)
+					t.Logf("    This could explain why chunk 1 cannot be read properly")
+				}
+				
+				// Check chunk count
+				chunkCount := int((dataInfo.OrigSize + fs.chunkSize - 1) / fs.chunkSize)
+				t.Logf("    Expected chunks: %d (file size %d / chunk size %d)", 
+					chunkCount, dataInfo.OrigSize, fs.chunkSize)
+				t.Logf("    Chunk 0: 0-%d, Chunk 1: %d-%d", 
+					fs.chunkSize-1, fs.chunkSize, dataInfo.OrigSize-1)
+			} else {
+				t.Logf("  WARNING: Failed to get DataInfo: %v", err)
+			}
+		}
+	}
+	
+	// Read chunk 0 (should still be intact)
+	t.Logf("\n[DEBUG] Reading chunk 0 (offset=0, size=131072)...")
+	readBuf, err = ra.Read(0, 131072)
+	if err != nil {
+		t.Logf("  ERROR: Failed to read chunk 0: %v", err)
+		t.Fatalf("Failed to read chunk 0 after second flush: %v", err)
+	}
+	if len(readBuf) != 131072 {
+		t.Logf("  ERROR: Read size mismatch: got %d, want %d", len(readBuf), 131072)
+		t.Fatalf("Read size mismatch: got %d, want %d", len(readBuf), 131072)
+	}
+	t.Logf("  ✓ Successfully read chunk 0: %d bytes", len(readBuf))
+
+	// Read chunk 1 at offset 11513856 (this was failing in the logs)
+	// Note: file size is 11575808, so we can only read up to 11575808 - 11513856 = 61952 bytes
+	// This is the critical test: after the second flush, reading chunk 1 should work
+	// In the logs, this read fails with "decryption failed: cipher: message authentication failed"
+	t.Logf("\n[DEBUG] Reading chunk 1 (offset=11513856, size=%d)...", int(fileSize-11513856))
+	t.Logf("  This is the critical read that fails in the logs")
+	t.Logf("  Offset 11513856 is in chunk 1 (chunk 0 ends at 10485760)")
+	
+	readSize = int(fileSize - 11513856)
+	if readSize > 65536 {
+		readSize = 65536
+	}
+	
+	// Get file state before read
+	fileObj, err = fs.h.Get(fs.c, bktID, []int64{fileID})
+	if err == nil && len(fileObj) > 0 {
+		t.Logf("  File state before read: dataID=%d, size=%d", fileObj[0].DataID, fileObj[0].Size)
+		
+		// Check if there's a journal (access through GetOrCreate with same parameters)
+		// Note: GetOrCreate will return existing journal if it exists
+		journal := fs.journalMgr.GetOrCreate(fileID, fileObj[0].DataID, fileObj[0].Size)
+		if journal != nil {
+			t.Logf("  Journal exists: baseDataID=%d, baseSize=%d, entries=%d, isDirty=%v",
+				journal.dataID, journal.baseSize, len(journal.entries), atomic.LoadInt32(&journal.isDirty) != 0)
+			t.Logf("    Journal baseDataID matches current file dataID: %v", journal.dataID == fileObj[0].DataID)
+			if journal.dataID != fileObj[0].DataID {
+				t.Logf("    ⚠️  WARNING: Journal baseDataID (%d) != current file dataID (%d)", 
+					journal.dataID, fileObj[0].DataID)
+				t.Logf("    This means journal is based on old dataID, which may cause decryption issues")
+			}
+		} else {
+			t.Logf("  No active journal")
+		}
+		
+		// Try to read chunk 1 directly to see what happens
+		t.Logf("  Attempting direct chunk read for debugging...")
+		lh, ok := fs.h.(*core.LocalHandler)
+		if ok {
+			// Get DataInfo first
+			dataInfo, err := lh.GetDataInfo(fs.c, bktID, fileObj[0].DataID)
+			if err == nil {
+				t.Logf("    DataInfo for direct read: dataID=%d, OrigSize=%d, Size=%d, Kind=0x%x", 
+					dataInfo.ID, dataInfo.OrigSize, dataInfo.Size, dataInfo.Kind)
+				t.Logf("    Encryption key length: %d", len(fs.EndecKey))
+			}
+			
+			// Try to read chunk 1 directly (this uses GetData which handles decryption)
+			chunk1Data, err := lh.GetData(fs.c, bktID, fileObj[0].DataID, 1)
+			if err != nil {
+				t.Logf("    Direct chunk 1 read failed: %v", err)
+				if strings.Contains(err.Error(), "decryption") || strings.Contains(err.Error(), "authentication") {
+					t.Logf("    This confirms the decryption error occurs at chunk level")
+					t.Logf("    Error type: %T", err)
+				}
+			} else {
+				t.Logf("    ✓ Direct chunk 1 read succeeded: %d bytes", len(chunk1Data))
+				t.Logf("    This means chunk 1 exists and can be decrypted with current key")
+				t.Logf("    The problem must be in how chunkReader accesses the chunk")
+			}
+			
+			// Compare with chunkReader approach
+			t.Logf("  Comparing with chunkReader approach...")
+			t.Logf("    chunkReader uses: dataID=%d, kind=0x%x, endecKey length=%d", 
+				fileObj[0].DataID, dataInfo.Kind, len(fs.EndecKey))
+			t.Logf("    Direct read uses: same dataID, same key (via GetData)")
+			t.Logf("    Difference: chunkReader may use different decryption context")
+		}
+	}
+	
+	readBuf, err = ra.Read(11513856, readSize)
+	if err != nil {
+		// This is the expected error from the logs: decryption failed
+		t.Logf("  ERROR DETAILS:")
+		t.Logf("    Error type: %T", err)
+		t.Logf("    Error message: %v", err)
+		t.Logf("    Error string: %s", err.Error())
+		
+		// Check if it's a decryption error
+		errStr := err.Error()
+		if strings.Contains(errStr, "decryption") || strings.Contains(errStr, "authentication") {
+			t.Logf("    This is a DECRYPTION ERROR")
+			t.Logf("    The error occurs when trying to decrypt chunk 1 (sn=1)")
+			t.Logf("    Chunk 1 should be read from the base dataID created by first flush")
+		}
+		
+		t.Errorf("❌ DECRYPTION ERROR REPRODUCED: Failed to read chunk 1 at offset 11513856 after second flush: %v", err)
+		t.Errorf("   This matches the log error: 'decryption failed: cipher: message authentication failed'")
+		t.Errorf("   The issue occurs when generateChunkData tries to read base data from the first flush")
+		// Don't fail the test here - we want to document the bug
+	} else if len(readBuf) != readSize {
+		if len(readBuf) == 0 {
+			t.Logf("  WARNING: Read returned 0 bytes (silent failure)")
+			t.Logf("    This suggests the read operation succeeded but returned no data")
+			t.Logf("    This could indicate a decryption error that was silently handled")
+			t.Errorf("❌ Read returned 0 bytes (possible decryption error): got %d, want %d", len(readBuf), readSize)
+			t.Errorf("   This indicates a silent decryption failure - the read succeeded but returned no data")
+		} else {
+			t.Logf("  WARNING: Partial read: got %d bytes, expected %d", len(readBuf), readSize)
+			t.Fatalf("Read size mismatch: got %d, want %d", len(readBuf), readSize)
+		}
+	} else {
+		t.Logf("  ✓ Successfully read chunk 1: %d bytes", len(readBuf))
+		t.Logf("✓ Successfully read chunk 1 at offset 11513856: %d bytes", len(readBuf))
+	}
+
+	// Read the written region at offset 11571200
+	// This should work because it's in the journal entries
+	t.Logf("\n[DEBUG] Reading written region (offset=11571200, size=4096)...")
+	t.Logf("  This region was written in the second write operation")
+	t.Logf("  It should be in chunk 1, overlapping with the first write")
+	
+	readBuf, err = ra.Read(11571200, 4096)
+	if err != nil {
+		t.Logf("  ERROR DETAILS:")
+		t.Logf("    Error type: %T", err)
+		t.Logf("    Error message: %v", err)
+		t.Logf("    Error string: %s", err.Error())
+		
+		// Check if it's a decryption error
+		errStr := err.Error()
+		if strings.Contains(errStr, "decryption") || strings.Contains(errStr, "authentication") {
+			t.Logf("    This is a DECRYPTION ERROR")
+			t.Logf("    The error occurs when trying to read the written region")
+			t.Logf("    This region should be readable from journal entries or base data")
+		}
+		
+		t.Errorf("Failed to read written region at offset 11571200: %v", err)
+		t.Errorf("   This read should succeed because the data is in journal entries")
+	} else if len(readBuf) != 4096 {
+		t.Logf("  WARNING: Read size mismatch: got %d, want %d", len(readBuf), 4096)
+		if len(readBuf) == 0 {
+			t.Logf("    Read returned 0 bytes - this indicates a decryption error")
+			t.Errorf("Read size mismatch at offset 11571200: got %d, want %d", len(readBuf), 4096)
+			t.Errorf("   This also indicates a decryption error")
+		} else {
+			t.Errorf("Read size mismatch at offset 11571200: got %d, want %d", len(readBuf), 4096)
+		}
+	} else {
+		t.Logf("  ✓ Successfully read: %d bytes", len(readBuf))
+		// Verify written data matches
+		if !bytes.Equal(readBuf, write2Data) {
+			t.Logf("  WARNING: Data mismatch detected")
+			for i := 0; i < len(readBuf) && i < len(write2Data); i++ {
+				if readBuf[i] != write2Data[i] {
+					t.Logf("    First mismatch at position %d: got %d, want %d", i, readBuf[i], write2Data[i])
+					t.Errorf("Written data mismatch at offset 11571200")
+					t.Errorf("Data mismatch at position %d: got %d, want %d", i, readBuf[i], write2Data[i])
+					break
+				}
+			}
+		} else {
+			t.Logf("  ✓ Data verification passed")
+			t.Logf("✓ Successfully read and verified written data at offset 11571200")
+		}
+	}
+
+	// Step 8: Read various offsets matching the logs
+	readOffsets := []struct {
+		offset int64
+		size   int
+	}{
+		{0, 131072},
+		{11513856, 61952}, // Adjusted: file size is 11575808, so 11575808 - 11513856 = 61952
+		{11448320, 65536},
+		{11345920, 65536},
+		{11411456, 36864},
+		{11571200, 4096},
+	}
+
+	t.Logf("\n[DEBUG] Reading multiple offsets to verify file integrity...")
+	for i, ro := range readOffsets {
+		// Adjust read size if it exceeds file size
+		maxReadSize := int(fileSize - ro.offset)
+		actualSize := ro.size
+		if actualSize > maxReadSize {
+			actualSize = maxReadSize
+		}
+		if actualSize <= 0 {
+			t.Logf("  [%d/%d] Skipping offset %d (beyond file size)", i+1, len(readOffsets), ro.offset)
+			continue // Skip if offset is beyond file size
+		}
+		
+		// Determine which chunk this offset is in
+		chunkIdx := int(ro.offset / fs.chunkSize)
+		t.Logf("  [%d/%d] Reading offset %d, size %d (chunk %d)...", i+1, len(readOffsets), ro.offset, actualSize, chunkIdx)
+		
+		readBuf, err = ra.Read(ro.offset, actualSize)
+		if err != nil {
+			t.Logf("    ERROR: %v", err)
+			// Check if this is the expected decryption error
+			errStr := err.Error()
+			if strings.Contains(errStr, "decryption") || strings.Contains(errStr, "authentication") {
+				t.Logf("    This is a DECRYPTION ERROR")
+				t.Errorf("❌ DECRYPTION ERROR at offset %d: %v", ro.offset, err)
+			} else {
+				t.Errorf("Failed to read at offset %d, size %d: %v", ro.offset, actualSize, err)
+			}
+			continue
+		}
+		if len(readBuf) != actualSize {
+			if len(readBuf) == 0 {
+				t.Logf("    WARNING: Read returned 0 bytes (silent failure)")
+				t.Errorf("❌ Read returned 0 bytes at offset %d (possible decryption error): got %d, want %d", ro.offset, len(readBuf), actualSize)
+			} else {
+				t.Logf("    WARNING: Partial read: got %d bytes, expected %d", len(readBuf), actualSize)
+				t.Errorf("Read size mismatch at offset %d: got %d, want %d", ro.offset, len(readBuf), actualSize)
+			}
+		} else {
+			t.Logf("    ✓ Successfully read: %d bytes", len(readBuf))
+			t.Logf("✓ Successfully read at offset %d: %d bytes", ro.offset, len(readBuf))
+		}
+	}
+
+	// Step 9: Verify file size is correct
+	fileObj, err = fs.h.Get(fs.c, bktID, []int64{fileID})
+	if err != nil || len(fileObj) == 0 {
+		t.Fatalf("Failed to get file object: %v", err)
+	}
+	if fileObj[0].Size != fileSize {
+		t.Errorf("File size mismatch: got %d, want %d", fileObj[0].Size, fileSize)
+	}
+
+	// Summary
+	if t.Failed() {
+		t.Logf("\n" + strings.Repeat("=", 80))
+		t.Logf("❌ TEST SUMMARY: Decryption error reproduced!")
+		t.Logf(strings.Repeat("=", 80))
+		t.Logf("   The issue occurs when:")
+		t.Logf("   1. First flush creates new dataID (e.g., 440782360150016)")
+		t.Logf("   2. Second write at same offset (11571200)")
+		t.Logf("   3. Second flush tries to read base data from first flush's dataID")
+		t.Logf("   4. generateChunkData fails to decrypt chunk 1 when reading base data")
+		t.Logf("   5. Error: 'decryption failed: cipher: message authentication failed'")
+		t.Logf("\n   KEY FINDINGS FROM DEBUG LOGS:")
+		t.Logf("   - Direct chunk 1 read via GetData() SUCCEEDS")
+		t.Logf("   - chunkReader.ReadAt() for chunk 1 FAILS with decryption error")
+		t.Logf("   - DataInfo.Size=0 but OrigSize=11575808 (may be related)")
+		t.Logf("   - Both use same dataID, same encryption key, same Kind")
+		t.Logf("   - Error occurs in chunkReader.getChunk() -> UnprocessData()")
+		t.Logf("\n   ROOT CAUSE HYPOTHESIS:")
+		t.Logf("   The issue is likely in how chunkReader processes chunks vs direct GetData().")
+		t.Logf("   Possible causes:")
+		t.Logf("   1. chunkReader may be using incorrect DataInfo (Size=0 issue)")
+		t.Logf("   2. chunkReader may be using different decryption context/IV")
+		t.Logf("   3. chunkReader may be reading corrupted or incomplete chunk data")
+		t.Logf("   4. DataInfo.Size=0 may cause chunkReader to skip decryption or use wrong size")
+		t.Logf("\n   This suggests the encryption key or context is incorrect when reading")
+		t.Logf("   base data during the second flush's generateChunkData operation.")
+		t.Logf("\n   NOTE: This test is designed to reproduce a known bug.")
+		t.Logf("   The test failure indicates the bug is still present.")
+		t.Logf("   Once the bug is fixed, this test should pass.")
+		t.Logf(strings.Repeat("=", 80))
+	} else {
+		t.Logf("\n" + strings.Repeat("=", 80))
+		t.Logf("✓ TEST PASSED: Decryption error test - all reads succeeded after second flush")
+		t.Logf("   This indicates the bug has been fixed!")
+		t.Logf(strings.Repeat("=", 80))
+	}
+}
