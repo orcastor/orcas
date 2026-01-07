@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"syscall"
 	"testing"
@@ -888,7 +889,7 @@ func TestJournalFlushWithAtomicReplace(t *testing.T) {
 	}
 
 	t.Logf("Written %d journal entries", len(writeOffsets))
-	
+
 	// Check journal state after writes
 	ra.journalMu.RLock()
 	hasJournal := ra.journal != nil
@@ -904,7 +905,7 @@ func TestJournalFlushWithAtomicReplace(t *testing.T) {
 		t.Logf("⚠️  No journal after writes (data may have gone through buffer path)")
 	}
 	ra.journalMu.RUnlock()
-	
+
 	// Check buffer state
 	writeIndex := atomic.LoadInt64(&ra.buffer.writeIndex)
 	totalSize := atomic.LoadInt64(&ra.buffer.totalSize)
@@ -914,20 +915,20 @@ func TestJournalFlushWithAtomicReplace(t *testing.T) {
 	// Note: versionID may be 0 if journal was already flushed (e.g., due to memory limits)
 	// or if flush went through other paths (buffer flush). The important thing is that
 	// the file object is updated correctly and atomic replace detection works.
-	
+
 	// Check state before flush
 	t.Logf("\n📝 Before Flush:")
 	ra.journalMu.RLock()
 	if ra.journal != nil {
-		t.Logf("  - Journal exists: isDirty=%v, isSparse=%v, virtualSize=%d", 
+		t.Logf("  - Journal exists: isDirty=%v, isSparse=%v, virtualSize=%d",
 			ra.journal.IsDirty(), ra.journal.isSparse, ra.journal.virtualSize)
 	} else {
 		t.Logf("  - No journal")
 	}
 	ra.journalMu.RUnlock()
-	t.Logf("  - Buffer: writeIndex=%d, totalSize=%d", 
+	t.Logf("  - Buffer: writeIndex=%d, totalSize=%d",
 		atomic.LoadInt64(&ra.buffer.writeIndex), atomic.LoadInt64(&ra.buffer.totalSize))
-	
+
 	versionID, err := ra.Flush()
 	if err != nil {
 		t.Fatalf("Failed to flush: %v", err)
@@ -936,18 +937,18 @@ func TestJournalFlushWithAtomicReplace(t *testing.T) {
 	t.Logf("\n📝 Flush completed: versionID=%d", versionID)
 	// Note: versionID=0 is acceptable if journal was already flushed or flush went through buffer path
 	// For sparse files, even if versionID=0, file object size should still be set to sparseSize
-	
+
 	// Check state after flush
 	t.Logf("📝 After Flush:")
 	ra.journalMu.RLock()
 	if ra.journal != nil {
-		t.Logf("  - Journal exists: isDirty=%v, isSparse=%v, virtualSize=%d", 
+		t.Logf("  - Journal exists: isDirty=%v, isSparse=%v, virtualSize=%d",
 			ra.journal.IsDirty(), ra.journal.isSparse, ra.journal.virtualSize)
 	} else {
 		t.Logf("  - No journal (cleared after flush)")
 	}
 	ra.journalMu.RUnlock()
-	t.Logf("  - Buffer: writeIndex=%d, totalSize=%d", 
+	t.Logf("  - Buffer: writeIndex=%d, totalSize=%d",
 		atomic.LoadInt64(&ra.buffer.writeIndex), atomic.LoadInt64(&ra.buffer.totalSize))
 
 	// Give a moment for operations to complete
@@ -1015,7 +1016,7 @@ func TestJournalFlushWithAtomicReplace(t *testing.T) {
 	t.Logf("  - Expected (sparseSize): %d", expectedSparseSize)
 	t.Logf("  - Actual (fileObj.Size): %d", fileObj[0].Size)
 	t.Logf("  - Difference: %d", fileObj[0].Size-expectedSparseSize)
-	
+
 	if fileObj[0].Size != expectedSparseSize {
 		// This is a test failure - sparse file size should be preserved
 		t.Errorf("❌ File object size mismatch: got %d, expected %d (sparse file). Sparse file size should be preserved even if data was flushed through buffer path.", fileObj[0].Size, expectedSparseSize)
@@ -2173,12 +2174,12 @@ func createTestFile(t *testing.T, fs *OrcasFS, bktID int64, fileName string) (in
 	if err != nil {
 		return 0, err
 	}
-	
+
 	// Verify that the file object was created successfully
 	if len(ids) == 0 || ids[0] == 0 {
 		return 0, fmt.Errorf("file object was not created (conflict or error)")
 	}
-	
+
 	// Verify the file object exists in database
 	objs, err := lh.Get(fs.c, bktID, []int64{fileID})
 	if err != nil {
@@ -2222,6 +2223,155 @@ func cleanupTestDir(t *testing.T, testDir string) {
 	} else {
 		t.Logf("✓ Cleaned up test directory: %s", testDir)
 	}
+}
+
+// TestDecryptErrorOnChunk1 reproduces the decryption error when reading chunk 1
+// This test case simulates the actual scenario:
+// - Original file is small (only chunk 0, e.g., 512 bytes)
+// - Random writes through journal extend file size beyond one chunk (e.g., 11575808 bytes)
+// - Reading beyond chunk 0 should read from journal, not try to read non-existent chunk 1
+func TestDecryptErrorOnChunk1(t *testing.T) {
+	// Setup test environment
+	testDir := filepath.Join(os.TempDir(), "orcas_decrypt_error_test")
+	defer cleanupTestDir(t, testDir)
+
+	// Create filesystem with encryption enabled
+	encryptionKey := "test-encryption-key-12345678901234567890123456789012" // 32 bytes for AES-256
+	fs, bktID := setupTestFSWithEncryption(t, testDir, encryptionKey, 0)    // No compression
+	defer cleanupFS(fs)
+
+	fileName := "test_decrypt_error.ppt"
+	chunkSize := int64(10485760) // 10MB chunk size
+
+	// Step 1: Create file with small initial data (only chunk 0, less than chunkSize)
+	fileID, err := createTestFile(t, fs, bktID, fileName)
+	if err != nil {
+		t.Fatalf("Failed to create file: %v", err)
+	}
+	t.Logf("Created file: fileID=%d, fileName=%s", fileID, fileName)
+
+	// Step 2: Write small initial data (only chunk 0, 512 bytes)
+	ra, err := getOrCreateRandomAccessor(fs, fileID)
+	if err != nil {
+		t.Fatalf("Failed to get RandomAccessor: %v", err)
+	}
+	defer ra.Close()
+
+	initialData := make([]byte, 512)
+	for i := range initialData {
+		initialData[i] = byte(i % 256)
+	}
+	err = ra.Write(0, initialData)
+	if err != nil {
+		t.Fatalf("Failed to write initial data: %v", err)
+	}
+	t.Logf("Written initial data: offset=0, size=%d (only chunk 0)", len(initialData))
+
+	// Step 3: Flush initial data to create baseVersion (only chunk 0)
+	versionID, err := ra.Flush()
+	if err != nil {
+		t.Fatalf("Failed to flush initial data: %v", err)
+	}
+	t.Logf("Flushed initial data: versionID=%d (baseVersion has only chunk 0)", versionID)
+
+	// Step 4: Write data beyond chunk 0 through journal (this extends file size beyond one chunk)
+	// Write at offset 10485760 (start of chunk 1) - this extends file size
+	extendedData := make([]byte, 1090048) // 11575808 - 10485760 = 1090048 bytes
+	for i := range extendedData {
+		extendedData[i] = byte((i + 200) % 256) // Different pattern
+	}
+	err = ra.Write(chunkSize, extendedData)
+	if err != nil {
+		t.Fatalf("Failed to write extended data: %v", err)
+	}
+	t.Logf("Written extended data through journal: offset=%d, size=%d (extends beyond chunk 0)", chunkSize, len(extendedData))
+
+	// Step 5: Verify journal has the extended data
+	ra.journalMu.RLock()
+	hasJournal := ra.journal != nil
+	journalIsDirty := false
+	if hasJournal {
+		journalIsDirty = ra.journal.IsDirty()
+	}
+	ra.journalMu.RUnlock()
+	t.Logf("Journal state: exists=%v, isDirty=%v", hasJournal, journalIsDirty)
+
+	// Step 6: Read from chunk 0 (should succeed, reads from baseVersion)
+	readBuf0 := make([]byte, 512)
+	readData0, err := ra.Read(0, len(readBuf0))
+	if err != nil {
+		t.Fatalf("Failed to read from chunk 0: %v", err)
+	}
+	t.Logf("✓ Successfully read from chunk 0: offset=0, size=%d", len(readData0))
+
+	// Step 7: Read from chunk 1 (should read from journal, not try to read non-existent chunk 1)
+	// This is where the error occurred in the log - should now work correctly
+	readBuf1 := make([]byte, 131072)
+	readData1, err := ra.Read(chunkSize, len(readBuf1))
+	if err != nil {
+		t.Logf("❌ ERROR reading from chunk 1: offset=%d, error=%v", chunkSize, err)
+		errStr := err.Error()
+		if err != nil && (strings.Contains(errStr, "decryption failed") || strings.Contains(errStr, "message authentication failed")) {
+			t.Errorf("❌ Still getting decryption error - fix didn't work: %v", err)
+		} else {
+			t.Fatalf("Unexpected error reading from chunk 1: %v", err)
+		}
+	} else {
+		t.Logf("✓ Successfully read from chunk 1 (from journal): offset=%d, size=%d", chunkSize, len(readData1))
+		// Verify data integrity - should match extendedData
+		expectedSize := len(readData1)
+		if expectedSize > len(extendedData) {
+			expectedSize = len(extendedData)
+		}
+		if !bytes.Equal(readData1[:expectedSize], extendedData[:expectedSize]) {
+			previewLen := 10
+			if previewLen > len(readData1) {
+				previewLen = len(readData1)
+			}
+			if previewLen > len(extendedData) {
+				previewLen = len(extendedData)
+			}
+			t.Errorf("Data mismatch: got %v, want %v", readData1[:previewLen], extendedData[:previewLen])
+		} else {
+			t.Logf("✓ Data integrity verified at offset %d", chunkSize)
+		}
+	}
+
+	// Step 8: Try reading at offset 11513856 (near the end, where error occurred in log)
+	readBuf2 := make([]byte, 4096)
+	readData2, err := ra.Read(11513856, len(readBuf2))
+	if err != nil {
+		t.Logf("❌ ERROR reading at offset 11513856: error=%v", err)
+		errStr := err.Error()
+		if err != nil && (strings.Contains(errStr, "decryption failed") || strings.Contains(errStr, "message authentication failed")) {
+			t.Errorf("❌ Still getting decryption error at offset 11513856 - fix didn't work: %v", err)
+		}
+	} else {
+		t.Logf("✓ Successfully read at offset 11513856: size=%d", len(readData2))
+	}
+
+	// Step 9: Flush journal to persist extended data
+	versionID2, err := ra.Flush()
+	if err != nil {
+		t.Fatalf("Failed to flush journal: %v", err)
+	}
+	t.Logf("Flushed journal: versionID=%d", versionID2)
+
+	// Step 10: Close and reopen to read from persisted data
+	ra.Close()
+	ra2, err := getOrCreateRandomAccessor(fs, fileID)
+	if err != nil {
+		t.Fatalf("Failed to get RandomAccessor for read: %v", err)
+	}
+	defer ra2.Close()
+
+	// Step 11: Read from chunk 1 after flush (should read from persisted data)
+	readBuf3 := make([]byte, 131072)
+	readData3, err := ra2.Read(chunkSize, len(readBuf3))
+	if err != nil {
+		t.Fatalf("Failed to read from chunk 1 after flush: %v", err)
+	}
+	t.Logf("✓ Successfully read from chunk 1 after flush: offset=%d, size=%d", chunkSize, len(readData3))
 }
 
 // TestJournalEncryptionSimple tests basic encryption without complex journal operations
