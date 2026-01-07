@@ -305,6 +305,94 @@ func TestPutObj(t *testing.T) {
 	})
 }
 
+// TestPutObjDuplicateName tests the behavior when creating files with the same name in the same directory
+// This test verifies that the behavior is consistent after changing from InsertIgnore to ReplaceInto
+func TestPutObjDuplicateName(t *testing.T) {
+	Convey("PutObj with duplicate name in same directory", t, func() {
+		InitDB(".", "")
+		testBktID, _ := idgen.NewIDGen(nil, 0).New()
+		InitBucketDB(".", testBktID)
+
+		dma := &DefaultMetadataAdapter{
+			DefaultBaseMetadataAdapter: &DefaultBaseMetadataAdapter{},
+			DefaultDataMetadataAdapter: &DefaultDataMetadataAdapter{},
+		}
+		dma.DefaultDataMetadataAdapter.SetDataPath(".")
+
+		ig := idgen.NewIDGen(nil, 0)
+		pid, _ := ig.New() // Parent directory ID
+
+		// Create first file
+		file1ID, _ := ig.New()
+		file1 := &ObjectInfo{
+			ID:     file1ID,
+			PID:    pid,
+			Type:   OBJ_TYPE_FILE,
+			Name:   "test.txt",
+			DataID: 0,
+			Size:   100,
+			MTime:  Now(),
+		}
+
+		ids, err := dma.PutObj(c, testBktID, []*ObjectInfo{file1})
+		So(err, ShouldBeNil)
+		So(len(ids), ShouldEqual, 1)
+		So(ids[0], ShouldEqual, file1ID)
+
+		// Verify file1 exists
+		objs, err := dma.GetObj(c, testBktID, []int64{file1ID})
+		So(err, ShouldBeNil)
+		So(len(objs), ShouldEqual, 1)
+		So(objs[0].ID, ShouldEqual, file1ID)
+		So(objs[0].Name, ShouldEqual, "test.txt")
+
+		// Try to create second file with same name and different ID
+		// This should conflict with (pid, n) unique constraint
+		file2ID, _ := ig.New()
+		file2 := &ObjectInfo{
+			ID:     file2ID,
+			PID:    pid,
+			Type:   OBJ_TYPE_FILE,
+			Name:   "test.txt", // Same name, same parent
+			DataID: 0,
+			Size:   200,
+			MTime:  Now(),
+		}
+
+		ids, err = dma.PutObj(c, testBktID, []*ObjectInfo{file2})
+		So(err, ShouldBeNil)
+		So(len(ids), ShouldEqual, 1)
+		// With ReplaceInto, file2 should replace file1
+		// So file2ID should exist, but file1ID should be replaced
+		So(ids[0], ShouldEqual, file2ID)
+
+		// Verify file1 no longer exists (replaced by file2)
+		objs, err = dma.GetObj(c, testBktID, []int64{file1ID})
+		So(err, ShouldBeNil)
+		So(len(objs), ShouldEqual, 0) // file1 was replaced
+
+		// Verify file2 exists
+		objs, err = dma.GetObj(c, testBktID, []int64{file2ID})
+		So(err, ShouldBeNil)
+		So(len(objs), ShouldEqual, 1)
+		So(objs[0].ID, ShouldEqual, file2ID)
+		So(objs[0].Name, ShouldEqual, "test.txt")
+		So(objs[0].Size, ShouldEqual, 200) // file2's size
+
+		// Verify only one file with this name exists
+		children, _, _, err := dma.ListObj(c, testBktID, pid, "", "", "", 100)
+		So(err, ShouldBeNil)
+		count := 0
+		for _, child := range children {
+			if child.Name == "test.txt" {
+				count++
+				So(child.ID, ShouldEqual, file2ID) // Should be file2
+			}
+		}
+		So(count, ShouldEqual, 1) // Only one file with this name
+	})
+}
+
 func TestGetObj(t *testing.T) {
 	Convey("normal", t, func() {
 		Convey("get obj info", func() {

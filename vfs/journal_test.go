@@ -785,19 +785,20 @@ func TestJournalFlushWithAtomicReplace(t *testing.T) {
 	defer cleanupFS(fs)
 
 	fileName := "test_atomic_replace.ppt"
-	fileID, err := createTestFile(t, fs, bktID, fileName)
-	if err != nil {
-		t.Fatalf("Failed to create test file: %v", err)
-	}
-
-	// Step 1: Create an "old" file object with some versions (simulating atomic replace scenario)
-	// This represents the file that was previously deleted and is pending deletion
-	oldFileID := core.NewID()
 	root := fs.root
 	if root == nil {
 		t.Fatalf("Failed to get root node")
 	}
 
+	lh, ok := fs.h.(*core.LocalHandler)
+	if !ok {
+		t.Fatalf("Handler is not LocalHandler")
+	}
+
+	// Step 1: Create an "old" file object with some versions (simulating atomic replace scenario)
+	// This represents the file that was previously deleted and is pending deletion
+	// IMPORTANT: Create old file FIRST to avoid (pid, n) conflict when creating new file
+	oldFileID := core.NewID()
 	oldFileObj := &core.ObjectInfo{
 		ID:     oldFileID,
 		PID:    root.objID,
@@ -808,12 +809,7 @@ func TestJournalFlushWithAtomicReplace(t *testing.T) {
 		MTime:  core.Now(),
 	}
 
-	lh, ok := fs.h.(*core.LocalHandler)
-	if !ok {
-		t.Fatalf("Handler is not LocalHandler")
-	}
-
-	_, err = lh.Put(fs.c, bktID, []*core.ObjectInfo{oldFileObj})
+	_, err := lh.Put(fs.c, bktID, []*core.ObjectInfo{oldFileObj})
 	if err != nil {
 		t.Fatalf("Failed to create old file object: %v", err)
 	}
@@ -858,7 +854,14 @@ func TestJournalFlushWithAtomicReplace(t *testing.T) {
 
 	t.Logf("Scheduled deletion for old file: fileID=%d", oldFileID)
 
-	// Step 3: Write data to the new file using journal (simulating sparse file with non-sequential writes)
+	// Step 3: Create the new file (after scheduling deletion of old file)
+	// This simulates the atomic replace scenario where a new file replaces an old one
+	fileID, err := createTestFile(t, fs, bktID, fileName)
+	if err != nil {
+		t.Fatalf("Failed to create test file: %v", err)
+	}
+
+	// Step 4: Write data to the new file using journal (simulating sparse file with non-sequential writes)
 	ra, err := getOrCreateRandomAccessor(fs, fileID)
 	if err != nil {
 		t.Fatalf("Failed to get RandomAccessor: %v", err)
@@ -2166,9 +2169,23 @@ func createTestFile(t *testing.T, fs *OrcasFS, bktID int64, fileName string) (in
 		return 0, fmt.Errorf("handler is not LocalHandler")
 	}
 
-	_, err := lh.Put(fs.c, bktID, []*core.ObjectInfo{fileObj})
+	ids, err := lh.Put(fs.c, bktID, []*core.ObjectInfo{fileObj})
 	if err != nil {
 		return 0, err
+	}
+	
+	// Verify that the file object was created successfully
+	if len(ids) == 0 || ids[0] == 0 {
+		return 0, fmt.Errorf("file object was not created (conflict or error)")
+	}
+	
+	// Verify the file object exists in database
+	objs, err := lh.Get(fs.c, bktID, []int64{fileID})
+	if err != nil {
+		return 0, fmt.Errorf("failed to verify file object creation: %w", err)
+	}
+	if len(objs) == 0 {
+		return 0, fmt.Errorf("file object not found after creation")
 	}
 
 	return fileID, nil

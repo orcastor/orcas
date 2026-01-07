@@ -101,7 +101,11 @@ func TestPutDataInfoNegativeID(t *testing.T) {
 		testBktID, _ := ig.New()
 		InitBucketDB(".", testBktID)
 
-		dma := &DefaultMetadataAdapter{}
+		dma := &DefaultMetadataAdapter{
+			DefaultBaseMetadataAdapter: &DefaultBaseMetadataAdapter{},
+			DefaultDataMetadataAdapter: &DefaultDataMetadataAdapter{},
+		}
+		dma.DefaultDataMetadataAdapter.SetDataPath(".")
 
 		// Create first DataInfo
 		data1ID, _ := ig.New()
@@ -139,7 +143,11 @@ func TestPutNegativePID(t *testing.T) {
 		testBktID, _ := ig.New()
 		InitBucketDB(".", testBktID)
 
-		dma := &DefaultMetadataAdapter{}
+		dma := &DefaultMetadataAdapter{
+			DefaultBaseMetadataAdapter: &DefaultBaseMetadataAdapter{},
+			DefaultDataMetadataAdapter: &DefaultDataMetadataAdapter{},
+		}
+		dma.DefaultDataMetadataAdapter.SetDataPath(".")
 
 		// Create objects with negative PID reference
 		// First object: directory (PID = 0)

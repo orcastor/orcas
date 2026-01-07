@@ -412,10 +412,8 @@ github.com/openzipkin-contrib/zipkin-go-opentracing v0.4.5/go.mod h1:/wsWhb9smxS
 github.com/openzipkin/zipkin-go v0.1.6/go.mod h1:QgAqvLzwWbR/WpD4A3cGpPtJrZXNIiJc5AZX7/PBEpw=
 github.com/openzipkin/zipkin-go v0.2.1/go.mod h1:NaW6tEwdmWMaCDZzg8sh+IBNOxHMPnhQw8ySjnjRyN4=
 github.com/openzipkin/zipkin-go v0.2.2/go.mod h1:NaW6tEwdmWMaCDZzg8sh+IBNOxHMPnhQw8ySjnjRyN4=
-github.com/orca-zhang/borm v0.0.0-20251222162248-ce6be9d18ce8 h1:1OQqcPrSXojrwu7nU5xszRYEIWM0ryNMxmKS0dQNksg=
-github.com/orca-zhang/borm v0.0.0-20251222162248-ce6be9d18ce8/go.mod h1:7a8ieP78hxkl7fZ1TBQWEAag+wCVQUNbWrj917XPgDU=
-github.com/orca-zhang/borm v0.0.0-20251223101851-1bfd798dcda3 h1:NbyEQedxXH4P6Xpc/vbfkLSkzEi6vnpWi2jst+Rui4U=
-github.com/orca-zhang/borm v0.0.0-20251223101851-1bfd798dcda3/go.mod h1:7a8ieP78hxkl7fZ1TBQWEAag+wCVQUNbWrj917XPgDU=
+github.com/orca-zhang/borm v0.0.0-20260107090806-aca4ca06c293 h1:GiXM+fDGiZy5IUTN4Wv63fy3z3efLdK3JC+0rUNY8Lk=
+github.com/orca-zhang/borm v0.0.0-20260107090806-aca4ca06c293/go.mod h1:7a8ieP78hxkl7fZ1TBQWEAag+wCVQUNbWrj917XPgDU=
 github.com/orca-zhang/ecache v1.1.1 h1:krk4+/ihsLPg9/k2zYeRa7dNespTQsFnRcLWaJGFNds=
 github.com/orca-zhang/ecache v1.1.1/go.mod h1:1/6HCddx1iAbafDyRdddq5v/0rZf5sCU/fkLZ3BhciQ=
 github.com/orca-zhang/ecache2 v0.0.1 h1:zgqzvSrsA2Wamqq1w79MvSme1nXPFzZOVgkYMeGxvZ4=

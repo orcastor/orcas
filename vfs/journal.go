@@ -1755,36 +1755,42 @@ func (j *Journal) readBaseData(offset, length int64) ([]byte, error) {
 	endChunk := int((offset + length - 1) / chunkSize)
 
 	// Read chunks and assemble result
+	// CRITICAL: If baseVersion doesn't have all chunks (e.g., only chunk 0), but journal has writes
+	// beyond base data range, we should return zeros for missing chunks instead of error
+	// This allows journal to fill in the data for those regions
 	result := make([]byte, 0, length)
 	for sn := startChunk; sn <= endChunk; sn++ {
 		rawChunk, err := j.fs.h.GetData(j.fs.c, j.fs.bktID, j.dataID, sn)
 		if err != nil {
-			// If chunk doesn't exist for sparse file, fill with zeros
-			if dataInfo.Kind&core.DATA_SPARSE != 0 {
+			// If chunk doesn't exist, check if it's beyond base data size
+			// For sparse files, always fill with zeros
+			// For non-sparse files, if chunk is beyond baseSize, fill with zeros (journal will provide data)
+			chunkStart := int64(sn) * chunkSize
+			isBeyondBaseSize := j.baseSize > 0 && chunkStart >= j.baseSize
+			if dataInfo.Kind&core.DATA_SPARSE != 0 || isBeyondBaseSize {
+				// For sparse files or chunks beyond base size, return zero-filled plain data (not encrypted)
 				chunkData := make([]byte, chunkSize)
 				// Calculate the range within this chunk that we need
-				chunkStart := int64(sn) * chunkSize
-				chunkEnd := chunkStart + int64(len(chunkData))
-
-				// Calculate the overlap with our requested range
 				readStart := offset
 				if readStart < chunkStart {
 					readStart = chunkStart
 				}
-
 				readEnd := offset + length
+				chunkEnd := chunkStart + chunkSize
 				if readEnd > chunkEnd {
 					readEnd = chunkEnd
 				}
-
 				if readStart < readEnd {
 					// Extract the relevant portion from this chunk
 					startInChunk := readStart - chunkStart
 					endInChunk := readEnd - chunkStart
 					result = append(result, chunkData[startInChunk:endInChunk]...)
 				}
+				DebugLog("[Journal readBaseData] Chunk %d doesn't exist (sparse=%v, beyondBaseSize=%v), filling with zeros: fileID=%d, chunkStart=%d, baseSize=%d", 
+					sn, dataInfo.Kind&core.DATA_SPARSE != 0, isBeyondBaseSize, j.fileID, chunkStart, j.baseSize)
 				continue
 			} else {
+				// For non-sparse files and chunk is within base size, this is an error
 				return nil, fmt.Errorf("failed to read chunk %d: %w", sn, err)
 			}
 		}

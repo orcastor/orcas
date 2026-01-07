@@ -766,12 +766,12 @@ func (dda *DefaultDataMetadataAdapter) ListAllBuckets(c Ctx) (o []*BucketInfo, e
 				return
 			}
 
-		// Cache miss, read from bucket database
-		bktDirPath := filepath.Join(dda.dataPath, fmt.Sprint(id))
-		db, err := GetReadDB(bktDirPath)
-		if err != nil {
-			return
-		}
+			// Cache miss, read from bucket database
+			bktDirPath := filepath.Join(dda.dataPath, fmt.Sprint(id))
+			db, err := GetReadDB(bktDirPath)
+			if err != nil {
+				return
+			}
 			// Note: Don't close the connection, it's from the pool
 
 			var bucketInfo []*BucketInfo
@@ -1275,7 +1275,7 @@ func (dma *DefaultMetadataAdapter) PutData(c Ctx, bktID int64, d []*DataInfo) er
 	}
 
 	if _, err = b.TableContext(c, db, DATA_TBL).ReplaceInto(&dataForDB); err != nil {
-		return fmt.Errorf("%w: PutData failed (bktID=%d, count=%d): %v", ERR_EXEC_DB, bktID, len(d), err)
+		return fmt.Errorf("%w: PutData ReplaceInto failed (bktID=%d, count=%d): %v", ERR_EXEC_DB, bktID, len(d), err)
 	}
 	return nil
 }
@@ -1634,23 +1634,32 @@ func (dma *DefaultMetadataAdapter) PutObj(c Ctx, bktID int64, o []*ObjectInfo) (
 		ids = append(ids, x.ID)
 	}
 
-	var n int
-	if n, err = b.TableContext(c, db, OBJ_TBL).InsertIgnore(&o); err != nil {
-		return nil, fmt.Errorf("%w: PutObj InsertIgnore failed (bktID=%d, count=%d): %v", ERR_EXEC_DB, bktID, len(o), err)
+	// Use ReplaceInto to insert or replace (handles both id and (pid, n) conflicts)
+	if _, err = b.TableContext(c, db, OBJ_TBL).ReplaceInto(&o); err != nil {
+		return nil, fmt.Errorf("%w: PutObj ReplaceInto failed (bktID=%d, count=%d): %v", ERR_EXEC_DB, bktID, len(o), err)
 	}
-	if n != len(o) {
-		var inserted []int64
-		if _, err = b.TableContext(c, db, OBJ_TBL).Select(&inserted, b.Fields("id"), b.Where(b.In("id", ids))); err != nil {
-			return nil, fmt.Errorf("%w: PutObj select inserted failed (bktID=%d): %v", ERR_QUERY_DB, bktID, err)
-		}
-		// 处理有冲突的情况
-		m := make(map[int64]struct{}, 0)
-		for _, v := range inserted {
-			m[v] = struct{}{}
-		}
-		// 擦除没有插入成功的id
-		for i, id := range ids {
-			if _, ok := m[id]; !ok {
+
+	// After ReplaceInto, check which records actually exist
+	// For (pid, n) conflicts with different id, ReplaceInto will replace the old record
+	// We need to identify which ids were conflicts (different id for same (pid, n))
+	var inserted []int64
+	if _, err = b.TableContext(c, db, OBJ_TBL).Select(&inserted, b.Fields("id"), b.Where(b.In("id", ids))); err != nil {
+		return nil, fmt.Errorf("%w: PutObj select inserted failed (bktID=%d): %v", ERR_QUERY_DB, bktID, err)
+	}
+	m := make(map[int64]struct{})
+	for _, v := range inserted {
+		m[v] = struct{}{}
+	}
+	// For records that don't exist with the original id, check if (pid, n) exists with a different id
+	// If so, this was a (pid, n) conflict and the record was replaced (not inserted with original id)
+	for i, obj := range o {
+		if _, ok := m[obj.ID]; !ok {
+			// Original id doesn't exist, check if (pid, n) exists with a different id
+			var found []*ObjectInfo
+			if _, err2 := b.TableContext(c, db, OBJ_TBL).Select(&found,
+				b.Where(b.And(b.Eq("pid", obj.PID), b.Eq("n", obj.Name)))); err2 == nil && len(found) > 0 && found[0].ID != obj.ID {
+				// (pid, n) exists with a different id, this was a conflict
+				// The record was replaced with the new id, so set ids[i] to 0
 				ids[i] = 0
 			}
 		}
@@ -1727,15 +1736,23 @@ func (dma *DefaultMetadataAdapter) PutDataAndObj(c Ctx, bktID int64, d []*DataIn
 			}
 		}
 
-		if _, err = b.TableContext(c, tx, DATA_TBL).ReplaceInto(&dataForDB); err != nil {
-			return fmt.Errorf("%w: PutObjAndData ReplaceInto DATA failed (bktID=%d, dataCount=%d): %v", ERR_EXEC_DB, bktID, len(d), err)
+		// Use OnConflictDoUpdateSet to insert or update on conflict (id conflict)
+		// conflictFields: ["id"] - conflict on primary key
+		// updateFields: fields to update when conflict occurs
+		if _, err = b.TableContext(c, tx, DATA_TBL).Insert(&dataForDB,
+			b.OnConflictDoUpdateSet([]string{"id"}, []string{"s", "os", "h", "x", "s0", "s1", "s2", "s3", "k", "pi", "po"})); err != nil {
+			return fmt.Errorf("%w: PutObjAndData OnConflictDoUpdateSet DATA failed (bktID=%d, dataCount=%d): %v", ERR_EXEC_DB, bktID, len(d), err)
 		}
 	}
 
 	// Write ObjectInfo
 	if len(o) > 0 {
-		if _, err = b.TableContext(c, tx, OBJ_TBL).ReplaceInto(&o); err != nil {
-			return fmt.Errorf("%w: PutObjAndData ReplaceInto OBJ failed (bktID=%d, objCount=%d): %v", ERR_EXEC_DB, bktID, len(o), err)
+		// Use OnConflictDoUpdateSet to insert or update on conflict (id conflict)
+		// conflictFields: ["id"] - conflict on primary key
+		// updateFields: fields to update when conflict occurs
+		if _, err = b.TableContext(c, tx, OBJ_TBL).Insert(&o,
+			b.OnConflictDoUpdateSet([]string{"id"}, []string{"pid", "m", "did", "t", "n", "s", "md", "e"})); err != nil {
+			return fmt.Errorf("%w: PutObjAndData OnConflictDoUpdateSet OBJ failed (bktID=%d, objCount=%d): %v", ERR_EXEC_DB, bktID, len(o), err)
 		}
 	}
 
