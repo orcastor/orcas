@@ -7,10 +7,12 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
 
+	"github.com/hanwen/go-fuse/v2/fuse"
 	"github.com/orca-zhang/idgen"
 	"github.com/orcastor/orcas/core"
 )
@@ -864,7 +866,9 @@ func TestJournalFlushWithAtomicReplace(t *testing.T) {
 	defer ra.Close()
 
 	// Set sparse size to simulate sparse file
-	ra.MarkSparseFile(8036352) // 8MB sparse file
+	sparseSize := int64(8036352) // 8MB sparse file
+	ra.MarkSparseFile(sparseSize)
+	t.Logf("📝 Marked file as sparse: fileID=%d, sparseSize=%d", fileID, sparseSize)
 
 	// Write data at various offsets (non-sequential, simulating WPS write pattern)
 	writeOffsets := []int64{0, 524288, 1048576, 2097152, 3145728}
@@ -877,21 +881,71 @@ func TestJournalFlushWithAtomicReplace(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Failed to write at offset %d: %v", offset, err)
 		}
+		t.Logf("  ✓ Written %d bytes at offset %d", len(data), offset)
 	}
 
 	t.Logf("Written %d journal entries", len(writeOffsets))
+	
+	// Check journal state after writes
+	ra.journalMu.RLock()
+	hasJournal := ra.journal != nil
+	journalIsDirty := false
+	journalIsSparse := false
+	journalVirtualSize := int64(0)
+	if hasJournal {
+		journalIsDirty = ra.journal.IsDirty()
+		journalIsSparse = ra.journal.isSparse
+		journalVirtualSize = ra.journal.virtualSize
+		t.Logf("📝 Journal state: isDirty=%v, isSparse=%v, virtualSize=%d", journalIsDirty, journalIsSparse, journalVirtualSize)
+	} else {
+		t.Logf("⚠️  No journal after writes (data may have gone through buffer path)")
+	}
+	ra.journalMu.RUnlock()
+	
+	// Check buffer state
+	writeIndex := atomic.LoadInt64(&ra.buffer.writeIndex)
+	totalSize := atomic.LoadInt64(&ra.buffer.totalSize)
+	t.Logf("📝 Buffer state: writeIndex=%d, totalSize=%d", writeIndex, totalSize)
 
 	// Step 4: Flush journal (this should detect atomic replace and merge versions)
 	// Note: versionID may be 0 if journal was already flushed (e.g., due to memory limits)
 	// or if flush went through other paths (buffer flush). The important thing is that
 	// the file object is updated correctly and atomic replace detection works.
+	
+	// Check state before flush
+	t.Logf("\n📝 Before Flush:")
+	ra.journalMu.RLock()
+	if ra.journal != nil {
+		t.Logf("  - Journal exists: isDirty=%v, isSparse=%v, virtualSize=%d", 
+			ra.journal.IsDirty(), ra.journal.isSparse, ra.journal.virtualSize)
+	} else {
+		t.Logf("  - No journal")
+	}
+	ra.journalMu.RUnlock()
+	t.Logf("  - Buffer: writeIndex=%d, totalSize=%d", 
+		atomic.LoadInt64(&ra.buffer.writeIndex), atomic.LoadInt64(&ra.buffer.totalSize))
+	
 	versionID, err := ra.Flush()
 	if err != nil {
 		t.Fatalf("Failed to flush: %v", err)
 	}
 
-	t.Logf("Flush completed: versionID=%d", versionID)
+	t.Logf("\n📝 Flush completed: versionID=%d", versionID)
 	// Note: versionID=0 is acceptable if journal was already flushed or flush went through buffer path
+	// For sparse files, even if versionID=0, file object size should still be set to sparseSize
+	
+	// Check state after flush
+	t.Logf("📝 After Flush:")
+	ra.journalMu.RLock()
+	if ra.journal != nil {
+		t.Logf("  - Journal exists: isDirty=%v, isSparse=%v, virtualSize=%d", 
+			ra.journal.IsDirty(), ra.journal.isSparse, ra.journal.virtualSize)
+	} else {
+		t.Logf("  - No journal (cleared after flush)")
+	}
+	ra.journalMu.RUnlock()
+	t.Logf("  - Buffer: writeIndex=%d, totalSize=%d", 
+		atomic.LoadInt64(&ra.buffer.writeIndex), atomic.LoadInt64(&ra.buffer.totalSize))
 
 	// Give a moment for operations to complete
 	time.Sleep(100 * time.Millisecond)
@@ -939,19 +993,52 @@ func TestJournalFlushWithAtomicReplace(t *testing.T) {
 		t.Fatalf("Failed to get file object: %v", err)
 	}
 
+	t.Logf("\n📝 File object after flush:")
+	t.Logf("  - DataID: %d", fileObj[0].DataID)
+	t.Logf("  - Size: %d", fileObj[0].Size)
+	t.Logf("  - MTime: %d", fileObj[0].MTime)
+
 	if fileObj[0].DataID == 0 {
 		t.Errorf("File object dataID still 0 after flush")
 	} else {
 		t.Logf("✓ File object dataID updated: %d", fileObj[0].DataID)
 	}
 
+	// Check file object size
+	// For sparse files, file object size should be sparseSize, not the actual data size
+	// This is important because sparse files may have data at non-contiguous offsets
+	expectedSparseSize := int64(8036352) // 8MB sparse file
+	t.Logf("\n📝 Size check:")
+	t.Logf("  - Expected (sparseSize): %d", expectedSparseSize)
+	t.Logf("  - Actual (fileObj.Size): %d", fileObj[0].Size)
+	t.Logf("  - Difference: %d", fileObj[0].Size-expectedSparseSize)
+	
+	if fileObj[0].Size != expectedSparseSize {
+		// This is a test failure - sparse file size should be preserved
+		t.Errorf("❌ File object size mismatch: got %d, expected %d (sparse file). Sparse file size should be preserved even if data was flushed through buffer path.", fileObj[0].Size, expectedSparseSize)
+	} else {
+		t.Logf("✓ File object size updated correctly: %d (sparse file)", fileObj[0].Size)
+	}
+
 	// Step 8: Verify data can be read back correctly
+	// After Flush, journal is cleared, so we need to close and reopen RandomAccessor
+	// to ensure we read from persisted data with correct sparseSize
+	ra.Close()
+	ra2, err := getOrCreateRandomAccessor(fs, fileID)
+	if err != nil {
+		t.Fatalf("Failed to get RandomAccessor for read: %v", err)
+	}
+	defer ra2.Close()
+
+	// Re-mark as sparse file (since we reopened)
+	ra2.MarkSparseFile(sparseSize)
+
 	for i, offset := range writeOffsets {
 		expectedData := make([]byte, 512)
 		for j := range expectedData {
 			expectedData[j] = byte(i + 1)
 		}
-		readBuf, err := ra.Read(offset, len(expectedData))
+		readBuf, err := ra2.Read(offset, len(expectedData))
 		if err != nil {
 			t.Fatalf("Failed to read at offset %d: %v", offset, err)
 		}
@@ -5738,14 +5825,13 @@ func TestLogBasedReadWritePatternWithNode(t *testing.T) {
 		// Extract data from ReadResult
 		// ReadResult is an interface, we need to call its methods to get data
 		var readData []byte
-		// Try to read from ReadResult using io.Reader interface
+		// Use Bytes() method to extract data from ReadResult
 		readBuf2 := make([]byte, readOp.size)
-		if n, err := readResult.Read(readBuf2); err == nil {
-			readData = readBuf2[:n]
-		} else if err == io.EOF {
-			readData = readBuf2[:n]
+		data, status := readResult.Bytes(readBuf2)
+		if status == fuse.OK {
+			readData = data
 		} else {
-			t.Fatalf("Failed to extract data from ReadResult at offset %d: %v", readOp.offset, err)
+			t.Fatalf("Failed to extract data from ReadResult at offset %d: status=%d", readOp.offset, status)
 		}
 
 		// Check if read size matches expected (may be less if file is smaller)
@@ -5844,10 +5930,11 @@ func TestLogBasedReadWritePatternWithNode(t *testing.T) {
 
 	var readData []byte
 	readBuf2 := make([]byte, expectedFinalSize)
-	if n, err := readResult.Read(readBuf2); err == nil || err == io.EOF {
-		readData = readBuf2[:n]
+	data, status := readResult.Bytes(readBuf2)
+	if status == fuse.OK {
+		readData = data
 	} else {
-		t.Fatalf("Failed to extract data from ReadResult: %v", err)
+		t.Fatalf("Failed to extract data from ReadResult: status=%d", status)
 	}
 
 	if len(readData) != int(expectedFinalSize) {
@@ -6040,16 +6127,12 @@ func TestLogBasedReadWritePatternWithNode(t *testing.T) {
 	verifyResult, errno := fileNode.Read(ctx, verifyBuf, 8038911)
 	if errno == 0 && verifyResult != nil {
 		verifyBuf2 := make([]byte, 1)
-		if n, err := verifyResult.Read(verifyBuf2); err == nil || err == io.EOF {
-			if n > 0 && verifyBuf2[0] == 0xBB {
-				t.Logf("  ✅ Offset 8038911 verified: 0x%02x", verifyBuf2[0])
+		data, status := verifyResult.Bytes(verifyBuf2)
+		if status == fuse.OK && len(data) > 0 {
+			if data[0] == 0xBB {
+				t.Logf("  ✅ Offset 8038911 verified: 0x%02x", data[0])
 			} else {
-				t.Errorf("  ❌ Offset 8038911 mismatch: got 0x%02x, want 0xBB", func() byte {
-					if n > 0 {
-						return verifyBuf2[0]
-					}
-					return 0
-				}())
+				t.Errorf("  ❌ Offset 8038911 mismatch: got 0x%02x, want 0xBB", data[0])
 			}
 		}
 	}
@@ -6059,16 +6142,12 @@ func TestLogBasedReadWritePatternWithNode(t *testing.T) {
 	verifyResult, errno = fileNode.Read(ctx, verifyBuf, 8039423)
 	if errno == 0 && verifyResult != nil {
 		verifyBuf2 := make([]byte, 1)
-		if n, err := verifyResult.Read(verifyBuf2); err == nil || err == io.EOF {
-			if n > 0 && verifyBuf2[0] == 0xDD {
-				t.Logf("  ✅ Offset 8039423 verified: 0x%02x", verifyBuf2[0])
+		data, status := verifyResult.Bytes(verifyBuf2)
+		if status == fuse.OK && len(data) > 0 {
+			if data[0] == 0xDD {
+				t.Logf("  ✅ Offset 8039423 verified: 0x%02x", data[0])
 			} else {
-				t.Errorf("  ❌ Offset 8039423 mismatch: got 0x%02x, want 0xDD", func() byte {
-					if n > 0 {
-						return verifyBuf2[0]
-					}
-					return 0
-				}())
+				t.Errorf("  ❌ Offset 8039423 mismatch: got 0x%02x, want 0xDD", data[0])
 			}
 		}
 	}
@@ -6078,20 +6157,19 @@ func TestLogBasedReadWritePatternWithNode(t *testing.T) {
 	verifyResult, errno = fileNode.Read(ctx, verifyBuf, 8038912)
 	if errno == 0 && verifyResult != nil {
 		verifyBuf2 := make([]byte, 32)
-		if n, err := verifyResult.Read(verifyBuf2); err == nil || err == io.EOF {
-			if n == 32 {
-				allMatch := true
-				for i := 0; i < 32; i++ {
-					if verifyBuf2[i] != byte(0x80+i) {
-						allMatch = false
-						break
-					}
+		data, status := verifyResult.Bytes(verifyBuf2)
+		if status == fuse.OK && len(data) == 32 {
+			allMatch := true
+			for i := 0; i < 32; i++ {
+				if data[i] != byte(0x80+i) {
+					allMatch = false
+					break
 				}
-				if allMatch {
-					t.Logf("  ✅ Offset 8038912 verified: 32 bytes match")
-				} else {
-					t.Errorf("  ❌ Offset 8038912: data mismatch")
-				}
+			}
+			if allMatch {
+				t.Logf("  ✅ Offset 8038912 verified: 32 bytes match")
+			} else {
+				t.Errorf("  ❌ Offset 8038912: data mismatch")
 			}
 		}
 	}
@@ -6101,20 +6179,19 @@ func TestLogBasedReadWritePatternWithNode(t *testing.T) {
 	verifyResult, errno = fileNode.Read(ctx, verifyBuf, 0)
 	if errno == 0 && verifyResult != nil {
 		verifyBuf2 := make([]byte, 512)
-		if n, err := verifyResult.Read(verifyBuf2); err == nil || err == io.EOF {
-			if n == 512 {
-				allMatch := true
-				for i := 0; i < 512; i++ {
-					if verifyBuf2[i] != byte(0xA0+(i%256)) {
-						allMatch = false
-						break
-					}
+		data, status := verifyResult.Bytes(verifyBuf2)
+		if status == fuse.OK && len(data) == 512 {
+			allMatch := true
+			for i := 0; i < 512; i++ {
+				if data[i] != byte(0xA0+(i%256)) {
+					allMatch = false
+					break
 				}
-				if allMatch {
-					t.Logf("  ✅ Offset 0 verified: 512 bytes match")
-				} else {
-					t.Errorf("  ❌ Offset 0: data mismatch")
-				}
+			}
+			if allMatch {
+				t.Logf("  ✅ Offset 0 verified: 512 bytes match")
+			} else {
+				t.Errorf("  ❌ Offset 0: data mismatch")
 			}
 		}
 	}

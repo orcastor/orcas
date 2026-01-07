@@ -3852,10 +3852,12 @@ func (n *OrcasNode) Setattr(ctx context.Context, f fs.FileHandle, in *fuse.SetAt
 
 	// Update modification time
 	if in.Valid&fuse.FATTR_MTIME != 0 {
-		oldMTime := obj.MTime
-		obj.MTime = int64(in.Mtime)
-		DebugLog("[VFS Setattr] Setting mtime: objID=%d, oldMTime=%d, newMTime=%d", n.objID, oldMTime, obj.MTime)
-		needUpdate = true
+		if obj.MTime != int64(in.Mtime) {
+			oldMTime := obj.MTime
+			obj.MTime = int64(in.Mtime)
+			DebugLog("[VFS Setattr] Setting mtime: objID=%d, oldMTime=%d, newMTime=%d", n.objID, oldMTime, obj.MTime)
+			needUpdate = true
+		}
 	}
 
 	// Update access time
@@ -3901,6 +3903,9 @@ func (n *OrcasNode) Setattr(ctx context.Context, f fs.FileHandle, in *fuse.SetAt
 			dirListCache.Del(parentCacheKey)
 			DebugLog("[VFS Setattr] Invalidated parent directory listing cache: objID=%d, parentID=%d", n.objID, obj.PID)
 		}
+	} else {
+		DebugLog("[VFS Setattr] No object updated: objID=%d", n.objID)
+		return 0
 	}
 
 	// Note: File size update has been completed in truncateFile through Flush

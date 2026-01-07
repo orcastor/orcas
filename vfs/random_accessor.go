@@ -2644,16 +2644,41 @@ func (ra *RandomAccessor) flushSequentialBuffer() error {
 				MTime:  mTime,
 			}
 
-			// Update file object MTime
-			fileObj.MTime = mTime
+			// For sparse files, use sparseSize instead of newSize for file object size
+			sparseSize := ra.getSparseSize()
+			fileSize := newSize
+			if sparseSize > 0 && sparseSize > newSize {
+				fileSize = sparseSize
+				DebugLog("[VFS flushSequentialBuffer] Using sparseSize for sparse file (complete overwrite): fileID=%d, sparseSize=%d, newSize=%d", ra.fileID, sparseSize, newSize)
+			}
 
-			// Write DataInfo, version object, and file object update together
-			objectsToPut := []*core.ObjectInfo{newVersion, fileObj}
-			err := lh.PutDataInfoAndObj(ra.fs.c, ra.fs.bktID, []*core.DataInfo{ra.seqBuffer.dataInfo}, objectsToPut)
+			// Update file object MTime and Size
+			fileObj.MTime = mTime
+			fileObj.Size = fileSize
+			fileObj.DataID = ra.seqBuffer.dataID
+
+			// Write DataInfo and version object first
+			_, err := lh.PutDataInfo(ra.fs.c, ra.fs.bktID, []*core.DataInfo{ra.seqBuffer.dataInfo})
 			if err != nil {
-				DebugLog("[VFS flushSequentialBuffer] ERROR: Failed to write DataInfo and ObjectInfo (complete overwrite): fileID=%d, dataID=%d, error=%v", ra.fileID, ra.seqBuffer.dataID, err)
+				DebugLog("[VFS flushSequentialBuffer] ERROR: Failed to write DataInfo (complete overwrite): fileID=%d, dataID=%d, error=%v", ra.fileID, ra.seqBuffer.dataID, err)
 				return err
 			}
+
+			// Create version object
+			_, err = lh.Put(ra.fs.c, ra.fs.bktID, []*core.ObjectInfo{newVersion})
+			if err != nil {
+				DebugLog("[VFS flushSequentialBuffer] ERROR: Failed to create version (complete overwrite): fileID=%d, error=%v", ra.fileID, err)
+				return err
+			}
+
+			// Update file object using SetObj to ensure Size field is updated
+			// Put uses InsertIgnore which won't update existing objects
+			err = lh.MetadataAdapter().SetObj(ra.fs.c, ra.fs.bktID, []string{"did", "s", "m"}, fileObj)
+			if err != nil {
+				DebugLog("[VFS flushSequentialBuffer] ERROR: Failed to update file object (complete overwrite): fileID=%d, error=%v", ra.fileID, err)
+				return err
+			}
+			DebugLog("[VFS flushSequentialBuffer] Updated file object using SetObj (complete overwrite): fileID=%d, DataID=%d, Size=%d", ra.fileID, fileObj.DataID, fileObj.Size)
 
 			// Update caches
 			dataInfoCache.Put(ra.seqBuffer.dataID, ra.seqBuffer.dataInfo)
@@ -2735,7 +2760,14 @@ func (ra *RandomAccessor) flushSequentialBuffer() error {
 						DataID: obj.DataID,
 						MTime:  core.Now(),
 					}
-					_, err := ra.fs.h.Put(ra.fs.c, ra.fs.bktID, []*core.ObjectInfo{updateFileObj})
+					// Use SetObj to ensure Size field is updated
+					// Put uses InsertIgnore which won't update existing objects
+					lh, ok := ra.fs.h.(*core.LocalHandler)
+					if !ok {
+						DebugLog("[VFS flushSequentialBuffer] ERROR: Handler is not LocalHandler")
+						return fmt.Errorf("handler is not LocalHandler")
+					}
+					err := lh.MetadataAdapter().SetObj(ra.fs.c, ra.fs.bktID, []string{"s", "m"}, updateFileObj)
 					if err != nil {
 						DebugLog("[VFS flushSequentialBuffer] ERROR: Failed to fix file size: fileID=%d, error=%v", ra.fileID, err)
 						return err
@@ -3374,10 +3406,13 @@ func (ra *RandomAccessor) flushInternal(force bool) (int64, error) {
 	}
 
 	// PRIORITY 1: Flush journal if exists (replaces TempWriteFile)
+	DebugLog("[VFS RandomAccessor Flush] 🔍 Checking journal flush path: fileID=%d, force=%v", ra.fileID, force)
 	versionID, journalFlushed := ra.flushJournal()
 	if journalFlushed {
-		DebugLog("[VFS RandomAccessor Flush] Successfully flushed journal: fileID=%d, versionID=%d", ra.fileID, versionID)
+		DebugLog("[VFS RandomAccessor Flush] ✅ Successfully flushed journal: fileID=%d, versionID=%d", ra.fileID, versionID)
 		return versionID, nil
+	} else {
+		DebugLog("[VFS RandomAccessor Flush] ⚠️ Journal not flushed: fileID=%d, versionID=%d, will try other paths", ra.fileID, versionID)
 	}
 
 	// For .tmp files, check final file size before flushing TempFileWriter
@@ -3607,7 +3642,8 @@ func (ra *RandomAccessor) flushInternal(force bool) (int64, error) {
 
 	// Use SDK path which handles compression/encryption properly
 	// Note: Sparse files and random writes are now handled by temp write area
-	DebugLog("[VFS RandomAccessor Flush] Using SDK path: fileID=%d, fileObj.DataID=%d, fileObj.Size=%d, mergedOps count=%d", ra.fileID, fileObj.DataID, fileObj.Size, len(mergedOps))
+	sparseSize := ra.getSparseSize()
+	DebugLog("[VFS RandomAccessor Flush] 🔍 Using SDK path (buffer flush): fileID=%d, fileObj.DataID=%d, fileObj.Size=%d, mergedOps count=%d, sparseSize=%d", ra.fileID, fileObj.DataID, fileObj.Size, len(mergedOps), sparseSize)
 	for i, op := range mergedOps {
 		DebugLog("[VFS RandomAccessor Flush] MergedOp[%d]: offset=%d, size=%d", i, op.Offset, len(op.Data))
 	}
@@ -3767,6 +3803,22 @@ func (ra *RandomAccessor) applyRandomWritesWithSDK(fileObj *core.ObjectInfo, wri
 		DebugLog("[VFS applyRandomWritesWithSDK] File size preserved (writes within bounds): fileID=%d, size=%d, maxEnd=%d", ra.fileID, newSize, maxEnd)
 	}
 
+	// For sparse files, use sparseSize instead of calculated newSize for file object size
+	// newSize is the actual data size, but file object size should be sparseSize
+	sparseSize := ra.getSparseSize()
+	DebugLog("[VFS applyRandomWritesWithSDK] 🔍 Checking sparse file: fileID=%d, sparseSize=%d, newSize=%d, maxEnd=%d", ra.fileID, sparseSize, newSize, maxEnd)
+	if sparseSize > 0 {
+		// For sparse files, always use sparseSize as file object size, regardless of newSize
+		// This ensures sparse files maintain their virtual size even if only partial data is written
+		// IMPORTANT: This must be done BEFORE creating updateFileObj, so updateFileObj.Size uses sparseSize
+		fileSize := sparseSize
+		DebugLog("[VFS applyRandomWritesWithSDK] ✅ Using sparseSize for sparse file: fileID=%d, sparseSize=%d, newSize=%d, setting fileSize=%d", ra.fileID, sparseSize, newSize, fileSize)
+		// Update newSize to sparseSize so that updateFileObj.Size will be set correctly
+		newSize = fileSize
+	} else {
+		DebugLog("[VFS applyRandomWritesWithSDK] ⚠️ Not a sparse file or sparseSize=0: fileID=%d, sparseSize=%d, newSize=%d", ra.fileID, sparseSize, newSize)
+	}
+
 	// Check if original data is compressed or encrypted (optimized: use cache)
 	var oldDataInfo *core.DataInfo
 	var hasCompression, hasEncryption bool
@@ -3856,10 +3908,15 @@ func (ra *RandomAccessor) applyRandomWritesWithSDK(fileObj *core.ObjectInfo, wri
 			MTime:  mTime,
 		}
 
-		// Optimization: batch write metadata (write version object and file object update together)
-		objectsToPut := []*core.ObjectInfo{newVersion}
-		// Also update file object (if file object itself needs update)
-		// IMPORTANT: Must include Type, Name, PID, MTime to avoid cache corruption
+		// Create version object first
+		_, err = lh.Put(ra.fs.c, ra.fs.bktID, []*core.ObjectInfo{newVersion})
+		if err != nil {
+			DebugLog("[VFS applyRandomWritesWithSDK] ERROR: Failed to create version: %v", err)
+			return 0, err
+		}
+
+		// Update file object using SetObj to ensure Size field is updated
+		// Put uses InsertIgnore which won't update existing objects
 		updateFileObj := &core.ObjectInfo{
 			ID:     ra.fileID,
 			PID:    fileObj.PID,
@@ -3869,10 +3926,8 @@ func (ra *RandomAccessor) applyRandomWritesWithSDK(fileObj *core.ObjectInfo, wri
 			Size:   newSize,
 			MTime:  mTime,
 		}
-		objectsToPut = append(objectsToPut, updateFileObj)
-
-		// Use Put method to batch create version and update file object (will automatically apply version retention policy)
-		_, err = lh.Put(ra.fs.c, ra.fs.bktID, objectsToPut)
+		DebugLog("[VFS applyRandomWritesWithSDK] 🔍 Calling SetObj to update file object (no DataInfo): fileID=%d, DataID=%d, Size=%d, MTime=%d", ra.fileID, updateFileObj.DataID, updateFileObj.Size, updateFileObj.MTime)
+		err = lh.MetadataAdapter().SetObj(ra.fs.c, ra.fs.bktID, []string{"did", "s", "m"}, updateFileObj)
 
 		// Update cached file object information
 		if err == nil {
@@ -4666,7 +4721,7 @@ func (ra *RandomAccessor) readWithWrites(reader dataReader, offset int64, size i
 	}
 
 	result := readData[resultOffset:resultEnd]
-	
+
 	// CRITICAL: Limit result size to actualFileSize to prevent reading beyond truncated size
 	// This is essential for truncated files where DataInfo.OrigSize may not match fileObj.Size
 	if actualFileSize > 0 && int64(len(result)) > actualFileSize-offset {
@@ -4675,7 +4730,7 @@ func (ra *RandomAccessor) readWithWrites(reader dataReader, offset int64, size i
 		DebugLog("[VFS readWithWrites] Truncated result to actualFileSize: fileID=%d, offset=%d, oldLen=%d, newLen=%d, actualFileSize=%d",
 			ra.fileID, offset, oldLen, len(result), actualFileSize)
 	}
-	
+
 	DebugLog("[VFS readWithWrites] Returning result: fileID=%d, offset=%d, size=%d, resultLen=%d, readDataLen=%d, resultOffset=%d, resultEnd=%d, actualFileSize=%d",
 		ra.fileID, offset, size, len(result), len(readData), resultOffset, resultEnd, actualFileSize)
 	return result, true
@@ -6019,17 +6074,22 @@ func (ra *RandomAccessor) Truncate(newSize int64) (int64, error) {
 	} else {
 		DebugLog("[VFS Truncate] No DataInfo to write (newDataID=%d, newSize=%d): fileID=%d", newDataID, newSize, ra.fileID)
 	}
-	objectsToPut := []*core.ObjectInfo{newVersion, updateFileObj}
+	// Create version object first
+	_, err = lh.Put(ra.fs.c, ra.fs.bktID, []*core.ObjectInfo{newVersion})
+	if err != nil {
+		DebugLog("[VFS applyRandomWritesWithSDK] ERROR: Failed to create version: %v", err)
+		return 0, err
+	}
 
 	if len(dataInfos) > 0 {
-		// Write DataInfo and ObjectInfo together
-		DebugLog("[VFS applyRandomWritesWithSDK] Writing DataInfo and ObjectInfo to disk: fileID=%d, newDataID=%d, newSize=%d", ra.fileID, newDataID, newSize)
-		err = lh.PutDataInfoAndObj(ra.fs.c, ra.fs.bktID, dataInfos, objectsToPut)
+		// Write DataInfo
+		DebugLog("[VFS applyRandomWritesWithSDK] Writing DataInfo to disk: fileID=%d, newDataID=%d, newSize=%d", ra.fileID, newDataID, newSize)
+		_, err = lh.PutDataInfo(ra.fs.c, ra.fs.bktID, dataInfos)
 		if err != nil {
-			DebugLog("[VFS applyRandomWritesWithSDK] ERROR: Failed to write DataInfo and ObjectInfo to disk: fileID=%d, newDataID=%d, error=%v", ra.fileID, newDataID, err)
-			return 0, fmt.Errorf("failed to save DataInfo and update objects: %v", err)
+			DebugLog("[VFS applyRandomWritesWithSDK] ERROR: Failed to write DataInfo to disk: fileID=%d, newDataID=%d, error=%v", ra.fileID, newDataID, err)
+			return 0, fmt.Errorf("failed to save DataInfo: %v", err)
 		}
-		DebugLog("[VFS applyRandomWritesWithSDK] Successfully wrote DataInfo and ObjectInfo to disk: fileID=%d, newDataID=%d, newSize=%d", ra.fileID, newDataID, newSize)
+		DebugLog("[VFS applyRandomWritesWithSDK] Successfully wrote DataInfo to disk: fileID=%d, newDataID=%d, newSize=%d", ra.fileID, newDataID, newSize)
 		// Update cache
 		dataInfoCache.Put(newDataID, newDataInfo)
 		// Clear decoded file cache and reader cache if DataID changed or size changed (important for truncate)
@@ -6045,40 +6105,30 @@ func (ra *RandomAccessor) Truncate(newSize int64) (int64, error) {
 			}
 			DebugLog("[VFS Truncate] Cleared decoding reader cache: fileID=%d, oldDataID=%d, newDataID=%d, oldSize=%d, newSize=%d", ra.fileID, fileObj.DataID, newDataID, oldSize, newSize)
 		}
-	} else {
-		// Only write ObjectInfo (no DataInfo to write)
-		DebugLog("[VFS applyRandomWritesWithSDK] Writing ObjectInfo to disk (no DataInfo): fileID=%d, newSize=%d, newVersionID=%d, objectsToPut count=%d", ra.fileID, newSize, newVersionID, len(objectsToPut))
-		_, err = lh.Put(ra.fs.c, ra.fs.bktID, objectsToPut)
-		if err != nil {
-			DebugLog("[VFS applyRandomWritesWithSDK] ERROR: Failed to write ObjectInfo to disk: fileID=%d, error=%v", ra.fileID, err)
-			return 0, fmt.Errorf("failed to update file object: %v", err)
-		}
-		DebugLog("[VFS applyRandomWritesWithSDK] Successfully wrote ObjectInfo to disk: fileID=%d, newSize=%d, newVersionID=%d", ra.fileID, newSize, newVersionID)
-		// Clear decoding reader cache if size changed (important for truncate)
-		// This ensures that truncated files don't use stale cached data
-		if newSize != oldSize && fileObj.DataID > 0 && fileObj.DataID != core.EmptyDataID {
-			decodingReaderCache.Del(fileObj.DataID)
-			DebugLog("[VFS Truncate] Cleared decoding reader cache (size changed): fileID=%d, DataID=%d, oldSize=%d, newSize=%d", ra.fileID, fileObj.DataID, oldSize, newSize)
-		}
-		// IMPORTANT: Update cache with updateFileObj which has the correct newSize
-		// This ensures subsequent getFileObj() calls return the updated fileObj with correct Size
-		fileObjCache.Put(ra.fileObjKey, updateFileObj)
-		ra.fileObj.Store(updateFileObj)
-		DebugLog("[VFS applyRandomWritesWithSDK] Updated fileObj cache: fileID=%d, newSize=%d, newDataID=%d", ra.fileID, updateFileObj.Size, updateFileObj.DataID)
-		// Update directory listing cache to ensure file is visible in Readdir
-		if updateFileObj.PID > 0 {
-			dirNode := &OrcasNode{
-				fs:    ra.fs,
-				objID: updateFileObj.PID,
-			}
-			dirNode.invalidateDirListCache(updateFileObj.PID)
-			DebugLog("[VFS applyRandomWritesWithSDK] Appended file to directory listing cache: fileID=%d, dirID=%d, name=%s", ra.fileID, updateFileObj.PID, updateFileObj.Name)
-		}
 	}
 
-	// Update cache
+	// Update file object using SetObj to ensure Size field is updated
+	// Put uses InsertIgnore which won't update existing objects
+	DebugLog("[VFS applyRandomWritesWithSDK] 🔍 Calling SetObj to update file object (with DataInfo): fileID=%d, newSize=%d, newDataID=%d, updateFileObj.Size=%d", ra.fileID, newSize, newDataID, updateFileObj.Size)
+	err = lh.MetadataAdapter().SetObj(ra.fs.c, ra.fs.bktID, []string{"did", "s", "m"}, updateFileObj)
+	if err != nil {
+		DebugLog("[VFS applyRandomWritesWithSDK] ❌ ERROR: Failed to update file object: %v", err)
+		return 0, fmt.Errorf("failed to update file object: %v", err)
+	}
+	DebugLog("[VFS applyRandomWritesWithSDK] ✅ Successfully updated file object using SetObj (with DataInfo): fileID=%d, newSize=%d, newDataID=%d, updateFileObj.Size=%d", ra.fileID, newSize, newDataID, updateFileObj.Size)
+
+	// Clear decoding reader cache if size changed (important for truncate)
+	// This ensures that truncated files don't use stale cached data
+	if newSize != oldSize && fileObj.DataID > 0 && fileObj.DataID != core.EmptyDataID {
+		decodingReaderCache.Del(fileObj.DataID)
+		DebugLog("[VFS Truncate] Cleared decoding reader cache (size changed): fileID=%d, DataID=%d, oldSize=%d, newSize=%d", ra.fileID, fileObj.DataID, oldSize, newSize)
+	}
+
+	// IMPORTANT: Update cache with updateFileObj which has the correct newSize
+	// This ensures subsequent getFileObj() calls return the updated fileObj with correct Size
 	fileObjCache.Put(ra.fileObjKey, updateFileObj)
 	ra.fileObj.Store(updateFileObj)
+	DebugLog("[VFS applyRandomWritesWithSDK] Updated fileObj cache: fileID=%d, newSize=%d, newDataID=%d", ra.fileID, updateFileObj.Size, updateFileObj.DataID)
 
 	// Update directory listing cache to ensure file is visible in Readdir
 	if updateFileObj.PID > 0 {
@@ -6587,10 +6637,29 @@ func (ra *RandomAccessor) migrateWriteBufferToJournal() error {
 func (ra *RandomAccessor) getOrCreateJournal() (*Journal, error) {
 	ra.journalMu.RLock()
 	if ra.journal != nil {
+		// Update sparse properties if sparseSize was set after journal creation
+		sparseSize := ra.getSparseSize()
+		if sparseSize > 0 && (!ra.journal.isSparse || ra.journal.virtualSize != sparseSize) {
+			ra.journalMu.RUnlock()
+			ra.journalMu.Lock()
+			// Double-check after acquiring write lock
+			if ra.journal != nil {
+				ra.journal.virtualSize = sparseSize
+				ra.journal.isSparse = true
+				DebugLog("[VFS getOrCreateJournal] Updated existing journal sparse properties: fileID=%d, virtualSize=%d", ra.fileID, sparseSize)
+			}
+			ra.journalMu.Unlock()
+			ra.journalMu.RLock()
+		}
+		journal := ra.journal
 		ra.journalMu.RUnlock()
-		return ra.journal, nil
+		if journal != nil {
+			return journal, nil
+		}
+		// Journal was cleared, continue to create new one
+	} else {
+		ra.journalMu.RUnlock()
 	}
-	ra.journalMu.RUnlock()
 
 	ra.journalMu.Lock()
 	defer ra.journalMu.Unlock()
@@ -7074,13 +7143,37 @@ func (ra *RandomAccessor) flushJournal() (int64, bool) {
 	journal := ra.journal
 	ra.journalMu.RUnlock()
 
-	if journal == nil || !journal.IsDirty() {
+	if journal == nil {
+		DebugLog("[VFS flushJournal] No journal: fileID=%d", ra.fileID)
 		return 0, false
 	}
+	if !journal.IsDirty() {
+		DebugLog("[VFS flushJournal] Journal not dirty: fileID=%d", ra.fileID)
+		return 0, false
+	}
+	DebugLog("[VFS flushJournal] Journal is dirty, proceeding to flush: fileID=%d, isSparse=%v, virtualSize=%d", ra.fileID, journal.isSparse, journal.virtualSize)
 
 	// Note: Don't call journal.GetEntryCount() here as it acquires entriesMu.RLock()
 	// which could block if another thread is in Flush() holding entriesMu.Lock()
 	DebugLog("[VFS flushJournal] Flushing journal: fileID=%d", ra.fileID)
+
+	// Get virtualSize before Flush (for sparse files, journal may be cleared after Flush)
+	virtualSize := int64(0)
+	isSparse := false
+	DebugLog("[VFS flushJournal] Checking journal sparse properties: fileID=%d, journal.isSparse=%v, journal.virtualSize=%d", ra.fileID, journal.isSparse, journal.virtualSize)
+	if journal.isSparse && journal.virtualSize > 0 {
+		virtualSize = journal.virtualSize
+		isSparse = true
+		DebugLog("[VFS flushJournal] Sparse file detected: fileID=%d, virtualSize=%d", ra.fileID, virtualSize)
+	} else {
+		// Also check sparseSize from RandomAccessor as fallback
+		sparseSize := ra.getSparseSize()
+		if sparseSize > 0 {
+			virtualSize = sparseSize
+			isSparse = true
+			DebugLog("[VFS flushJournal] Sparse file detected from RandomAccessor: fileID=%d, sparseSize=%d (journal.isSparse=%v, journal.virtualSize=%d)", ra.fileID, virtualSize, journal.isSparse, journal.virtualSize)
+		}
+	}
 
 	// Flush journal to create new data block
 	newDataID, newSize, err := journal.Flush()
@@ -7153,6 +7246,15 @@ func (ra *RandomAccessor) flushJournal() (int64, bool) {
 	}
 
 	mTime := core.Now()
+
+	// For sparse files, use virtualSize instead of newSize for file object size
+	// newSize is the actual data size, but file object size should be virtualSize
+	fileSize := newSize
+	if isSparse && virtualSize > 0 {
+		fileSize = virtualSize
+		DebugLog("[VFS flushJournal] Using virtualSize for sparse file: fileID=%d, virtualSize=%d, newSize=%d", ra.fileID, fileSize, newSize)
+	}
+
 	newVersion := &core.ObjectInfo{
 		ID:     versionID,
 		PID:    ra.fileID,
@@ -7169,17 +7271,27 @@ func (ra *RandomAccessor) flushJournal() (int64, bool) {
 		Type:   fileObj.Type,
 		Name:   fileObj.Name,
 		DataID: newDataID,
-		Size:   newSize,
+		Size:   fileSize,
 		MTime:  mTime,
 	}
+	DebugLog("[VFS flushJournal] 🔍 Prepared updateFileObj: fileID=%d, DataID=%d, Size=%d, isSparse=%v, virtualSize=%d, newSize=%d", ra.fileID, updateFileObj.DataID, updateFileObj.Size, isSparse, virtualSize, newSize)
 
-	// Batch write version and update file object
-	objectsToPut := []*core.ObjectInfo{newVersion, updateFileObj}
-	_, err = lh.Put(ra.fs.c, ra.fs.bktID, objectsToPut)
+	// Create version object first
+	_, err = lh.Put(ra.fs.c, ra.fs.bktID, []*core.ObjectInfo{newVersion})
+	if err != nil {
+		DebugLog("[VFS flushJournal] ❌ ERROR: Failed to create version: %v", err)
+		return 0, false
+	}
+
+	// Update file object using SetObj to ensure Size field is updated
+	// Put uses InsertIgnore which won't update existing objects
+	DebugLog("[VFS flushJournal] 🔍 Calling SetObj to update file object: fileID=%d, DataID=%d, Size=%d, MTime=%d, isSparse=%v, virtualSize=%d", ra.fileID, updateFileObj.DataID, updateFileObj.Size, updateFileObj.MTime, isSparse, virtualSize)
+	err = lh.MetadataAdapter().SetObj(ra.fs.c, ra.fs.bktID, []string{"did", "s", "m"}, updateFileObj)
 	if err != nil {
 		DebugLog("[VFS flushJournal] ERROR: Failed to update file object: %v", err)
 		return 0, false
 	}
+	DebugLog("[VFS flushJournal] Updated file object using SetObj: fileID=%d, DataID=%d, Size=%d", ra.fileID, updateFileObj.DataID, updateFileObj.Size)
 
 	// Update cache
 	fileObjCache.Put(ra.fileObjKey, updateFileObj)

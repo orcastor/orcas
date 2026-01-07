@@ -579,6 +579,14 @@ func (j *Journal) SmartFlush() (versionID int64, err error) {
 		}
 		fileObj := fileObjs[0]
 
+		// For sparse files, use virtualSize instead of newSize for file object size
+		// newSize is the actual data size, but file object size should be virtualSize
+		fileSize := newSize
+		if j.isSparse && j.virtualSize > 0 {
+			fileSize = j.virtualSize
+			DebugLog("[Journal SmartFlush] Using virtualSize for sparse file: fileID=%d, virtualSize=%d, newSize=%d", j.fileID, fileSize, newSize)
+		}
+
 		// Update file object with new dataID and size
 		updateFileObj := &core.ObjectInfo{
 			ID:     j.fileID,
@@ -586,18 +594,27 @@ func (j *Journal) SmartFlush() (versionID int64, err error) {
 			Type:   fileObj.Type,
 			Name:   fileObj.Name,
 			DataID: newDataID,
-			Size:   newSize,
+			Size:   fileSize,
 			MTime:  mTime,
 			Mode:   fileObj.Mode,
 			Extra:  fileObj.Extra,
 		}
 
-		// Batch write: version object + update file object
-		objectsToPut := []*core.ObjectInfo{versionObj, updateFileObj}
-		_, err = lh.Put(j.fs.c, j.fs.bktID, objectsToPut)
+		// Create version object first
+		_, err = lh.Put(j.fs.c, j.fs.bktID, []*core.ObjectInfo{versionObj})
 		if err != nil {
-			return 0, fmt.Errorf("failed to create version and update file: %w", err)
+			return 0, fmt.Errorf("failed to create version: %w", err)
 		}
+
+		// Update file object using SetObj to ensure Size field is updated
+		// Put uses InsertIgnore which won't update existing objects
+		DebugLog("[Journal SmartFlush] 🔍 Calling SetObj to update file object: fileID=%d, DataID=%d, Size=%d, MTime=%d, isSparse=%v, virtualSize=%d", j.fileID, updateFileObj.DataID, updateFileObj.Size, updateFileObj.MTime, j.isSparse, j.virtualSize)
+		err = lh.MetadataAdapter().SetObj(j.fs.c, j.fs.bktID, []string{"did", "s", "m"}, updateFileObj)
+		if err != nil {
+			DebugLog("[Journal SmartFlush] ❌ ERROR: Failed to update file object: %v", err)
+			return 0, fmt.Errorf("failed to update file object: %w", err)
+		}
+		DebugLog("[Journal SmartFlush] ✅ Successfully updated file object using SetObj: fileID=%d, DataID=%d, Size=%d", j.fileID, updateFileObj.DataID, updateFileObj.Size)
 
 		// Update cache
 		fileObjCache.Put(j.fileID, updateFileObj)
@@ -1138,17 +1155,48 @@ func (j *Journal) flushSmallFile(newSize int64) (int64, int64, error) {
 	finalData := make([]byte, newSize)
 
 	// Read base data if exists
+	// For sparse files, baseSize is virtual size, but actual data may be smaller
+	// We should try to read actual data size from DataInfo, not virtual size
 	if j.dataID > 0 && j.dataID != core.EmptyDataID && j.baseSize > 0 {
-		baseData, err := j.readBaseData(0, j.baseSize)
+		// For sparse files, try to read actual data size instead of virtual size
+		readSize := j.baseSize
+		if j.isSparse {
+			// Get actual data size from DataInfo
+			lh, ok := j.fs.h.(*core.LocalHandler)
+			if ok {
+				dataInfo, err := lh.GetDataInfo(j.fs.c, j.fs.bktID, j.dataID)
+				if err == nil && dataInfo != nil && dataInfo.OrigSize > 0 && dataInfo.OrigSize < j.baseSize {
+					// Use actual data size instead of virtual size
+					readSize = dataInfo.OrigSize
+					DebugLog("[Journal flushSmallFile] Sparse file: using actual data size instead of virtual size: fileID=%d, virtualSize=%d, actualSize=%d", j.fileID, j.baseSize, readSize)
+				}
+			}
+		}
+
+		baseData, err := j.readBaseData(0, readSize)
 		if err != nil {
-			DebugLog("[Journal flushSmallFile] ERROR: Failed to read base data: %v", err)
-			return 0, 0, fmt.Errorf("failed to read base data: %w", err)
+			// For sparse files, missing base data chunks is normal
+			// Continue with empty buffer and only apply journal entries
+			if j.isSparse {
+				DebugLog("[Journal flushSmallFile] Sparse file: base data not available (normal for sparse files), continuing with empty buffer: fileID=%d, error=%v", j.fileID, err)
+				// Initialize finalData with zeros (sparse file behavior)
+				// finalData is already initialized with zeros, so we can continue
+			} else {
+				DebugLog("[Journal flushSmallFile] ERROR: Failed to read base data: %v", err)
+				return 0, 0, fmt.Errorf("failed to read base data: %w", err)
+			}
+		} else {
+			// Base data exists, copy it
+			copyLen := readSize
+			if copyLen > newSize {
+				copyLen = newSize
+			}
+			if len(baseData) < int(copyLen) {
+				copyLen = int64(len(baseData))
+			}
+			copy(finalData[:copyLen], baseData)
+			DebugLog("[Journal flushSmallFile] Copied base data: fileID=%d, copyLen=%d, baseDataLen=%d", j.fileID, copyLen, len(baseData))
 		}
-		copyLen := j.baseSize
-		if copyLen > newSize {
-			copyLen = newSize
-		}
-		copy(finalData[:copyLen], baseData)
 	}
 
 	// Apply all journal entries
