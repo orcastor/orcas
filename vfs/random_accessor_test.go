@@ -4181,7 +4181,7 @@ func TestReadDuringRandomWrites(t *testing.T) {
 		verifyReadData := func(offset int64, data []byte) error {
 			expectedDataMu.RLock()
 			defer expectedDataMu.RUnlock()
-			
+
 			// CRITICAL: Verify read data length doesn't exceed file size
 			// This catches cases where file size changes during read
 			if offset+int64(len(data)) > expectedFileSize {
@@ -4196,7 +4196,7 @@ func TestReadDuringRandomWrites(t *testing.T) {
 						offset, len(data), expectedFileSize, maxReadable)
 				}
 			}
-			
+
 			// During concurrent writes, reads may see:
 			// 1. Old data (before write)
 			// 2. New data (after write and flush)
@@ -4205,7 +4205,7 @@ func TestReadDuringRandomWrites(t *testing.T) {
 			// - Data length doesn't exceed file size (CRITICAL)
 			// - Data is not all zeros or all same value (garbage detection)
 			// - Data is within reasonable range (not completely random garbage)
-			
+
 			// Check for garbage data patterns
 			if len(data) > 100 {
 				allSame := true
@@ -4230,7 +4230,7 @@ func TestReadDuringRandomWrites(t *testing.T) {
 					return fmt.Errorf("suspicious data: all bytes are zero at offset %d (fileSize=%d)", offset, expectedFileSize)
 				}
 			}
-			
+
 			// Verify data is within file bounds (CRITICAL check)
 			for i := range data {
 				pos := offset + int64(i)
@@ -4239,10 +4239,10 @@ func TestReadDuringRandomWrites(t *testing.T) {
 						offset, pos, expectedFileSize, len(data))
 				}
 			}
-			
+
 			return nil
 		}
-		
+
 		// Helper function to get current file size from RandomAccessor
 		getCurrentFileSize := func() (int64, error) {
 			fileObj, err := ra.getFileObj()
@@ -4263,7 +4263,7 @@ func TestReadDuringRandomWrites(t *testing.T) {
 				atomic.AddInt32(&readCount, 1)
 				// Read from various offsets, including near end of file
 				readOffset := int64(i * 25000) // Various offsets
-				readSize := 131072              // 128KB reads
+				readSize := 131072             // 128KB reads
 				data, err := ra.Read(readOffset, readSize)
 				if err != nil && err != io.EOF {
 					readErrors <- fmt.Errorf("read failed at offset %d, size %d: %w", readOffset, readSize, err)
@@ -4283,7 +4283,7 @@ func TestReadDuringRandomWrites(t *testing.T) {
 							readOffset, len(data), currentFileSize)
 						return
 					}
-					
+
 					// Verify data matches expected values
 					if err := verifyReadData(readOffset, data); err != nil {
 						readErrors <- fmt.Errorf("data integrity check failed: %w", err)
@@ -4306,13 +4306,13 @@ func TestReadDuringRandomWrites(t *testing.T) {
 			8000000,  // Near end
 		}
 		writeSizes := []int{
-			122880,  // 120KB
-			2048,    // 2KB
-			65536,   // 64KB
-			32768,   // 32KB
-			8192,    // 8KB
-			512,     // 512B
-			131072,  // 128KB
+			122880, // 120KB
+			2048,   // 2KB
+			65536,  // 64KB
+			32768,  // 32KB
+			8192,   // 8KB
+			512,    // 512B
+			131072, // 128KB
 		}
 
 		for i, offset := range writeOffsets {
@@ -4351,7 +4351,7 @@ func TestReadDuringRandomWrites(t *testing.T) {
 			// No errors, good
 		}
 
-		t.Logf("✅ Test Case 1 passed: %d reads completed, %d verified without errors", 
+		t.Logf("✅ Test Case 1 passed: %d reads completed, %d verified without errors",
 			atomic.LoadInt32(&readCount), atomic.LoadInt32(&verifiedReads))
 
 		// Test Case 2: Large file (> 10MB, multiple chunks) with random writes
@@ -4383,7 +4383,7 @@ func TestReadDuringRandomWrites(t *testing.T) {
 				atomic.AddInt32(&readCount2, 1)
 				// Read from various chunks
 				readOffset := int64(i * 100000) // Various offsets across chunks
-				readSize := 65536                // 64KB reads
+				readSize := 65536               // 64KB reads
 				data, err := ra.Read(readOffset, readSize)
 				if err != nil && err != io.EOF {
 					readErrors <- fmt.Errorf("read failed at offset %d (chunk %d): %w",
@@ -4405,7 +4405,7 @@ func TestReadDuringRandomWrites(t *testing.T) {
 
 		// Write to different chunks randomly
 		largeWriteOffsets := []int64{
-			0,           // Chunk 0, beginning
+			0,                // Chunk 0, beginning
 			5 * 1024 * 1024,  // Chunk 0, middle
 			10 * 1024 * 1024, // Chunk 1, beginning
 			12 * 1024 * 1024, // Chunk 1, middle
@@ -4414,13 +4414,13 @@ func TestReadDuringRandomWrites(t *testing.T) {
 			11 * 1024 * 1024, // Chunk 1, near boundary
 		}
 		largeWriteSizes := []int{
-			1024 * 1024, // 1MB
-			512 * 1024,  // 512KB
+			1024 * 1024,     // 1MB
+			512 * 1024,      // 512KB
 			2 * 1024 * 1024, // 2MB
-			256 * 1024,  // 256KB
-			128 * 1024, // 128KB
-			64 * 1024,  // 64KB
-			32 * 1024,  // 32KB
+			256 * 1024,      // 256KB
+			128 * 1024,      // 128KB
+			64 * 1024,       // 64KB
+			32 * 1024,       // 32KB
 		}
 
 		for i, offset := range largeWriteOffsets {
@@ -4456,13 +4456,13 @@ func TestReadDuringRandomWrites(t *testing.T) {
 			// No errors, good
 		}
 
-		t.Logf("✅ Test Case 2 passed: %d reads completed, %d verified without errors", 
+		t.Logf("✅ Test Case 2 passed: %d reads completed, %d verified without errors",
 			atomic.LoadInt32(&readCount2), atomic.LoadInt32(&verifiedReads2))
 
 		// Test Case 3: File shrinking scenario (was large, now small)
 		// This is the scenario that caused the original bug
 		t.Log("Test Case 3: File shrinking from large to small (triggers chunk boundary issue)")
-		
+
 		// First make file large (2 chunks)
 		veryLargeSize := int64(20 * 1024 * 1024) // 20MB - 2 chunks
 		veryLargeData := make([]byte, veryLargeSize)
@@ -4495,7 +4495,7 @@ func TestReadDuringRandomWrites(t *testing.T) {
 				atomic.AddInt32(&readCount3, 1)
 				// Read from various offsets, including near end
 				readOffset := int64(i * 90000) // Various offsets
-				readSize := 131072              // 128KB
+				readSize := 131072             // 128KB
 				data, err := ra.Read(readOffset, readSize)
 				if err != nil && err != io.EOF {
 					readErrors <- fmt.Errorf("read failed after shrink at offset %d: %w", readOffset, err)
@@ -4515,7 +4515,7 @@ func TestReadDuringRandomWrites(t *testing.T) {
 							readOffset, len(data), currentFileSize)
 						return
 					}
-					
+
 					// Verify data matches expected (use verifyReadData if expectedData is set)
 					expectedDataMu.RLock()
 					hasExpectedData := len(expectedData) > 0
@@ -4549,7 +4549,7 @@ func TestReadDuringRandomWrites(t *testing.T) {
 			0,
 			4 * 1024 * 1024,
 			8 * 1024 * 1024,
-			8 * 1024 * 1024 + 500000, // Near end
+			8*1024*1024 + 500000, // Near end
 		}
 		smallWriteSizes := []int{
 			1024,
@@ -4595,7 +4595,7 @@ func TestReadDuringRandomWrites(t *testing.T) {
 		// Test Case 4: File extension during read (critical size change scenario)
 		// This tests the scenario where file is being extended while reads are happening
 		t.Log("Test Case 4: File extension during concurrent read (size change scenario)")
-		
+
 		// Start with a small file
 		baseSize := int64(2 * 1024 * 1024) // 2MB
 		baseData := make([]byte, baseSize)
@@ -4624,35 +4624,35 @@ func TestReadDuringRandomWrites(t *testing.T) {
 			for i := 0; i < 150; i++ {
 				atomic.AddInt32(&readCount4, 1)
 				readOffset := int64(i * 15000) // Various offsets
-				readSize := 65536               // 64KB reads
-				
+				readSize := 65536              // 64KB reads
+
 				// Get file size BEFORE read
 				sizeBeforeRead, err := getCurrentFileSize()
 				if err != nil {
 					readErrors <- fmt.Errorf("failed to get file size before read: %w", err)
 					return
 				}
-				
+
 				data, err := ra.Read(readOffset, readSize)
 				if err != nil && err != io.EOF {
 					readErrors <- fmt.Errorf("read failed during extension at offset %d: %w", readOffset, err)
 					return
 				}
-				
+
 				// Get file size AFTER read (may have changed)
 				sizeAfterRead, err := getCurrentFileSize()
 				if err != nil {
 					readErrors <- fmt.Errorf("failed to get file size after read: %w", err)
 					return
 				}
-				
+
 				// CRITICAL: Verify read data doesn't exceed file size at time of read
 				// Use the smaller of before/after to be conservative
 				effectiveFileSize := sizeBeforeRead
 				if sizeAfterRead < sizeBeforeRead {
 					effectiveFileSize = sizeAfterRead
 				}
-				
+
 				if len(data) > 0 {
 					// Verify read length is reasonable
 					maxReadable := effectiveFileSize - readOffset
@@ -4665,12 +4665,12 @@ func TestReadDuringRandomWrites(t *testing.T) {
 							readOffset, len(data), sizeBeforeRead, sizeAfterRead, maxReadable)
 						return
 					}
-					
+
 					// Verify data integrity
 					expectedDataMu.RLock()
 					currentExpectedSize := expectedFileSize
 					expectedDataMu.RUnlock()
-					
+
 					// Only verify data that should exist
 					verifyLen := len(data)
 					if readOffset+int64(verifyLen) > currentExpectedSize {
@@ -4679,7 +4679,7 @@ func TestReadDuringRandomWrites(t *testing.T) {
 							verifyLen = 0
 						}
 					}
-					
+
 					if verifyLen > 0 {
 						if err := verifyReadData(readOffset, data[:verifyLen]); err != nil {
 							readErrors <- fmt.Errorf("data integrity check failed during extension: %w", err)
@@ -4688,7 +4688,7 @@ func TestReadDuringRandomWrites(t *testing.T) {
 						atomic.AddInt32(&verifiedReads4, 1)
 					}
 				}
-				
+
 				time.Sleep(3 * time.Millisecond)
 			}
 		}()
@@ -4698,11 +4698,11 @@ func TestReadDuringRandomWrites(t *testing.T) {
 			offset int64
 			size   int
 		}{
-			{baseSize, 1024 * 1024},           // Extend by 1MB
-			{baseSize + 512*1024, 512 * 1024}, // Overlapping extension
+			{baseSize, 1024 * 1024},                 // Extend by 1MB
+			{baseSize + 512*1024, 512 * 1024},       // Overlapping extension
 			{baseSize + 1024*1024, 2 * 1024 * 1024}, // Extend by 2MB more
-			{baseSize + 3*1024*1024, 1024 * 1024}, // Extend by 1MB more
-			{baseSize + 4*1024*1024, 512 * 1024},  // Extend by 512KB more
+			{baseSize + 3*1024*1024, 1024 * 1024},   // Extend by 1MB more
+			{baseSize + 4*1024*1024, 512 * 1024},    // Extend by 512KB more
 		}
 
 		for i, ext := range extensionWrites {
@@ -4757,7 +4757,7 @@ func TestReadDuringRandomWrites(t *testing.T) {
 		finalReadData, err := ra.Read(0, int(finalSize))
 		So(err, ShouldBeNil)
 		So(len(finalReadData), ShouldEqual, int(finalSize))
-		
+
 		// Verify data is not garbage
 		if len(finalReadData) > 100 {
 			allSame := true
@@ -4964,7 +4964,7 @@ func TestVFSWriteAppendAndPrepend(t *testing.T) {
 		So(len(updatedFileObj), ShouldEqual, 1)
 		actualFileSize := updatedFileObj[0].Size
 		t.Logf("File size in database: %d bytes (expected: %d bytes)", actualFileSize, expectedFileSize)
-		
+
 		// If size doesn't match, it's a bug - but let's still verify data integrity
 		if actualFileSize != expectedFileSize {
 			t.Logf("⚠️  WARNING: File size mismatch! Expected %d, got %d. This indicates a bug in size calculation.", expectedFileSize, actualFileSize)
@@ -4994,5 +4994,233 @@ func TestVFSWriteAppendAndPrepend(t *testing.T) {
 		t.Logf("✅ Data verified after reopen: %d bytes match", len(actualData2))
 
 		t.Logf("✅ All verifications passed: file size=%d, all data matches expected", expectedFileSize)
+	})
+}
+
+// TestSequentialWriteContinuousLargeFileWithEncryption 测试大文件持续写入（特别是加密情况下）的数据准确性
+// 这个测试验证：
+// 1. 大文件持续写入（超过10个chunk，触发定期更新DataInfo）
+// 2. 在写入过程中不关闭文件
+// 3. 在写入过程中读取已写入的部分，验证数据准确性
+// 4. 特别测试加密情况，确保读取时能正确解密
+func TestSequentialWriteContinuousLargeFileWithEncryption(t *testing.T) {
+	Convey("Sequential write continuous large file with encryption", t, func() {
+		ig := idgen.NewIDGen(nil, 0)
+		testBktID, _ := ig.New()
+		err := core.InitBucketDB(".", testBktID)
+		So(err, ShouldBeNil)
+
+		dma := &core.DefaultMetadataAdapter{
+			DefaultBaseMetadataAdapter: &core.DefaultBaseMetadataAdapter{},
+			DefaultDataMetadataAdapter: &core.DefaultDataMetadataAdapter{},
+		}
+		dma.DefaultBaseMetadataAdapter.SetPath(".")
+		dma.DefaultDataMetadataAdapter.SetPath(".")
+		dda := &core.DefaultDataAdapter{}
+
+		lh := core.NewLocalHandler("", "").(*core.LocalHandler)
+		lh.SetAdapter(dma, dda)
+
+		testCtx, userInfo, _, err := lh.Login(c, "orcas", "orcas")
+		So(err, ShouldBeNil)
+
+		bucket := &core.BucketInfo{
+			ID:       testBktID,
+			Name:     "test_bucket",
+			Type:     1,
+			Quota:    200000000, // 200MB quota for large file test (120MB + overhead)
+			Used:     0,
+			RealUsed: 0,
+		}
+		admin := core.NewLocalAdmin(".", ".")
+		So(admin.PutBkt(testCtx, []*core.BucketInfo{bucket}), ShouldBeNil)
+
+		if userInfo != nil && userInfo.ID > 0 {
+			So(admin.PutACL(testCtx, testBktID, userInfo.ID, core.ALL), ShouldBeNil)
+		}
+
+		// Test with encryption enabled
+		encryptionKey := "this-is-a-test-encryption-key-that-is-long-enough-for-aes256-encryption-12345678901234567890"
+		cfg := &core.Config{
+			EndecWay: core.DATA_ENDEC_AES256,
+			EndecKey: encryptionKey,
+		}
+		ofs := NewOrcasFSWithConfig(lh, testCtx, testBktID, cfg)
+
+		Convey("test continuous sequential write with encryption and periodic DataInfo updates", func() {
+			fileID, _ := ig.New()
+			fileObj := &core.ObjectInfo{
+				ID:    fileID,
+				PID:   testBktID,
+				Type:  core.OBJ_TYPE_FILE,
+				Name:  "large_encrypted_continuous_test.txt",
+				Size:  0,
+				MTime: core.Now(),
+			}
+			_, err = dma.PutObj(testCtx, testBktID, []*core.ObjectInfo{fileObj})
+			So(err, ShouldBeNil)
+
+			ra, err := NewRandomAccessor(ofs, fileID)
+			So(err, ShouldBeNil)
+			defer ra.Close()
+
+			// Write large file that will trigger multiple periodic DataInfo updates
+			// Each chunk is 10MB (default), so 12 chunks = 120MB will trigger at least one periodic update (every 10 chunks)
+			// We write 12 chunks to ensure at least one periodic update happens
+			chunkSize := 10 * 1024 * 1024 // 10MB per chunk
+			totalChunks := 12
+			totalSize := int64(chunkSize * totalChunks)
+
+			// Generate test data with predictable pattern for verification
+			generateTestData := func(offset, size int64) []byte {
+				data := make([]byte, size)
+				for i := int64(0); i < size; i++ {
+					// Use offset + i to create unique pattern
+					data[i] = byte((offset + i) % 256)
+				}
+				return data
+			}
+
+			// Store expected data for verification
+			expectedData := make([]byte, totalSize)
+			for i := int64(0); i < totalSize; i++ {
+				expectedData[i] = byte(i % 256)
+			}
+
+			// Write data in chunks (sequential write)
+			writtenSize := int64(0)
+			for chunk := 0; chunk < totalChunks; chunk++ {
+				offset := int64(chunk) * int64(chunkSize)
+				chunkData := generateTestData(offset, int64(chunkSize))
+				copy(expectedData[offset:], chunkData)
+
+				err = ra.Write(offset, chunkData)
+				So(err, ShouldBeNil)
+
+				writtenSize += int64(len(chunkData))
+
+				// After writing 10 chunks (100MB), test reading again
+				// This should be after at least one periodic DataInfo update
+				// Note: We test at chunk 10 instead of chunk 5 because data needs to be flushed
+				// to storage before it can be read. Chunks are flushed when they reach chunkSize.
+				if chunk == 9 {
+					// Read first 100MB to verify data integrity after periodic update
+					// At this point, at least 10 chunks have been written and flushed
+					readData, err := ra.Read(0, int(writtenSize))
+					So(err, ShouldBeNil)
+					So(len(readData), ShouldEqual, int(writtenSize))
+					So(bytes.Equal(readData, expectedData[:writtenSize]), ShouldBeTrue)
+
+					// Also read a random portion to verify random access
+					randomOffset := int64(50 * 1024 * 1024) // 50MB offset
+					randomSize := 1024 * 1024               // 1MB
+					randomData, err := ra.Read(randomOffset, randomSize)
+					So(err, ShouldBeNil)
+					So(len(randomData), ShouldEqual, randomSize)
+					So(bytes.Equal(randomData, expectedData[randomOffset:randomOffset+int64(randomSize)]), ShouldBeTrue)
+
+					// Verify file object size matches written size
+					fileObj2, err := ra.getFileObj()
+					So(err, ShouldBeNil)
+					So(fileObj2.Size, ShouldEqual, writtenSize)
+
+					// Verify DataInfo is accessible and correct
+					dataInfo, err := lh.GetDataInfo(testCtx, testBktID, fileObj2.DataID)
+					So(err, ShouldBeNil)
+					So(dataInfo, ShouldNotBeNil)
+					So(dataInfo.OrigSize, ShouldEqual, writtenSize)
+					So(dataInfo.Kind&core.DATA_ENDEC_MASK, ShouldNotEqual, 0)
+				}
+			}
+
+			// Final flush
+			_, err = ra.Flush()
+			So(err, ShouldBeNil)
+
+			// Final verification: read entire file
+			finalData, err := ra.Read(0, int(totalSize))
+			So(err, ShouldBeNil)
+			So(len(finalData), ShouldEqual, int(totalSize))
+			So(bytes.Equal(finalData, expectedData), ShouldBeTrue)
+
+			// Verify file object size
+			fileObj3, err := ra.getFileObj()
+			So(err, ShouldBeNil)
+			So(fileObj3.Size, ShouldEqual, totalSize)
+
+			// Verify DataInfo is correct
+			dataInfo, err := lh.GetDataInfo(testCtx, testBktID, fileObj3.DataID)
+			So(err, ShouldBeNil)
+			So(dataInfo.OrigSize, ShouldEqual, totalSize)
+			So(dataInfo.Kind&core.DATA_ENDEC_MASK, ShouldNotEqual, 0)
+
+			t.Logf("✅ Successfully verified continuous sequential write with encryption: %d bytes, %d chunks", totalSize, totalChunks)
+		})
+
+		Convey("test continuous sequential write without encryption for comparison", func() {
+			// Test without encryption to ensure the test works for both cases
+			ofsNoEnc := NewOrcasFS(lh, testCtx, testBktID)
+
+			fileID, _ := ig.New()
+			fileObj := &core.ObjectInfo{
+				ID:    fileID,
+				PID:   testBktID,
+				Type:  core.OBJ_TYPE_FILE,
+				Name:  "large_continuous_test_no_enc.txt",
+				Size:  0,
+				MTime: core.Now(),
+			}
+			_, err = dma.PutObj(testCtx, testBktID, []*core.ObjectInfo{fileObj})
+			So(err, ShouldBeNil)
+
+			ra, err := NewRandomAccessor(ofsNoEnc, fileID)
+			So(err, ShouldBeNil)
+			defer ra.Close()
+
+			// Write 12 chunks (120MB) to trigger periodic updates
+			chunkSize := 10 * 1024 * 1024 // 10MB
+			totalChunks := 12
+			totalSize := int64(chunkSize * totalChunks)
+
+			generateTestData := func(offset, size int64) []byte {
+				data := make([]byte, size)
+				for i := int64(0); i < size; i++ {
+					data[i] = byte((offset + i) % 256)
+				}
+				return data
+			}
+
+			expectedData := make([]byte, totalSize)
+			writtenSize := int64(0)
+
+			for chunk := 0; chunk < totalChunks; chunk++ {
+				offset := int64(chunk) * int64(chunkSize)
+				chunkData := generateTestData(offset, int64(chunkSize))
+				copy(expectedData[offset:], chunkData)
+
+				err = ra.Write(offset, chunkData)
+				So(err, ShouldBeNil)
+				writtenSize += int64(len(chunkData))
+
+				// Test reading after 10 chunks (should be after periodic update)
+				if chunk == 9 {
+					readData, err := ra.Read(0, int(writtenSize))
+					So(err, ShouldBeNil)
+					So(len(readData), ShouldEqual, int(writtenSize))
+					So(bytes.Equal(readData, expectedData[:writtenSize]), ShouldBeTrue)
+				}
+			}
+
+			// Final flush and verification
+			_, err = ra.Flush()
+			So(err, ShouldBeNil)
+
+			finalData, err := ra.Read(0, int(totalSize))
+			So(err, ShouldBeNil)
+			So(len(finalData), ShouldEqual, int(totalSize))
+			So(bytes.Equal(finalData, expectedData), ShouldBeTrue)
+
+			t.Logf("✅ Successfully verified continuous sequential write without encryption: %d bytes", totalSize)
+		})
 	})
 }

@@ -2487,6 +2487,89 @@ func (ra *RandomAccessor) flushSequentialChunkLocked() error {
 
 	ra.seqBuffer.sn++
 	ra.seqBuffer.buffer = ra.seqBuffer.buffer[:0] // Clear buffer but keep capacity
+
+	// For continuous sequential writes (large files), periodically update DataInfo and file object
+	// This ensures progress is visible even when file is not closed yet
+	// Update every 10 chunks (approximately every 100MB) to balance visibility and performance
+	// Only update if this is not the first chunk (sn > 0) and we've written multiple chunks
+	if ra.seqBuffer.sn > 0 && ra.seqBuffer.sn%10 == 0 {
+		// Update DataInfo and file object periodically for continuous writes
+		// This allows progress tracking for large files that are continuously written
+		if lh, ok := ra.fs.h.(*core.LocalHandler); ok {
+			// CRITICAL: Ensure DataInfo is complete and consistent before updating
+			// This is especially important for encrypted files to ensure accurate reading
+			// Verify that:
+			// 1. DataInfo ID matches seqBuffer.dataID
+			// 2. OrigSize and Size are consistent (Size >= OrigSize if compressed/encrypted)
+			// 3. Kind flags are valid (encryption flags should not change during write)
+			if ra.seqBuffer.dataInfo.ID != ra.seqBuffer.dataID {
+				DebugLog("[VFS flushSequentialChunk] ERROR: DataInfo ID mismatch, skipping periodic update: fileID=%d, dataID=%d, DataInfo.ID=%d", ra.fileID, ra.seqBuffer.dataID, ra.seqBuffer.dataInfo.ID)
+			} else if ra.seqBuffer.dataInfo.OrigSize <= 0 {
+				DebugLog("[VFS flushSequentialChunk] WARNING: DataInfo OrigSize is invalid, skipping periodic update: fileID=%d, dataID=%d, OrigSize=%d", ra.fileID, ra.seqBuffer.dataID, ra.seqBuffer.dataInfo.OrigSize)
+			} else {
+				// Validate Size consistency
+				// Note: Compression may make Size < OrigSize, but encryption always makes Size >= OrigSize
+				// For encrypted-only (no compression), Size should be >= OrigSize
+				// For compressed-only (no encryption), Size may be < OrigSize
+				// For both compressed and encrypted, Size depends on compression ratio
+				hasCompression := ra.seqBuffer.dataInfo.Kind&core.DATA_CMPR_MASK != 0
+				hasEncryption := ra.seqBuffer.dataInfo.Kind&core.DATA_ENDEC_MASK != 0
+				if hasEncryption && !hasCompression && ra.seqBuffer.dataInfo.Size < ra.seqBuffer.dataInfo.OrigSize {
+					// Encrypted-only data should always have Size >= OrigSize (encryption adds overhead)
+					DebugLog("[VFS flushSequentialChunk] WARNING: DataInfo Size < OrigSize for encrypted-only data, this may indicate inconsistency: fileID=%d, dataID=%d, Size=%d, OrigSize=%d, Kind=0x%x", ra.fileID, ra.seqBuffer.dataID, ra.seqBuffer.dataInfo.Size, ra.seqBuffer.dataInfo.OrigSize, ra.seqBuffer.dataInfo.Kind)
+				}
+				if ra.seqBuffer.dataInfo.Size <= 0 {
+					DebugLog("[VFS flushSequentialChunk] WARNING: DataInfo Size is invalid, this may cause read issues: fileID=%d, dataID=%d, Size=%d, OrigSize=%d", ra.fileID, ra.seqBuffer.dataID, ra.seqBuffer.dataInfo.Size, ra.seqBuffer.dataInfo.OrigSize)
+				}
+
+				// Create a copy of DataInfo to ensure we don't modify the original during update
+				// This is important to maintain consistency if update fails
+				dataInfoCopy := *ra.seqBuffer.dataInfo
+
+				// Update DataInfo without closing the sequential buffer
+				// This allows the file to continue writing while making progress visible
+				_, updateErr := lh.PutDataInfo(ra.fs.c, ra.fs.bktID, []*core.DataInfo{&dataInfoCopy})
+				if updateErr != nil {
+					DebugLog("[VFS flushSequentialChunk] WARNING: Failed to update DataInfo periodically (non-critical): fileID=%d, dataID=%d, sn=%d, error=%v", ra.fileID, ra.seqBuffer.dataID, ra.seqBuffer.sn, updateErr)
+					// Don't return error - this is a non-critical update for progress visibility
+				} else {
+					// Update cache with latest DataInfo (use copy to avoid race conditions)
+					dataInfoCache.Put(ra.seqBuffer.dataID, &dataInfoCopy)
+					// Also invalidate decodingReaderCache to ensure chunkReader uses fresh DataInfo
+					decodingReaderCache.Del(ra.seqBuffer.dataID)
+
+					// Also update file object size to make progress visible
+					// This allows file size to be visible even when file is not closed
+					fileObj, err := ra.getFileObj()
+					if err == nil && fileObj != nil {
+						// Update file object size to reflect current progress
+						// CRITICAL: Ensure Size matches DataInfo.OrigSize for consistency
+						updateFileObj := &core.ObjectInfo{
+							ID:     fileObj.ID,
+							PID:    fileObj.PID,
+							DataID: ra.seqBuffer.dataID,
+							Size:   ra.seqBuffer.dataInfo.OrigSize, // Use OrigSize as file size (must match DataInfo.OrigSize)
+							MTime:  core.Now(),
+							Type:   fileObj.Type,
+							Name:   fileObj.Name,
+						}
+
+						// Use SetObj to update file size without closing the file
+						updateErr := lh.MetadataAdapter().SetObj(ra.fs.c, ra.fs.bktID, []string{"did", "s", "m"}, updateFileObj)
+						if updateErr != nil {
+							DebugLog("[VFS flushSequentialChunk] WARNING: Failed to update file object size periodically (non-critical): fileID=%d, error=%v", ra.fileID, updateErr)
+						} else {
+							// Update cache with latest file object
+							fileObjCache.Put(ra.fileObjKey, updateFileObj)
+							ra.fileObj.Store(updateFileObj)
+							DebugLog("[VFS flushSequentialChunk] Periodically updated DataInfo and file object for continuous write: fileID=%d, dataID=%d, sn=%d, OrigSize=%d, Size=%d, Kind=0x%x (CMPR=%v, ENDEC=%v)", ra.fileID, ra.seqBuffer.dataID, ra.seqBuffer.sn, ra.seqBuffer.dataInfo.OrigSize, ra.seqBuffer.dataInfo.Size, ra.seqBuffer.dataInfo.Kind, hasCompression, hasEncryption)
+						}
+					}
+				}
+			}
+		}
+	}
+
 	return nil
 }
 
@@ -2706,6 +2789,27 @@ func (ra *RandomAccessor) flushSequentialBuffer() error {
 
 			DebugLog("[VFS flushSequentialBuffer] Successfully completed full overwrite: fileID=%d, oldDataID=%d, newDataID=%d, oldSize=%d, newSize=%d, versionID=%d", ra.fileID, oldDataID, ra.seqBuffer.dataID, oldSize, newSize, versionID)
 			return nil
+		}
+
+		// CRITICAL OPTIMIZATION: Check if this is pure append (no overlap with existing data)
+		// Pure append means: writeOffset >= oldSize (new data starts at or after old file end)
+		// For pure append, we can use SDK's AppendData to avoid reprocessing existing chunks
+		isPureAppend := writeOffset >= oldSize
+		if isPureAppend {
+			DebugLog("[VFS flushSequentialBuffer] Pure append detected (writeOffset=%d >= oldSize=%d), using append mode to avoid reprocessing existing chunks: fileID=%d", writeOffset, oldSize, ra.fileID)
+
+			// Use SDK's streaming append to add new chunks without reprocessing old ones
+			lh, ok := ra.fs.h.(*core.LocalHandler)
+			if ok {
+				// Call optimized append path
+				versionID, appendErr := ra.applyAppendWithSDK(lh, fileObj, writeOffset, writeData)
+				if appendErr == nil {
+					DebugLog("[VFS flushSequentialBuffer] Successfully completed append: fileID=%d, oldDataID=%d, newSize=%d, versionID=%d", ra.fileID, oldDataID, writeOffset+int64(len(writeData)), versionID)
+					return nil
+				}
+				// If append failed, fall through to merge path
+				DebugLog("[VFS flushSequentialBuffer] Append failed, falling back to merge path: fileID=%d, error=%v", ra.fileID, appendErr)
+			}
 		}
 
 		// Restore old DataID and size so applyRandomWritesWithSDK can read existing data
@@ -4009,6 +4113,214 @@ func (ra *RandomAccessor) applyRandomWritesWithSDK(fileObj *core.ObjectInfo, wri
 	return newVersionID, err
 }
 
+// applyAppendWithSDK handles pure append operations without reprocessing existing chunks
+// This is a critical optimization for sequential uploads: when appending data to existing file,
+// only new chunks need to be processed, old chunks can be referenced directly
+func (ra *RandomAccessor) applyAppendWithSDK(lh *core.LocalHandler, fileObj *core.ObjectInfo, appendOffset int64, appendData []byte) (int64, error) {
+	DebugLog("[VFS applyAppendWithSDK] Starting append: fileID=%d, oldSize=%d, appendOffset=%d, appendSize=%d",
+		ra.fileID, fileObj.Size, appendOffset, len(appendData))
+
+	// Get old DataInfo
+	oldDataInfo, err := lh.GetDataInfo(ra.fs.c, ra.fs.bktID, fileObj.DataID)
+	if err != nil {
+		DebugLog("[VFS applyAppendWithSDK] Failed to get old DataInfo: fileID=%d, error=%v", ra.fileID, err)
+		return 0, err
+	}
+
+	// Create new DataID for appended data
+	newDataID := core.NewID()
+	if newDataID <= 0 {
+		return 0, fmt.Errorf("failed to generate DataID")
+	}
+
+	da := lh.GetDataAdapter()
+	if da == nil {
+		return 0, fmt.Errorf("failed to get DataAdapter")
+	}
+
+	chunkSize := ra.fs.chunkSize
+	oldSize := fileObj.Size
+	newSize := appendOffset + int64(len(appendData))
+
+	// Calculate chunk ranges
+	oldChunkCount := int((oldSize + chunkSize - 1) / chunkSize)
+	newChunkCount := int((newSize + chunkSize - 1) / chunkSize)
+
+	DebugLog("[VFS applyAppendWithSDK] Chunk analysis: oldChunkCount=%d, newChunkCount=%d, chunkSize=%d",
+		oldChunkCount, newChunkCount, chunkSize)
+
+	// 1. Copy existing chunks directly (encrypted data, no reprocessing!)
+	for chunkIdx := 0; chunkIdx < oldChunkCount; chunkIdx++ {
+		encryptedChunk, err := da.Read(ra.fs.c, ra.fs.bktID, fileObj.DataID, chunkIdx)
+		if err != nil {
+			DebugLog("[VFS applyAppendWithSDK] Failed to read old chunk %d: %v", chunkIdx, err)
+			return 0, fmt.Errorf("failed to read old chunk %d: %w", chunkIdx, err)
+		}
+
+		err = da.Write(ra.fs.c, ra.fs.bktID, newDataID, chunkIdx, encryptedChunk)
+		if err != nil {
+			DebugLog("[VFS applyAppendWithSDK] Failed to write copied chunk %d: %v", chunkIdx, err)
+			return 0, fmt.Errorf("failed to write copied chunk %d: %w", chunkIdx, err)
+		}
+
+		DebugLog("[VFS applyAppendWithSDK] Copied chunk %d directly (size=%d, no decrypt/encrypt)",
+			chunkIdx, len(encryptedChunk))
+	}
+
+	// 2. Process and write new chunks
+	// Use ProcessData to handle compression/encryption consistently
+	for chunkIdx := oldChunkCount; chunkIdx < newChunkCount; chunkIdx++ {
+		chunkOffset := int64(chunkIdx) * chunkSize
+		dataOffset := chunkOffset - appendOffset
+		chunkEnd := chunkOffset + chunkSize
+		if chunkEnd > newSize {
+			chunkEnd = newSize
+		}
+		chunkLength := chunkEnd - chunkOffset
+
+		var chunkData []byte
+		if dataOffset >= 0 && dataOffset < int64(len(appendData)) {
+			dataEnd := dataOffset + chunkLength
+			if dataEnd > int64(len(appendData)) {
+				dataEnd = int64(len(appendData))
+			}
+			chunkData = appendData[dataOffset:dataEnd]
+		} else {
+			chunkData = make([]byte, chunkLength) // Zero-filled
+		}
+
+		// Process chunk (compress + encrypt)
+		processKind := oldDataInfo.Kind // Inherit kind from old data
+		processedChunk, err := core.ProcessData(chunkData, &processKind, ra.fs.CmprQlty, ra.fs.EndecKey, false)
+		if err != nil {
+			DebugLog("[VFS applyAppendWithSDK] Failed to process new chunk %d: %v", chunkIdx, err)
+			return 0, fmt.Errorf("failed to process new chunk %d: %w", chunkIdx, err)
+		}
+
+		err = da.Write(ra.fs.c, ra.fs.bktID, newDataID, chunkIdx, processedChunk)
+		if err != nil {
+			DebugLog("[VFS applyAppendWithSDK] Failed to write new chunk %d: %v", chunkIdx, err)
+			return 0, fmt.Errorf("failed to write new chunk %d: %w", chunkIdx, err)
+		}
+
+		DebugLog("[VFS applyAppendWithSDK] Wrote new chunk %d (offset=%d, size=%d, processed=%d)",
+			chunkIdx, chunkOffset, len(chunkData), len(processedChunk))
+	}
+
+	// 3. Calculate hashes for new file
+	// Note: For append, we need to read all chunks to calculate hash
+	// But at least we avoid re-encrypting old chunks
+	finalData := make([]byte, newSize)
+	for chunkIdx := 0; chunkIdx < newChunkCount; chunkIdx++ {
+		chunkOffset := int64(chunkIdx) * chunkSize
+		chunkEnd := chunkOffset + chunkSize
+		if chunkEnd > newSize {
+			chunkEnd = newSize
+		}
+		actualChunkSize := int(chunkEnd - chunkOffset)
+
+		// Read decrypted chunk data for hash calculation
+		chunkData, err := lh.GetData(ra.fs.c, ra.fs.bktID, newDataID, chunkIdx)
+		if err != nil {
+			DebugLog("[VFS applyAppendWithSDK] Failed to read chunk %d for hashing: %v", chunkIdx, err)
+			return 0, fmt.Errorf("failed to read chunk %d for hashing: %w", chunkIdx, err)
+		}
+
+		if len(chunkData) > actualChunkSize {
+			chunkData = chunkData[:actualChunkSize]
+		}
+		copy(finalData[chunkOffset:], chunkData)
+	}
+
+	// Calculate hashes
+	hdrSize := int(core.DefaultHdrSize)
+	if hdrSize > len(finalData) {
+		hdrSize = len(finalData)
+	}
+	hdrXXH3 := int64(xxh3.Hash(finalData[:hdrSize]))
+	dataXXH3 := int64(xxh3.Hash(finalData))
+	dataSHA256 := sha256.Sum256(finalData)
+
+	// 4. Create DataInfo
+	newDataInfo := &core.DataInfo{
+		ID:       newDataID,
+		Kind:     oldDataInfo.Kind, // Inherit kind
+		OrigSize: newSize,
+		HdrXXH3:  hdrXXH3,
+		XXH3:     dataXXH3,
+		SHA256_0: int64(binary.BigEndian.Uint64(dataSHA256[0:8])),
+		SHA256_1: int64(binary.BigEndian.Uint64(dataSHA256[8:16])),
+		SHA256_2: int64(binary.BigEndian.Uint64(dataSHA256[16:24])),
+		SHA256_3: int64(binary.BigEndian.Uint64(dataSHA256[24:32])),
+	}
+
+	_, err = lh.PutDataInfo(ra.fs.c, ra.fs.bktID, []*core.DataInfo{newDataInfo})
+	if err != nil {
+		DebugLog("[VFS applyAppendWithSDK] Failed to write DataInfo: fileID=%d, error=%v", ra.fileID, err)
+		return 0, err
+	}
+
+	// 5. Create version and update file object
+	versionID := core.NewID()
+	if versionID == 0 {
+		return 0, fmt.Errorf("failed to generate version ID")
+	}
+
+	mTime := core.Now()
+	newVersion := &core.ObjectInfo{
+		ID:     versionID,
+		PID:    ra.fileID,
+		Type:   core.OBJ_TYPE_VERSION,
+		DataID: newDataID,
+		Size:   newSize,
+		MTime:  mTime,
+	}
+
+	_, err = lh.Put(ra.fs.c, ra.fs.bktID, []*core.ObjectInfo{newVersion})
+	if err != nil {
+		DebugLog("[VFS applyAppendWithSDK] Failed to create version: fileID=%d, error=%v", ra.fileID, err)
+		return 0, err
+	}
+
+	// Update file object
+	fileObj.DataID = newDataID
+	fileObj.Size = newSize
+	fileObj.MTime = mTime
+
+	// For sparse files, preserve sparseSize
+	sparseSize := ra.getSparseSize()
+	if sparseSize > 0 && sparseSize > newSize {
+		fileObj.Size = sparseSize
+		DebugLog("[VFS applyAppendWithSDK] Using sparseSize for file: fileID=%d, sparseSize=%d, newSize=%d",
+			ra.fileID, sparseSize, newSize)
+	}
+
+	err = lh.MetadataAdapter().SetObj(ra.fs.c, ra.fs.bktID, []string{"did", "s", "m"}, fileObj)
+	if err != nil {
+		DebugLog("[VFS applyAppendWithSDK] Failed to update file object: fileID=%d, error=%v", ra.fileID, err)
+		return 0, err
+	}
+
+	// Update caches
+	dataInfoCache.Put(newDataID, newDataInfo)
+	fileObjCache.Put(ra.fileObjKey, fileObj)
+	ra.fileObj.Store(fileObj)
+
+	// Invalidate directory listing cache
+	if fileObj.PID > 0 {
+		dirNode := &OrcasNode{
+			fs:    ra.fs,
+			objID: fileObj.PID,
+		}
+		dirNode.invalidateDirListCache(fileObj.PID)
+	}
+
+	DebugLog("[VFS applyAppendWithSDK] Successfully completed append: fileID=%d, oldSize=%d, newSize=%d, oldChunks=%d (copied), newChunks=%d (processed)",
+		ra.fileID, oldSize, newSize, oldChunkCount, newChunkCount-oldChunkCount)
+
+	return versionID, nil
+}
+
 // applyWritesStreamingCompressed handles compressed or encrypted data
 // Streaming processing: read original data by chunk, apply write operations, process and write to new object immediately
 func (ra *RandomAccessor) applyWritesStreamingCompressed(oldDataInfo *core.DataInfo, writes []WriteOperation,
@@ -4283,8 +4595,23 @@ func (ra *RandomAccessor) processWritesStreaming(
 	firstChunk := true
 	chunkSizeInt := int(ra.fs.chunkSize)
 
+	// Get LocalHandler and DataAdapter for direct chunk access (optimization)
+	lh, _ := ra.fs.h.(*core.LocalHandler)
+	var da core.DataAdapter
+	if lh != nil {
+		da = lh.GetDataAdapter()
+	}
+	var oldDataID int64
+	var hasOldData bool
+	if reader != nil {
+		if cr, ok := reader.(*chunkReader); ok {
+			oldDataID = cr.dataID
+			hasOldData = oldDataID > 0
+		}
+	}
+
 	// Stream process by chunk
-	DebugLog("[VFS processWritesStreaming] Starting chunk processing: fileID=%d, dataID=%d, chunkCount=%d, newSize=%d, chunkSize=%d", ra.fileID, dataInfo.ID, chunkCount, newSize, chunkSizeInt)
+	DebugLog("[VFS processWritesStreaming] Starting chunk processing: fileID=%d, dataID=%d, chunkCount=%d, newSize=%d, chunkSize=%d, hasOldData=%v, canOptimize=%v", ra.fileID, dataInfo.ID, chunkCount, newSize, chunkSizeInt, hasOldData, da != nil)
 	for chunkIdx := 0; chunkIdx < chunkCount; chunkIdx++ {
 		pos := int64(chunkIdx * chunkSizeInt)
 		chunkEnd := pos + int64(chunkSizeInt)
@@ -4299,6 +4626,80 @@ func (ra *RandomAccessor) processWritesStreaming(
 			// Skip empty chunks
 			continue
 		}
+
+		hasWrites := len(writesByChunk[chunkIdx]) > 0
+
+		// OPTIMIZATION: For unmodified chunks with existing encrypted data, copy directly
+		// This avoids expensive read→decrypt→re-encrypt→write cycle
+		// Still need to read original data for hash calculation, but can skip re-encryption
+		if !hasWrites && hasOldData && da != nil {
+			// Read encrypted chunk directly from old DataID
+			encryptedChunk, err := da.Read(ra.fs.c, ra.fs.bktID, oldDataID, chunkIdx)
+			if err == nil && len(encryptedChunk) > 0 {
+				// Successfully read encrypted chunk, copy it directly to new DataID
+				err = da.Write(ra.fs.c, ra.fs.bktID, dataInfo.ID, sn, encryptedChunk)
+				if err == nil {
+					// Success! Skip decryption and re-encryption
+					DebugLog("[VFS processWritesStreaming] Copied encrypted chunk directly: fileID=%d, chunkIdx=%d, sn=%d, size=%d (saved decrypt+encrypt)",
+						ra.fileID, chunkIdx, sn, len(encryptedChunk))
+
+					// Still need to read original data for hash calculation
+					chunkData := chunkDataPool.Get().([]byte)
+					if cap(chunkData) < actualChunkSize {
+						chunkData = make([]byte, actualChunkSize)
+					} else {
+						chunkData = chunkData[:actualChunkSize]
+					}
+
+					n, readErr := reader.Read(chunkData, pos)
+					if readErr == nil || readErr == io.EOF {
+						// Update hash with original data
+						if xxh3Hash == nil {
+							xxh3Hash = xxh3.New()
+							sha256Hash = sha256.New()
+						}
+
+						// Handle HdrXXH3 calculation
+						if !hdrXXH3Calculated {
+							hdrEnd := dataInfo.OrigSize + int64(n)
+							if hdrEnd <= core.DefaultHdrSize {
+								xxh3Hash.Write(chunkData[:n])
+							} else if dataInfo.OrigSize < core.DefaultHdrSize {
+								remainingHdrSize := core.DefaultHdrSize - dataInfo.OrigSize
+								if remainingHdrSize > 0 && remainingHdrSize < int64(n) {
+									xxh3Hash.Write(chunkData[:remainingHdrSize])
+								} else {
+									xxh3Hash.Write(chunkData[:n])
+								}
+								dataInfo.HdrXXH3 = int64(xxh3Hash.Sum64())
+								hdrXXH3Calculated = true
+								xxh3Hash = xxh3.New()
+								xxh3Hash.Write(chunkData[:n])
+							} else {
+								hdrSize := int(core.DefaultHdrSize)
+								if hdrSize > n {
+									hdrSize = n
+								}
+								dataInfo.HdrXXH3 = int64(xxh3.Hash(chunkData[:hdrSize]))
+								hdrXXH3Calculated = true
+								xxh3Hash.Write(chunkData[:n])
+							}
+						} else {
+							xxh3Hash.Write(chunkData[:n])
+						}
+
+						sha256Hash.Write(chunkData[:n])
+						dataXXH3 = xxh3Hash.Sum64()
+					}
+
+					putChunkDataToPool(chunkData)
+					sn++
+					continue // Skip normal processing
+				}
+			}
+			// If direct copy failed, fall through to normal processing
+		}
+
 		// IMPORTANT: For chunks beyond the original newSize, we need to read the full chunk from original file
 		// actualChunkSize is already correct based on totalSize
 		DebugLog("[VFS processWritesStreaming] Processing chunk: fileID=%d, dataID=%d, chunkIdx=%d, sn=%d, pos=%d, chunkEnd=%d, actualChunkSize=%d, writesCount=%d", ra.fileID, dataInfo.ID, chunkIdx, sn, pos, chunkEnd, actualChunkSize, len(writesByChunk[chunkIdx]))
@@ -5635,13 +6036,13 @@ func (ra *RandomAccessor) Truncate(newSize int64) (int64, error) {
 						if ra.seqBuffer != nil {
 							ra.seqBuffer = nil
 						}
-						
+
 						// CRITICAL: Remove existing journal before writing truncated data
 						// This ensures journal.baseSize doesn't carry over the old (larger) size
 						// which would cause flushSmallFile to use the wrong size
 						ra.fs.journalMgr.Remove(ra.fileID)
 						DebugLog("[VFS Truncate] Removed existing journal before writing truncated data: fileID=%d", ra.fileID)
-						
+
 						// CRITICAL: Update fileObj.Size to newSize BEFORE writing truncated data
 						// This ensures that getOrCreateJournal uses the new (smaller) size as baseSize
 						// Without this, the new journal would use the old (larger) size
@@ -5904,13 +6305,13 @@ func (ra *RandomAccessor) Truncate(newSize int64) (int64, error) {
 						if ra.seqBuffer != nil {
 							ra.seqBuffer = nil
 						}
-						
+
 						// CRITICAL: Remove existing journal before writing truncated data
 						// This ensures journal.baseSize doesn't carry over the old (larger) size
 						// which would cause flushSmallFile to use the wrong size
 						ra.fs.journalMgr.Remove(ra.fileID)
 						DebugLog("[VFS Truncate] Removed existing journal before writing truncated data: fileID=%d", ra.fileID)
-						
+
 						// CRITICAL: Update fileObj.Size to newSize BEFORE writing truncated data
 						// This ensures that getOrCreateJournal uses the new (smaller) size as baseSize
 						// Without this, the new journal would use the old (larger) size
@@ -6945,7 +7346,7 @@ func (ra *RandomAccessor) readBaseData(offset, length int64) ([]byte, error) {
 					endInChunk := readEnd - chunkStart
 					result = append(result, chunkData[startInChunk:endInChunk]...)
 				}
-				DebugLog("[VFS readBaseData] Chunk %d doesn't exist (sparse=%v, beyondBaseSize=%v), filling with zeros: fileID=%d, chunkStart=%d, baseSize=%d", 
+				DebugLog("[VFS readBaseData] Chunk %d doesn't exist (sparse=%v, beyondBaseSize=%v), filling with zeros: fileID=%d, chunkStart=%d, baseSize=%d",
 					sn, dataInfo.Kind&core.DATA_SPARSE != 0, isBeyondBaseSize, ra.fileID, chunkStart, baseSize)
 				continue
 			} else {
