@@ -6543,12 +6543,52 @@ func (ra *RandomAccessor) shouldUseJournal(fileObj *core.ObjectInfo) bool {
 		}
 	}
 
-	// PRIORITY CHECK: Sparse files should use Journal
-	// This replaces TempWriteArea for sparse files
+	// OPTIMIZATION: Sparse files with sequential writes should NOT use journal
+	// Windows SMB large file uploads: SetAllocationSize → sequential writes from offset 0
+	// This is NOT random write, using SequentialWriteBuffer is more efficient
 	sparseSize := ra.getSparseSize()
 	if sparseSize > 0 {
-		DebugLog("[VFS shouldUseJournal] Using journal for sparse file: fileID=%d, sparseSize=%d", ra.fileID, sparseSize)
-		return true
+		// Check if writes are sequential (starting from 0)
+		// If sequential, prefer SequentialWriteBuffer over Journal
+		lastOffset := atomic.LoadInt64(&ra.lastOffset)
+
+		// Sequential pattern detection:
+		// 1. First write (lastOffset == 0 or -1) starting from offset 0
+		// 2. Or sequential buffer already active with data
+		if ra.seqBuffer != nil {
+			ra.seqBuffer.mu.Lock()
+			hasSeqData := ra.seqBuffer.hasData && !ra.seqBuffer.closed
+			seqOffset := ra.seqBuffer.offset
+			ra.seqBuffer.mu.Unlock()
+			if hasSeqData && seqOffset > 0 {
+				// Already have sequential buffer with data, continue using it
+				DebugLog("[VFS shouldUseJournal] Sparse file with sequential buffer active, not using journal: fileID=%d, sparseSize=%d, seqOffset=%d",
+					ra.fileID, sparseSize, seqOffset)
+				return false
+			}
+		}
+
+		// If lastOffset is small (near start of file), this looks like sequential upload
+		// Only use journal if we detect random write pattern (writes not at expected offset)
+		if lastOffset <= 0 {
+			// First write or no writes yet - defer decision, don't force journal
+			DebugLog("[VFS shouldUseJournal] Sparse file first write, deferring journal decision: fileID=%d, sparseSize=%d, lastOffset=%d",
+				ra.fileID, sparseSize, lastOffset)
+			return false
+		}
+
+		// Check if this is random write pattern on sparse file
+		// For true random writes (like qBittorrent), use journal
+		if ra.isRandomWritePattern() {
+			DebugLog("[VFS shouldUseJournal] Using journal for sparse file with random writes: fileID=%d, sparseSize=%d",
+				ra.fileID, sparseSize)
+			return true
+		}
+
+		// Sequential pattern on sparse file - don't use journal
+		DebugLog("[VFS shouldUseJournal] Sparse file appears sequential, not using journal: fileID=%d, sparseSize=%d, lastOffset=%d",
+			ra.fileID, sparseSize, lastOffset)
+		return false
 	}
 
 	// PRIORITY CHECK 2: Files that need encryption or compression

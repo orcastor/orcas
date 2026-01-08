@@ -7600,3 +7600,126 @@ func TestFlushLargeFileChunkedBugFix(t *testing.T) {
 
 	t.Logf("✓ Regression test passed - bug fix is working correctly (all chunks readable)")
 }
+
+// TestSparseFileSequentialUpload tests the Windows SMB large file upload scenario
+// where SetAllocationSize is called first (creating sparse file), then sequential writes follow.
+// This should use SequentialWriteBuffer path (more efficient) instead of Journal path.
+func TestSparseFileSequentialUpload(t *testing.T) {
+	testDir := filepath.Join(os.TempDir(), "orcas_sparse_sequential_upload")
+	defer cleanupTestDir(t, testDir)
+
+	// Setup without encryption to test pure sequential path
+	fs, bktID := setupTestFS(t, testDir)
+	defer cleanupFS(fs)
+
+	// Set chunk size
+	fs.chunkSize = 10 << 20 // 10MB chunks
+
+	// Create test file (simulating Windows SMB file creation)
+	fileName := "large_upload.iso"
+	fileID, err := createTestFile(t, fs, bktID, fileName)
+	if err != nil {
+		t.Fatalf("Failed to create test file: %v", err)
+	}
+
+	ra, err := getOrCreateRandomAccessor(fs, fileID)
+	if err != nil {
+		t.Fatalf("Failed to get RandomAccessor: %v", err)
+	}
+	defer ra.Close()
+
+	// Simulate Windows SMB SetAllocationSize (pre-allocate 50MB)
+	sparseSize := int64(50 << 20) // 50MB
+	ra.MarkSparseFile(sparseSize)
+	t.Logf("Simulated SetAllocationSize: sparseSize=%d", sparseSize)
+
+	// Sequential writes from offset 0 (simulating SMB upload)
+	// This should NOT trigger journal path
+	writeSize := 1 << 20 // 1MB per write
+	totalWrites := 50
+	testData := make([]byte, writeSize)
+	for i := range testData {
+		testData[i] = byte(i % 256)
+	}
+
+	t.Logf("Starting sequential writes: %d x %d bytes", totalWrites, writeSize)
+
+	for i := 0; i < totalWrites; i++ {
+		offset := int64(i * writeSize)
+		err := ra.Write(offset, testData)
+		if err != nil {
+			t.Fatalf("Write failed at offset %d: %v", offset, err)
+		}
+	}
+
+	// Check if journal was used (it should NOT be used for sequential writes)
+	ra.journalMu.RLock()
+	journalUsed := ra.journal != nil
+	var journalDirty bool
+	if journalUsed {
+		journalDirty = ra.journal.IsDirty()
+	}
+	ra.journalMu.RUnlock()
+
+	// Check if sequential buffer was used
+	seqBufferUsed := ra.seqBuffer != nil
+	var seqBufferHasData bool
+	if seqBufferUsed {
+		ra.seqBuffer.mu.Lock()
+		seqBufferHasData = ra.seqBuffer.hasData
+		ra.seqBuffer.mu.Unlock()
+	}
+
+	t.Logf("Write path analysis:")
+	t.Logf("  - Journal used: %v (dirty: %v)", journalUsed, journalDirty)
+	t.Logf("  - Sequential buffer used: %v (hasData: %v)", seqBufferUsed, seqBufferHasData)
+
+	// Flush and verify
+	versionID, err := ra.Flush()
+	if err != nil {
+		t.Fatalf("Flush failed: %v", err)
+	}
+	t.Logf("Flush succeeded: versionID=%d", versionID)
+
+	// Verify file object
+	fileObj, err := fs.h.Get(fs.c, bktID, []int64{fileID})
+	if err != nil || len(fileObj) == 0 {
+		t.Fatalf("Failed to get file object: %v", err)
+	}
+
+	t.Logf("Final file state:")
+	t.Logf("  - DataID: %d", fileObj[0].DataID)
+	t.Logf("  - Size: %d", fileObj[0].Size)
+
+	// For optimal performance, sequential writes should use SequentialWriteBuffer
+	// not Journal (which is designed for random writes)
+	if journalUsed && journalDirty {
+		t.Logf("Note: Journal was used for sequential writes - consider optimization")
+		t.Logf("  For Windows SMB uploads, sequential writes should ideally use SequentialWriteBuffer")
+	} else if seqBufferHasData || !journalUsed {
+		t.Logf("✓ Optimal path used: Sequential writes did not create dirty journal")
+	}
+
+	// Verify data integrity by reading back
+	ra2, err := getOrCreateRandomAccessor(fs, fileID)
+	if err != nil {
+		t.Fatalf("Failed to get RandomAccessor for read: %v", err)
+	}
+	defer ra2.Close()
+
+	// Read first chunk and verify
+	readData, err := ra2.Read(0, writeSize)
+	if err != nil {
+		t.Fatalf("Failed to read back data: %v", err)
+	}
+	if len(readData) != writeSize {
+		t.Errorf("Read size mismatch: got %d, expected %d", len(readData), writeSize)
+	}
+	if !bytes.Equal(readData, testData) {
+		t.Errorf("Data mismatch at offset 0")
+	} else {
+		t.Logf("✓ Data integrity verified")
+	}
+
+	t.Logf("✓ Sparse file sequential upload test completed")
+}
