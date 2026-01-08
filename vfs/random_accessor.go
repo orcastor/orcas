@@ -6543,13 +6543,12 @@ func (ra *RandomAccessor) shouldUseJournal(fileObj *core.ObjectInfo) bool {
 		}
 	}
 
-	// OPTIMIZATION: Sparse files with sequential writes should NOT use journal
-	// Windows SMB large file uploads: SetAllocationSize → sequential writes from offset 0
-	// This is NOT random write, using SequentialWriteBuffer is more efficient
+	// OPTIMIZATION: Sparse files write path selection
+	// Key issue: Buffer path (applyRandomWritesWithSDK) will rewrite entire file on each flush!
+	// For 1GB sparse file, even writing 16MB triggers rewriting all 106 chunks
 	sparseSize := ra.getSparseSize()
 	if sparseSize > 0 {
-		// Check if writes are sequential (starting from 0)
-		// If sequential, prefer SequentialWriteBuffer over Journal
+		// Check if writes are sequential from start (fresh upload scenario)
 		lastOffset := atomic.LoadInt64(&ra.lastOffset)
 
 		// Sequential pattern detection:
@@ -6568,13 +6567,23 @@ func (ra *RandomAccessor) shouldUseJournal(fileObj *core.ObjectInfo) bool {
 			}
 		}
 
-		// If lastOffset is small (near start of file), this looks like sequential upload
-		// Only use journal if we detect random write pattern (writes not at expected offset)
+		// If lastOffset is small (near start of file), this looks like initial sequential upload
+		// Allow sequential buffer for fresh uploads (not using journal)
 		if lastOffset <= 0 {
 			// First write or no writes yet - defer decision, don't force journal
 			DebugLog("[VFS shouldUseJournal] Sparse file first write, deferring journal decision: fileID=%d, sparseSize=%d, lastOffset=%d",
 				ra.fileID, sparseSize, lastOffset)
 			return false
+		}
+
+		// CRITICAL: For sparse files with EXISTING data (fileObj.DataID > 0), MUST use journal!
+		// Reason: Buffer path will rewrite entire file (all chunks) on each flush
+		// Example: 1GB sparse file, writing 16MB at offset 70MB will rewrite all 106 chunks!
+		// Journal's chunked COW only rewrites modified chunks, saving massive I/O
+		if fileObj.DataID > 0 && fileObj.DataID != core.EmptyDataID {
+			DebugLog("[VFS shouldUseJournal] Using journal for sparse file with existing data (avoid full file rewrite): fileID=%d, sparseSize=%d, dataID=%d",
+				ra.fileID, sparseSize, fileObj.DataID)
+			return true
 		}
 
 		// Check if this is random write pattern on sparse file
@@ -6585,9 +6594,9 @@ func (ra *RandomAccessor) shouldUseJournal(fileObj *core.ObjectInfo) bool {
 			return true
 		}
 
-		// Sequential pattern on sparse file - don't use journal
-		DebugLog("[VFS shouldUseJournal] Sparse file appears sequential, not using journal: fileID=%d, sparseSize=%d, lastOffset=%d",
-			ra.fileID, sparseSize, lastOffset)
+		// Sequential pattern on NEW sparse file (no existing data) - use sequential buffer
+		DebugLog("[VFS shouldUseJournal] Sparse file appears sequential (new file), not using journal: fileID=%d, sparseSize=%d, lastOffset=%d, dataID=%d",
+			ra.fileID, sparseSize, lastOffset, fileObj.DataID)
 		return false
 	}
 

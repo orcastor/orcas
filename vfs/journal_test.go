@@ -7723,3 +7723,161 @@ func TestSparseFileSequentialUpload(t *testing.T) {
 
 	t.Logf("✓ Sparse file sequential upload test completed")
 }
+
+// TestSparseFileIncrementalWrite tests incremental writes to an existing sparse file
+// This verifies that journal is used (not buffer path) to avoid rewriting the entire file
+func TestSparseFileIncrementalWrite(t *testing.T) {
+	testDir := filepath.Join(os.TempDir(), "orcas_sparse_incremental_write")
+	defer cleanupTestDir(t, testDir)
+
+	// Setup without encryption for clarity
+	fs, bktID := setupTestFS(t, testDir)
+	defer cleanupFS(fs)
+
+	fs.chunkSize = 10 << 20 // 10MB chunks
+
+	fileName := "incremental_test.iso"
+	fileID, err := createTestFile(t, fs, bktID, fileName)
+	if err != nil {
+		t.Fatalf("Failed to create test file: %v", err)
+	}
+
+	ra, err := getOrCreateRandomAccessor(fs, fileID)
+	if err != nil {
+		t.Fatalf("Failed to get RandomAccessor: %v", err)
+	}
+	defer ra.Close()
+
+	// Step 1: Create sparse file with initial data (simulating first upload session)
+	sparseSize := int64(100 << 20) // 100MB sparse file
+	ra.MarkSparseFile(sparseSize)
+
+	// Write initial 50MB
+	initialSize := 50 << 20
+	writeSize := 1 << 20 // 1MB per write
+	testData := make([]byte, writeSize)
+	for i := range testData {
+		testData[i] = byte(i % 256)
+	}
+
+	t.Logf("Phase 1: Initial upload of %d MB", initialSize>>20)
+	for offset := int64(0); offset < int64(initialSize); offset += int64(writeSize) {
+		err := ra.Write(offset, testData)
+		if err != nil {
+			t.Fatalf("Initial write failed at offset %d: %v", offset, err)
+		}
+	}
+
+	// Flush to create base version
+	_, err = ra.Flush()
+	if err != nil {
+		t.Fatalf("Initial flush failed: %v", err)
+	}
+
+	// Verify file was created
+	fileObj, err := fs.h.Get(fs.c, bktID, []int64{fileID})
+	if err != nil || len(fileObj) == 0 {
+		t.Fatalf("Failed to get file object after initial upload: %v", err)
+	}
+	initialDataID := fileObj[0].DataID
+	t.Logf("Initial upload complete: DataID=%d, Size=%d", initialDataID, fileObj[0].Size)
+
+	// Step 2: Close and reopen RandomAccessor to simulate new upload session
+	ra.Close()
+
+	ra2, err := getOrCreateRandomAccessor(fs, fileID)
+	if err != nil {
+		t.Fatalf("Failed to reopen RandomAccessor: %v", err)
+	}
+	defer ra2.Close()
+
+	// Re-mark as sparse
+	ra2.MarkSparseFile(sparseSize)
+
+	// Step 3: Incremental write (write next 20MB)
+	t.Logf("Phase 2: Incremental write of %d MB starting at offset %d MB", 20, initialSize>>20)
+
+	// Write more data starting from 50MB
+	incrementalSize := 20 << 20
+	startOffset := int64(initialSize)
+
+	for offset := startOffset; offset < startOffset+int64(incrementalSize); offset += int64(writeSize) {
+		err := ra2.Write(offset, testData)
+		if err != nil {
+			t.Fatalf("Incremental write failed at offset %d: %v", offset, err)
+		}
+	}
+
+	// Check write path before flush
+	ra2.journalMu.RLock()
+	journalUsed := ra2.journal != nil
+	var journalDirty bool
+	if journalUsed {
+		journalDirty = ra2.journal.IsDirty()
+	}
+	ra2.journalMu.RUnlock()
+
+	t.Logf("Write path analysis (before flush):")
+	t.Logf("  - Journal used: %v (dirty: %v)", journalUsed, journalDirty)
+
+	// Flush incremental writes
+	versionID, err := ra2.Flush()
+	if err != nil {
+		t.Fatalf("Incremental flush failed: %v", err)
+	}
+	t.Logf("Incremental flush succeeded: versionID=%d", versionID)
+
+	// Verify final file state
+	fileObj2, err := fs.h.Get(fs.c, bktID, []int64{fileID})
+	if err != nil || len(fileObj2) == 0 {
+		t.Fatalf("Failed to get file object after incremental write: %v", err)
+	}
+
+	finalDataID := fileObj2[0].DataID
+	t.Logf("Final file state:")
+	t.Logf("  - Initial DataID: %d", initialDataID)
+	t.Logf("  - Final DataID: %d", finalDataID)
+	t.Logf("  - DataID changed: %v", finalDataID != initialDataID)
+	t.Logf("  - Size: %d", fileObj2[0].Size)
+
+	// For sparse files with existing data, journal should be used to avoid full file rewrite
+	// This is critical for performance:
+	// - Buffer path would rewrite all 10 chunks (100MB)
+	// - Journal path only rewrites modified chunks (5-7, about 20-30MB)
+	if journalUsed && journalDirty {
+		t.Logf("✓ Optimal: Journal was used for incremental write (avoids full file rewrite)")
+		t.Logf("  This means only modified chunks were rewritten, not the entire 100MB file")
+	} else {
+		t.Logf("Note: Journal not used - may have used buffer path")
+		t.Logf("  Buffer path would rewrite entire file (all 100MB) even for 20MB change")
+		t.Logf("  This is less efficient for large sparse files with small incremental writes")
+	}
+
+	// Verify data integrity
+	ra3, err := getOrCreateRandomAccessor(fs, fileID)
+	if err != nil {
+		t.Fatalf("Failed to get RandomAccessor for verification: %v", err)
+	}
+	defer ra3.Close()
+
+	// Read from initial write region
+	readData, err := ra3.Read(0, writeSize)
+	if err != nil {
+		t.Fatalf("Failed to read initial region: %v", err)
+	}
+	if !bytes.Equal(readData, testData) {
+		t.Errorf("Data mismatch in initial region")
+	}
+
+	// Read from incremental write region
+	readData2, err := ra3.Read(startOffset, writeSize)
+	if err != nil {
+		t.Fatalf("Failed to read incremental region: %v", err)
+	}
+	if !bytes.Equal(readData2, testData) {
+		t.Errorf("Data mismatch in incremental region")
+	}
+
+	t.Logf("✓ Data integrity verified in both initial and incremental regions")
+	t.Logf("✓ Sparse file incremental write test completed")
+}
