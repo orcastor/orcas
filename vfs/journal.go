@@ -1630,6 +1630,47 @@ func (j *Journal) flushLargeFileChunked(newSize int64) (int64, int64, error) {
 				return 0, 0, fmt.Errorf("failed to copy chunk %d: %w", chunkIdx, err)
 			}
 		}
+	} else if j.isSparse {
+		// FIX: Handle new sparse files (dataID=0) - write zero-filled chunks for unmodified regions
+		// This fixes the bug where hash calculation fails because unmodified chunks don't exist
+		// See: https://github.com/orcastor/orcas/issues/XXX
+		DebugLog("[Journal flushLargeFileChunked] New sparse file detected (dataID=0), writing zero chunks for unmodified regions")
+
+		for chunkIdx := 0; chunkIdx < totalChunks; chunkIdx++ {
+			if modifiedChunks[chunkIdx] {
+				continue // Already written
+			}
+
+			chunkOffset := int64(chunkIdx) * chunkSize
+			chunkLength := chunkSize
+			if chunkOffset+chunkLength > newSize {
+				chunkLength = newSize - chunkOffset
+			}
+			if chunkLength <= 0 {
+				continue // Beyond file size
+			}
+
+			// Create zero-filled data for this chunk
+			zeroData := make([]byte, chunkLength)
+
+			// Process (compress/encrypt) if needed
+			if needsCompress || needsEncrypt {
+				chunkKind := processKind
+				processedChunk, procErr := core.ProcessData(zeroData, &chunkKind, j.fs.CmprQlty, j.fs.EndecKey, false)
+				if procErr != nil {
+					return 0, 0, fmt.Errorf("failed to process zero chunk %d for new sparse file: %w", chunkIdx, procErr)
+				}
+				zeroData = processedChunk
+			}
+
+			// Write zero-filled chunk
+			if err := da.Write(j.fs.c, j.fs.bktID, newDataID, chunkIdx, zeroData); err != nil {
+				return 0, 0, fmt.Errorf("failed to write zero chunk %d for new sparse file: %w", chunkIdx, err)
+			}
+
+			DebugLog("[Journal flushLargeFileChunked] Wrote zero chunk %d for new sparse file: offset=%d, length=%d",
+				chunkIdx, chunkOffset, len(zeroData))
+		}
 	}
 
 	// 5. Prepare DataInfo (use the processKind determined earlier)
