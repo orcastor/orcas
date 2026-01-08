@@ -42,6 +42,10 @@ const (
 
 	// Write pattern detection
 	SequentialWriteWindow = 4 << 10 // 4KB - window for detecting sequential writes
+	
+	// Sparse file local sequential write detection
+	// If writes are within N chunks, treat as sequential even if out of order
+	LocalSequentialChunkCount = 2 // 1-2 chunks: treat as sequential write
 
 	// Performance tuning
 	ChunkedCOWThreshold = 0.1 // 10% - modification ratio threshold for chunked COW
@@ -194,6 +198,10 @@ var (
 	// singleflight group: prevent duplicate concurrent package file decoding
 	// key: "decode_pkg_<dataID>", ensures only one decode per package file at a time
 	packageDecodeSingleFlight singleflight.Group
+
+	// singleflight group: prevent duplicate concurrent DataInfo updates for sequential writes
+	// key: "update_datainfo_<dataID>", ensures only one update per DataID at a time
+	seqDataInfoUpdateSingleFlight singleflight.Group
 
 	tempFlushMgr     *delayedFlushManager
 	tempFlushMgrOnce sync.Once
@@ -506,6 +514,9 @@ type RandomAccessor struct {
 	journal      *Journal                      // Journal for tracking random writes (protected by JournalManager)
 	journalMu    sync.RWMutex                  // Mutex for journal access
 	flushMu      sync.Mutex                    // Mutex for flush operations (prevents concurrent flushes)
+	// Local sequential write tracking for sparse files
+	writeRangeStart int64 // Start of current write range (atomic access)
+	writeRangeEnd   int64 // End of current write range (atomic access)
 }
 
 func isTempFile(obj *core.ObjectInfo) bool {
@@ -1881,9 +1892,17 @@ func (ra *RandomAccessor) Write(offset int64, data []byte) error {
 		}
 	}
 
+	// Update write range for sparse files (before checking shouldUseJournal)
+	// This allows shouldUseJournal to check if writes are within local sequential range
+	sparseSize := ra.getSparseSize()
+	if sparseSize > 0 {
+		ra.updateWriteRange(offset, int64(len(data)))
+	}
+
 	// PRIORITY 1: Check if should use journal
 	// Journal provides version control for random writes on existing files
-	if ra.shouldUseJournal(fileObj) {
+	// Pass offset and length for sparse file local sequential range detection
+	if ra.shouldUseJournal(fileObj, offset, int64(len(data))) {
 		DebugLog("[VFS RandomAccessor Write] Using journal: fileID=%d, offset=%d, size=%d", ra.fileID, offset, len(data))
 
 		// Migrate existing WriteBuffer entries to Journal (if any)
@@ -2119,8 +2138,8 @@ func (ra *RandomAccessor) Write(offset int64, data []byte) error {
 	// Aggressive optimization: for sparse files (pre-allocated), use larger buffer threshold to reduce flush frequency
 	// This is critical for qBittorrent random write performance
 	// For small files, use larger buffer to allow more batching (balanced approach)
-	sparseSize := atomic.LoadInt64(&ra.sparseSize)
-	isSparseFile := sparseSize > 0
+	sparseSizeVal := atomic.LoadInt64(&ra.sparseSize)
+	isSparseFile := sparseSizeVal > 0
 	maxBufferSize := config.MaxBufferSize
 
 	// Check if this is a small file (likely to use batch write)
@@ -2522,50 +2541,93 @@ func (ra *RandomAccessor) flushSequentialChunkLocked() error {
 					DebugLog("[VFS flushSequentialChunk] WARNING: DataInfo Size is invalid, this may cause read issues: fileID=%d, dataID=%d, Size=%d, OrigSize=%d", ra.fileID, ra.seqBuffer.dataID, ra.seqBuffer.dataInfo.Size, ra.seqBuffer.dataInfo.OrigSize)
 				}
 
-				// Create a copy of DataInfo to ensure we don't modify the original during update
-				// This is important to maintain consistency if update fails
-				dataInfoCopy := *ra.seqBuffer.dataInfo
+				// Use async update with singleflight to prevent blocking writes and duplicate updates
+				// This avoids transmission curve dips by not blocking the write path
+				// Singleflight ensures only one update happens at a time per DataID
+				updateKey := fmt.Sprintf("update_datainfo_%d", ra.seqBuffer.dataID)
 
-				// Update DataInfo without closing the sequential buffer
-				// This allows the file to continue writing while making progress visible
-				_, updateErr := lh.PutDataInfo(ra.fs.c, ra.fs.bktID, []*core.DataInfo{&dataInfoCopy})
-				if updateErr != nil {
-					DebugLog("[VFS flushSequentialChunk] WARNING: Failed to update DataInfo periodically (non-critical): fileID=%d, dataID=%d, sn=%d, error=%v", ra.fileID, ra.seqBuffer.dataID, ra.seqBuffer.sn, updateErr)
-					// Don't return error - this is a non-critical update for progress visibility
-				} else {
-					// Update cache with latest DataInfo (use copy to avoid race conditions)
-					dataInfoCache.Put(ra.seqBuffer.dataID, &dataInfoCopy)
-					// Also invalidate decodingReaderCache to ensure chunkReader uses fresh DataInfo
-					decodingReaderCache.Del(ra.seqBuffer.dataID)
+				// Create snapshot of data for async update (to avoid race conditions)
+				// This ensures we update with consistent data even if writes continue
+				dataInfoSnapshot := *ra.seqBuffer.dataInfo
+				fileID := ra.fileID
+				dataID := ra.seqBuffer.dataID
+				sn := ra.seqBuffer.sn
+				fileObjKey := ra.fileObjKey
+				bktID := ra.fs.bktID
+				ctx := ra.fs.c
 
-					// Also update file object size to make progress visible
-					// This allows file size to be visible even when file is not closed
-					fileObj, err := ra.getFileObj()
-					if err == nil && fileObj != nil {
-						// Update file object size to reflect current progress
-						// CRITICAL: Ensure Size matches DataInfo.OrigSize for consistency
-						updateFileObj := &core.ObjectInfo{
-							ID:     fileObj.ID,
-							PID:    fileObj.PID,
-							DataID: ra.seqBuffer.dataID,
-							Size:   ra.seqBuffer.dataInfo.OrigSize, // Use OrigSize as file size (must match DataInfo.OrigSize)
-							MTime:  core.Now(),
-							Type:   fileObj.Type,
-							Name:   fileObj.Name,
-						}
+				// Launch async update in goroutine (non-blocking)
+				// Singleflight will deduplicate if multiple updates are triggered simultaneously
+				go func() {
+					// Use singleflight to ensure only one update per DataID at a time
+					// This prevents duplicate updates and ensures consistency
+					_, err, _ := seqDataInfoUpdateSingleFlight.Do(updateKey, func() (interface{}, error) {
+						// Create a copy of DataInfo snapshot for update
+						dataInfoCopy := dataInfoSnapshot
 
-						// Use SetObj to update file size without closing the file
-						updateErr := lh.MetadataAdapter().SetObj(ra.fs.c, ra.fs.bktID, []string{"did", "s", "m"}, updateFileObj)
+						// Update DataInfo asynchronously (non-blocking)
+						_, updateErr := lh.PutDataInfo(ctx, bktID, []*core.DataInfo{&dataInfoCopy})
 						if updateErr != nil {
-							DebugLog("[VFS flushSequentialChunk] WARNING: Failed to update file object size periodically (non-critical): fileID=%d, error=%v", ra.fileID, updateErr)
-						} else {
-							// Update cache with latest file object
-							fileObjCache.Put(ra.fileObjKey, updateFileObj)
-							ra.fileObj.Store(updateFileObj)
-							DebugLog("[VFS flushSequentialChunk] Periodically updated DataInfo and file object for continuous write: fileID=%d, dataID=%d, sn=%d, OrigSize=%d, Size=%d, Kind=0x%x (CMPR=%v, ENDEC=%v)", ra.fileID, ra.seqBuffer.dataID, ra.seqBuffer.sn, ra.seqBuffer.dataInfo.OrigSize, ra.seqBuffer.dataInfo.Size, ra.seqBuffer.dataInfo.Kind, hasCompression, hasEncryption)
+							DebugLog("[VFS flushSequentialChunk] WARNING: Failed to update DataInfo periodically (async, non-critical): fileID=%d, dataID=%d, sn=%d, error=%v", fileID, dataID, sn, updateErr)
+							return nil, updateErr
 						}
+
+						// Update cache with latest DataInfo (use copy to avoid race conditions)
+						dataInfoCache.Put(dataID, &dataInfoCopy)
+						// Also invalidate decodingReaderCache to ensure chunkReader uses fresh DataInfo
+						decodingReaderCache.Del(dataID)
+
+						// Also update file object size to make progress visible
+						// Get file object (may need to reload if cache is stale)
+						fileObjVal := ra.fileObj.Load()
+						var fileObj *core.ObjectInfo
+						if fileObjVal != nil {
+							if obj, ok := fileObjVal.(*core.ObjectInfo); ok {
+								fileObj = obj
+							}
+						}
+						if fileObj == nil {
+							// Try cache
+							if cached, ok := fileObjCache.Get(fileObjKey); ok {
+								if obj, ok := cached.(*core.ObjectInfo); ok {
+									fileObj = obj
+								}
+							}
+						}
+
+						if fileObj != nil {
+							// Update file object size to reflect current progress
+							// CRITICAL: Ensure Size matches DataInfo.OrigSize for consistency
+							updateFileObj := &core.ObjectInfo{
+								ID:     fileObj.ID,
+								PID:    fileObj.PID,
+								DataID: dataID,
+								Size:   dataInfoCopy.OrigSize, // Use OrigSize as file size (must match DataInfo.OrigSize)
+								MTime:  core.Now(),
+								Type:   fileObj.Type,
+								Name:   fileObj.Name,
+							}
+
+							// Use SetObj to update file size without closing the file
+							updateErr := lh.MetadataAdapter().SetObj(ctx, bktID, []string{"did", "s", "m"}, updateFileObj)
+							if updateErr != nil {
+								DebugLog("[VFS flushSequentialChunk] WARNING: Failed to update file object size periodically (async, non-critical): fileID=%d, error=%v", fileID, updateErr)
+							} else {
+								// Update cache with latest file object
+								fileObjCache.Put(fileObjKey, updateFileObj)
+								ra.fileObj.Store(updateFileObj)
+								DebugLog("[VFS flushSequentialChunk] Periodically updated DataInfo and file object (async) for continuous write: fileID=%d, dataID=%d, sn=%d, OrigSize=%d, Size=%d, Kind=0x%x (CMPR=%v, ENDEC=%v)", fileID, dataID, sn, dataInfoCopy.OrigSize, dataInfoCopy.Size, dataInfoCopy.Kind, hasCompression, hasEncryption)
+							}
+						}
+
+						return nil, nil
+					})
+
+					// Log error if update failed (but don't block)
+					if err != nil {
+						DebugLog("[VFS flushSequentialChunk] Async DataInfo update completed with error: fileID=%d, dataID=%d, error=%v", fileID, dataID, err)
 					}
-				}
+				}()
 			}
 		}
 	}
@@ -6907,7 +6969,8 @@ func tryInstantUpload(fs *OrcasFS, data []byte, origSize int64, kind uint32) (in
 }
 
 // shouldUseJournal determines if journal should be used for this file
-func (ra *RandomAccessor) shouldUseJournal(fileObj *core.ObjectInfo) bool {
+// offset and length are used for sparse file local sequential range detection
+func (ra *RandomAccessor) shouldUseJournal(fileObj *core.ObjectInfo, offset, length int64) bool {
 	// Check if journal is enabled
 	if ra.fs.journalMgr == nil || !ra.fs.journalMgr.config.Enabled {
 		return false
@@ -6977,11 +7040,69 @@ func (ra *RandomAccessor) shouldUseJournal(fileObj *core.ObjectInfo) bool {
 			return false
 		}
 
-		// CRITICAL: For sparse files with EXISTING data (fileObj.DataID > 0), MUST use journal!
-		// Reason: Buffer path will rewrite entire file (all chunks) on each flush
-		// Example: 1GB sparse file, writing 16MB at offset 70MB will rewrite all 106 chunks!
-		// Journal's chunked COW only rewrites modified chunks, saving massive I/O
+		// OPTIMIZATION: For sparse files, check if writes are within a few chunks (local sequential)
+		// If writes are within 1-2 chunks, treat as sequential even if out of order
+		// This avoids using journal for small local writes, improving performance
+		chunkSize := ra.fs.chunkSize
+		if chunkSize <= 0 {
+			chunkSize = DefaultChunkSize
+		}
+		localSeqRange := int64(LocalSequentialChunkCount) * chunkSize
+		
+		writeRangeStart := atomic.LoadInt64(&ra.writeRangeStart)
+		writeRangeEnd := atomic.LoadInt64(&ra.writeRangeEnd)
+		currentWriteEnd := offset + length
+		
+		// Check if current write is within local sequential range
+		if writeRangeStart > 0 && writeRangeEnd > 0 {
+			// We have an existing write range, check if current write extends it within limit
+			newRangeStart := writeRangeStart
+			newRangeEnd := writeRangeEnd
+			if offset < writeRangeStart {
+				newRangeStart = offset
+			}
+			if currentWriteEnd > writeRangeEnd {
+				newRangeEnd = currentWriteEnd
+			}
+			newRangeSize := newRangeEnd - newRangeStart
+			if newRangeSize <= localSeqRange {
+				// Still within local sequential range, don't use journal
+				DebugLog("[VFS shouldUseJournal] Sparse file writes within local sequential range (%d chunks), not using journal: fileID=%d, sparseSize=%d, rangeSize=%d, chunkSize=%d",
+					LocalSequentialChunkCount, ra.fileID, sparseSize, newRangeSize, chunkSize)
+				return false
+			}
+		} else {
+			// First write in range, check if it's small enough to be local sequential
+			if length <= localSeqRange {
+				DebugLog("[VFS shouldUseJournal] Sparse file first write in local range, not using journal: fileID=%d, sparseSize=%d, offset=%d, length=%d",
+					ra.fileID, sparseSize, offset, length)
+				return false
+			}
+		}
+
+		// CRITICAL: For sparse files with EXISTING data (fileObj.DataID > 0), check if within local range
+		// If writes are within a few chunks, use buffer path instead of journal
 		if fileObj.DataID > 0 && fileObj.DataID != core.EmptyDataID {
+			// Check if writes are within local sequential range
+			if writeRangeStart > 0 && writeRangeEnd > 0 {
+				newRangeStart := writeRangeStart
+				newRangeEnd := writeRangeEnd
+				if offset < writeRangeStart {
+					newRangeStart = offset
+				}
+				if currentWriteEnd > writeRangeEnd {
+					newRangeEnd = currentWriteEnd
+				}
+				newRangeSize := newRangeEnd - newRangeStart
+				if newRangeSize <= localSeqRange {
+					// Writes are within local range, use buffer path (more efficient for small ranges)
+					DebugLog("[VFS shouldUseJournal] Sparse file with existing data but within local sequential range (%d chunks), using buffer: fileID=%d, sparseSize=%d, rangeSize=%d, dataID=%d",
+						LocalSequentialChunkCount, ra.fileID, sparseSize, newRangeSize, fileObj.DataID)
+					return false
+				}
+			}
+			
+			// Writes span too many chunks, use journal to avoid rewriting entire file
 			DebugLog("[VFS shouldUseJournal] Using journal for sparse file with existing data (avoid full file rewrite): fileID=%d, sparseSize=%d, dataID=%d",
 				ra.fileID, sparseSize, fileObj.DataID)
 			return true
@@ -7836,6 +7957,34 @@ func (ra *RandomAccessor) truncateJournal(size int64) error {
 	}
 
 	return journal.Truncate(size)
+}
+
+// updateWriteRange updates the write range for sparse files
+// This tracks the range of writes to detect if they're within a few chunks (local sequential)
+func (ra *RandomAccessor) updateWriteRange(offset, length int64) {
+	writeEnd := offset + length
+	writeRangeStart := atomic.LoadInt64(&ra.writeRangeStart)
+	writeRangeEnd := atomic.LoadInt64(&ra.writeRangeEnd)
+	
+	if writeRangeStart == 0 || writeRangeEnd == 0 {
+		// First write, initialize range
+		atomic.StoreInt64(&ra.writeRangeStart, offset)
+		atomic.StoreInt64(&ra.writeRangeEnd, writeEnd)
+		DebugLog("[VFS updateWriteRange] Initialized write range: fileID=%d, start=%d, end=%d", ra.fileID, offset, writeEnd)
+	} else {
+		// Update range to include new write
+		newStart := writeRangeStart
+		newEnd := writeRangeEnd
+		if offset < writeRangeStart {
+			newStart = offset
+		}
+		if writeEnd > writeRangeEnd {
+			newEnd = writeEnd
+		}
+		atomic.StoreInt64(&ra.writeRangeStart, newStart)
+		atomic.StoreInt64(&ra.writeRangeEnd, newEnd)
+		DebugLog("[VFS updateWriteRange] Updated write range: fileID=%d, start=%d, end=%d, rangeSize=%d", ra.fileID, newStart, newEnd, newEnd-newStart)
+	}
 }
 
 // getJournalSize returns the current size including journal modifications
