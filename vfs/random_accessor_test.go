@@ -6539,3 +6539,191 @@ func TestSparseFileFullyWrittenVerification(t *testing.T) {
 		t.Logf("✅ Successfully verified sparse file fully written: dataID=%d, size=%d, sparse flag cleared", fileObj2.DataID, fileObj2.Size)
 	})
 }
+
+// TestTmpFileOfficeSaveScenario simulates the .tmp-based Office save pattern from logs (3.log)
+// and verifies that:
+// 1. Data is written via ChunkedFileWriter to a .tmp file (WRITER_TYPE_TMP)
+// 2. ForceFlush() (simulating rename removing .tmp) flushes all data correctly
+// 3. After "rename" to final name (1.ppt), reading the file returns the correct content
+//    and not corrupted/zero-filled data.
+func TestTmpFileOfficeSaveScenario(t *testing.T) {
+	Convey("Tmp file Office save scenario (atomic replace with .tmp)", t, func() {
+		c := context.Background()
+		ig := idgen.NewIDGen(nil, 0)
+		testBktID, _ := ig.New()
+		err := core.InitBucketDB(".", testBktID)
+		So(err, ShouldBeNil)
+
+		dma := &core.DefaultMetadataAdapter{
+			DefaultBaseMetadataAdapter: &core.DefaultBaseMetadataAdapter{},
+			DefaultDataMetadataAdapter: &core.DefaultDataMetadataAdapter{},
+		}
+		dma.DefaultBaseMetadataAdapter.SetPath(".")
+		dma.DefaultDataMetadataAdapter.SetPath(".")
+		dda := &core.DefaultDataAdapter{}
+
+		lh := core.NewLocalHandler("", "").(*core.LocalHandler)
+		lh.SetAdapter(dma, dda)
+
+		testCtx, userInfo, _, err := lh.Login(c, "orcas", "orcas")
+		So(err, ShouldBeNil)
+
+		bucket := &core.BucketInfo{
+			ID:       testBktID,
+			Name:     "test_bucket",
+			Type:     1,
+			Quota:    500000000,
+			Used:     0,
+			RealUsed: 0,
+		}
+		admin := core.NewLocalAdmin(".", ".")
+		So(admin.PutBkt(testCtx, []*core.BucketInfo{bucket}), ShouldBeNil)
+
+		if userInfo != nil && userInfo.ID > 0 {
+			So(admin.PutACL(testCtx, testBktID, userInfo.ID, core.ALL), ShouldBeNil)
+		}
+
+		// Enable encryption to match real-world scenario from logs
+		encryptionKey := "this-is-a-test-encryption-key-that-is-long-enough-for-aes256-encryption-12345678901234567890"
+		cfg := &core.Config{
+			EndecWay: core.DATA_ENDEC_AES256,
+			EndecKey: encryptionKey,
+		}
+		ofs := NewOrcasFSWithConfig(lh, testCtx, testBktID, cfg)
+
+		// Create original file "1.ppt" (old version). Content is not important for this test,
+		// but we create it to mirror the real Office save pattern where an existing file is replaced.
+		origFileID, _ := ig.New()
+		origFileObj := &core.ObjectInfo{
+			ID:    origFileID,
+			PID:   testBktID,
+			Type:  core.OBJ_TYPE_FILE,
+			Name:  "1.ppt",
+			Size:  0,
+			MTime: core.Now(),
+		}
+		_, err = dma.PutObj(testCtx, testBktID, []*core.ObjectInfo{origFileObj})
+		So(err, ShouldBeNil)
+
+		// Create .tmp file used for new content: "A906C37C.tmp"
+		tmpFileID, _ := ig.New()
+		tmpFileObj := &core.ObjectInfo{
+			ID:    tmpFileID,
+			PID:   testBktID,
+			Type:  core.OBJ_TYPE_FILE,
+			Name:  "A906C37C.tmp",
+			Size:  0,
+			MTime: core.Now(),
+		}
+		_, err = dma.PutObj(testCtx, testBktID, []*core.ObjectInfo{tmpFileObj})
+		So(err, ShouldBeNil)
+
+		// Create RandomAccessor for .tmp file (isTmpFile=true because name ends with .tmp)
+		raTmp, err := NewRandomAccessor(ofs, tmpFileID)
+		So(err, ShouldBeNil)
+		So(raTmp, ShouldNotBeNil)
+
+		// Generate test data matching the size pattern in the log:
+		// totalSize = 12 * 524288 + 78848 = 6,370,304 bytes
+		const blockSize = 524288
+		const numFullBlocks = 12
+		const lastBlockSize = 78848
+		totalSize := int64(numFullBlocks*blockSize + lastBlockSize)
+
+		newContent := make([]byte, totalSize)
+		for i := range newContent {
+			newContent[i] = byte(i % 251) // non-zero, deterministic pattern
+		}
+
+		t.Logf("Writing .tmp file via ChunkedFileWriter: fileID=%d, size=%d", tmpFileID, totalSize)
+
+		// Write 12 full 512KB blocks at offsets 0, 524288, ..., 5767168
+		for i := 0; i < numFullBlocks; i++ {
+			offset := int64(i) * blockSize
+			chunk := newContent[offset : offset+blockSize]
+			err = raTmp.Write(offset, chunk)
+			So(err, ShouldBeNil)
+		}
+
+		// Final partial block: 78,848 bytes at offset 6,291,456
+		lastOffset := int64(numFullBlocks) * blockSize
+		So(int64(len(newContent))-lastOffset, ShouldEqual, int64(lastBlockSize))
+		lastChunk := newContent[lastOffset:]
+		err = raTmp.Write(lastOffset, lastChunk)
+		So(err, ShouldBeNil)
+
+		// Verify ChunkedFileWriter exists and is TMP type
+		val := raTmp.chunkedWriter.Load()
+		So(val, ShouldNotBeNil)
+		So(val, ShouldNotEqual, clearedChunkedWriterMarker)
+		cw, ok := val.(*ChunkedFileWriter)
+		So(ok, ShouldBeTrue)
+		So(cw, ShouldNotBeNil)
+		So(cw.writerType, ShouldEqual, WRITER_TYPE_TMP)
+		t.Logf("  ChunkedFileWriter before ForceFlush: fileID=%d, dataID=%d, writerType=TMP", cw.fileID, cw.dataID)
+
+		// Simulate VFS Flush(force=false) before rename: should skip flushing .tmp file
+		_, err = raTmp.Flush()
+		So(err, ShouldBeNil)
+
+		// Now simulate rename removing .tmp suffix: ForceFlush must flush ChunkedFileWriter
+		_, err = raTmp.ForceFlush()
+		So(err, ShouldBeNil)
+
+		// After ForceFlush, try to get fileObj in cache (mainly for logging/debug)
+		fileObjAfterFlush, err := raTmp.getFileObj()
+		So(err, ShouldBeNil)
+		So(fileObjAfterFlush, ShouldNotBeNil)
+		t.Logf("  File object after ForceFlush (before rename): fileID=%d, dataID=%d, size=%d", fileObjAfterFlush.ID, fileObjAfterFlush.DataID, fileObjAfterFlush.Size)
+
+		// "Rename" file to final name "1.ppt" (simulate VFS Rename .tmp -> 1.ppt)
+		renamedObj := *tmpFileObj
+		renamedObj.Name = "1.ppt"
+		renamedObj.Size = totalSize
+		renamedObj.MTime = core.Now()
+		_, err = dma.PutObj(testCtx, testBktID, []*core.ObjectInfo{&renamedObj})
+		So(err, ShouldBeNil)
+
+		// Create new RandomAccessor for final file "1.ppt" (non-.tmp, isTmpFile=false)
+		raFinal, err := NewRandomAccessor(ofs, tmpFileID)
+		So(err, ShouldBeNil)
+		So(raFinal, ShouldNotBeNil)
+		defer raFinal.Close()
+
+		// Verify fileObj for final file has expected size (DataID may be 0 in tests due to WAL behaviour)
+		finalFileObj, err := raFinal.getFileObj()
+		So(err, ShouldBeNil)
+		So(finalFileObj, ShouldNotBeNil)
+		So(finalFileObj.Size, ShouldEqual, totalSize)
+		t.Logf("  Final file object after rename: fileID=%d, dataID=%d, size=%d, name=%s", finalFileObj.ID, finalFileObj.DataID, finalFileObj.Size, finalFileObj.Name)
+
+		// Read back entire file via non-.tmp RandomAccessor and verify content
+		readBack, err := raFinal.Read(0, int(totalSize))
+		So(err, ShouldBeNil)
+		So(len(readBack), ShouldEqual, int(totalSize))
+
+		// Verify first few bytes match
+		for i := 0; i < 1024 && i < len(readBack); i++ {
+			if readBack[i] != newContent[i] {
+				t.Fatalf("Data mismatch at offset %d: expected=%d, got=%d", i, newContent[i], readBack[i])
+			}
+		}
+
+		// Spot-check some offsets (start, middle, end) to ensure no corruption/zeros
+		checkOffsets := []int64{0, blockSize, 3 * blockSize, lastOffset, totalSize - 1024}
+		for _, off := range checkOffsets {
+			if off < 0 || off >= totalSize {
+				continue
+			}
+			checkLen := int64(64)
+			if off+checkLen > totalSize {
+				checkLen = totalSize - off
+			}
+			chunkExpected := newContent[off : off+checkLen]
+			chunkActual := readBack[off : off+checkLen]
+			So(bytes.Equal(chunkActual, chunkExpected), ShouldBeTrue)
+		}
+
+		t.Logf("✅ Successfully verified tmp file Office save scenario: dataID=%d, size=%d", finalFileObj.DataID, finalFileObj.Size)
+	})
+}

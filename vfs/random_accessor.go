@@ -1950,22 +1950,27 @@ func (ra *RandomAccessor) Write(offset int64, data []byte) error {
 	// IMPORTANT: If file is renamed, RandomAccessor MUST be closed and recreated
 
 	// CRITICAL: Detect file rename by comparing isTmpFile flag with actual file name
-	// If isTmpFile is true but actual file name is not .tmp, file was renamed
-	// In this case, reject write and force RandomAccessor recreation
+	// 原来这里一旦检测到 .tmp 被重命名，就直接返回错误，要求上层重建 RandomAccessor，
+	// 这会导致已经 flush 到后端的文件在后续写入时被拒绝（见 3.log 中
+	//  "File was renamed from .tmp, RandomAccessor must be recreated" 的错误）。
+	// 为了兼容 Office 等在重命名后继续使用同一 FD 写入的场景，这里改为：
+	//   - 如果原 RA 认为自己是 .tmp，但实际文件名已经不是 .tmp（说明发生了重命名），
+	//     则记录日志、清理掉旧的 TMP ChunkedFileWriter，保持 isTmpFile=false，
+	//     然后继续执行后续的随机写路径，让新的写入走正常非 tmp 的写路径（使用 journal/顺写）。
+	//   - 不再返回 "RandomAccessor must be recreated" 错误。
 	actualIsTmpFile := isTempFile(fileObj)
 	if ra.isTmpFile != actualIsTmpFile {
-		// File was renamed! isTmpFile flag doesn't match actual file name
-		if ra.isTmpFile {
-			// File was renamed from .tmp to normal name
-			DebugLog("[VFS RandomAccessor Write] ERROR: File was renamed from .tmp, RandomAccessor must be recreated: fileID=%d, fileName=%s", ra.fileID, fileObj.Name)
-			// Clear ChunkedFileWriter to prevent future writes
+		// 文件名与 RA 创建时的 isTmpFile 状态不一致，说明发生了重命名
+		if ra.isTmpFile && !actualIsTmpFile {
+			// 从 .tmp 重命名为普通文件：
+			// 清理掉仍然挂在 RA 上的 TMP 类型 ChunkedFileWriter，避免后续误用
+			DebugLog("[VFS RandomAccessor Write] Detected .tmp rename for fileID=%d (oldName=%s), clearing TMP ChunkedFileWriter and switching to non-tmp mode", ra.fileID, fileObj.Name)
 			ra.chunkedWriter.Store(clearedChunkedWriterMarker)
-			// Close RandomAccessor to force recreation
-			ra.Close()
-			return fmt.Errorf("file was renamed from .tmp, RandomAccessor must be recreated: fileID=%d, fileName=%s", ra.fileID, fileObj.Name)
-		} else {
-			// File was renamed to .tmp (unusual but possible)
-			DebugLog("[VFS RandomAccessor Write] ERROR: File was renamed to .tmp, RandomAccessor must be recreated: fileID=%d, fileName=%s", ra.fileID, fileObj.Name)
+			ra.isTmpFile = false
+			// 继续往下走，使用普通文件的顺写/随机写路径，不再直接拒绝
+		} else if !ra.isTmpFile && actualIsTmpFile {
+			// 从普通文件重命名为 .tmp（极少见），当前 RA 没有 TMP 语义，安全起见仍然要求重建
+			DebugLog("[VFS RandomAccessor Write] File was renamed to .tmp, RandomAccessor must be recreated: fileID=%d, fileName=%s", ra.fileID, fileObj.Name)
 			ra.Close()
 			return fmt.Errorf("file was renamed to .tmp, RandomAccessor must be recreated: fileID=%d, fileName=%s", ra.fileID, fileObj.Name)
 		}
