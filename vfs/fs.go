@@ -2514,6 +2514,16 @@ func (n *OrcasNode) Rename(ctx context.Context, name string, newParent fs.InodeE
 		return errno
 	}
 
+	// If name and newName are the same, check if it's the same parent directory
+	if name == newName {
+		newParentNode, ok := newParent.(*OrcasNode)
+		if ok && newParentNode != nil && newParentNode.objID == n.objID {
+			// Same name and same parent directory, ignore the operation
+			DebugLog("[VFS Rename] Ignoring rename operation: name and newName are the same (%s) in the same parent directory", name)
+			return 0 // Success, no operation needed
+		}
+	}
+
 	obj, err := n.getObj()
 	if err != nil {
 		DebugLog("[VFS Rename] ERROR: Failed to get source parent object: name=%s, newName=%s, parentID=%d, error=%v", name, newName, n.objID, err)

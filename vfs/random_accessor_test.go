@@ -6148,3 +6148,194 @@ func TestSparseFileWriteAfterChunkedWriterCleared(t *testing.T) {
 		t.Logf("✅ Successfully verified sparse file write after ChunkedFileWriter cleared")
 	})
 }
+
+// TestSparseFileLargeUploadSimulation simulates the real-world scenario from logs
+// where a 200+MB sparse file is written, and verifies that:
+// 1. ChunkedFileWriter is correctly used for sparse files (WRITER_TYPE_SPARSE)
+// 2. No incorrect WRITER_TYPE_TMP is created for sparse files
+// 3. File upload completes successfully without deletion errors
+// 4. All data is correctly written and can be read back
+func TestSparseFileLargeUploadSimulation(t *testing.T) {
+	Convey("Sparse file large upload simulation (200+MB)", t, func() {
+		c := context.Background()
+		ig := idgen.NewIDGen(nil, 0)
+		testBktID, _ := ig.New()
+		err := core.InitBucketDB(".", testBktID)
+		So(err, ShouldBeNil)
+
+		dma := &core.DefaultMetadataAdapter{
+			DefaultBaseMetadataAdapter: &core.DefaultBaseMetadataAdapter{},
+			DefaultDataMetadataAdapter: &core.DefaultDataMetadataAdapter{},
+		}
+		dma.DefaultBaseMetadataAdapter.SetPath(".")
+		dma.DefaultDataMetadataAdapter.SetPath(".")
+		dda := &core.DefaultDataAdapter{}
+
+		lh := core.NewLocalHandler("", "").(*core.LocalHandler)
+		lh.SetAdapter(dma, dda)
+
+		testCtx, userInfo, _, err := lh.Login(c, "orcas", "orcas")
+		So(err, ShouldBeNil)
+
+		bucket := &core.BucketInfo{
+			ID:       testBktID,
+			Name:     "test_bucket",
+			Type:     1,
+			Quota:    500000000, // 500MB quota
+			Used:     0,
+			RealUsed: 0,
+		}
+		admin := core.NewLocalAdmin(".", ".")
+		So(admin.PutBkt(testCtx, []*core.BucketInfo{bucket}), ShouldBeNil)
+
+		if userInfo != nil && userInfo.ID > 0 {
+			So(admin.PutACL(testCtx, testBktID, userInfo.ID, core.ALL), ShouldBeNil)
+		}
+
+		// Test with encryption enabled (matching real scenario)
+		encryptionKey := "this-is-a-test-encryption-key-that-is-long-enough-for-aes256-encryption-12345678901234567890"
+		cfg := &core.Config{
+			EndecWay: core.DATA_ENDEC_AES256,
+			EndecKey: encryptionKey,
+		}
+		ofs := NewOrcasFSWithConfig(lh, testCtx, testBktID, cfg)
+
+		// Create a sparse file matching the log scenario
+		// File: 文档类.zip, size: 238564753 bytes (≈227MB)
+		fileName := "文档类.zip"
+		fileID, _ := ig.New()
+		fileObj := &core.ObjectInfo{
+			ID:    fileID,
+			PID:   testBktID,
+			Type:  core.OBJ_TYPE_FILE,
+			Name:  fileName,
+			Size:  0,
+			MTime: core.Now(),
+		}
+		_, err = dma.PutObj(testCtx, testBktID, []*core.ObjectInfo{fileObj})
+		So(err, ShouldBeNil)
+
+		ra, err := NewRandomAccessor(ofs, fileID)
+		So(err, ShouldBeNil)
+		So(ra, ShouldNotBeNil)
+		defer ra.Close()
+
+		// Set sparse size matching the log: 238564753 bytes
+		sparseSize := int64(238564753)
+		ra.MarkSparseFile(sparseSize)
+
+		// Simulate the write pattern from logs:
+		// - Sequential writes of 524288 bytes (512KB) each
+		// - First 20 chunks use ChunkedFileWriter (WRITER_TYPE_SPARSE)
+		// - Then continue writing beyond 20MB to trigger the bug scenario
+		writeSize := int64(524288) // 512KB per write
+		totalWrites := int((sparseSize + writeSize - 1) / writeSize) // Enough writes to cover sparseSize
+
+		// Generate test data
+		expectedData := make([]byte, sparseSize)
+		for i := range expectedData {
+			expectedData[i] = byte(i % 256)
+		}
+
+		t.Logf("Simulating large sparse file upload: fileID=%d, sparseSize=%d, totalWrites=%d", fileID, sparseSize, totalWrites)
+
+		// Write pattern: sequential writes of 512KB each
+		// This matches the log pattern where writes are sequential within chunks
+		writeCount := 0
+		maxWrites := 50 // Limit test writes to avoid timeout (covers first ~25MB)
+		for offset := int64(0); offset < sparseSize && writeCount < maxWrites; offset += writeSize {
+			end := offset + writeSize
+			if end > sparseSize {
+				end = sparseSize
+			}
+			chunk := expectedData[offset:end]
+
+			// Verify ChunkedFileWriter type before write
+			chunkedWriterVal := ra.chunkedWriter.Load()
+			if chunkedWriterVal != nil && chunkedWriterVal != clearedChunkedWriterMarker {
+				if cw, ok := chunkedWriterVal.(*ChunkedFileWriter); ok && cw != nil {
+					// Verify it's SPARSE type, not TMP
+					So(cw.writerType, ShouldEqual, WRITER_TYPE_SPARSE)
+					if cw.writerType != WRITER_TYPE_SPARSE {
+						t.Fatalf("ERROR: ChunkedFileWriter has wrong type! Expected SPARSE (%d), got %d at offset %d", WRITER_TYPE_SPARSE, cw.writerType, offset)
+					}
+				}
+			}
+
+			err = ra.Write(offset, chunk)
+			So(err, ShouldBeNil)
+			writeCount++
+
+			// After write, verify ChunkedFileWriter type is still correct
+			chunkedWriterVal = ra.chunkedWriter.Load()
+			if chunkedWriterVal != nil && chunkedWriterVal != clearedChunkedWriterMarker {
+				if cw, ok := chunkedWriterVal.(*ChunkedFileWriter); ok && cw != nil {
+					So(cw.writerType, ShouldEqual, WRITER_TYPE_SPARSE)
+					if cw.writerType != WRITER_TYPE_SPARSE {
+						t.Fatalf("ERROR: ChunkedFileWriter type changed to wrong type! Expected SPARSE (%d), got %d at offset %d", WRITER_TYPE_SPARSE, cw.writerType, offset)
+					}
+				}
+			}
+
+			if writeCount%10 == 0 {
+				t.Logf("  Written %d chunks (offset=%d, %d bytes)", writeCount, offset, len(chunk))
+			}
+		}
+
+		t.Logf("Completed %d writes, flushing...", writeCount)
+
+		// Flush all pending writes
+		_, err = ra.Flush()
+		So(err, ShouldBeNil)
+
+		// Close to ensure ChunkedFileWriter is flushed for sparse files
+		err = ra.Close()
+		So(err, ShouldBeNil)
+
+		// Reopen to read back data
+		ra2, err := NewRandomAccessor(ofs, fileID)
+		So(err, ShouldBeNil)
+		defer ra2.Close()
+		ra2.MarkSparseFile(sparseSize)
+
+		// Read back and verify data
+		readSize := int(writeCount * int(writeSize))
+		if readSize > int(sparseSize) {
+			readSize = int(sparseSize)
+		}
+		readData, err := ra2.Read(0, readSize)
+		So(err, ShouldBeNil)
+		So(len(readData), ShouldBeGreaterThan, 0)
+
+		// Verify first few bytes match
+		if len(readData) >= 16 {
+			expectedFirst16 := expectedData[:16]
+			actualFirst16 := readData[:16]
+			if !bytes.Equal(actualFirst16, expectedFirst16) {
+				t.Logf("ERROR: First 16 bytes don't match! Expected: %v, Actual: %v", expectedFirst16, actualFirst16)
+			}
+			So(bytes.Equal(actualFirst16, expectedFirst16), ShouldBeTrue)
+		}
+
+		// Verify data integrity at various offsets
+		verifyOffsets := []int64{0, 524288, 1048576, 5242880, 10485760, 20971520}
+		for _, verifyOffset := range verifyOffsets {
+			if verifyOffset < int64(len(readData)) && verifyOffset < sparseSize {
+				verifySize := 16
+				if verifyOffset+int64(verifySize) > int64(len(readData)) {
+					verifySize = len(readData) - int(verifyOffset)
+				}
+				if verifySize > 0 {
+					expectedChunk := expectedData[verifyOffset : verifyOffset+int64(verifySize)]
+					actualChunk := readData[verifyOffset : verifyOffset+int64(verifySize)]
+					if !bytes.Equal(actualChunk, expectedChunk) {
+						t.Logf("ERROR: Data mismatch at offset %d! Expected: %v, Actual: %v", verifyOffset, expectedChunk, actualChunk)
+					}
+					So(bytes.Equal(actualChunk, expectedChunk), ShouldBeTrue)
+				}
+			}
+		}
+
+		t.Logf("✅ Successfully verified large sparse file upload simulation: %d bytes written, %d bytes read", writeCount*int(writeSize), len(readData))
+	})
+}

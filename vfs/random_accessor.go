@@ -2171,27 +2171,59 @@ func (ra *RandomAccessor) Write(offset int64, data []byte) error {
 	}
 
 	// Random write mode: use original buffer logic
-	// IMPORTANT: Double-check that TempFileWriter doesn't exist before using random write buffer
-	// This prevents .tmp files from accidentally using random write when fileObj cache is stale
+	// IMPORTANT: Double-check that ChunkedFileWriter doesn't exist before using random write buffer
+	// This prevents .tmp files and sparse files from accidentally using random write when fileObj cache is stale
 	// Lock-free check using atomic.Value
 	chunkedWriterValInRandomMode := ra.chunkedWriter.Load()
 	hasChunkedWriterInRandomMode := chunkedWriterValInRandomMode != nil && chunkedWriterValInRandomMode != clearedChunkedWriterMarker
 	if hasChunkedWriterInRandomMode {
-		// TempFileWriter exists, this should not happen (should have returned above)
-		// But handle it for safety - use TempFileWriter instead of random write buffer
-		DebugLog("[VFS RandomAccessor Write] WARNING: TempFileWriter exists but reached random write mode, using TempFileWriter: fileID=%d", ra.fileID)
-		// IMPORTANT: Update lastActivity before writing to enable timeout flush
-		// Timeout flush should start counting from the last write operation
-		atomic.StoreInt64(&ra.lastActivity, core.Now())
-		// Schedule delayed flush (will be cancelled if new writes come in)
-		getDelayedFlushManager().schedule(ra, false)
-
-		cw, err := ra.getOrCreateTempWriter()
-		if err != nil {
-			DebugLog("[VFS RandomAccessor Write] ERROR: Failed to get or create TempFileWriter (random mode fallback): fileID=%d, offset=%d, size=%d, error=%v", ra.fileID, offset, len(data), err)
-			return fmt.Errorf("failed to get or create TempFileWriter: %w", err)
+		// ChunkedFileWriter exists, this should not happen (should have returned above)
+		// But handle it for safety - use ChunkedFileWriter instead of random write buffer
+		// Check the type of existing ChunkedFileWriter
+		if cw, ok := chunkedWriterValInRandomMode.(*ChunkedFileWriter); ok && cw != nil {
+			// Use existing ChunkedFileWriter if type matches
+			if (ra.isTmpFile && cw.writerType == WRITER_TYPE_TMP) || 
+			   (!ra.isTmpFile && cw.writerType == WRITER_TYPE_SPARSE) {
+				DebugLog("[VFS RandomAccessor Write] WARNING: ChunkedFileWriter exists but reached random write mode, using existing ChunkedFileWriter: fileID=%d, writerType=%d", ra.fileID, cw.writerType)
+				// IMPORTANT: Update lastActivity before writing to enable timeout flush
+				atomic.StoreInt64(&ra.lastActivity, core.Now())
+				getDelayedFlushManager().schedule(ra, false)
+				return cw.Write(offset, data)
+			}
+			// Type mismatch - clear and recreate with correct type
+			DebugLog("[VFS RandomAccessor Write] WARNING: ChunkedFileWriter type mismatch, clearing and recreating: fileID=%d, existingType=%d, isTmpFile=%v", ra.fileID, cw.writerType, ra.isTmpFile)
+			ra.chunkedWriter.Store(clearedChunkedWriterMarker)
 		}
-		return cw.Write(offset, data)
+		
+		// Create ChunkedFileWriter with correct type
+		var writerType WriterType
+		if ra.isTmpFile {
+			writerType = WRITER_TYPE_TMP
+		} else {
+			// Check if sparse file
+			sparseSize := ra.getSparseSize()
+			if sparseSize > 0 {
+				writerType = WRITER_TYPE_SPARSE
+			} else {
+				// Not sparse, not .tmp - should not use ChunkedFileWriter here
+				// Fall through to random write buffer
+				DebugLog("[VFS RandomAccessor Write] WARNING: ChunkedFileWriter exists but file is not .tmp or sparse, falling through to random write: fileID=%d", ra.fileID)
+			}
+		}
+		
+		if writerType == WRITER_TYPE_TMP || writerType == WRITER_TYPE_SPARSE {
+			DebugLog("[VFS RandomAccessor Write] WARNING: ChunkedFileWriter exists but reached random write mode, recreating with correct type: fileID=%d, writerType=%d", ra.fileID, writerType)
+			// IMPORTANT: Update lastActivity before writing to enable timeout flush
+			atomic.StoreInt64(&ra.lastActivity, core.Now())
+			getDelayedFlushManager().schedule(ra, false)
+
+			cw, err := ra.getOrCreateChunkedWriter(writerType)
+			if err != nil {
+				DebugLog("[VFS RandomAccessor Write] ERROR: Failed to get or create ChunkedFileWriter (random mode fallback): fileID=%d, offset=%d, size=%d, error=%v", ra.fileID, offset, len(data), err)
+				return fmt.Errorf("failed to get or create ChunkedFileWriter: %w", err)
+			}
+			return cw.Write(offset, data)
+		}
 	}
 
 	// Optimization: reduce data copying, only copy when necessary
