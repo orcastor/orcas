@@ -6284,13 +6284,25 @@ func TestSparseFileLargeUploadSimulation(t *testing.T) {
 
 		t.Logf("Completed %d writes, flushing...", writeCount)
 
-		// Flush all pending writes
-		_, err = ra.Flush()
-		So(err, ShouldBeNil)
+		// For sparse files, Close() should complete the Flush automatically
+		// This is different from .tmp files which flush on rename
+		// Verify ChunkedFileWriter exists before close
+		chunkedWriterVal := ra.chunkedWriter.Load()
+		So(chunkedWriterVal, ShouldNotBeNil)
+		So(chunkedWriterVal, ShouldNotEqual, clearedChunkedWriterMarker)
+		if cw, ok := chunkedWriterVal.(*ChunkedFileWriter); ok && cw != nil {
+			So(cw.writerType, ShouldEqual, WRITER_TYPE_SPARSE)
+			t.Logf("  ChunkedFileWriter exists before close: fileID=%d, dataID=%d, writerType=SPARSE", cw.fileID, cw.dataID)
+		}
 
-		// Close to ensure ChunkedFileWriter is flushed for sparse files
+		// Close should flush ChunkedFileWriter for sparse files
 		err = ra.Close()
 		So(err, ShouldBeNil)
+
+		// Verify ChunkedFileWriter was cleared after close (flush completed)
+		chunkedWriterVal = ra.chunkedWriter.Load()
+		So(chunkedWriterVal, ShouldEqual, clearedChunkedWriterMarker)
+		t.Logf("  ChunkedFileWriter cleared after close (flush completed)")
 
 		// Reopen to read back data
 		ra2, err := NewRandomAccessor(ofs, fileID)

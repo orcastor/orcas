@@ -6797,20 +6797,19 @@ func (ra *RandomAccessor) Close() error {
 
 	// PRIORITY 1: Flush ChunkedFileWriter for sparse files (completes on close)
 	// For .tmp files, ChunkedFileWriter is flushed on rename (removing .tmp suffix)
+	// IMPORTANT: For sparse files, we must complete the flush on close to ensure all data is persisted
+	// This is different from .tmp files which flush on rename
 	sparseSize := ra.getSparseSize()
 	if sparseSize > 0 {
-		val := ra.chunkedWriter.Load()
-		if val != nil && val != clearedChunkedWriterMarker {
-			if cw, ok := val.(*ChunkedFileWriter); ok && cw != nil && cw.writerType == WRITER_TYPE_SPARSE {
-				DebugLog("[VFS RandomAccessor Close] Flushing ChunkedFileWriter for sparse file: fileID=%d", ra.fileID)
-				if err := cw.Flush(); err != nil {
-					DebugLog("[VFS RandomAccessor Close] WARNING: Failed to flush ChunkedFileWriter for sparse file: %v", err)
-					// Don't return error, continue with other cleanup
-				}
-				// Clear ChunkedFileWriter after flush for sparse files
-				ra.chunkedWriter.Store(clearedChunkedWriterMarker)
-			}
+		// Use flushChunkedWriter to ensure complete flush with proper fileObj update
+		if err := ra.flushChunkedWriter(WRITER_TYPE_SPARSE); err != nil {
+			DebugLog("[VFS RandomAccessor Close] WARNING: Failed to flush ChunkedFileWriter for sparse file: %v", err)
+			// Don't return error immediately, continue with other cleanup
+			// But we should still try to clear the ChunkedFileWriter to prevent issues
 		}
+		// Clear ChunkedFileWriter after flush for sparse files (flushChunkedWriter doesn't clear it)
+		ra.chunkedWriter.Store(clearedChunkedWriterMarker)
+		DebugLog("[VFS RandomAccessor Close] Completed ChunkedFileWriter flush for sparse file: fileID=%d", ra.fileID)
 	}
 
 	// PRIORITY 2: Close journal if exists (flushes and creates new version)
@@ -6819,7 +6818,8 @@ func (ra *RandomAccessor) Close() error {
 		// Don't return error, continue with other cleanup
 	}
 
-	// Synchronously flush all pending write data
+	// PRIORITY 3: Synchronously flush all pending write data (buffer, etc.)
+	// This handles any remaining buffered writes that weren't handled by ChunkedFileWriter
 	_, err := ra.Flush()
 	if err != nil {
 		return err
