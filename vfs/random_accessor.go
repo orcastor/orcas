@@ -42,7 +42,7 @@ const (
 
 	// Write pattern detection
 	SequentialWriteWindow = 4 << 10 // 4KB - window for detecting sequential writes
-	
+
 	// Sparse file local sequential write detection
 	// If writes are within N chunks, treat as sequential even if out of order
 	LocalSequentialChunkCount = 2 // 1-2 chunks: treat as sequential write
@@ -512,23 +512,23 @@ func (buf *chunkBuffer) isChunkComplete(chunkSize int64) bool {
 
 // RandomAccessor random access object in VFS, supports compression and encryption
 type RandomAccessor struct {
-	fs           *OrcasFS
-	fileID       int64
-	buffer       *WriteBuffer           // Random write buffer
-	seqBuffer    *SequentialWriteBuffer // Sequential write buffer (optimized)
-	fileObj      atomic.Value
-	fileObjKey   int64                         // Pre-computed file_obj cache key (optimized: avoid repeated conversion)
-	lastActivity int64                         // Last activity timestamp (atomic access)
-	sparseSize   int64                         // Sparse file size (for pre-allocated files, e.g., qBittorrent) (atomic access)
-	lastOffset   int64                         // Last write offset (for sequential write detection) (atomic access)
-	seqDetector  *ConcurrentSequentialDetector // Concurrent sequential write detector
+	fs            *OrcasFS
+	fileID        int64
+	buffer        *WriteBuffer           // Random write buffer
+	seqBuffer     *SequentialWriteBuffer // Sequential write buffer (optimized)
+	fileObj       atomic.Value
+	fileObjKey    int64                         // Pre-computed file_obj cache key (optimized: avoid repeated conversion)
+	lastActivity  int64                         // Last activity timestamp (atomic access)
+	sparseSize    int64                         // Sparse file size (for pre-allocated files, e.g., qBittorrent) (atomic access)
+	lastOffset    int64                         // Last write offset (for sequential write detection) (atomic access)
+	seqDetector   *ConcurrentSequentialDetector // Concurrent sequential write detector
 	chunkedWriter atomic.Value                  // ChunkedFileWriter for .tmp files and sparse files (atomic.Value stores *ChunkedFileWriter)
-	tempWriteMu  sync.Mutex                    // Mutex for temp operations
-	isTmpFile    bool                          // Whether this file is a .tmp file (determined at creation time, immutable)
-	dataInfo     atomic.Value                  // Cached DataInfo (atomic.Value stores *core.DataInfo)
-	journal      *Journal                      // Journal for tracking random writes (protected by JournalManager)
-	journalMu    sync.RWMutex                  // Mutex for journal access
-	flushMu      sync.Mutex                    // Mutex for flush operations (prevents concurrent flushes)
+	tempWriteMu   sync.Mutex                    // Mutex for temp operations
+	isTmpFile     bool                          // Whether this file is a .tmp file (determined at creation time, immutable)
+	dataInfo      atomic.Value                  // Cached DataInfo (atomic.Value stores *core.DataInfo)
+	journal       *Journal                      // Journal for tracking random writes (protected by JournalManager)
+	journalMu     sync.RWMutex                  // Mutex for journal access
+	flushMu       sync.Mutex                    // Mutex for flush operations (prevents concurrent flushes)
 	// Local sequential write tracking for sparse files
 	writeRangeStart int64 // Start of current write range (atomic access)
 	writeRangeEnd   int64 // End of current write range (atomic access)
@@ -665,7 +665,7 @@ func (ra *RandomAccessor) getOrCreateChunkedWriter(writerType WriterType) (*Chun
 		realtimeDecided: false,
 		lh:              lh,
 		firstChunkSN:    0,
-		writerType:       writerType, // Set writer type
+		writerType:      writerType, // Set writer type
 	}
 	atomic.StoreInt64(&cw.firstChunkSN, 0) // First chunk is always sn=0
 
@@ -1568,25 +1568,25 @@ func (cw *ChunkedFileWriter) Flush() error {
 
 	// CRITICAL: Set flushing flag to prevent writes during flush
 	// This ensures data consistency and prevents chunk corruption
-		if !atomic.CompareAndSwapInt32(&cw.flushing, 0, 1) {
-			// Already flushing, wait for it to complete or return error
-			DebugLog("[VFS ChunkedFileWriter Flush] Already flushing, skipping duplicate flush: fileID=%d, dataID=%d", cw.fileID, cw.dataID)
-			return fmt.Errorf("flush already in progress")
-		}
-		defer atomic.StoreInt32(&cw.flushing, 0)
+	if !atomic.CompareAndSwapInt32(&cw.flushing, 0, 1) {
+		// Already flushing, wait for it to complete or return error
+		DebugLog("[VFS ChunkedFileWriter Flush] Already flushing, skipping duplicate flush: fileID=%d, dataID=%d", cw.fileID, cw.dataID)
+		return fmt.Errorf("flush already in progress")
+	}
+	defer atomic.StoreInt32(&cw.flushing, 0)
 
-		size := atomic.LoadInt64(&cw.size)
-		DebugLog("[VFS ChunkedFileWriter Flush] Starting flush for large file: fileID=%d, dataID=%d, fileSize=%d, writerType=%d",
-			cw.fileID, cw.dataID, size, cw.writerType)
+	size := atomic.LoadInt64(&cw.size)
+	DebugLog("[VFS ChunkedFileWriter Flush] Starting flush for large file: fileID=%d, dataID=%d, fileSize=%d, writerType=%d",
+		cw.fileID, cw.dataID, size, cw.writerType)
 
-		if size == 0 {
-			// No data written, nothing to flush
-			DebugLog("[VFS ChunkedFileWriter Flush] No data written, skipping flush: fileID=%d, dataID=%d", cw.fileID, cw.dataID)
-			return nil
-		}
+	if size == 0 {
+		// No data written, nothing to flush
+		DebugLog("[VFS ChunkedFileWriter Flush] No data written, skipping flush: fileID=%d, dataID=%d", cw.fileID, cw.dataID)
+		return nil
+	}
 
-		// Get file object
-		fileObj, err := cw.fs.h.Get(cw.fs.c, cw.fs.bktID, []int64{cw.fileID})
+	// Get file object
+	fileObj, err := cw.fs.h.Get(cw.fs.c, cw.fs.bktID, []int64{cw.fileID})
 	if err != nil || len(fileObj) == 0 {
 		DebugLog("[VFS ChunkedFileWriter Flush] ERROR: Failed to get file object: fileID=%d, dataID=%d, error=%v, len=%d", cw.fileID, cw.dataID, err, len(fileObj))
 		return fmt.Errorf("failed to get file object: %v", err)
@@ -1918,9 +1918,39 @@ func (ra *RandomAccessor) Write(offset int64, data []byte) error {
 		}
 	}
 
-	// Update write range for sparse files (before checking shouldUseJournal)
+	// CRITICAL: Detect file rename by comparing isTmpFile flag with actual file name
+	// 原来这里一旦检测到 .tmp 被重命名，就直接返回错误，要求上层重建 RandomAccessor，
+	// 这会导致已经 flush 到后端的文件在后续写入时被拒绝（见 3.log 中
+	//  "File was renamed from .tmp, RandomAccessor must be recreated" 的错误）。
+	// 为了兼容 Office 等在重命名后继续使用同一 FD 写入的场景，这里改为：
+	//   - 如果原 RA 认为自己是 .tmp，但实际文件名已经不是 .tmp（说明发生了重命名），
+	//     则记录日志、清理掉旧的 TMP ChunkedFileWriter，保持 isTmpFile=false，
+	//     然后继续执行后续的随机写路径，让新的写入走正常非 tmp 的写路径（使用 journal/顺写）。
+	//   - 不再返回 "RandomAccessor must be recreated" 错误。
+	actualIsTmpFile := isTempFile(fileObj)
+	if ra.isTmpFile != actualIsTmpFile {
+		// 文件名与 RA 创建时的 isTmpFile 状态不一致，说明发生了重命名
+		if ra.isTmpFile && !actualIsTmpFile {
+			// 从 .tmp 重命名为普通文件：
+			// 清理掉仍然挂在 RA 上的 TMP 类型 ChunkedFileWriter，避免后续误用
+			// IMPORTANT: 同时清除 sparseSize，因为重命名后的文件不应该再被当作sparse file
+			// 否则后续写入会被误判为sparse file，创建SPARSE类型的ChunkedFileWriter，导致大小不匹配错误
+			DebugLog("[VFS RandomAccessor Write] Detected .tmp rename for fileID=%d (oldName=%s), clearing TMP ChunkedFileWriter and sparseSize, switching to non-tmp mode", ra.fileID, fileObj.Name)
+			ra.chunkedWriter.Store(clearedChunkedWriterMarker)
+			atomic.StoreInt64(&ra.sparseSize, 0) // 清除sparseSize，避免误判为sparse file
+			ra.isTmpFile = false
+			// 继续往下走，使用普通文件的顺写/随机写路径，不再直接拒绝
+		} else if !ra.isTmpFile && actualIsTmpFile {
+			// 从普通文件重命名为 .tmp（极少见），当前 RA 没有 TMP 语义，安全起见仍然要求重建
+			DebugLog("[VFS RandomAccessor Write] File was renamed to .tmp, RandomAccessor must be recreated: fileID=%d, fileName=%s", ra.fileID, fileObj.Name)
+			ra.Close()
+			return fmt.Errorf("file was renamed to .tmp, RandomAccessor must be recreated: fileID=%d, fileName=%s", ra.fileID, fileObj.Name)
+		}
+	}
+
+	// Update write range for sparse files (after rename detection, so we use updated sparseSize)
 	// This allows shouldUseJournal to check if writes are within local sequential range
-	sparseSize := ra.getSparseSize()
+	sparseSize := ra.getSparseSize() // Re-read sparseSize after rename detection (may have been cleared)
 	if sparseSize > 0 {
 		ra.updateWriteRange(offset, int64(len(data)))
 	}
@@ -1943,38 +1973,11 @@ func (ra *RandomAccessor) Write(offset int64, data []byte) error {
 	}
 
 	// CRITICAL: For non-.tmp files, do NOT use ChunkedFileWriter (TMP type)
-		// ChunkedFileWriter should only be used for .tmp files and sparse files
+	// ChunkedFileWriter should only be used for .tmp files and sparse files
 	// Once a file is renamed (removed .tmp suffix), writes should go through normal write path
 	// Use the immutable isTmpFile flag (set at creation time) instead of checking file name
 	// This is more efficient and avoids cache inconsistency issues
 	// IMPORTANT: If file is renamed, RandomAccessor MUST be closed and recreated
-
-	// CRITICAL: Detect file rename by comparing isTmpFile flag with actual file name
-	// 原来这里一旦检测到 .tmp 被重命名，就直接返回错误，要求上层重建 RandomAccessor，
-	// 这会导致已经 flush 到后端的文件在后续写入时被拒绝（见 3.log 中
-	//  "File was renamed from .tmp, RandomAccessor must be recreated" 的错误）。
-	// 为了兼容 Office 等在重命名后继续使用同一 FD 写入的场景，这里改为：
-	//   - 如果原 RA 认为自己是 .tmp，但实际文件名已经不是 .tmp（说明发生了重命名），
-	//     则记录日志、清理掉旧的 TMP ChunkedFileWriter，保持 isTmpFile=false，
-	//     然后继续执行后续的随机写路径，让新的写入走正常非 tmp 的写路径（使用 journal/顺写）。
-	//   - 不再返回 "RandomAccessor must be recreated" 错误。
-	actualIsTmpFile := isTempFile(fileObj)
-	if ra.isTmpFile != actualIsTmpFile {
-		// 文件名与 RA 创建时的 isTmpFile 状态不一致，说明发生了重命名
-		if ra.isTmpFile && !actualIsTmpFile {
-			// 从 .tmp 重命名为普通文件：
-			// 清理掉仍然挂在 RA 上的 TMP 类型 ChunkedFileWriter，避免后续误用
-			DebugLog("[VFS RandomAccessor Write] Detected .tmp rename for fileID=%d (oldName=%s), clearing TMP ChunkedFileWriter and switching to non-tmp mode", ra.fileID, fileObj.Name)
-			ra.chunkedWriter.Store(clearedChunkedWriterMarker)
-			ra.isTmpFile = false
-			// 继续往下走，使用普通文件的顺写/随机写路径，不再直接拒绝
-		} else if !ra.isTmpFile && actualIsTmpFile {
-			// 从普通文件重命名为 .tmp（极少见），当前 RA 没有 TMP 语义，安全起见仍然要求重建
-			DebugLog("[VFS RandomAccessor Write] File was renamed to .tmp, RandomAccessor must be recreated: fileID=%d, fileName=%s", ra.fileID, fileObj.Name)
-			ra.Close()
-			return fmt.Errorf("file was renamed to .tmp, RandomAccessor must be recreated: fileID=%d, fileName=%s", ra.fileID, fileObj.Name)
-		}
-	}
 
 	// IMPORTANT: Check ChunkedFileWriter only for .tmp files
 	// For non-.tmp files, ChunkedFileWriter should have been cleared after rename (for .tmp files)
@@ -2001,11 +2004,11 @@ func (ra *RandomAccessor) Write(offset int64, data []byte) error {
 			} else {
 				// ChunkedFileWriter was cleared (clearedChunkedWriterMarker)
 				// This could mean:
-				// 1. File was renamed from .tmp (should reject writes)
+				// 1. File was renamed from .tmp (should allow writes via normal path, not SPARSE ChunkedFileWriter)
 				// 2. Sparse file ChunkedFileWriter was cleared after flush (should allow writes)
-				// We can't distinguish these cases, so we need a different approach
-				// For sparse files, we should allow writes even if ChunkedFileWriter was cleared
-				// (it will be recreated if needed)
+				// IMPORTANT: If rename detection just happened (ra.isTmpFile was just set to false),
+				// we should allow writes via normal path (journal/sequential buffer), not reject them.
+				// The rename detection logic above already cleared sparseSize, so we won't create SPARSE ChunkedFileWriter.
 				sparseSize := ra.getSparseSize()
 				if sparseSize > 0 {
 					// Sparse file - allow writes (ChunkedFileWriter will be recreated if needed)
@@ -2013,10 +2016,13 @@ func (ra *RandomAccessor) Write(offset int64, data []byte) error {
 					// Continue to normal write path below
 				} else {
 					// Non-sparse, non-.tmp file with cleared ChunkedFileWriter
-					// This likely means file was renamed from .tmp
-					// Reject writes to prevent accidental ChunkedFileWriter recreation
-					DebugLog("[VFS RandomAccessor Write] ERROR: File is not .tmp and ChunkedFileWriter was cleared, rejecting write: fileID=%d, fileName=%s", ra.fileID, fileObj.Name)
-					return fmt.Errorf("file was renamed from .tmp, writes are no longer allowed (cleared): fileID=%d, fileName=%s", ra.fileID, fileObj.Name)
+					// This could mean:
+					// 1. File was renamed from .tmp (rename detection just cleared sparseSize)
+					// 2. ChunkedFileWriter was cleared for other reasons
+					// In both cases, we should allow writes via normal path (journal/sequential buffer)
+					// The rename detection logic above already handled the cleanup, so we can proceed
+					DebugLog("[VFS RandomAccessor Write] Non-sparse file with cleared ChunkedFileWriter, allowing writes via normal path: fileID=%d, fileName=%s", ra.fileID, fileObj.Name)
+					// Continue to normal write path below (journal/sequential buffer)
 				}
 			}
 		}
@@ -2051,11 +2057,11 @@ func (ra *RandomAccessor) Write(offset int64, data []byte) error {
 			chunkSize = DefaultChunkSize
 		}
 		localRange := int64(LocalSequentialChunkCount) * chunkSize
-		
+
 		writeRangeStart := atomic.LoadInt64(&ra.writeRangeStart)
 		writeRangeEnd := atomic.LoadInt64(&ra.writeRangeEnd)
 		currentWriteEnd := offset + int64(len(data))
-		
+
 		// Check if current write is within local sequential range
 		if writeRangeStart > 0 && writeRangeEnd > 0 {
 			newRangeStart := writeRangeStart
@@ -2085,26 +2091,26 @@ func (ra *RandomAccessor) Write(offset int64, data []byte) error {
 		}
 	}
 
-		// Check if this is a .tmp file (and ChunkedFileWriter doesn't exist yet)
-		// Use the immutable isTmpFile flag (set at creation time)
-		// Note: ra.isTmpFile was already checked above, but we need to check again here
-		// because the code path above might have returned early
-		if ra.isTmpFile {
-			// For .tmp files, all writes should go through ChunkedFileWriter
-			// This ensures consistent data handling and avoids triggering applyRandomWritesWithSDK
-			// IMPORTANT: Update lastActivity before writing to enable timeout flush
-			// Timeout flush should start counting from the last write operation
-			atomic.StoreInt64(&ra.lastActivity, core.Now())
-			// Schedule delayed flush (will be cancelled if new writes come in)
-			getDelayedFlushManager().schedule(ra, false)
+	// Check if this is a .tmp file (and ChunkedFileWriter doesn't exist yet)
+	// Use the immutable isTmpFile flag (set at creation time)
+	// Note: ra.isTmpFile was already checked above, but we need to check again here
+	// because the code path above might have returned early
+	if ra.isTmpFile {
+		// For .tmp files, all writes should go through ChunkedFileWriter
+		// This ensures consistent data handling and avoids triggering applyRandomWritesWithSDK
+		// IMPORTANT: Update lastActivity before writing to enable timeout flush
+		// Timeout flush should start counting from the last write operation
+		atomic.StoreInt64(&ra.lastActivity, core.Now())
+		// Schedule delayed flush (will be cancelled if new writes come in)
+		getDelayedFlushManager().schedule(ra, false)
 
-			cw, err := ra.getOrCreateChunkedWriter(WRITER_TYPE_TMP)
-			if err != nil {
-				DebugLog("[VFS RandomAccessor Write] ERROR: Failed to get or create ChunkedFileWriter for .tmp file: fileID=%d, offset=%d, size=%d, error=%v", ra.fileID, offset, len(data), err)
-				return fmt.Errorf("failed to get or create ChunkedFileWriter for .tmp file: %w", err)
-			}
-			return cw.Write(offset, data)
+		cw, err := ra.getOrCreateChunkedWriter(WRITER_TYPE_TMP)
+		if err != nil {
+			DebugLog("[VFS RandomAccessor Write] ERROR: Failed to get or create ChunkedFileWriter for .tmp file: fileID=%d, offset=%d, size=%d, error=%v", ra.fileID, offset, len(data), err)
+			return fmt.Errorf("failed to get or create ChunkedFileWriter for .tmp file: %w", err)
 		}
+		return cw.Write(offset, data)
+	}
 
 	// Check if in sequential write mode (only for non-.tmp files)
 	if ra.seqBuffer != nil {
@@ -2187,8 +2193,8 @@ func (ra *RandomAccessor) Write(offset int64, data []byte) error {
 		// Check the type of existing ChunkedFileWriter
 		if cw, ok := chunkedWriterValInRandomMode.(*ChunkedFileWriter); ok && cw != nil {
 			// Use existing ChunkedFileWriter if type matches
-			if (ra.isTmpFile && cw.writerType == WRITER_TYPE_TMP) || 
-			   (!ra.isTmpFile && cw.writerType == WRITER_TYPE_SPARSE) {
+			if (ra.isTmpFile && cw.writerType == WRITER_TYPE_TMP) ||
+				(!ra.isTmpFile && cw.writerType == WRITER_TYPE_SPARSE) {
 				DebugLog("[VFS RandomAccessor Write] WARNING: ChunkedFileWriter exists but reached random write mode, using existing ChunkedFileWriter: fileID=%d, writerType=%d", ra.fileID, cw.writerType)
 				// IMPORTANT: Update lastActivity before writing to enable timeout flush
 				atomic.StoreInt64(&ra.lastActivity, core.Now())
@@ -2199,7 +2205,7 @@ func (ra *RandomAccessor) Write(offset int64, data []byte) error {
 			DebugLog("[VFS RandomAccessor Write] WARNING: ChunkedFileWriter type mismatch, clearing and recreating: fileID=%d, existingType=%d, isTmpFile=%v", ra.fileID, cw.writerType, ra.isTmpFile)
 			ra.chunkedWriter.Store(clearedChunkedWriterMarker)
 		}
-		
+
 		// Create ChunkedFileWriter with correct type
 		var writerType WriterType
 		if ra.isTmpFile {
@@ -2215,7 +2221,7 @@ func (ra *RandomAccessor) Write(offset int64, data []byte) error {
 				DebugLog("[VFS RandomAccessor Write] WARNING: ChunkedFileWriter exists but file is not .tmp or sparse, falling through to random write: fileID=%d", ra.fileID)
 			}
 		}
-		
+
 		if writerType == WRITER_TYPE_TMP || writerType == WRITER_TYPE_SPARSE {
 			DebugLog("[VFS RandomAccessor Write] WARNING: ChunkedFileWriter exists but reached random write mode, recreating with correct type: fileID=%d, writerType=%d", ra.fileID, writerType)
 			// IMPORTANT: Update lastActivity before writing to enable timeout flush
@@ -6833,7 +6839,7 @@ func (ra *RandomAccessor) Close() error {
 		}
 		// Clear ChunkedFileWriter after flush for sparse files (flushChunkedWriter doesn't clear it)
 		ra.chunkedWriter.Store(clearedChunkedWriterMarker)
-		
+
 		// Check if file is fully written and clear sparse file flag if so
 		// This is done after flush to ensure we have the latest file size
 		// Re-read fileObj from cache after flush to get the latest size
@@ -6860,7 +6866,7 @@ func (ra *RandomAccessor) Close() error {
 				DebugLog("[VFS RandomAccessor Close] Sparse file not fully written (size=%d < sparseSize=%d), keeping sparse file flag: fileID=%d", actualSize, sparseSize, ra.fileID)
 			}
 		}
-		
+
 		DebugLog("[VFS RandomAccessor Close] Completed ChunkedFileWriter flush for sparse file: fileID=%d", ra.fileID)
 	}
 
@@ -6884,7 +6890,7 @@ func (ra *RandomAccessor) Close() error {
 			}
 		}
 	}
-	
+
 	_, err := ra.Flush()
 	if err != nil {
 		return err
@@ -6923,7 +6929,7 @@ func (ra *RandomAccessor) flushChunkedWriter(writerType WriterType) error {
 	if !ok || cw == nil {
 		return nil
 	}
-	
+
 	// Check if writer type matches
 	if cw.writerType != writerType {
 		return nil // Not the right type, skip
@@ -6953,7 +6959,7 @@ func (ra *RandomAccessor) flushChunkedWriter(writerType WriterType) error {
 	if cachedObj := ra.fileObj.Load(); cachedObj != nil {
 		if obj, ok := cachedObj.(*core.ObjectInfo); ok && obj != nil {
 			DebugLog("[VFS RandomAccessor flushChunkedWriter] Verified fileObj cache after ChunkedFileWriter flush: fileID=%d, size=%d, dataID=%d", ra.fileID, obj.Size, obj.DataID)
-			
+
 			// IMPORTANT: For sparse files, if file is fully written (size >= sparseSize), clear sparse file flag
 			// This ensures that fully written files are no longer treated as sparse files
 			if writerType == WRITER_TYPE_SPARSE {
@@ -7298,11 +7304,11 @@ func (ra *RandomAccessor) shouldUseJournal(fileObj *core.ObjectInfo, offset, len
 			chunkSize = DefaultChunkSize
 		}
 		localSeqRange := int64(LocalSequentialChunkCount) * chunkSize
-		
+
 		writeRangeStart := atomic.LoadInt64(&ra.writeRangeStart)
 		writeRangeEnd := atomic.LoadInt64(&ra.writeRangeEnd)
 		currentWriteEnd := offset + length
-		
+
 		// Check if current write is within local sequential range
 		if writeRangeStart > 0 && writeRangeEnd > 0 {
 			// We have an existing write range, check if current write extends it within limit
@@ -7351,7 +7357,7 @@ func (ra *RandomAccessor) shouldUseJournal(fileObj *core.ObjectInfo, offset, len
 					return false
 				}
 			}
-			
+
 			// Writes span too many chunks, use journal to avoid rewriting entire file
 			DebugLog("[VFS shouldUseJournal] Using journal for sparse file with existing data (avoid full file rewrite): fileID=%d, sparseSize=%d, dataID=%d",
 				ra.fileID, sparseSize, fileObj.DataID)
@@ -8215,7 +8221,7 @@ func (ra *RandomAccessor) updateWriteRange(offset, length int64) {
 	writeEnd := offset + length
 	writeRangeStart := atomic.LoadInt64(&ra.writeRangeStart)
 	writeRangeEnd := atomic.LoadInt64(&ra.writeRangeEnd)
-	
+
 	if writeRangeStart == 0 || writeRangeEnd == 0 {
 		// First write, initialize range
 		atomic.StoreInt64(&ra.writeRangeStart, offset)

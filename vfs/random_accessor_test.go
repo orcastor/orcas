@@ -6727,3 +6727,191 @@ func TestTmpFileOfficeSaveScenario(t *testing.T) {
 		t.Logf("✅ Successfully verified tmp file Office save scenario: dataID=%d, size=%d", finalFileObj.DataID, finalFileObj.Size)
 	})
 }
+
+// TestTmpFileWriteAfterRenameWithSparseSizeBug reproduces the bug from 3.log where:
+// 1. A .tmp file is written and renamed to 1.ppt
+// 2. The RandomAccessor still has sparseSize set (from .tmp creation)
+// 3. After rename, writes are incorrectly treated as sparse file writes
+// 4. This creates a SPARSE ChunkedFileWriter that tries to write to existing DataID
+// 5. Flush fails with "chunk exists but size mismatch" error
+// This test verifies the fix: clearing sparseSize when .tmp is renamed
+func TestTmpFileWriteAfterRenameWithSparseSizeBug(t *testing.T) {
+	Convey("Tmp file write after rename with sparseSize bug reproduction", t, func() {
+		c := context.Background()
+		ig := idgen.NewIDGen(nil, 0)
+		testBktID, _ := ig.New()
+		err := core.InitBucketDB(".", testBktID)
+		So(err, ShouldBeNil)
+
+		dma := &core.DefaultMetadataAdapter{
+			DefaultBaseMetadataAdapter: &core.DefaultBaseMetadataAdapter{},
+			DefaultDataMetadataAdapter: &core.DefaultDataMetadataAdapter{},
+		}
+		dma.DefaultBaseMetadataAdapter.SetPath(".")
+		dma.DefaultDataMetadataAdapter.SetPath(".")
+		dda := &core.DefaultDataAdapter{}
+
+		lh := core.NewLocalHandler("", "").(*core.LocalHandler)
+		lh.SetAdapter(dma, dda)
+
+		testCtx, userInfo, _, err := lh.Login(c, "orcas", "orcas")
+		So(err, ShouldBeNil)
+
+		bucket := &core.BucketInfo{
+			ID:       testBktID,
+			Name:     "test_bucket",
+			Type:     1,
+			Quota:    500000000,
+			Used:     0,
+			RealUsed: 0,
+		}
+		admin := core.NewLocalAdmin(".", ".")
+		So(admin.PutBkt(testCtx, []*core.BucketInfo{bucket}), ShouldBeNil)
+
+		if userInfo != nil && userInfo.ID > 0 {
+			So(admin.PutACL(testCtx, testBktID, userInfo.ID, core.ALL), ShouldBeNil)
+		}
+
+		encryptionKey := "this-is-a-test-encryption-key-that-is-long-enough-for-aes256-encryption-12345678901234567890"
+		cfg := &core.Config{
+			EndecWay: core.DATA_ENDEC_AES256,
+			EndecKey: encryptionKey,
+		}
+		ofs := NewOrcasFSWithConfig(lh, testCtx, testBktID, cfg)
+
+		// Create .tmp file (matching log: A906C37C.tmp pattern)
+		tmpFileID, _ := ig.New()
+		tmpFileObj := &core.ObjectInfo{
+			ID:    tmpFileID,
+			PID:   testBktID,
+			Type:  core.OBJ_TYPE_FILE,
+			Name:  "A906C37C.tmp",
+			Size:  0,
+			MTime: core.Now(),
+		}
+		_, err = dma.PutObj(testCtx, testBktID, []*core.ObjectInfo{tmpFileObj})
+		So(err, ShouldBeNil)
+
+		// Create RandomAccessor for .tmp file
+		raTmp, err := NewRandomAccessor(ofs, tmpFileID)
+		So(err, ShouldBeNil)
+		So(raTmp, ShouldNotBeNil)
+
+		// Write initial data (matching log: size=6389248, but we'll write 6,370,304 to match previous test)
+		const blockSize = 524288
+		const numFullBlocks = 12
+		const lastBlockSize = 78848
+		initialSize := int64(numFullBlocks*blockSize + lastBlockSize) // 6,370,304
+
+		initialContent := make([]byte, initialSize)
+		for i := range initialContent {
+			initialContent[i] = byte(i % 251)
+		}
+
+		t.Logf("Writing initial .tmp file: fileID=%d, size=%d", tmpFileID, initialSize)
+
+		// Write 12 full blocks + last partial block
+		for i := 0; i < numFullBlocks; i++ {
+			offset := int64(i) * blockSize
+			err = raTmp.Write(offset, initialContent[offset:offset+blockSize])
+			So(err, ShouldBeNil)
+		}
+		lastOffset := int64(numFullBlocks) * blockSize
+		err = raTmp.Write(lastOffset, initialContent[lastOffset:])
+		So(err, ShouldBeNil)
+
+		// Verify ChunkedFileWriter is TMP type
+		val := raTmp.chunkedWriter.Load()
+		So(val, ShouldNotBeNil)
+		cw, ok := val.(*ChunkedFileWriter)
+		So(ok, ShouldBeTrue)
+		So(cw.writerType, ShouldEqual, WRITER_TYPE_TMP)
+		t.Logf("  Initial ChunkedFileWriter: fileID=%d, dataID=%d, writerType=TMP", cw.fileID, cw.dataID)
+
+		// ForceFlush (simulating rename flush)
+		_, err = raTmp.ForceFlush()
+		So(err, ShouldBeNil)
+
+		// CRITICAL: Simulate the bug scenario - set sparseSize BEFORE rename
+		// This simulates the case where sparseSize was set during .tmp file creation
+		// (which might happen in some code paths)
+		raTmp.MarkSparseFile(initialSize)
+		So(raTmp.getSparseSize(), ShouldEqual, initialSize)
+		t.Logf("  Simulated sparseSize set (bug scenario): sparseSize=%d", initialSize)
+
+		// Verify ra.isTmpFile is still true (before rename)
+		So(raTmp.isTmpFile, ShouldBeTrue)
+		t.Logf("  Verified ra.isTmpFile=true before rename")
+
+		// "Rename" to 1.ppt
+		renamedObj := *tmpFileObj
+		renamedObj.Name = "1.ppt"
+		renamedObj.Size = initialSize
+		renamedObj.MTime = core.Now()
+		_, err = dma.PutObj(testCtx, testBktID, []*core.ObjectInfo{&renamedObj})
+		So(err, ShouldBeNil)
+
+		// CRITICAL: Force reload fileObj from database to see renamed file name
+		// We'll use the metadata adapter directly to get the updated fileObj
+		// and manually update the cache in RandomAccessor
+		objs, err := dma.GetObj(testCtx, testBktID, []int64{tmpFileID})
+		So(err, ShouldBeNil)
+		So(len(objs), ShouldEqual, 1)
+		reloadedFileObj := objs[0]
+		So(reloadedFileObj.Name, ShouldEqual, "1.ppt")
+		// Manually update the cache in RandomAccessor
+		raTmp.fileObj.Store(reloadedFileObj)
+		t.Logf("  Forced reload of fileObj from database after rename: name=%s, isTmpFile=%v", reloadedFileObj.Name, raTmp.isTmpFile)
+
+		// Verify ra.isTmpFile is still true (rename detection hasn't happened yet)
+		So(raTmp.isTmpFile, ShouldBeTrue)
+		t.Logf("  Verified ra.isTmpFile=true (rename detection will happen in Write)")
+
+		// Now try to write 1 byte at offset=6391295 (beyond initialSize, like in log)
+		// This should trigger rename detection, clear sparseSize, and NOT create a SPARSE ChunkedFileWriter
+		// The write should succeed using normal write path (journal or sequential buffer), not SPARSE ChunkedFileWriter
+		writeOffset := initialSize - 1 // 6391295 in log (but our initialSize is 6370304, so use initialSize-1)
+		writeData := []byte{0xAB}
+		err = raTmp.Write(writeOffset, writeData)
+		So(err, ShouldBeNil)
+
+		// Verify ra.isTmpFile was set to false by rename detection
+		So(raTmp.isTmpFile, ShouldBeFalse)
+		t.Logf("  Verified ra.isTmpFile=false after rename detection in Write")
+
+		// Verify that sparseSize was cleared after rename detection (this is the fix)
+		So(raTmp.getSparseSize(), ShouldEqual, 0)
+		t.Logf("  Verified sparseSize was cleared after .tmp rename detection (fix applied)")
+
+		// Verify ChunkedFileWriter is NOT SPARSE type (should use journal or normal write path)
+		// This is the key fix: we should NOT create SPARSE ChunkedFileWriter after rename
+		val2 := raTmp.chunkedWriter.Load()
+		if val2 != nil && val2 != clearedChunkedWriterMarker {
+			if cw2, ok2 := val2.(*ChunkedFileWriter); ok2 && cw2 != nil {
+				// If ChunkedFileWriter exists, it should NOT be SPARSE type
+				So(cw2.writerType, ShouldNotEqual, WRITER_TYPE_SPARSE)
+				t.Logf("  ChunkedFileWriter after write: fileID=%d, dataID=%d, writerType=%d (should not be SPARSE=1)", cw2.fileID, cw2.dataID, cw2.writerType)
+			}
+		} else {
+			t.Logf("  ChunkedFileWriter is cleared or nil (using journal/sequential buffer, not SPARSE)")
+		}
+
+
+		// Flush and verify no "size mismatch" error
+		// This is the key fix: after rename detection clears sparseSize, we should NOT create
+		// SPARSE ChunkedFileWriter, so flush should succeed without size mismatch error
+		_, err = raTmp.Flush()
+		So(err, ShouldBeNil)
+		t.Logf("  ✅ Flush succeeded without 'size mismatch' error (fix verified)")
+
+		// Close and verify
+		err = raTmp.Close()
+		So(err, ShouldBeNil)
+
+		t.Logf("✅ Successfully verified tmp file write after rename with sparseSize bug fix:")
+		t.Logf("  1. Rename detection correctly cleared sparseSize")
+		t.Logf("  2. No SPARSE ChunkedFileWriter was created after rename")
+		t.Logf("  3. Flush succeeded without 'size mismatch' error")
+		t.Logf("  4. Write succeeded using normal path (journal/sequential buffer)")
+	})
+}
