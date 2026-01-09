@@ -1972,29 +1972,47 @@ func (ra *RandomAccessor) Write(offset int64, data []byte) error {
 	}
 
 	// IMPORTANT: Check ChunkedFileWriter only for .tmp files
-	// For non-.tmp files, ChunkedFileWriter should have been cleared after rename
-	// If it still exists, reject the write to prevent data corruption
+	// For non-.tmp files, ChunkedFileWriter should have been cleared after rename (for .tmp files)
+	// BUT sparse files can also use ChunkedFileWriter (WRITER_TYPE_SPARSE), so we need to allow that
 	if !ra.isTmpFile {
-		// File is not .tmp, check if ChunkedFileWriter still exists (should have been cleared)
+		// File is not .tmp, check if ChunkedFileWriter still exists
+		// Only reject if it's a WRITER_TYPE_TMP (which shouldn't exist for non-.tmp files)
+		// Allow WRITER_TYPE_SPARSE for sparse files
 		hasChunkedWriter := ra.chunkedWriter.Load() != nil
 		if hasChunkedWriter {
 			chunkedWriterVal := ra.chunkedWriter.Load()
 			if chunkedWriterVal != clearedChunkedWriterMarker {
 				cw, ok := chunkedWriterVal.(*ChunkedFileWriter)
 				if ok && cw != nil && cw.writerType == WRITER_TYPE_TMP {
-					// File was renamed from .tmp but ChunkedFileWriter still exists
+					// File was renamed from .tmp but ChunkedFileWriter (TMP type) still exists
 					// This should not happen - reject the write
-					DebugLog("[VFS RandomAccessor Write] ERROR: File is not .tmp but ChunkedFileWriter exists, rejecting write: fileID=%d, fileName=%s", ra.fileID, fileObj.Name)
+					DebugLog("[VFS RandomAccessor Write] ERROR: File is not .tmp but ChunkedFileWriter (TMP) exists, rejecting write: fileID=%d, fileName=%s", ra.fileID, fileObj.Name)
 					// Clear ChunkedFileWriter to prevent future writes
 					ra.chunkedWriter.Store(clearedChunkedWriterMarker)
 					return fmt.Errorf("file was renamed from .tmp, writes are no longer allowed: fileID=%d, fileName=%s", ra.fileID, fileObj.Name)
 				}
+				// If it's WRITER_TYPE_SPARSE, allow it (for sparse files)
+				// Continue to normal write path below
 			} else {
-				// TempFileWriter was cleared (clearedChunkedWriterMarker)
-				// This means the file was renamed from .tmp
-				// Reject writes to prevent accidental TempFileWriter recreation
-				DebugLog("[VFS RandomAccessor Write] ERROR: File is not .tmp and TempFileWriter was cleared, rejecting write: fileID=%d, fileName=%s", ra.fileID, fileObj.Name)
-				return fmt.Errorf("file was renamed from .tmp, writes are no longer allowed (cleared): fileID=%d, fileName=%s", ra.fileID, fileObj.Name)
+				// ChunkedFileWriter was cleared (clearedChunkedWriterMarker)
+				// This could mean:
+				// 1. File was renamed from .tmp (should reject writes)
+				// 2. Sparse file ChunkedFileWriter was cleared after flush (should allow writes)
+				// We can't distinguish these cases, so we need a different approach
+				// For sparse files, we should allow writes even if ChunkedFileWriter was cleared
+				// (it will be recreated if needed)
+				sparseSize := ra.getSparseSize()
+				if sparseSize > 0 {
+					// Sparse file - allow writes (ChunkedFileWriter will be recreated if needed)
+					DebugLog("[VFS RandomAccessor Write] Sparse file with cleared ChunkedFileWriter, allowing writes (will recreate if needed): fileID=%d", ra.fileID)
+					// Continue to normal write path below
+				} else {
+					// Non-sparse, non-.tmp file with cleared ChunkedFileWriter
+					// This likely means file was renamed from .tmp
+					// Reject writes to prevent accidental ChunkedFileWriter recreation
+					DebugLog("[VFS RandomAccessor Write] ERROR: File is not .tmp and ChunkedFileWriter was cleared, rejecting write: fileID=%d, fileName=%s", ra.fileID, fileObj.Name)
+					return fmt.Errorf("file was renamed from .tmp, writes are no longer allowed (cleared): fileID=%d, fileName=%s", ra.fileID, fileObj.Name)
+				}
 			}
 		}
 		// For non-.tmp files, continue to normal write path below
