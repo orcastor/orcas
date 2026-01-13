@@ -54,6 +54,7 @@ type WriterType int
 const (
 	WRITER_TYPE_TMP    WriterType = iota // .tmp file: completes on rename (removing .tmp suffix)
 	WRITER_TYPE_SPARSE                   // Sparse file: completes on file close
+	WRITER_TYPE_SEQ                      // New sequential upload (non-.tmp), flushes on normal Flush/Close
 )
 
 var (
@@ -430,6 +431,7 @@ type ChunkedFileWriter struct {
 	firstChunkSN    int64                // First chunk sequence number (sn=0)
 	flushing        int32                // Atomic flag: 1 if currently flushing, 0 otherwise (prevents writes during flush)
 	writerType      WriterType           // Type of writer: .tmp file or sparse file
+	ra              *RandomAccessor      // Reference to parent RandomAccessor for cache updates
 }
 
 // writeRange represents a contiguous range of written data within a chunk
@@ -517,18 +519,17 @@ type RandomAccessor struct {
 	buffer        *WriteBuffer           // Random write buffer
 	seqBuffer     *SequentialWriteBuffer // Sequential write buffer (optimized)
 	fileObj       atomic.Value
-	fileObjKey    int64                         // Pre-computed file_obj cache key (optimized: avoid repeated conversion)
-	lastActivity  int64                         // Last activity timestamp (atomic access)
-	sparseSize    int64                         // Sparse file size (for pre-allocated files, e.g., qBittorrent) (atomic access)
-	lastOffset    int64                         // Last write offset (for sequential write detection) (atomic access)
-	seqDetector   *ConcurrentSequentialDetector // Concurrent sequential write detector
-	chunkedWriter atomic.Value                  // ChunkedFileWriter for .tmp files and sparse files (atomic.Value stores *ChunkedFileWriter)
-	tempWriteMu   sync.Mutex                    // Mutex for temp operations
-	isTmpFile     bool                          // Whether this file is a .tmp file (determined at creation time, immutable)
-	dataInfo      atomic.Value                  // Cached DataInfo (atomic.Value stores *core.DataInfo)
-	journal       *Journal                      // Journal for tracking random writes (protected by JournalManager)
-	journalMu     sync.RWMutex                  // Mutex for journal access
-	flushMu       sync.Mutex                    // Mutex for flush operations (prevents concurrent flushes)
+	fileObjKey    int64        // Pre-computed file_obj cache key (optimized: avoid repeated conversion)
+	lastActivity  int64        // Last activity timestamp (atomic access)
+	sparseSize    int64        // Sparse file size (for pre-allocated files, e.g., qBittorrent) (atomic access)
+	lastOffset    int64        // Last write offset (for sequential write detection) (atomic access)
+	chunkedWriter atomic.Value // ChunkedFileWriter for .tmp files and sparse files (atomic.Value stores *ChunkedFileWriter)
+	tempWriteMu   sync.Mutex   // Mutex for temp operations
+	isTmpFile     bool         // Whether this file is a .tmp file (determined at creation time, immutable)
+	dataInfo      atomic.Value // Cached DataInfo (atomic.Value stores *core.DataInfo)
+	journal       *Journal     // Journal for tracking random writes (protected by JournalManager)
+	journalMu     sync.RWMutex // Mutex for journal access
+	flushMu       sync.Mutex   // Mutex for flush operations (prevents concurrent flushes)
 	// Local sequential write tracking for sparse files
 	writeRangeStart int64 // Start of current write range (atomic access)
 	writeRangeEnd   int64 // End of current write range (atomic access)
@@ -635,6 +636,28 @@ func (ra *RandomAccessor) getOrCreateChunkedWriter(writerType WriterType) (*Chun
 		SHA256_3: 0,
 	}
 
+	// For WRITER_TYPE_SEQ, set encryption flag from OrcasFS config
+	// Compression will be decided on first chunk based on file type detection
+	// This ensures ChunkedFileWriter processes data with correct flags from the start
+	var enableRealtimeForSeq bool
+	var realtimeDecidedForSeq bool
+	if writerType == WRITER_TYPE_SEQ {
+		endecWay := getEndecWayForFS(ra.fs)
+		if endecWay > 0 {
+			dataInfo.Kind |= endecWay
+			DebugLog("[VFS ChunkedFileWriter Create] Set encryption flag for SEQ writer: fileID=%d, EndecWay=0x%x, Kind=0x%x", ra.fileID, endecWay, dataInfo.Kind)
+			// Enable realtime processing for encryption (compression will be decided on first chunk)
+			enableRealtimeForSeq = true
+			// Don't mark as fully decided yet - compression detection happens on first chunk
+			realtimeDecidedForSeq = false
+		} else {
+			// No encryption or compression configured, no realtime processing needed
+			enableRealtimeForSeq = false
+			realtimeDecidedForSeq = true
+		}
+		DebugLog("[VFS ChunkedFileWriter Create] Initial DataInfo Kind for SEQ writer: fileID=%d, Kind=0x%x, enableRealtime=%v", ra.fileID, dataInfo.Kind, enableRealtimeForSeq)
+	}
+
 	// Cache LocalHandler if available
 	// IMPORTANT: ChunkedFileWriter requires LocalHandler because it needs:
 	// 1. PutDataInfoAndObj() - for atomic metadata writes (in Handler interface)
@@ -661,11 +684,12 @@ func (ra *RandomAccessor) getOrCreateChunkedWriter(writerType WriterType) (*Chun
 		size:            initialSize, // Initialize from existing file size if reusing DataID
 		chunks:          make(map[int]*chunkBuffer),
 		dataInfo:        dataInfo,
-		enableRealtime:  false,
-		realtimeDecided: false,
+		enableRealtime:  enableRealtimeForSeq,  // For SEQ writer, enable if encryption configured
+		realtimeDecided: realtimeDecidedForSeq, // For SEQ writer, let first chunk decide compression
 		lh:              lh,
 		firstChunkSN:    0,
 		writerType:      writerType, // Set writer type
+		ra:              ra,         // Store reference to parent RandomAccessor
 	}
 	atomic.StoreInt64(&cw.firstChunkSN, 0) // First chunk is always sn=0
 
@@ -676,9 +700,34 @@ func (ra *RandomAccessor) getOrCreateChunkedWriter(writerType WriterType) (*Chun
 	writerTypeName := "tmp"
 	if writerType == WRITER_TYPE_SPARSE {
 		writerTypeName = "sparse"
+	} else if writerType == WRITER_TYPE_SEQ {
+		writerTypeName = "seq"
 	}
 	DebugLog("[VFS ChunkedFileWriter Create] Created ChunkedFileWriter for %s file: fileID=%d, dataID=%d, fileName=%s, chunkSize=%d, realtimeCompressEncrypt=%v",
 		writerTypeName, ra.fileID, dataID, fileObj.Name, chunkSize, cw.enableRealtime)
+
+	// For new files (WRITER_TYPE_SEQ), update fileObj.DataID immediately to make it visible
+	// This allows Read to find the DataID before final Flush
+	if writerType == WRITER_TYPE_SEQ && initialSize == 0 && (fileObj.DataID == 0 || fileObj.DataID == core.EmptyDataID) {
+		updateFileObj := &core.ObjectInfo{
+			ID:     fileObj.ID,
+			PID:    fileObj.PID,
+			Type:   fileObj.Type,
+			Name:   fileObj.Name,
+			DataID: dataID,
+			Size:   fileObj.Size, // Keep existing size (will be updated periodically)
+			MTime:  core.Now(),
+		}
+		if _, putErr := ra.fs.h.Put(ra.fs.c, ra.fs.bktID, []*core.ObjectInfo{updateFileObj}); putErr != nil {
+			DebugLog("[VFS ChunkedFileWriter Create] WARNING: Failed to update file DataID for SEQ writer: %v", putErr)
+		} else {
+			// Update cache immediately
+			fileObjCache.Put(ra.fileObjKey, updateFileObj)
+			ra.fileObj.Store(updateFileObj)
+			DebugLog("[VFS ChunkedFileWriter Create] Updated file DataID for SEQ writer: fileID=%d, oldDataID=%d, newDataID=%d",
+				ra.fileID, fileObj.DataID, dataID)
+		}
+	}
 
 	return cw, nil
 }
@@ -1378,6 +1427,98 @@ func (cw *ChunkedFileWriter) flushChunkWithBuffer(sn int, buf *chunkBuffer) erro
 	// For compressed/encrypted data, Size is the compressed/encrypted size
 	atomic.AddInt64(&cw.dataInfo.Size, int64(len(finalData)))
 
+	// For WRITER_TYPE_SEQ (new sequential uploads), update fileObj.Size after each chunk flush
+	// This ensures data is immediately visible for Read operations
+	// We update synchronously for Size (critical for Read), and asynchronously for DataInfo (optimization)
+	if cw.writerType == WRITER_TYPE_SEQ {
+		if lh, ok := cw.fs.h.(*core.LocalHandler); ok {
+			currentOrigSize := atomic.LoadInt64(&cw.dataInfo.OrigSize)
+			currentSize := atomic.LoadInt64(&cw.dataInfo.Size)
+
+			// Synchronously update fileObj.Size to make progress immediately visible for Read
+			// Get fileObj first
+			fileObjs, getErr := lh.Get(cw.fs.c, cw.fs.bktID, []int64{cw.fileID})
+			if getErr != nil || len(fileObjs) == 0 {
+				DebugLog("[VFS ChunkedFileWriter flushChunk] ERROR: Failed to get fileObj for size update: fileID=%d, sn=%d, error=%v", cw.fileID, sn, getErr)
+			} else {
+				currentFileObj := fileObjs[0]
+				updateFileObj := &core.ObjectInfo{
+					ID:     currentFileObj.ID,
+					PID:    currentFileObj.PID,
+					DataID: cw.dataID,
+					Size:   currentOrigSize, // Use OrigSize as file size
+					MTime:  core.Now(),
+					Type:   currentFileObj.Type,
+					Name:   currentFileObj.Name,
+					Mode:   currentFileObj.Mode,
+					Extra:  currentFileObj.Extra,
+				}
+
+				// Synchronously update file size for immediate Read visibility
+				updateErr := lh.MetadataAdapter().SetObj(cw.fs.c, cw.fs.bktID, []string{"did", "s", "m"}, updateFileObj)
+				if updateErr != nil {
+					DebugLog("[VFS ChunkedFileWriter flushChunk] ERROR: SetObj failed for size update: fileID=%d, sn=%d, error=%v", cw.fileID, sn, updateErr)
+				} else {
+					// Update cache immediately
+					fileObjCache.Put(cw.fileID, updateFileObj)
+
+					// Also update RandomAccessor's cache using direct reference
+					if cw.ra != nil {
+						cw.ra.fileObj.Store(updateFileObj)
+						fileObjCache.Put(cw.ra.fileObjKey, updateFileObj)
+						DebugLog("[VFS ChunkedFileWriter flushChunk] SUCCESS: Updated fileObj.Size via RA: fileID=%d, sn=%d, newSize=%d", cw.fileID, sn, updateFileObj.Size)
+					} else {
+						DebugLog("[VFS ChunkedFileWriter flushChunk] WARNING: RandomAccessor reference is nil: fileID=%d, sn=%d, newSize=%d", cw.fileID, sn, updateFileObj.Size)
+					}
+				}
+			}
+
+			// Asynchronously update DataInfo every 10 chunks to reduce database load
+			if sn == 0 || (sn > 0 && sn%10 == 0) {
+				dataInfoSnapshot := core.DataInfo{
+					ID:       cw.dataInfo.ID,
+					OrigSize: currentOrigSize,
+					Size:     currentSize,
+					Kind:     cw.dataInfo.Kind,
+					HdrXXH3:  cw.dataInfo.HdrXXH3,
+					XXH3:     cw.dataInfo.XXH3,
+					SHA256_0: cw.dataInfo.SHA256_0,
+					SHA256_1: cw.dataInfo.SHA256_1,
+					SHA256_2: cw.dataInfo.SHA256_2,
+					SHA256_3: cw.dataInfo.SHA256_3,
+				}
+				dataID := cw.dataID
+				fileID := cw.fileID
+				currentSN := sn
+				bktID := cw.fs.bktID
+				ctx := cw.fs.c
+
+				// Async DataInfo update
+				go func() {
+					updateKey := fmt.Sprintf("update_datainfo_%d", dataID)
+					_, err, _ := seqDataInfoUpdateSingleFlight.Do(updateKey, func() (interface{}, error) {
+						_, updateErr := lh.PutDataInfo(ctx, bktID, []*core.DataInfo{&dataInfoSnapshot})
+						if updateErr != nil {
+							DebugLog("[VFS ChunkedFileWriter flushChunk] WARNING: Failed to update DataInfo: fileID=%d, dataID=%d, sn=%d, error=%v", fileID, dataID, currentSN, updateErr)
+							return nil, updateErr
+						}
+
+						dataInfoCache.Put(dataID, &dataInfoSnapshot)
+						decodingReaderCache.Del(dataID)
+						DebugLog("[VFS ChunkedFileWriter flushChunk] Updated DataInfo: fileID=%d, dataID=%d, sn=%d, OrigSize=%d, Size=%d",
+							fileID, dataID, currentSN, dataInfoSnapshot.OrigSize, dataInfoSnapshot.Size)
+
+						return nil, nil
+					})
+
+					if err != nil {
+						DebugLog("[VFS ChunkedFileWriter flushChunk] WARNING: DataInfo update failed: fileID=%d, dataID=%d, sn=%d, error=%v", fileID, dataID, currentSN, err)
+					}
+				}()
+			}
+		}
+	}
+
 	return nil
 }
 
@@ -1576,8 +1717,9 @@ func (cw *ChunkedFileWriter) Flush() error {
 	defer atomic.StoreInt32(&cw.flushing, 0)
 
 	size := atomic.LoadInt64(&cw.size)
-	DebugLog("[VFS ChunkedFileWriter Flush] Starting flush for large file: fileID=%d, dataID=%d, fileSize=%d, writerType=%d",
-		cw.fileID, cw.dataID, size, cw.writerType)
+	origSize := atomic.LoadInt64(&cw.dataInfo.OrigSize)
+	DebugLog("[VFS ChunkedFileWriter Flush] Starting flush for large file: fileID=%d, dataID=%d, cw.size=%d, dataInfo.OrigSize=%d, writerType=%d",
+		cw.fileID, cw.dataID, size, origSize, cw.writerType)
 
 	if size == 0 {
 		// No data written, nothing to flush
@@ -1618,117 +1760,121 @@ func (cw *ChunkedFileWriter) Flush() error {
 	// The flushing flag prevents concurrent flush operations, but allows writes
 	// New writes during flush will create/update chunks that will be flushed in next flush call
 
-	if len(remainingChunks) == 0 {
-		// No chunks to flush
-		return nil
-	}
-
-	DebugLog("[VFS ChunkedFileWriter Flush] Flushing %d remaining incomplete chunks concurrently: fileID=%d, dataID=%d, chunks=%v",
-		len(remainingChunks), cw.fileID, cw.dataID, remainingChunks)
-
-	// Process all remaining chunks concurrently
-	// IMPORTANT: Only process chunks that actually exist in cw.chunks
-	// Chunks that were already flushed in Write() have been removed from cw.chunks
-	// Use singleflight to prevent duplicate flushes
-	// No need to sort or check disk - singleflight handles duplicate prevention
-	var wg sync.WaitGroup
+	// Process remaining chunks if any
 	var firstErr error
-	var firstErrMu sync.Mutex
+	if len(remainingChunks) > 0 {
+		DebugLog("[VFS ChunkedFileWriter Flush] Flushing %d remaining incomplete chunks concurrently: fileID=%d, dataID=%d, chunks=%v, currentOrigSize=%d",
+			len(remainingChunks), cw.fileID, cw.dataID, remainingChunks, atomic.LoadInt64(&cw.dataInfo.OrigSize))
 
-	for _, sn := range remainingChunks {
-		// Check if chunk still exists in cw.chunks (might have been flushed by concurrent write)
-		cw.mu.Lock()
-		flushBuf, exists := cw.chunks[sn]
-		if !exists {
-			// Chunk already flushed or doesn't exist, skip
-			cw.mu.Unlock()
-			continue
-		}
-		// Remove chunk from cw.chunks immediately to prevent concurrent writes
-		delete(cw.chunks, sn)
-		cw.mu.Unlock()
+		// Process all remaining chunks concurrently
+		// IMPORTANT: Only process chunks that actually exist in cw.chunks
+		// Chunks that were already flushed in Write() have been removed from cw.chunks
+		// Use singleflight to prevent duplicate flushes
+		// No need to sort or check disk - singleflight handles duplicate prevention
+		var wg sync.WaitGroup
+		var firstErrMu sync.Mutex
 
-		// Flush chunk concurrently
-		wg.Add(1)
-		go func(chunkSN int, buf *chunkBuffer) {
-			defer wg.Done()
-
-			// Use singleflight to ensure only one flush per chunk at a time
-			// Key format: "flush_<dataID>_<sn>"
-			flushKey := fmt.Sprintf("flush_%d_%d", cw.dataID, chunkSN)
-
-			_, err, _ := chunkFlushSingleFlight.Do(flushKey, func() (interface{}, error) {
-				// Process chunk (compression/encryption) - reuse flushChunkWithBuffer logic
-				flushErr := cw.flushChunkWithBuffer(chunkSN, buf)
-				if flushErr != nil {
-					return nil, flushErr
-				}
-
-				// CRITICAL: Only return chunk buffer to pool if chunk is completely written
-				chunkSize := cw.chunkSize
-				buf.mu.Lock()
-				isComplete := buf.isChunkComplete(chunkSize)
-				buf.mu.Unlock()
-
-				// Return chunk buffer to pool only if chunk is completely written
-				if isComplete && cap(buf.data) <= 10<<20 {
-					// CRITICAL: Clear entire buffer capacity before returning to pool
-					// This prevents data corruption when buffer is reused
-					clearLen := cap(buf.data)
-					if clearLen > 0 {
-						// Extend to full capacity for clearing
-						buf.data = buf.data[:clearLen]
-						for cleared := 0; cleared < clearLen; {
-							chunk := clearLen - cleared
-							if chunk > len(zeroSlice) {
-								chunk = len(zeroSlice)
-							}
-							copy(buf.data[cleared:cleared+chunk], zeroSlice[:chunk])
-							cleared += chunk
-						}
-					}
-					buf.data = buf.data[:0] // Reset length, keep capacity
-					buf.offsetInChunk = 0
-					buf.ranges = buf.ranges[:0] // Reset ranges
-					chunkBufferPool.Put(buf)
-				}
-
-				return nil, nil
-			})
-
-			if err != nil {
-				firstErrMu.Lock()
-				if firstErr == nil {
-					firstErr = err
-				}
-				firstErrMu.Unlock()
-				DebugLog("[VFS ChunkedFileWriter Flush] ERROR: Failed to flush chunk: fileID=%d, dataID=%d, sn=%d, error=%v", cw.fileID, cw.dataID, chunkSN, err)
+		for _, sn := range remainingChunks {
+			// Check if chunk still exists in cw.chunks (might have been flushed by concurrent write)
+			cw.mu.Lock()
+			flushBuf, exists := cw.chunks[sn]
+			if !exists {
+				// Chunk already flushed or doesn't exist, skip
+				cw.mu.Unlock()
+				continue
 			}
-		}(sn, flushBuf)
-	}
+			// Remove chunk from cw.chunks immediately to prevent concurrent writes
+			delete(cw.chunks, sn)
+			cw.mu.Unlock()
 
-	// Wait for all concurrent flushes to complete
-	wg.Wait()
+			// Flush chunk concurrently
+			wg.Add(1)
+			go func(chunkSN int, buf *chunkBuffer) {
+				defer wg.Done()
+
+				// Use singleflight to ensure only one flush per chunk at a time
+				// Key format: "flush_<dataID>_<sn>"
+				flushKey := fmt.Sprintf("flush_%d_%d", cw.dataID, chunkSN)
+
+				_, err, _ := chunkFlushSingleFlight.Do(flushKey, func() (interface{}, error) {
+					// Process chunk (compression/encryption) - reuse flushChunkWithBuffer logic
+					flushErr := cw.flushChunkWithBuffer(chunkSN, buf)
+					if flushErr != nil {
+						return nil, flushErr
+					}
+
+					// CRITICAL: Only return chunk buffer to pool if chunk is completely written
+					chunkSize := cw.chunkSize
+					buf.mu.Lock()
+					isComplete := buf.isChunkComplete(chunkSize)
+					buf.mu.Unlock()
+
+					// Return chunk buffer to pool only if chunk is completely written
+					if isComplete && cap(buf.data) <= 10<<20 {
+						// CRITICAL: Clear entire buffer capacity before returning to pool
+						// This prevents data corruption when buffer is reused
+						clearLen := cap(buf.data)
+						if clearLen > 0 {
+							// Extend to full capacity for clearing
+							buf.data = buf.data[:clearLen]
+							for cleared := 0; cleared < clearLen; {
+								chunk := clearLen - cleared
+								if chunk > len(zeroSlice) {
+									chunk = len(zeroSlice)
+								}
+								copy(buf.data[cleared:cleared+chunk], zeroSlice[:chunk])
+								cleared += chunk
+							}
+						}
+						buf.data = buf.data[:0] // Reset length, keep capacity
+						buf.offsetInChunk = 0
+						buf.ranges = buf.ranges[:0] // Reset ranges
+						chunkBufferPool.Put(buf)
+					}
+
+					return nil, nil
+				})
+
+				if err != nil {
+					firstErrMu.Lock()
+					if firstErr == nil {
+						firstErr = err
+					}
+					firstErrMu.Unlock()
+					DebugLog("[VFS ChunkedFileWriter Flush] ERROR: Failed to flush chunk: fileID=%d, dataID=%d, sn=%d, error=%v", cw.fileID, cw.dataID, chunkSN, err)
+				}
+			}(sn, flushBuf)
+		}
+
+		// Wait for all concurrent flushes to complete
+		wg.Wait()
+
+		if firstErr != nil {
+			// Return remainingChunks slice to pool before returning error
+			intSlicePool.Put(remainingChunks[:0])
+			return firstErr
+		}
+	} else {
+		// No remaining chunks, all were flushed during Write()
+		DebugLog("[VFS ChunkedFileWriter Flush] No remaining chunks to flush (all flushed during Write): fileID=%d, dataID=%d, currentOrigSize=%d",
+			cw.fileID, cw.dataID, atomic.LoadInt64(&cw.dataInfo.OrigSize))
+	}
 
 	// Return remainingChunks slice to pool
-	intSlicePool.Put(remainingChunks[:0])
-
-	if firstErr != nil {
-		return firstErr
-	}
-
-	// Return remainingChunks slice to pool after use
 	intSlicePool.Put(remainingChunks[:0])
 
 	// Use the DataInfo we've been tracking (with compression/encryption flags and sizes)
 	dataInfo := cw.dataInfo
 
-	// OrigSize should be the logical file size (max write offset), not the accumulated value
-	// The accumulated OrigSize in flushChunk tracks actual data written, but for files with holes,
-	// we need to use the logical size. However, for consistency, we should use the logical size.
-	// But note: if there are holes, the accumulated OrigSize might be less than size.
-	// For now, use size as OrigSize to match the file's logical size.
-	dataInfo.OrigSize = size
+	// OrigSize should be the logical file size (max write offset)
+	// For WRITER_TYPE_SEQ (sequential uploads), OrigSize is accumulated correctly in flushChunk
+	// and should not be overwritten with cw.size. Only use cw.size if OrigSize is 0 or less.
+	// For sparse files or files with holes, cw.size may be more accurate.
+	currentOrigSize := atomic.LoadInt64(&dataInfo.OrigSize)
+	if currentOrigSize == 0 || size > currentOrigSize {
+		// Use cw.size as OrigSize (for sparse files or when OrigSize wasn't accumulated)
+		dataInfo.OrigSize = size
+	}
 
 	// For offline processing, Size should equal OrigSize (actual data size on disk)
 	// For real-time processing, Size is already accumulated (compressed/encrypted size)
@@ -1851,13 +1997,6 @@ func NewRandomAccessor(fs *OrcasFS, fileID int64) (*RandomAccessor, error) {
 			totalSize:  0,
 		},
 		lastOffset: 0,
-		seqDetector: &ConcurrentSequentialDetector{
-			pendingWrites:    make(map[int64]*PendingWrite),
-			expectedOffset:   -1,
-			blockSize:        0,
-			consecutiveCount: 0,
-			enabled:          false,
-		},
 	}
 
 	// Initialize isTmpFile flag by checking file name at creation time
@@ -1981,26 +2120,32 @@ func (ra *RandomAccessor) Write(offset int64, data []byte) error {
 
 	// IMPORTANT: Check ChunkedFileWriter only for .tmp files
 	// For non-.tmp files, ChunkedFileWriter should have been cleared after rename (for .tmp files)
-	// BUT sparse files can also use ChunkedFileWriter (WRITER_TYPE_SPARSE), so we need to allow that
+	// BUT sparse files and new sequential uploads can also use ChunkedFileWriter
+	// (WRITER_TYPE_SPARSE, WRITER_TYPE_SEQ), so we need to allow those cases.
 	if !ra.isTmpFile {
 		// File is not .tmp, check if ChunkedFileWriter still exists
-		// Only reject if it's a WRITER_TYPE_TMP (which shouldn't exist for non-.tmp files)
-		// Allow WRITER_TYPE_SPARSE for sparse files
+		// Only reject/clear if it's a WRITER_TYPE_TMP (which shouldn't exist for non-.tmp files)
+		// Allow WRITER_TYPE_SPARSE / WRITER_TYPE_SEQ for sparse/sequential files
 		hasChunkedWriter := ra.chunkedWriter.Load() != nil
 		if hasChunkedWriter {
 			chunkedWriterVal := ra.chunkedWriter.Load()
 			if chunkedWriterVal != clearedChunkedWriterMarker {
 				cw, ok := chunkedWriterVal.(*ChunkedFileWriter)
-				if ok && cw != nil && cw.writerType == WRITER_TYPE_TMP {
-					// File was renamed from .tmp but ChunkedFileWriter (TMP type) still exists
-					// This should not happen - reject the write
-					DebugLog("[VFS RandomAccessor Write] ERROR: File is not .tmp but ChunkedFileWriter (TMP) exists, rejecting write: fileID=%d, fileName=%s", ra.fileID, fileObj.Name)
-					// Clear ChunkedFileWriter to prevent future writes
-					ra.chunkedWriter.Store(clearedChunkedWriterMarker)
-					return fmt.Errorf("file was renamed from .tmp, writes are no longer allowed: fileID=%d, fileName=%s", ra.fileID, fileObj.Name)
+				if ok && cw != nil {
+					if cw.writerType == WRITER_TYPE_TMP {
+						// File is not .tmp but still has a TMP ChunkedFileWriter attached.
+						// This can happen if a previous .tmp RandomAccessor was reused or not cleaned up correctly.
+						// Instead of rejecting writes, clear the stale TMP writer and continue with normal path.
+						DebugLog("[VFS RandomAccessor Write] WARNING: Non-.tmp file has stale TMP ChunkedFileWriter, clearing and continuing: fileID=%d, fileName=%s", ra.fileID, fileObj.Name)
+						ra.chunkedWriter.Store(clearedChunkedWriterMarker)
+					} else if cw.writerType == WRITER_TYPE_SPARSE || cw.writerType == WRITER_TYPE_SEQ {
+						// Sparse or sequential ChunkedFileWriter exists, use it directly
+						atomic.StoreInt64(&ra.lastActivity, core.Now())
+						getDelayedFlushManager().schedule(ra, false)
+						DebugLog("[VFS RandomAccessor Write] Using existing ChunkedFileWriter (type=%d): fileID=%d, offset=%d, size=%d", cw.writerType, ra.fileID, offset, len(data))
+						return cw.Write(offset, data)
+					}
 				}
-				// If it's WRITER_TYPE_SPARSE, allow it (for sparse files)
-				// Continue to normal write path below
 			} else {
 				// ChunkedFileWriter was cleared (clearedChunkedWriterMarker)
 				// This could mean:
@@ -2112,6 +2257,24 @@ func (ra *RandomAccessor) Write(offset int64, data []byte) error {
 		return cw.Write(offset, data)
 	}
 
+	// New file large sequential uploads (non-.tmp): prefer ChunkedFileWriter to avoid journal/seqBuffer path
+	// 条件：
+	// - 非 .tmp 文件
+	// - 当前 fileObj 没有 DataID（新文件）
+	// - 从 offset=0 开始写
+	// 其它场景仍然走原有 seqBuffer / buffer / journal 路径，尽量减小行为影响范围。
+	if !ra.isTmpFile && (fileObj.DataID == 0 || fileObj.DataID == core.EmptyDataID) && fileObj.Size == 0 && offset == 0 {
+		atomic.StoreInt64(&ra.lastActivity, core.Now())
+		getDelayedFlushManager().schedule(ra, false)
+
+		cw, err := ra.getOrCreateChunkedWriter(WRITER_TYPE_SEQ)
+		if err == nil && cw != nil {
+			DebugLog("[VFS RandomAccessor Write] Using WRITER_TYPE_SEQ ChunkedFileWriter for new sequential upload: fileID=%d, offset=%d, size=%d", ra.fileID, offset, len(data))
+			return cw.Write(offset, data)
+		}
+		DebugLog("[VFS RandomAccessor Write] WARNING: Failed to create WRITER_TYPE_SEQ ChunkedFileWriter, fallback to seqBuffer/random: fileID=%d, error=%v", ra.fileID, err)
+	}
+
 	// Check if in sequential write mode (only for non-.tmp files)
 	if ra.seqBuffer != nil {
 		ra.seqBuffer.mu.Lock()
@@ -2194,7 +2357,7 @@ func (ra *RandomAccessor) Write(offset int64, data []byte) error {
 		if cw, ok := chunkedWriterValInRandomMode.(*ChunkedFileWriter); ok && cw != nil {
 			// Use existing ChunkedFileWriter if type matches
 			if (ra.isTmpFile && cw.writerType == WRITER_TYPE_TMP) ||
-				(!ra.isTmpFile && cw.writerType == WRITER_TYPE_SPARSE) {
+				(!ra.isTmpFile && (cw.writerType == WRITER_TYPE_SPARSE || cw.writerType == WRITER_TYPE_SEQ)) {
 				DebugLog("[VFS RandomAccessor Write] WARNING: ChunkedFileWriter exists but reached random write mode, using existing ChunkedFileWriter: fileID=%d, writerType=%d", ra.fileID, cw.writerType)
 				// IMPORTANT: Update lastActivity before writing to enable timeout flush
 				atomic.StoreInt64(&ra.lastActivity, core.Now())
@@ -2216,13 +2379,12 @@ func (ra *RandomAccessor) Write(offset int64, data []byte) error {
 			if sparseSize > 0 {
 				writerType = WRITER_TYPE_SPARSE
 			} else {
-				// Not sparse, not .tmp - should not use ChunkedFileWriter here
-				// Fall through to random write buffer
-				DebugLog("[VFS RandomAccessor Write] WARNING: ChunkedFileWriter exists but file is not .tmp or sparse, falling through to random write: fileID=%d", ra.fileID)
+				// Non-sparse, non-.tmp: treat as sequential large upload, use WRITER_TYPE_SEQ
+				writerType = WRITER_TYPE_SEQ
 			}
 		}
 
-		if writerType == WRITER_TYPE_TMP || writerType == WRITER_TYPE_SPARSE {
+		if writerType == WRITER_TYPE_TMP || writerType == WRITER_TYPE_SPARSE || writerType == WRITER_TYPE_SEQ {
 			DebugLog("[VFS RandomAccessor Write] WARNING: ChunkedFileWriter exists but reached random write mode, recreating with correct type: fileID=%d, writerType=%d", ra.fileID, writerType)
 			// IMPORTANT: Update lastActivity before writing to enable timeout flush
 			atomic.StoreInt64(&ra.lastActivity, core.Now())
@@ -3280,6 +3442,18 @@ func (ra *RandomAccessor) Read(offset int64, size int) ([]byte, error) {
 	// Use fileObj.Size as the authoritative source for file size
 	var actualFileSize int64 = fileObj.Size
 
+	// Check for ChunkedFileWriter: if it exists and has data, use its size
+	// This is important when writes are in progress and fileObj.Size hasn't been updated yet
+	if val := ra.chunkedWriter.Load(); val != nil && val != clearedChunkedWriterMarker {
+		if cw, ok := val.(*ChunkedFileWriter); ok && cw != nil {
+			cwSize := atomic.LoadInt64(&cw.size)
+			if cwSize > actualFileSize {
+				actualFileSize = cwSize
+				DebugLog("[VFS Read] ChunkedFileWriter detected, using cw.size: fileID=%d, cwSize=%d, fileObj.Size=%d", ra.fileID, cwSize, fileObj.Size)
+			}
+		}
+	}
+
 	// Check for sparse file: sparse files may have sparseSize > fileObj.Size
 	sparseSize := atomic.LoadInt64(&ra.sparseSize)
 	if sparseSize > 0 && sparseSize > actualFileSize {
@@ -3778,8 +3952,9 @@ func (ra *RandomAccessor) flushInternal(force bool) (int64, error) {
 	}
 
 	// For non-.tmp files, flush ChunkedFileWriter if exists
-	// IMPORTANT: For sparse files, ChunkedFileWriter should be flushed in Close(), not here
-	// But we still check here in case it wasn't flushed yet
+	// IMPORTANT:
+	// - Sparse files: WRITER_TYPE_SPARSE 通常在 Close() 完成 flush，这里只是兜底
+	// - 顺序上传的新文件：WRITER_TYPE_SEQ 需要在 Flush()/Close() 时确保完全落盘
 	if !ra.isTmpFile {
 		// Check if sparse file and has ChunkedFileWriter
 		sparseSize := ra.getSparseSize()
@@ -3796,8 +3971,11 @@ func (ra *RandomAccessor) flushInternal(force bool) (int64, error) {
 				}
 			}
 		} else {
-			// For non-sparse, non-.tmp files, flush ChunkedFileWriter if exists (TMP type)
+			// For non-sparse, non-.tmp files, flush ChunkedFileWriter if exists (TMP or SEQ type)
 			if err := ra.flushTempFileWriter(); err != nil {
+				return 0, err
+			}
+			if err := ra.flushChunkedWriter(WRITER_TYPE_SEQ); err != nil {
 				return 0, err
 			}
 		}
@@ -6947,6 +7125,8 @@ func (ra *RandomAccessor) flushChunkedWriter(writerType WriterType) error {
 	writerTypeName := "tmp"
 	if writerType == WRITER_TYPE_SPARSE {
 		writerTypeName = "sparse"
+	} else if writerType == WRITER_TYPE_SEQ {
+		writerTypeName = "seq"
 	}
 	DebugLog("[VFS RandomAccessor flushChunkedWriter] Forcing ChunkedFileWriter flush for %s file: fileID=%d, dataID=%d", writerTypeName, cw.fileID, cw.dataID)
 	if err := cw.Flush(); err != nil {
@@ -7235,6 +7415,17 @@ func (ra *RandomAccessor) shouldUseJournal(fileObj *core.ObjectInfo, offset, len
 	// Don't use journal for .tmp files (they use ChunkedFileWriter)
 	if ra.isTmpFile {
 		return false
+	}
+
+	// Don't use journal if ChunkedFileWriter is active (WRITER_TYPE_SEQ or WRITER_TYPE_SPARSE)
+	// ChunkedFileWriter handles its own versioning and progress tracking
+	if val := ra.chunkedWriter.Load(); val != nil && val != clearedChunkedWriterMarker {
+		if cw, ok := val.(*ChunkedFileWriter); ok && cw != nil {
+			if cw.writerType == WRITER_TYPE_SEQ || cw.writerType == WRITER_TYPE_SPARSE {
+				DebugLog("[VFS shouldUseJournal] ChunkedFileWriter active (type=%d), not using journal: fileID=%d", cw.writerType, ra.fileID)
+				return false
+			}
+		}
 	}
 
 	// OPTIMIZATION: Don't use journal for small files after truncate(0) with sequential writes
