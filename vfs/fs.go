@@ -3937,6 +3937,8 @@ func (n *OrcasNode) writeImpl(ctx context.Context, data []byte, off int64) (writ
 			tf.mtime = core.Now()
 			n.fs.noKeyTempMu.Unlock()
 
+			n.fs.root.invalidateDirListCache(n.fs.bktID)
+
 			// Update node cache
 			n.obj.Store(&core.ObjectInfo{
 				ID:     tf.id,
@@ -4016,6 +4018,23 @@ func (n *OrcasNode) writeImpl(ctx context.Context, data []byte, off int64) (writ
 // Optimization: use atomic operations, completely lock-free
 func (n *OrcasNode) Flush(ctx context.Context, f fs.FileHandle) syscall.Errno {
 	DebugLog("[VFS Flush] Entry: objID=%d, FileHandle=%v", n.objID, f)
+
+	if errno := n.fs.checkKey(true); errno != 0 {
+		if n.fs.OnKeyFileContent != nil {
+			if n.fs.keyContent != "" {
+				if errno := n.fs.OnKeyFileContent(n.fs.keyContent); errno != 0 {
+					DebugLog("[VFS Flush] ERROR: OnKeyFileContent failed: objID=%d, errno=%d", n.objID, errno)
+					return errno
+				} else {
+					DebugLog("[VFS Flush] Successfully called OnKeyFileContent: objID=%d", n.objID)
+				}
+			}
+			return 0
+		}
+		DebugLog("[VFS Flush] ERROR: checkKey failed: objID=%d, errno=%d", n.objID, errno)
+		return errno
+	}
+
 	// Forward to FileHandle if it implements FileFlusher
 	if f != nil {
 		if fileFlusher, ok := f.(fs.FileFlusher); ok {
@@ -4032,21 +4051,6 @@ func (n *OrcasNode) Flush(ctx context.Context, f fs.FileHandle) syscall.Errno {
 // flushImpl is the actual flush implementation
 func (n *OrcasNode) flushImpl(ctx context.Context) syscall.Errno {
 	DebugLog("[VFS flushImpl] Entry: objID=%d", n.objID)
-	if errno := n.fs.checkKey(true); errno != 0 {
-		if n.fs.OnKeyFileContent != nil {
-			if n.fs.keyContent != "" {
-				if errno := n.fs.OnKeyFileContent(n.fs.keyContent); errno != 0 {
-					DebugLog("[VFS Flush] ERROR: OnKeyFileContent failed: objID=%d, errno=%d", n.objID, errno)
-					return errno
-				} else {
-					DebugLog("[VFS Flush] Successfully called OnKeyFileContent: objID=%d", n.objID)
-				}
-			}
-			return 0
-		}
-		DebugLog("[VFS Flush] ERROR: checkKey failed: objID=%d, errno=%d", n.objID, errno)
-		return errno
-	}
 
 	// Atomically read ra
 	val := n.ra.Load()
