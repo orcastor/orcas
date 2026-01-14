@@ -2093,18 +2093,16 @@ func (n *OrcasNode) Open(ctx context.Context, flags uint32) (fh fs.FileHandle, f
 	DebugLog("[VFS Open] Entry: objID=%d, flags=0x%x", n.objID, flags)
 	// If key check fails, allow opening only noKeyTemp in-memory nodes; deny real DB-backed nodes.
 	if errno := n.fs.checkKey(true); errno != 0 {
-		if n.isRoot {
-			if n.fs.shouldUseFallbackFiles() && n.fs.GetFallbackFiles != nil {
-				files := n.fs.GetFallbackFiles()
-				for fn := range files {
-					if hashBKRD(fn) == n.objID {
-						return n, 0, 0
-					}
+		if n.fs.shouldUseFallbackFiles() && n.fs.GetFallbackFiles != nil {
+			files := n.fs.GetFallbackFiles()
+			for fn := range files {
+				if hashBKRD(fn) == n.objID {
+					return n, 0, 0
 				}
 			}
-			if _, ok := n.fs.noKeyTempGetByID(n.objID); ok {
-				return n, 0, 0
-			}
+		}
+		if _, ok := n.fs.noKeyTempGetByID(n.objID); ok {
+			return n, 0, 0
 		}
 		DebugLog("[VFS Open] ERROR: checkKey failed: objID=%d, flags=0x%x, errno=%d", n.objID, flags, errno)
 		return nil, 0, errno
