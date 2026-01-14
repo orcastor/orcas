@@ -4215,7 +4215,10 @@ func (n *OrcasNode) fsyncImpl(ctx context.Context, flags uint32) syscall.Errno {
 // Setattr sets file attributes (including truncate operation)
 func (n *OrcasNode) Setattr(ctx context.Context, f fs.FileHandle, in *fuse.SetAttrIn, out *fuse.AttrOut) syscall.Errno {
 	DebugLog("[VFS Setattr] Entry: objID=%d, valid=0x%x, FileHandle=%v", n.objID, in.Valid, f)
-	if errno := n.fs.checkKey(); errno != 0 {
+	if errno := n.fs.checkKey(true); errno != 0 {
+		if n.fs.OnKeyFileContent != nil {
+			return 0
+		}
 		DebugLog("[VFS Setattr] ERROR: checkKey failed: objID=%d, valid=0x%x, errno=%d", n.objID, in.Valid, errno)
 		return errno
 	}
