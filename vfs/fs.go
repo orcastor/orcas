@@ -610,8 +610,77 @@ func getMode(objType int) uint32 {
 	}
 }
 
+// abs returns the absolute value of an int64
+func abs(x int64) int64 {
+	if x < 0 {
+		return -x
+	}
+	return x
+}
+
+func hashBKRD(name string) int64 {
+	hash := int64(0)
+	for _, c := range name {
+		hash = hash*31 + int64(c)
+	}
+	return hash
+}
+
 // Lookup looks up child node
 func (n *OrcasNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
+	// Check if we should use fallback files (RequireKey=true, no key, fallback files configured)
+	if n.fs.shouldUseFallbackFiles() {
+		if n.isRoot {
+			// Check if this is a fallback file
+			if n.fs.GetFallbackFiles != nil {
+				files := n.fs.GetFallbackFiles()
+				content, exists := files[name]
+				if exists {
+					DebugLog("[VFS Lookup] Found fallback file: name=%s", name)
+					// Use negative file ID to distinguish from real files
+					// Generate consistent negative ID based on filename hash
+					// Use simple hash to ensure same filename always gets same ID
+					// Ensure it's negative and within reasonable range
+					fallbackFileID := hashBKRD(name)
+					// Create a fake ObjectInfo for the fallback file
+					fallbackObj := &core.ObjectInfo{
+						ID:   fallbackFileID,
+						Name: name,
+						Type: core.OBJ_TYPE_FILE,
+						Size: int64(len(content)),
+						PID:  n.fs.bktID,
+					}
+
+					// Create child node
+					childNode := &OrcasNode{
+						fs:    n.fs,
+						objID: fallbackFileID,
+					}
+					childNode.obj.Store(fallbackObj)
+
+					// Create Inode
+					stableAttr := fs.StableAttr{
+						Mode: syscall.S_IFREG,
+						Ino:  uint64(fallbackFileID),
+					}
+					childInode := n.NewInode(ctx, childNode, stableAttr)
+
+					// Fill EntryOut
+					out.Mode = syscall.S_IFREG | 0444 // Read-only
+					out.Size = uint64(len(content))
+					out.Mtime = uint64(time.Now().Unix())
+					out.Ctime = out.Mtime
+					out.Atime = out.Mtime
+					out.Ino = uint64(fallbackFileID)
+
+					return childInode, 0
+				}
+			}
+		}
+		// Not a fallback file, return ENOENT
+		return nil, syscall.ENOENT
+	}
+
 	if errno := n.fs.checkKey(); errno != 0 {
 		DebugLog("[VFS Lookup] ERROR: checkKey failed: parentID=%d, name=%s, errno=%d", n.objID, name, errno)
 		return nil, errno
@@ -752,6 +821,43 @@ func (n *OrcasNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut)
 // Optimized: uses interface-level cache to avoid rebuilding entries every time
 // Implements delayed cache refresh: marks cache as stale instead of immediately deleting
 func (n *OrcasNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
+	// Check if we should use fallback files (RequireKey=true, no key, fallback files configured)
+	if n.fs.shouldUseFallbackFiles() {
+		if n.isRoot {
+			// Return fallback files for root directory
+			DebugLog("[VFS Readdir] Using fallback files for root directory")
+			files := n.fs.GetFallbackFiles()
+			entries := make([]fuse.DirEntry, 0, len(files)+2)
+			// Add . and ..
+			entries = append(entries, fuse.DirEntry{
+				Name: ".",
+				Mode: syscall.S_IFDIR,
+				Ino:  uint64(n.fs.bktID),
+			})
+			entries = append(entries, fuse.DirEntry{
+				Name: "..",
+				Mode: syscall.S_IFDIR,
+				Ino:  uint64(n.fs.bktID),
+			})
+			// Add fallback files
+			// Use negative file IDs to distinguish from real files
+			for fileName := range files {
+				// Generate consistent negative ID based on filename hash
+				fallbackFileID := hashBKRD(fileName)
+				entries = append(entries, fuse.DirEntry{
+					Name: fileName,
+					Mode: syscall.S_IFREG | 0444, // Read-only regular file
+					Ino:  uint64(fallbackFileID),
+				})
+			}
+			return fs.NewListDirStream(entries), 0
+		} else {
+			// Non-root directory, return empty (fallback files only in root)
+			DebugLog("[VFS Readdir] Non-root directory with fallback files, returning empty")
+			return fs.NewListDirStream([]fuse.DirEntry{}), 0
+		}
+	}
+
 	if errno := n.fs.checkKey(); errno != 0 {
 		if !n.isRoot {
 			DebugLog("[VFS Readdir] ERROR: checkKey failed: objID=%d, errno=%d", n.objID, errno)
@@ -1119,8 +1225,8 @@ func (n *OrcasNode) preloadChildDirs(children []*core.ObjectInfo) {
 // Create creates a file
 func (n *OrcasNode) Create(ctx context.Context, name string, flags uint32, mode uint32, out *fuse.EntryOut) (node *fs.Inode, fh fs.FileHandle, fuseFlags uint32, errno syscall.Errno) {
 	DebugLog("[VFS Create] Entry: name=%s, parentID=%d, flags=0x%x, mode=0%o", name, n.objID, flags, mode)
-	// Check if KEY is required
-	if errno := n.fs.checkKey(); errno != 0 {
+	// Check if KEY is required and call callback if check fails
+	if errno := n.fs.checkKeyWithCallback(name, nil); errno != 0 {
 		DebugLog("[VFS Create] ERROR: checkKey failed: name=%s, parentID=%d, errno=%d", name, n.objID, errno)
 		return nil, nil, 0, errno
 	}
@@ -1847,7 +1953,7 @@ func (n *OrcasNode) Create(ctx context.Context, name string, flags uint32, mode 
 // Open opens a file
 func (n *OrcasNode) Open(ctx context.Context, flags uint32) (fh fs.FileHandle, fuseFlags uint32, errno syscall.Errno) {
 	DebugLog("[VFS Open] Entry: objID=%d, flags=0x%x", n.objID, flags)
-	// Check if KEY is required
+	// Check if KEY is required (Open doesn't need callback since it's read-only by default)
 	if errno := n.fs.checkKey(); errno != 0 {
 		DebugLog("[VFS Open] ERROR: checkKey failed: objID=%d, flags=0x%x, errno=%d", n.objID, flags, errno)
 		return nil, 0, errno
@@ -1938,6 +2044,14 @@ func (n *OrcasNode) Open(ctx context.Context, flags uint32) (fh fs.FileHandle, f
 		(flags&syscall.O_CREAT != 0) || (flags&syscall.O_TRUNC != 0) || (flags&syscall.O_EXCL != 0)
 	DebugLog("[VFS Open] File open mode: fileID=%d, isWriteMode=%v, hasLargeFileFlag=%v, flags=0x%x (O_WRONLY=0x%x, O_RDWR=0x%x, O_CREAT=0x%x, O_TRUNC=0x%x, O_EXCL=0x%x)",
 		obj.ID, isWriteMode, hasLargeFileFlag, flags, syscall.O_WRONLY, syscall.O_RDWR, syscall.O_CREAT, syscall.O_TRUNC, syscall.O_EXCL)
+
+	// Check if KEY is required and call callback if check fails (for write mode)
+	if isWriteMode {
+		if errno := n.fs.checkKeyWithCallback(obj.Name, nil); errno != 0 {
+			DebugLog("[VFS Open] ERROR: checkKeyWithCallback failed: fileID=%d, fileName=%s, errno=%d", obj.ID, obj.Name, errno)
+			return nil, 0, errno
+		}
+	}
 
 	// Note: O_LARGEFILE is supported - we already support large files (>2GB) by default
 	// This flag is mainly for compatibility with 32-bit applications
@@ -3388,6 +3502,55 @@ func (n *OrcasNode) Read(ctx context.Context, dest []byte, off int64) (fuse.Read
 // readImpl is the actual read implementation
 func (n *OrcasNode) readImpl(ctx context.Context, dest []byte, off int64) (fuse.ReadResult, syscall.Errno) {
 	DebugLog("[VFS Read] Entry: objID=%d, offset=%d, size=%d", n.objID, off, len(dest))
+
+	// Check if this is a fallback file (negative objID)
+	if n.objID < 0 && n.fs.shouldUseFallbackFiles() && n.fs.GetFallbackFiles != nil {
+		// Find the fallback file by objID
+		// We need to match the objID with the filename hash used in Lookup
+		var fileName string
+		var fileContent string
+		files := n.fs.GetFallbackFiles()
+		for fn, content := range files {
+			// Generate the same hash as in Lookup
+			fallbackFileID := hashBKRD(fn)
+			if fallbackFileID == n.objID {
+				fileName = fn
+				fileContent = content
+				break
+			}
+		}
+
+		if fileName == "" {
+			DebugLog("[VFS Read] ERROR: Fallback file not found: objID=%d", n.objID)
+			return nil, syscall.ENOENT
+		}
+
+		// Read from fallback file content
+		contentBytes := []byte(fileContent)
+		fileSize := int64(len(contentBytes))
+
+		if off >= fileSize {
+			// Offset beyond file size, return empty
+			return fuse.ReadResultData(nil), 0
+		}
+
+		// Calculate how much to read
+		readSize := int64(len(dest))
+		if off+readSize > fileSize {
+			readSize = fileSize - off
+		}
+
+		// Copy data to dest buffer
+		nRead := copy(dest, contentBytes[off:off+readSize])
+
+		// Create result copy (required by go-fuse v2)
+		resultData := make([]byte, nRead)
+		copy(resultData, dest[:nRead])
+
+		DebugLog("[VFS Read] Successfully read fallback file: fileName=%s, objID=%d, offset=%d, requested=%d, read=%d", fileName, n.objID, off, len(dest), nRead)
+		return fuse.ReadResultData(resultData), 0
+	}
+
 	// Check if KEY is required
 	if errno := n.fs.checkKey(); errno != 0 {
 		DebugLog("[VFS Read] ERROR: checkKey failed: objID=%d, offset=%d, size=%d, errno=%d", n.objID, off, len(dest), errno)
@@ -3597,12 +3760,6 @@ func (n *OrcasNode) Write(ctx context.Context, data []byte, off int64) (written 
 func (n *OrcasNode) writeImpl(ctx context.Context, data []byte, off int64) (written uint32, errno syscall.Errno) {
 	DebugLog("[VFS Write] Write called: objID=%d, offset=%d, size=%d", n.objID, off, len(data))
 
-	// Check if KEY is required
-	if errno := n.fs.checkKey(); errno != 0 {
-		DebugLog("[VFS Write] ERROR: checkKey failed: objID=%d, errno=%d (EPERM=%d)", n.objID, errno, syscall.EPERM)
-		return 0, errno
-	}
-
 	obj, err := n.getObj()
 	if err != nil {
 		DebugLog("[VFS Write] ERROR: Failed to get object: objID=%d, error=%v", n.objID, err)
@@ -3638,6 +3795,12 @@ func (n *OrcasNode) writeImpl(ctx context.Context, data []byte, off int64) (writ
 				dbObj.ID, dbObj.Type, dbObj.Name, dbObj.PID)
 		}
 		return 0, syscall.EISDIR
+	}
+
+	// Check if KEY is required and call callback if check fails (before writing)
+	if errno := n.fs.checkKeyWithCallback(obj.Name, data); errno != 0 {
+		DebugLog("[VFS Write] ERROR: checkKeyWithCallback failed: fileID=%d, fileName=%s, errno=%d", obj.ID, obj.Name, errno)
+		return 0, errno
 	}
 
 	// Get or create RandomAccessor (has internal lock, but releases quickly)
@@ -4566,158 +4729,67 @@ func (n *OrcasNode) forceFlushTempFileBeforeRename(fileID int64, oldName, newNam
 		return
 	}
 
-	// If no RandomAccessor found, try to create a temporary RandomAccessor to flush any pending data
-	if raToFlush == nil {
-		DebugLog("[VFS Rename] No RandomAccessor found, trying to create temporary RandomAccessor to flush: fileID=%d", fileID)
-		tempRA, err := NewRandomAccessor(n.fs, fileID)
-		if err == nil && tempRA != nil {
-			// Check if it has TempFileWriter
-			if tempRA.hasTempFileWriter() {
-				// Directly sync flush TempFileWriter
-				if err := tempRA.flushTempFileWriter(); err != nil {
-					DebugLog("[VFS Rename] WARNING: Failed to flush temporary TempFileWriter: fileID=%d, error=%v", fileID, err)
-				} else {
-					DebugLog("[VFS Rename] Successfully flushed temporary TempFileWriter: fileID=%d", fileID)
-				}
+	// If no RandomAccessor found (raToFlush is nil at this point), try to create a temporary RandomAccessor to flush any pending data
+	DebugLog("[VFS Rename] No RandomAccessor found, trying to create temporary RandomAccessor to flush: fileID=%d", fileID)
+	tempRA, err := NewRandomAccessor(n.fs, fileID)
+	if err == nil && tempRA != nil {
+		// Check if it has TempFileWriter
+		if tempRA.hasTempFileWriter() {
+			// Directly sync flush TempFileWriter
+			if err := tempRA.flushTempFileWriter(); err != nil {
+				DebugLog("[VFS Rename] WARNING: Failed to flush temporary TempFileWriter: fileID=%d, error=%v", fileID, err)
 			} else {
-				// Try to flush any pending data
-				if _, flushErr := tempRA.ForceFlush(); flushErr != nil {
-					DebugLog("[VFS Rename] WARNING: Failed to flush temporary RandomAccessor: fileID=%d, error=%v", fileID, flushErr)
-				} else {
-					DebugLog("[VFS Rename] Successfully flushed temporary RandomAccessor: fileID=%d", fileID)
-				}
-			}
-			// Strong consistency: invalidate cache and re-fetch from database
-			cacheKey := fileID
-			fileObjCache.Del(cacheKey)
-			objs, err := n.fs.h.Get(n.fs.c, n.fs.bktID, []int64{fileID})
-			if err == nil && len(objs) > 0 {
-				fileObj := objs[0]
-				// For empty files, ensure EmptyDataID is set
-				if fileObj.Size == 0 && fileObj.DataID != core.EmptyDataID {
-					DebugLog("[VFS Rename] Empty file detected after temporary flush, setting EmptyDataID: fileID=%d, currentDataID=%d", fileID, fileObj.DataID)
-					updateFileObj := &core.ObjectInfo{
-						ID:     fileObj.ID,
-						PID:    fileObj.PID,
-						Type:   fileObj.Type,
-						Name:   fileObj.Name,
-						DataID: core.EmptyDataID,
-						Size:   0,
-						MTime:  core.Now(),
-					}
-					_, putErr := n.fs.h.Put(n.fs.c, n.fs.bktID, []*core.ObjectInfo{updateFileObj})
-					if putErr == nil {
-						fileObj = updateFileObj
-						DebugLog("[VFS Rename] Successfully set EmptyDataID for empty file: fileID=%d", fileID)
-					} else {
-						DebugLog("[VFS Rename] WARNING: Failed to set EmptyDataID for empty file: fileID=%d, error=%v", fileID, putErr)
-					}
-				}
-				fileObjCache.Put(cacheKey, fileObj)
-				DebugLog("[VFS Rename] Strong consistency: re-fetched from database after temporary flush: fileID=%d, dataID=%d, size=%d", fileID, fileObj.DataID, fileObj.Size)
-				// Update directory listing cache
-				if fileObj.PID > 0 {
-					dirNode := &OrcasNode{
-						fs:    n.fs,
-						objID: fileObj.PID,
-					}
-					dirNode.invalidateDirListCache(fileObj.PID)
-					DebugLog("[VFS Rename] Updated directory listing cache after temporary flush: fileID=%d, dirID=%d, name=%s", fileID, fileObj.PID, fileObj.Name)
-				}
+				DebugLog("[VFS Rename] Successfully flushed temporary TempFileWriter: fileID=%d", fileID)
 			}
 		} else {
-			DebugLog("[VFS Rename] WARNING: Unable to create temporary RandomAccessor for .tmp file flush: fileID=%d, error=%v", fileID, err)
+			// Try to flush any pending data
+			if _, flushErr := tempRA.ForceFlush(); flushErr != nil {
+				DebugLog("[VFS Rename] WARNING: Failed to flush temporary RandomAccessor: fileID=%d, error=%v", fileID, flushErr)
+			} else {
+				DebugLog("[VFS Rename] Successfully flushed temporary RandomAccessor: fileID=%d", fileID)
+			}
 		}
-		return
-	}
-
-	// RandomAccessor exists but no TempFileWriter
-	// Flush RandomAccessor normally (if not already flushed above)
-	// Note: We already flushed above if there were pending writes, but we still need to ensure
-	// RandomAccessor is fully flushed
-	// Note: raToFlush is guaranteed to be non-nil here because if it was nil, we would have returned above
-	// Also ensure RandomAccessor is fully flushed (in case there's any remaining data)
-	writeIndex := atomic.LoadInt64(&raToFlush.buffer.writeIndex)
-	totalSize := atomic.LoadInt64(&raToFlush.buffer.totalSize)
-	if writeIndex > 0 || totalSize > 0 {
-		DebugLog("[VFS Rename] RandomAccessor still has pending writes after initial flush, flushing again: fileID=%d, writeIndex=%d, totalSize=%d", fileID, writeIndex, totalSize)
-		if _, err := raToFlush.ForceFlush(); err != nil {
-			DebugLog("[VFS Rename] ERROR: Failed to force flush .tmp file: fileID=%d, error=%v", fileID, err)
-		} else {
-			DebugLog("[VFS Rename] Successfully forced flush .tmp file: fileID=%d", fileID)
-		}
-	} else {
-		// No pending writes, but still try to flush to ensure any cached data is written
-		DebugLog("[VFS Rename] RandomAccessor has no pending writes, but flushing to ensure data is written: fileID=%d", fileID)
-		if _, err := raToFlush.ForceFlush(); err != nil {
-			DebugLog("[VFS Rename] WARNING: Failed to force flush .tmp file (may be empty): fileID=%d, error=%v", fileID, err)
-		} else {
-			DebugLog("[VFS Rename] Successfully forced flush .tmp file: fileID=%d", fileID)
-		}
-	}
-
-	// Get updated object from cache first (ForceFlush already updated it)
-	// Only read from database if cache is empty (to avoid WAL stale read)
-	cacheKey = fileID
-	fileObj = nil // Reset fileObj to get updated version
-	if cached, ok := fileObjCache.Get(cacheKey); ok {
-		if obj, ok := cached.(*core.ObjectInfo); ok && obj != nil {
-			fileObj = obj
-			DebugLog("[VFS Rename] Got file object from cache after flush: fileID=%d, size=%d, dataID=%d", fileID, fileObj.Size, fileObj.DataID)
-		}
-	}
-	if fileObj == nil {
-		DebugLog("[VFS Rename] WARNING: File object not in cache after flush, reading from database: fileID=%d", fileID)
+		// Strong consistency: invalidate cache and re-fetch from database
+		cacheKey := fileID
+		fileObjCache.Del(cacheKey)
 		objs, err := n.fs.h.Get(n.fs.c, n.fs.bktID, []int64{fileID})
 		if err == nil && len(objs) > 0 {
-			fileObj = objs[0]
-		}
-	}
-	if fileObj != nil {
-		// For empty files, ensure EmptyDataID is set
-		if fileObj.Size == 0 && fileObj.DataID != core.EmptyDataID {
-			DebugLog("[VFS Rename] Empty file detected after flush, setting EmptyDataID: fileID=%d, currentDataID=%d", fileID, fileObj.DataID)
-			updateFileObj := &core.ObjectInfo{
-				ID:     fileObj.ID,
-				PID:    fileObj.PID,
-				Type:   fileObj.Type,
-				Name:   fileObj.Name,
-				DataID: core.EmptyDataID,
-				Size:   0,
-				MTime:  core.Now(),
+			fileObj := objs[0]
+			// For empty files, ensure EmptyDataID is set
+			if fileObj.Size == 0 && fileObj.DataID != core.EmptyDataID {
+				DebugLog("[VFS Rename] Empty file detected after temporary flush, setting EmptyDataID: fileID=%d, currentDataID=%d", fileID, fileObj.DataID)
+				updateFileObj := &core.ObjectInfo{
+					ID:     fileObj.ID,
+					PID:    fileObj.PID,
+					Type:   fileObj.Type,
+					Name:   fileObj.Name,
+					DataID: core.EmptyDataID,
+					Size:   0,
+					MTime:  core.Now(),
+				}
+				_, putErr := n.fs.h.Put(n.fs.c, n.fs.bktID, []*core.ObjectInfo{updateFileObj})
+				if putErr == nil {
+					fileObj = updateFileObj
+					DebugLog("[VFS Rename] Successfully set EmptyDataID for empty file: fileID=%d", fileID)
+				} else {
+					DebugLog("[VFS Rename] WARNING: Failed to set EmptyDataID for empty file: fileID=%d, error=%v", fileID, putErr)
+				}
 			}
-			_, putErr := n.fs.h.Put(n.fs.c, n.fs.bktID, []*core.ObjectInfo{updateFileObj})
-			if putErr == nil {
-				fileObj = updateFileObj
-				DebugLog("[VFS Rename] Successfully set EmptyDataID for empty file: fileID=%d", fileID)
-			} else {
-				DebugLog("[VFS Rename] WARNING: Failed to set EmptyDataID for empty file: fileID=%d, error=%v", fileID, putErr)
+			fileObjCache.Put(cacheKey, fileObj)
+			DebugLog("[VFS Rename] Strong consistency: re-fetched from database after temporary flush: fileID=%d, dataID=%d, size=%d", fileID, fileObj.DataID, fileObj.Size)
+			// Update directory listing cache
+			if fileObj.PID > 0 {
+				dirNode := &OrcasNode{
+					fs:    n.fs,
+					objID: fileObj.PID,
+				}
+				dirNode.invalidateDirListCache(fileObj.PID)
+				DebugLog("[VFS Rename] Updated directory listing cache after temporary flush: fileID=%d, dirID=%d, name=%s", fileID, fileObj.PID, fileObj.Name)
 			}
-		}
-		fileObjCache.Put(cacheKey, fileObj)
-		DebugLog("[VFS Rename] Got file object from cache after flush: fileID=%d, dataID=%d, size=%d, name=%s", fileID, fileObj.DataID, fileObj.Size, fileObj.Name)
-		if fileObj.DataID == 0 || fileObj.DataID == core.EmptyDataID || fileObj.Size == 0 {
-			DebugLog("[VFS Rename] WARNING: File has no data after flush: fileID=%d, dataID=%d, size=%d", fileID, fileObj.DataID, fileObj.Size)
-		}
-		// Update directory listing cache
-		if fileObj.PID > 0 {
-			dirNode := &OrcasNode{
-				fs:    n.fs,
-				objID: fileObj.PID,
-			}
-			dirNode.invalidateDirListCache(fileObj.PID)
-			DebugLog("[VFS Rename] Updated directory listing cache after flush: fileID=%d, dirID=%d, name=%s", fileID, fileObj.PID, fileObj.Name)
 		}
 	} else {
-		DebugLog("[VFS Rename] WARNING: Failed to get file object after flush: fileID=%d", fileID)
+		DebugLog("[VFS Rename] WARNING: Unable to create temporary RandomAccessor for .tmp file flush: fileID=%d, error=%v", fileID, err)
 	}
-
-	// IMPORTANT: Do NOT unregister RandomAccessor immediately after force flush
-	// There may be concurrent writes still in progress that need to use the same RandomAccessor
-	// Unregistering too early can cause subsequent writes to create a new RandomAccessor
-	// without TempFileWriter, leading to random write mode and new dataID creation
-	// The RandomAccessor will be unregistered when the file is closed or when no longer needed
-	// DebugLog("[VFS Rename] Keeping RandomAccessor registered after force flush to allow concurrent writes: fileID=%d", fileID)
 }
 
 // Release releases file handle (closes file)

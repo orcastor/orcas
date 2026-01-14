@@ -91,6 +91,19 @@ type OrcasFS struct {
 		Wait()
 		Serve()
 	}
+	// GetFallbackFiles: Callback function to get fallback files.
+	// When RequireKey is true and no key is provided, these files will be shown as a fallback.
+	// Returns a map where key is the file name and value is the file content.
+	GetFallbackFiles func() map[string]string
+	// OnKeyCheckFailed: Callback function called when a file operation is attempted
+	// but RequireKey is enabled and no key is provided.
+	// This callback is only called when checkKey fails (RequireKey=true but EndecKey is not provided).
+	// Parameters:
+	//   - fileName: The name of the file being operated on
+	//   - data: The data being written (nil for Create/Open operations)
+	// Returns:
+	//   - errno: syscall.Errno to return (0 for success, syscall.EPERM for permission denied, etc.)
+	OnKeyCheckFailed func(fileName string, data []byte) syscall.Errno
 }
 
 // NewOrcasFS creates a new ORCAS filesystem
@@ -339,7 +352,8 @@ func (fs *OrcasFS) getBucketConfig() *core.BucketInfo {
 }
 
 // checkKey checks if KEY is required and present in OrcasFS.Config.EndecKey
-// Returns EPERM if requireKey is true but KEY is not provided
+// Returns EPERM if requireKey is true but KEY is not provided (and no fallback files)
+// Returns 0 if key is present or if fallback files are available
 // Note: This should not happen if mount-time validation is working correctly,
 // but we keep this check as a safety measure
 func (fs *OrcasFS) checkKey() syscall.Errno {
@@ -351,9 +365,52 @@ func (fs *OrcasFS) checkKey() syscall.Errno {
 		return 0 // Key is present
 	}
 	// Key is required but not provided
+	// If fallback files are configured, allow read-only access to them
+	if fs.GetFallbackFiles != nil {
+		files := fs.GetFallbackFiles()
+		if len(files) > 0 {
+			DebugLog("[VFS checkKey] RequireKey is enabled but EndecKey is not provided, using fallback files")
+			return 0 // Allow access to fallback files
+		}
+	}
+	// Key is required but not provided and no fallback files
 	// This should have been caught at mount time, but return EPERM as fallback
 	DebugLog("[VFS checkKey] ERROR: RequireKey is enabled but EndecKey is not provided")
 	return syscall.EPERM
+}
+
+// checkKeyWithCallback checks if KEY is required and calls OnKeyCheckFailed if checkKey fails
+// This is used for file operations that need to call the callback when key check fails
+func (fs *OrcasFS) checkKeyWithCallback(fileName string, data []byte) syscall.Errno {
+	errno := fs.checkKey()
+	if errno != 0 && fs.OnKeyCheckFailed != nil {
+		// Key check failed, call callback
+		callbackErrno := fs.OnKeyCheckFailed(fileName, data)
+		if callbackErrno != 0 {
+			DebugLog("[VFS checkKeyWithCallback] Callback returned error: fileName=%s, errno=%d", fileName, callbackErrno)
+			return callbackErrno
+		}
+		// Callback returned success, allow the operation
+		DebugLog("[VFS checkKeyWithCallback] Callback allowed operation: fileName=%s", fileName)
+		return 0
+	}
+	return errno
+}
+
+// shouldUseFallbackFiles checks if we should use fallback files
+// Returns true if RequireKey is true, no key is provided, and fallback files are configured
+func (fs *OrcasFS) shouldUseFallbackFiles() bool {
+	if !fs.requireKey {
+		return false
+	}
+	if fs.Config.EndecKey != "" {
+		return false
+	}
+	if fs.GetFallbackFiles == nil {
+		return false
+	}
+	files := fs.GetFallbackFiles()
+	return len(files) > 0
 }
 
 // registerRandomAccessor tracks active RandomAccessor instances for a file
