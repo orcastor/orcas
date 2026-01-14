@@ -541,10 +541,7 @@ func (n *OrcasNode) invalidateDirListCache(dirID int64) {
 // Getattr gets file/directory attributes
 func (n *OrcasNode) Getattr(ctx context.Context, f fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
 	if !n.isRoot {
-		if errno := n.fs.checkKey(true); errno != 0 {
-			if n.fs.shouldUseFallbackFiles() {
-				return 0
-			}
+		if errno := n.fs.checkKey(); errno != 0 {
 			DebugLog("[VFS Getattr] ERROR: checkKey failed: objID=%d, errno=%d", n.objID, errno)
 			return errno
 		}
@@ -4186,10 +4183,7 @@ func (n *OrcasNode) fsyncImpl(ctx context.Context, flags uint32) syscall.Errno {
 // Setattr sets file attributes (including truncate operation)
 func (n *OrcasNode) Setattr(ctx context.Context, f fs.FileHandle, in *fuse.SetAttrIn, out *fuse.AttrOut) syscall.Errno {
 	DebugLog("[VFS Setattr] Entry: objID=%d, valid=0x%x, FileHandle=%v", n.objID, in.Valid, f)
-	if errno := n.fs.checkKey(true); errno != 0 {
-		if n.fs.shouldUseFallbackFiles() {
-			return 0
-		}
+	if errno := n.fs.checkKey(); errno != 0 {
 		DebugLog("[VFS Setattr] ERROR: checkKey failed: objID=%d, valid=0x%x, errno=%d", n.objID, in.Valid, errno)
 		return errno
 	}
