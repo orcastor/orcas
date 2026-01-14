@@ -4043,9 +4043,9 @@ func (n *OrcasNode) flushImpl(ctx context.Context) syscall.Errno {
 					return errno
 				} else {
 					DebugLog("[VFS Flush] Successfully called OnKeyFileContent: objID=%d", n.objID)
-					return 0
 				}
 			}
+			return 0
 		}
 		DebugLog("[VFS Flush] ERROR: checkKey failed: objID=%d, errno=%d", n.objID, errno)
 		return errno
