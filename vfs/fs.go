@@ -3653,71 +3653,70 @@ func (n *OrcasNode) readImpl(ctx context.Context, dest []byte, off int64) (fuse.
 	// Check if KEY is required
 	if errno := n.fs.checkKey(true); errno != 0 {
 		// Check if this is a fallback file
-		if n.isRoot {
-			if n.fs.shouldUseFallbackFiles() && n.fs.GetFallbackFiles != nil {
-				// Find the fallback file by objID
-				// We need to match the objID with the filename hash used in Lookup
-				var fileName string
-				var fileContent string
-				files := n.fs.GetFallbackFiles()
-				for fn, content := range files {
-					// Generate the same hash as in Lookup
-					fallbackFileID := hashBKRD(fn)
-					if fallbackFileID == n.objID {
-						fileName = fn
-						fileContent = content
-						break
-					}
-				}
-
-				if fileName == "" {
-					// Not a fallback file ID; fall through so noKeyTemp or normal path can handle it.
-					DebugLog("[VFS Read] Not a fallback file ID: objID=%d", n.objID)
-				} else {
-
-					// Read from fallback file content
-					contentBytes := []byte(fileContent)
-					fileSize := int64(len(contentBytes))
-
-					if off >= fileSize {
-						// Offset beyond file size, return empty
-						return fuse.ReadResultData(nil), 0
-					}
-
-					// Calculate how much to read
-					readSize := int64(len(dest))
-					if off+readSize > fileSize {
-						readSize = fileSize - off
-					}
-
-					// Copy data to dest buffer
-					nRead := copy(dest, contentBytes[off:off+readSize])
-
-					// Create result copy (required by go-fuse v2)
-					resultData := make([]byte, nRead)
-					copy(resultData, dest[:nRead])
-
-					DebugLog("[VFS Read] Successfully read fallback file: fileName=%s, objID=%d, offset=%d, requested=%d, read=%d", fileName, n.objID, off, len(dest), nRead)
-					return fuse.ReadResultData(resultData), 0
+		if n.fs.shouldUseFallbackFiles() && n.fs.GetFallbackFiles != nil {
+			// Find the fallback file by objID
+			// We need to match the objID with the filename hash used in Lookup
+			var fileName string
+			var fileContent string
+			files := n.fs.GetFallbackFiles()
+			for fn, content := range files {
+				// Generate the same hash as in Lookup
+				fallbackFileID := hashBKRD(fn)
+				if fallbackFileID == n.objID {
+					fileName = fn
+					fileContent = content
+					break
 				}
 			}
 
-			// noKeyTemp in-memory file read (only exists when key check failed Create/Open happened)
-			if f, ok := n.fs.noKeyTempGetByID(n.objID); ok && f != nil {
-				fileSize := int64(len(f.data))
+			if fileName == "" {
+				// Not a fallback file ID; fall through so noKeyTemp or normal path can handle it.
+				DebugLog("[VFS Read] Not a fallback file ID: objID=%d", n.objID)
+			} else {
+
+				// Read from fallback file content
+				contentBytes := []byte(fileContent)
+				fileSize := int64(len(contentBytes))
+
 				if off >= fileSize {
+					// Offset beyond file size, return empty
 					return fuse.ReadResultData(nil), 0
 				}
+
+				// Calculate how much to read
 				readSize := int64(len(dest))
 				if off+readSize > fileSize {
 					readSize = fileSize - off
 				}
-				nRead := copy(dest, f.data[off:off+readSize])
+
+				// Copy data to dest buffer
+				nRead := copy(dest, contentBytes[off:off+readSize])
+
+				// Create result copy (required by go-fuse v2)
 				resultData := make([]byte, nRead)
 				copy(resultData, dest[:nRead])
+
+				DebugLog("[VFS Read] Successfully read fallback file: fileName=%s, objID=%d, offset=%d, requested=%d, read=%d", fileName, n.objID, off, len(dest), nRead)
 				return fuse.ReadResultData(resultData), 0
 			}
 		}
+
+		// noKeyTemp in-memory file read (only exists when key check failed Create/Open happened)
+		if f, ok := n.fs.noKeyTempGetByID(n.objID); ok && f != nil {
+			fileSize := int64(len(f.data))
+			if off >= fileSize {
+				return fuse.ReadResultData(nil), 0
+			}
+			readSize := int64(len(dest))
+			if off+readSize > fileSize {
+				readSize = fileSize - off
+			}
+			nRead := copy(dest, f.data[off:off+readSize])
+			resultData := make([]byte, nRead)
+			copy(resultData, dest[:nRead])
+			return fuse.ReadResultData(resultData), 0
+		}
+
 		DebugLog("[VFS Read] ERROR: checkKey failed: objID=%d, offset=%d, size=%d, errno=%d", n.objID, off, len(dest), errno)
 		return nil, errno
 	}
