@@ -623,77 +623,74 @@ func (n *OrcasNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut)
 	// If key check fails, try noKeyTemp entries in-memory (do not touch DB)
 	if errno := n.fs.checkKey(true); errno != 0 {
 		// Check if we should use fallback files (RequireKey=true, no key, fallback files configured)
-		if n.fs.shouldUseFallbackFiles() {
-			if n.isRoot {
-				// Check if this is a fallback file
-				if n.fs.GetFallbackFiles != nil {
-					files := n.fs.GetFallbackFiles()
-					content, exists := files[name]
-					if exists {
-						// DebugLog("[VFS Lookup] Found fallback file: name=%s", name)
-						// Use negative file ID to distinguish from real files
-						// Generate consistent negative ID based on filename hash
-						// Use simple hash to ensure same filename always gets same ID
-						// Ensure it's negative and within reasonable range
-						fallbackFileID := hashBKRD(name)
-						// Create a fake ObjectInfo for the fallback file
-						fallbackObj := &core.ObjectInfo{
-							ID:   fallbackFileID,
-							Name: name,
-							Type: core.OBJ_TYPE_FILE,
-							Size: int64(len(content)),
-							PID:  n.fs.bktID,
-						}
-
-						// Create child node
-						childNode := &OrcasNode{
-							fs:    n.fs,
-							objID: fallbackFileID,
-						}
-						childNode.obj.Store(fallbackObj)
-
-						// Create Inode
-						stableAttr := fs.StableAttr{
-							Mode: syscall.S_IFREG,
-							Ino:  uint64(fallbackFileID),
-						}
-						childInode := n.NewInode(ctx, childNode, stableAttr)
-
-						// Fill EntryOut
-						out.Mode = syscall.S_IFREG | 0444 // Read-only
-						out.Size = uint64(len(content))
-						out.Mtime = uint64(time.Now().Unix())
-						out.Ctime = out.Mtime
-						out.Atime = out.Mtime
-						out.Ino = uint64(fallbackFileID)
-
-						return childInode, 0
+		if n.isRoot {
+			if n.fs.shouldUseFallbackFiles() {
+				files := n.fs.GetFallbackFiles()
+				content, exists := files[name]
+				if exists {
+					// DebugLog("[VFS Lookup] Found fallback file: name=%s", name)
+					// Use negative file ID to distinguish from real files
+					// Generate consistent negative ID based on filename hash
+					// Use simple hash to ensure same filename always gets same ID
+					// Ensure it's negative and within reasonable range
+					fallbackFileID := hashBKRD(name)
+					// Create a fake ObjectInfo for the fallback file
+					fallbackObj := &core.ObjectInfo{
+						ID:   fallbackFileID,
+						Name: name,
+						Type: core.OBJ_TYPE_FILE,
+						Size: int64(len(content)),
+						PID:  n.fs.bktID,
 					}
+
+					// Create child node
+					childNode := &OrcasNode{
+						fs:    n.fs,
+						objID: fallbackFileID,
+					}
+					childNode.obj.Store(fallbackObj)
+
+					// Create Inode
+					stableAttr := fs.StableAttr{
+						Mode: syscall.S_IFREG,
+						Ino:  uint64(fallbackFileID),
+					}
+					childInode := n.NewInode(ctx, childNode, stableAttr)
+
+					// Fill EntryOut
+					out.Mode = syscall.S_IFREG | 0444 // Read-only
+					out.Size = uint64(len(content))
+					out.Mtime = uint64(time.Now().Unix())
+					out.Ctime = out.Mtime
+					out.Atime = out.Mtime
+					out.Ino = uint64(fallbackFileID)
+
+					return childInode, 0
 				}
-				// Merge: also expose noKeyTemp files under root while key is missing.
-				if id, ok := n.fs.noKeyTempGetIDByName(name); ok {
-					if f, ok2 := n.fs.noKeyTempGetByID(id); ok2 && f != nil {
-						obj := &core.ObjectInfo{
-							ID:     f.id,
-							PID:    n.fs.bktID,
-							Type:   core.OBJ_TYPE_FILE,
-							Name:   f.name,
-							Size:   int64(len(f.data)),
-							DataID: core.EmptyDataID,
-							MTime:  f.mtime,
-						}
-						childNode := &OrcasNode{fs: n.fs, objID: f.id}
-						childNode.obj.Store(obj)
-						stableAttr := fs.StableAttr{Mode: syscall.S_IFREG, Ino: uint64(f.id)}
-						childInode := n.NewInode(ctx, childNode, stableAttr)
-						out.Mode = syscall.S_IFREG | 0o644
-						out.Size = uint64(obj.Size)
-						out.Mtime = uint64(obj.MTime)
-						out.Ctime = out.Mtime
-						out.Atime = out.Mtime
-						out.Ino = uint64(obj.ID)
-						return childInode, 0
+			}
+			// Merge: also expose noKeyTemp files under root while key is missing.
+			if id, ok := n.fs.noKeyTempGetIDByName(name); ok {
+				if f, ok2 := n.fs.noKeyTempGetByID(id); ok2 && f != nil {
+					obj := &core.ObjectInfo{
+						ID:     f.id,
+						PID:    n.fs.bktID,
+						Type:   core.OBJ_TYPE_FILE,
+						Name:   f.name,
+						Size:   int64(len(f.data)),
+						DataID: core.EmptyDataID,
+						MTime:  f.mtime,
 					}
+					childNode := &OrcasNode{fs: n.fs, objID: f.id}
+					childNode.obj.Store(obj)
+					stableAttr := fs.StableAttr{Mode: syscall.S_IFREG, Ino: uint64(f.id)}
+					childInode := n.NewInode(ctx, childNode, stableAttr)
+					out.Mode = syscall.S_IFREG | 0o644
+					out.Size = uint64(obj.Size)
+					out.Mtime = uint64(obj.MTime)
+					out.Ctime = out.Mtime
+					out.Atime = out.Mtime
+					out.Ino = uint64(obj.ID)
+					return childInode, 0
 				}
 			}
 			// Not a fallback file, return ENOENT
@@ -868,8 +865,8 @@ func (n *OrcasNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut)
 func (n *OrcasNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
 	if errno := n.fs.checkKey(true); errno != 0 {
 		// Check if we should use fallback files (RequireKey=true, no key, fallback files configured)
-		if n.fs.shouldUseFallbackFiles() {
-			if n.isRoot {
+		if n.isRoot {
+			if n.fs.shouldUseFallbackFiles() {
 				// Return fallback files for root directory
 				DebugLog("[VFS Readdir] Using fallback files for root directory")
 				files := n.fs.GetFallbackFiles()
@@ -2077,7 +2074,7 @@ func (n *OrcasNode) Open(ctx context.Context, flags uint32) (fh fs.FileHandle, f
 	DebugLog("[VFS Open] Entry: objID=%d, flags=0x%x", n.objID, flags)
 	// If key check fails, allow opening only noKeyTemp in-memory nodes; deny real DB-backed nodes.
 	if errno := n.fs.checkKey(true); errno != 0 {
-		if n.fs.shouldUseFallbackFiles() && n.fs.GetFallbackFiles != nil {
+		if n.fs.shouldUseFallbackFiles() {
 			files := n.fs.GetFallbackFiles()
 			for fn := range files {
 				DebugLog("[VFS Open] Checking fallback file: fileName=%s, objID=%d", fn, n.objID)
@@ -3640,7 +3637,7 @@ func (n *OrcasNode) readImpl(ctx context.Context, dest []byte, off int64) (fuse.
 	// Check if KEY is required
 	if errno := n.fs.checkKey(true); errno != 0 {
 		// Check if this is a fallback file
-		if n.fs.shouldUseFallbackFiles() && n.fs.GetFallbackFiles != nil {
+		if n.fs.shouldUseFallbackFiles() {
 			// Find the fallback file by objID
 			// We need to match the objID with the filename hash used in Lookup
 			var fileName string
