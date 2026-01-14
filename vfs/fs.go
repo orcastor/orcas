@@ -4052,7 +4052,10 @@ func (n *OrcasNode) Flush(ctx context.Context, f fs.FileHandle) syscall.Errno {
 					}
 				}()
 
+				n.invalidateObj()
 				fileObjCache.Del(objID)
+				n.fs.h.Delete(n.fs.c, n.fs.bktID, objID)
+				n.fs.root.invalidateDirListCache(n.fs.bktID)
 			}
 			return 0
 		}
