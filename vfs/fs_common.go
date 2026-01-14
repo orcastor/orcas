@@ -445,13 +445,7 @@ func (fs *OrcasFS) noKeyTempCreate(name string) *noKeyTempFile {
 		}
 	}
 	// Base ID derived from filename, consistent with fallback IDs
-	id := hashBKDR(name)
-	// If already exists, treat as "same name" and reuse (no collision probing).
-	// Note: hash collisions will be treated as the same file by design.
-	if existing, exists := fs.noKeyTempByID[id]; exists && existing != nil {
-		fs.noKeyTempByName[name] = existing.id
-		return existing
-	}
+	id := core.NewID()
 	f := &noKeyTempFile{
 		id:    id,
 		name:  name,

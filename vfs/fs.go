@@ -610,14 +610,6 @@ func getMode(objType int) uint32 {
 	}
 }
 
-func hashBKDR(name string) int64 {
-	hash := int64(0)
-	for _, c := range name {
-		hash = hash*31 + int64(c)
-	}
-	return hash
-}
-
 // Lookup looks up child node
 func (n *OrcasNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
 	// If key check fails, try noKeyTemp entries in-memory (do not touch DB)
@@ -633,7 +625,7 @@ func (n *OrcasNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut)
 					// Generate consistent negative ID based on filename hash
 					// Use simple hash to ensure same filename always gets same ID
 					// Ensure it's negative and within reasonable range
-					fallbackFileID := hashBKDR(name)
+					fallbackFileID := core.NewID()
 					// Create a fake ObjectInfo for the fallback file
 					fallbackObj := &core.ObjectInfo{
 						ID:   fallbackFileID,
@@ -888,7 +880,7 @@ func (n *OrcasNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
 				// Use negative file IDs to distinguish from real files
 				for fileName := range files {
 					// Generate consistent negative ID based on filename hash
-					fallbackFileID := hashBKDR(fileName)
+					fallbackFileID := core.NewID()
 					entries = append(entries, fuse.DirEntry{
 						Name: fileName,
 						Mode: syscall.S_IFREG | 0444, // Read-only regular file
@@ -2076,9 +2068,15 @@ func (n *OrcasNode) Open(ctx context.Context, flags uint32) (fh fs.FileHandle, f
 	if errno := n.fs.checkKey(true); errno != 0 {
 		if n.fs.shouldUseFallbackFiles() {
 			files := n.fs.GetFallbackFiles()
+			obj, err := n.getObj()
+			if err != nil {
+				DebugLog("[VFS Open] ERROR: Failed to get object: objID=%d, error=%v", n.objID, err)
+				return nil, 0, syscall.ENOENT
+			}
 			for fn := range files {
 				DebugLog("[VFS Open] Checking fallback file: fileName=%s, objID=%d", fn, n.objID)
-				if hashBKDR(fn) == n.objID {
+				if fn == obj.Name {
+					DebugLog("[VFS Open] Found fallback file: fileName=%s, objID=%d", fn, n.objID)
 					return n, 0, 0
 				}
 			}
@@ -3651,11 +3649,15 @@ func (n *OrcasNode) readImpl(ctx context.Context, dest []byte, off int64) (fuse.
 			// We need to match the objID with the filename hash used in Lookup
 			var fileName string
 			var fileContent string
+			obj, err := n.getObj()
+			if err != nil {
+				DebugLog("[VFS Read] ERROR: Failed to get object: objID=%d, error=%v", n.objID, err)
+				return nil, syscall.ENOENT
+			}
 			files := n.fs.GetFallbackFiles()
 			for fn, content := range files {
 				// Generate the same hash as in Lookup
-				fallbackFileID := hashBKDR(fn)
-				if fallbackFileID == n.objID {
+				if fn == obj.Name {
 					fileName = fn
 					fileContent = content
 					break
