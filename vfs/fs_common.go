@@ -306,6 +306,7 @@ func (fs *OrcasFS) SetEndecKey(key string) {
 		fs.noKeyTempMu.Unlock()
 		fs.keyContent = ""
 	}
+	fs.root.invalidateDirListCache(fs.bktID)
 }
 
 // getEndecKeyForFS returns the encryption key for a given OrcasFS
