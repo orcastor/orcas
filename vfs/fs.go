@@ -2181,7 +2181,7 @@ func (n *OrcasNode) Open(ctx context.Context, flags uint32) (fh fs.FileHandle, f
 
 	if isWriteMode && n.fs.KeyFileNameFilter != nil {
 		if errno := n.fs.KeyFileNameFilter(obj.Name); errno != 0 {
-			DebugLog("[VFS Open] ERROR: checkKeyWithCallback failed: fileID=%d, errno=%d", obj.ID, errno)
+			DebugLog("[VFS Open] ERROR: KeyFileNameFilter failed: fileID=%d, errno=%d", obj.ID, errno)
 			return nil, 0, errno
 		}
 	}
@@ -3910,42 +3910,48 @@ func (n *OrcasNode) Write(ctx context.Context, data []byte, off int64) (written 
 func (n *OrcasNode) writeImpl(ctx context.Context, data []byte, off int64) (written uint32, errno syscall.Errno) {
 	DebugLog("[VFS Write] Write called: objID=%d, offset=%d, size=%d", n.objID, off, len(data))
 
-	// noKeyTemp in-memory write
-	if f, ok := n.fs.noKeyTempGetByID(n.objID); ok && f != nil {
-		// Key check must fail; run content callback (or return EPERM)
-		if errno := n.fs.checkKeyWithCallback(data); errno != 0 {
-			return 0, errno
-		}
-		if off < 0 {
-			return 0, syscall.EINVAL
-		}
-		end := off + int64(len(data))
-		n.fs.noKeyTempMu.Lock()
-		tf := n.fs.noKeyTempByID[n.objID]
-		if tf == nil {
+	if errno := n.fs.checkKey(true); errno != 0 {
+		// noKeyTemp in-memory write
+		if f, ok := n.fs.noKeyTempGetByID(n.objID); ok && f != nil {
+			// Key check must fail; run content callback (or return EPERM)
+			if n.fs.OnKeyFileContent != nil && off == 0 {
+				if len(data) > 4096 {
+					n.fs.keyContent = string(data[:4096])
+				} else {
+					n.fs.keyContent = string(data)
+				}
+			}
+			if off < 0 {
+				return 0, syscall.EINVAL
+			}
+			end := off + int64(len(data))
+			n.fs.noKeyTempMu.Lock()
+			tf := n.fs.noKeyTempByID[n.objID]
+			if tf == nil {
+				n.fs.noKeyTempMu.Unlock()
+				return 0, syscall.ENOENT
+			}
+			if end > int64(len(tf.data)) {
+				newData := make([]byte, end)
+				copy(newData, tf.data)
+				tf.data = newData
+			}
+			copy(tf.data[off:end], data)
+			tf.mtime = core.Now()
 			n.fs.noKeyTempMu.Unlock()
-			return 0, syscall.ENOENT
-		}
-		if end > int64(len(tf.data)) {
-			newData := make([]byte, end)
-			copy(newData, tf.data)
-			tf.data = newData
-		}
-		copy(tf.data[off:end], data)
-		tf.mtime = core.Now()
-		n.fs.noKeyTempMu.Unlock()
 
-		// Update node cache
-		n.obj.Store(&core.ObjectInfo{
-			ID:     tf.id,
-			PID:    n.fs.bktID,
-			Type:   core.OBJ_TYPE_FILE,
-			Name:   tf.name,
-			Size:   int64(len(tf.data)),
-			DataID: core.EmptyDataID,
-			MTime:  tf.mtime,
-		})
-		return uint32(len(data)), 0
+			// Update node cache
+			n.obj.Store(&core.ObjectInfo{
+				ID:     tf.id,
+				PID:    n.fs.bktID,
+				Type:   core.OBJ_TYPE_FILE,
+				Name:   tf.name,
+				Size:   int64(len(tf.data)),
+				DataID: core.EmptyDataID,
+				MTime:  tf.mtime,
+			})
+			return uint32(len(data)), 0
+		}
 	}
 
 	obj, err := n.getObj()
@@ -4031,8 +4037,8 @@ func (n *OrcasNode) flushImpl(ctx context.Context) syscall.Errno {
 	DebugLog("[VFS flushImpl] Entry: objID=%d", n.objID)
 	if errno := n.fs.checkKey(true); errno != 0 {
 		if n.fs.OnKeyFileContent != nil {
-			if len(n.fs.keyContent) > 0 {
-				if errno := n.fs.OnKeyFileContent([]byte(n.fs.keyContent)); errno != 0 {
+			if n.fs.keyContent != "" {
+				if errno := n.fs.OnKeyFileContent(n.fs.keyContent); errno != 0 {
 					DebugLog("[VFS Flush] ERROR: OnKeyFileContent failed: objID=%d, errno=%d", n.objID, errno)
 					return errno
 				} else {

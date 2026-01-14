@@ -100,7 +100,7 @@ type OrcasFS struct {
 	KeyFileNameFilter func(fileName string) syscall.Errno
 	// OnKeyFileContent is called when Write happens while key check failed
 	// (RequireKey enabled but no key provided). Return 0 to allow; non-zero errno to reject.
-	OnKeyFileContent func(data []byte) syscall.Errno
+	OnKeyFileContent func(key string) syscall.Errno
 
 	keyContent string
 
@@ -108,9 +108,6 @@ type OrcasFS struct {
 	noKeyTempMu     sync.RWMutex
 	noKeyTempByID   map[int64]*noKeyTempFile
 	noKeyTempByName map[string]int64
-
-	attrMu sync.Mutex
-	attrs  map[int64]map[string][]byte
 }
 
 type noKeyTempFile struct {
@@ -405,24 +402,6 @@ func (fs *OrcasFS) checkKey(dontUseFallback ...bool) syscall.Errno {
 	// This should have been caught at mount time, but return EPERM as fallback
 	DebugLog("[VFS checkKey] ERROR: RequireKey is enabled but EndecKey is not provided")
 	return syscall.EPERM
-}
-
-// checkKeyWithCallback checks if KEY is required and calls OnKeyFileContent if checkKey fails.
-// This is used for Write operations.
-func (fs *OrcasFS) checkKeyWithCallback(data []byte) syscall.Errno {
-	errno := fs.checkKey(true)
-	if errno == 0 {
-		return 0
-	}
-	if fs.OnKeyFileContent != nil {
-		if len(data) > 4096 {
-			fs.keyContent = string(data[:4096])
-		} else {
-			fs.keyContent = string(data)
-		}
-		return 0
-	}
-	return errno
 }
 
 func (fs *OrcasFS) noKeyTempGetByID(id int64) (*noKeyTempFile, bool) {
