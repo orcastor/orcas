@@ -623,6 +623,9 @@ func hashBKRD(name string) int64 {
 	for _, c := range name {
 		hash = hash*31 + int64(c)
 	}
+	if hash > 0 {
+		return -hash
+	}
 	return hash
 }
 
@@ -676,6 +679,31 @@ func (n *OrcasNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut)
 					return childInode, 0
 				}
 			}
+			// Merge: also expose noKeyTemp files under root while key is missing.
+			if id, ok := n.fs.noKeyTempGetIDByName(name); ok {
+				if f, ok2 := n.fs.noKeyTempGetByID(id); ok2 && f != nil {
+					obj := &core.ObjectInfo{
+						ID:     f.id,
+						PID:    n.fs.bktID,
+						Type:   core.OBJ_TYPE_FILE,
+						Name:   f.name,
+						Size:   int64(len(f.data)),
+						DataID: core.EmptyDataID,
+						MTime:  f.mtime,
+					}
+					childNode := &OrcasNode{fs: n.fs, objID: f.id}
+					childNode.obj.Store(obj)
+					stableAttr := fs.StableAttr{Mode: syscall.S_IFREG, Ino: uint64(f.id)}
+					childInode := n.NewInode(ctx, childNode, stableAttr)
+					out.Mode = syscall.S_IFREG | 0o644
+					out.Size = uint64(obj.Size)
+					out.Mtime = uint64(obj.MTime)
+					out.Ctime = out.Mtime
+					out.Atime = out.Mtime
+					out.Ino = uint64(obj.ID)
+					return childInode, 0
+				}
+			}
 		}
 		// Not a fallback file, return ENOENT
 		return nil, syscall.ENOENT
@@ -683,28 +711,31 @@ func (n *OrcasNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut)
 
 	// If key check fails, try noKeyTemp entries in-memory (do not touch DB)
 	if errno := n.fs.checkKey(true); errno != 0 {
-		if id, ok := n.fs.noKeyTempGetIDByName(n.objID, name); ok {
-			if f, ok2 := n.fs.noKeyTempGetByID(id); ok2 && f != nil {
-				obj := &core.ObjectInfo{
-					ID:     f.id,
-					PID:    f.pid,
-					Type:   core.OBJ_TYPE_FILE,
-					Name:   f.name,
-					Size:   int64(len(f.data)),
-					DataID: core.EmptyDataID,
-					MTime:  f.mtime,
+		// noKeyTemp only exists at root
+		if n.objID == n.fs.bktID {
+			if id, ok := n.fs.noKeyTempGetIDByName(name); ok {
+				if f, ok2 := n.fs.noKeyTempGetByID(id); ok2 && f != nil {
+					obj := &core.ObjectInfo{
+						ID:     f.id,
+						PID:    n.fs.bktID,
+						Type:   core.OBJ_TYPE_FILE,
+						Name:   f.name,
+						Size:   int64(len(f.data)),
+						DataID: core.EmptyDataID,
+						MTime:  f.mtime,
+					}
+					childNode := &OrcasNode{fs: n.fs, objID: f.id}
+					childNode.obj.Store(obj)
+					stableAttr := fs.StableAttr{Mode: syscall.S_IFREG, Ino: uint64(f.id)}
+					childInode := n.NewInode(ctx, childNode, stableAttr)
+					out.Mode = syscall.S_IFREG | 0o644
+					out.Size = uint64(obj.Size)
+					out.Mtime = uint64(obj.MTime)
+					out.Ctime = out.Mtime
+					out.Atime = out.Mtime
+					out.Ino = uint64(obj.ID)
+					return childInode, 0
 				}
-				childNode := &OrcasNode{fs: n.fs, objID: f.id}
-				childNode.obj.Store(obj)
-				stableAttr := fs.StableAttr{Mode: syscall.S_IFREG, Ino: uint64(f.id)}
-				childInode := n.NewInode(ctx, childNode, stableAttr)
-				out.Mode = syscall.S_IFREG | 0o644
-				out.Size = uint64(obj.Size)
-				out.Mtime = uint64(obj.MTime)
-				out.Ctime = out.Mtime
-				out.Atime = out.Mtime
-				out.Ino = uint64(obj.ID)
-				return childInode, 0
 			}
 		}
 		DebugLog("[VFS Lookup] ERROR: checkKey failed: parentID=%d, name=%s, errno=%d", n.objID, name, errno)
@@ -857,7 +888,9 @@ func (n *OrcasNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
 			// Return fallback files for root directory
 			DebugLog("[VFS Readdir] Using fallback files for root directory")
 			files := n.fs.GetFallbackFiles()
-			entries := make([]fuse.DirEntry, 0, len(files)+2)
+			// Merge in-memory temp files created under no-key mode into the listing.
+			temp := n.fs.noKeyTempList()
+			entries := make([]fuse.DirEntry, 0, len(files)+len(temp)+2)
 			// Add . and ..
 			entries = append(entries, fuse.DirEntry{
 				Name: ".",
@@ -880,6 +913,14 @@ func (n *OrcasNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
 					Ino:  uint64(fallbackFileID),
 				})
 			}
+			// Add noKeyTemp files (read/write in-memory)
+			for fileName, id := range temp {
+				entries = append(entries, fuse.DirEntry{
+					Name: fileName,
+					Mode: syscall.S_IFREG | 0o644,
+					Ino:  uint64(id),
+				})
+			}
 			return fs.NewListDirStream(entries), 0
 		} else {
 			// Non-root directory, return empty (fallback files only in root)
@@ -890,7 +931,10 @@ func (n *OrcasNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
 
 	if errno := n.fs.checkKey(); errno != 0 {
 		// Key check failed: still expose noKeyTemp in-memory files under this directory.
-		temp := n.fs.noKeyTempList(n.objID)
+		if n.objID != n.fs.bktID {
+			return fs.NewListDirStream([]fuse.DirEntry{}), 0
+		}
+		temp := n.fs.noKeyTempList()
 		entries := make([]fuse.DirEntry, 0, len(temp)+2)
 		entries = append(entries, fuse.DirEntry{Name: ".", Mode: syscall.S_IFDIR, Ino: uint64(n.objID)})
 		entries = append(entries, fuse.DirEntry{Name: "..", Mode: syscall.S_IFDIR, Ino: uint64(n.objID)})
@@ -1264,64 +1308,65 @@ func (n *OrcasNode) Create(ctx context.Context, name string, flags uint32, mode 
 	DebugLog("[VFS Create] Entry: name=%s, parentID=%d, flags=0x%x, mode=0%o", name, n.objID, flags, mode)
 	// If key check fails (RequireKey enabled but no key), create in-memory inode (do NOT touch DB).
 	if keyErrno := n.fs.checkKey(true); keyErrno != 0 {
-		if n.fs.KeyCheckFailedFileNameFilter == nil {
-			return nil, nil, 0, keyErrno
-		}
-		if filterErrno := n.fs.KeyCheckFailedFileNameFilter(name); filterErrno != 0 {
-			return nil, nil, 0, filterErrno
-		}
-
-		parentID := n.objID
-		// If exists, respect O_EXCL
-		if existingID, ok := n.fs.noKeyTempGetIDByName(parentID, name); ok {
-			if flags&syscall.O_EXCL != 0 {
-				return nil, nil, 0, syscall.EEXIST
+		if n.isRoot {
+			if n.fs.KeyCheckFailedFileNameFilter == nil {
+				return nil, nil, 0, keyErrno
 			}
-			if f, ok2 := n.fs.noKeyTempGetByID(existingID); ok2 && f != nil {
-				obj := &core.ObjectInfo{
-					ID:     f.id,
-					PID:    f.pid,
-					Type:   core.OBJ_TYPE_FILE,
-					Name:   f.name,
-					Size:   int64(len(f.data)),
-					DataID: core.EmptyDataID,
-					MTime:  f.mtime,
+			if filterErrno := n.fs.KeyCheckFailedFileNameFilter(name); filterErrno != 0 {
+				return nil, nil, 0, filterErrno
+			}
+
+			// If exists, respect O_EXCL
+			if existingID, ok := n.fs.noKeyTempGetIDByName(name); ok {
+				if flags&syscall.O_EXCL != 0 {
+					return nil, nil, 0, syscall.EEXIST
 				}
-				fileNode := &OrcasNode{fs: n.fs, objID: f.id}
-				fileNode.obj.Store(obj)
-				stableAttr := fs.StableAttr{Mode: syscall.S_IFREG, Ino: uint64(f.id)}
-				fileInode := n.NewInode(ctx, fileNode, stableAttr)
-				out.Mode = syscall.S_IFREG | 0o644
-				out.Size = uint64(obj.Size)
-				out.Mtime = uint64(obj.MTime)
-				out.Ctime = out.Mtime
-				out.Atime = out.Mtime
-				out.Ino = uint64(obj.ID)
-				return fileInode, fileNode, 0, 0
+				if f, ok2 := n.fs.noKeyTempGetByID(existingID); ok2 && f != nil {
+					obj := &core.ObjectInfo{
+						ID:     f.id,
+						PID:    n.fs.bktID,
+						Type:   core.OBJ_TYPE_FILE,
+						Name:   f.name,
+						Size:   int64(len(f.data)),
+						DataID: core.EmptyDataID,
+						MTime:  f.mtime,
+					}
+					fileNode := &OrcasNode{fs: n.fs, objID: f.id}
+					fileNode.obj.Store(obj)
+					stableAttr := fs.StableAttr{Mode: syscall.S_IFREG, Ino: uint64(f.id)}
+					fileInode := n.NewInode(ctx, fileNode, stableAttr)
+					out.Mode = syscall.S_IFREG | 0o644
+					out.Size = uint64(obj.Size)
+					out.Mtime = uint64(obj.MTime)
+					out.Ctime = out.Mtime
+					out.Atime = out.Mtime
+					out.Ino = uint64(obj.ID)
+					return fileInode, fileNode, 0, 0
+				}
 			}
-		}
 
-		f := n.fs.noKeyTempCreate(parentID, name)
-		obj := &core.ObjectInfo{
-			ID:     f.id,
-			PID:    f.pid,
-			Type:   core.OBJ_TYPE_FILE,
-			Name:   f.name,
-			Size:   0,
-			DataID: core.EmptyDataID,
-			MTime:  f.mtime,
+			f := n.fs.noKeyTempCreate(name)
+			obj := &core.ObjectInfo{
+				ID:     f.id,
+				PID:    n.fs.bktID,
+				Type:   core.OBJ_TYPE_FILE,
+				Name:   f.name,
+				Size:   0,
+				DataID: core.EmptyDataID,
+				MTime:  f.mtime,
+			}
+			fileNode := &OrcasNode{fs: n.fs, objID: f.id}
+			fileNode.obj.Store(obj)
+			stableAttr := fs.StableAttr{Mode: syscall.S_IFREG, Ino: uint64(f.id)}
+			fileInode := n.NewInode(ctx, fileNode, stableAttr)
+			out.Mode = syscall.S_IFREG | 0o644
+			out.Size = 0
+			out.Mtime = uint64(obj.MTime)
+			out.Ctime = out.Mtime
+			out.Atime = out.Mtime
+			out.Ino = uint64(obj.ID)
+			return fileInode, fileNode, 0, 0
 		}
-		fileNode := &OrcasNode{fs: n.fs, objID: f.id}
-		fileNode.obj.Store(obj)
-		stableAttr := fs.StableAttr{Mode: syscall.S_IFREG, Ino: uint64(f.id)}
-		fileInode := n.NewInode(ctx, fileNode, stableAttr)
-		out.Mode = syscall.S_IFREG | 0o644
-		out.Size = 0
-		out.Mtime = uint64(obj.MTime)
-		out.Ctime = out.Mtime
-		out.Atime = out.Mtime
-		out.Ino = uint64(obj.ID)
-		return fileInode, fileNode, 0, 0
 	}
 
 	obj, err := n.getObj()
@@ -3617,34 +3662,34 @@ func (n *OrcasNode) readImpl(ctx context.Context, dest []byte, off int64) (fuse.
 		}
 
 		if fileName == "" {
-			DebugLog("[VFS Read] ERROR: Fallback file not found: objID=%d", n.objID)
-			return nil, syscall.ENOENT
+			// Not a fallback file ID; fall through so noKeyTemp or normal path can handle it.
+		} else {
+
+			// Read from fallback file content
+			contentBytes := []byte(fileContent)
+			fileSize := int64(len(contentBytes))
+
+			if off >= fileSize {
+				// Offset beyond file size, return empty
+				return fuse.ReadResultData(nil), 0
+			}
+
+			// Calculate how much to read
+			readSize := int64(len(dest))
+			if off+readSize > fileSize {
+				readSize = fileSize - off
+			}
+
+			// Copy data to dest buffer
+			nRead := copy(dest, contentBytes[off:off+readSize])
+
+			// Create result copy (required by go-fuse v2)
+			resultData := make([]byte, nRead)
+			copy(resultData, dest[:nRead])
+
+			DebugLog("[VFS Read] Successfully read fallback file: fileName=%s, objID=%d, offset=%d, requested=%d, read=%d", fileName, n.objID, off, len(dest), nRead)
+			return fuse.ReadResultData(resultData), 0
 		}
-
-		// Read from fallback file content
-		contentBytes := []byte(fileContent)
-		fileSize := int64(len(contentBytes))
-
-		if off >= fileSize {
-			// Offset beyond file size, return empty
-			return fuse.ReadResultData(nil), 0
-		}
-
-		// Calculate how much to read
-		readSize := int64(len(dest))
-		if off+readSize > fileSize {
-			readSize = fileSize - off
-		}
-
-		// Copy data to dest buffer
-		nRead := copy(dest, contentBytes[off:off+readSize])
-
-		// Create result copy (required by go-fuse v2)
-		resultData := make([]byte, nRead)
-		copy(resultData, dest[:nRead])
-
-		DebugLog("[VFS Read] Successfully read fallback file: fileName=%s, objID=%d, offset=%d, requested=%d, read=%d", fileName, n.objID, off, len(dest), nRead)
-		return fuse.ReadResultData(resultData), 0
 	}
 
 	// noKeyTemp in-memory file read (only exists when key check failed Create/Open happened)
@@ -3900,7 +3945,7 @@ func (n *OrcasNode) writeImpl(ctx context.Context, data []byte, off int64) (writ
 		// Update node cache
 		n.obj.Store(&core.ObjectInfo{
 			ID:     tf.id,
-			PID:    tf.pid,
+			PID:    n.fs.bktID,
 			Type:   core.OBJ_TYPE_FILE,
 			Name:   tf.name,
 			Size:   int64(len(tf.data)),

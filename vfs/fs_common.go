@@ -103,15 +103,13 @@ type OrcasFS struct {
 	OnKeyCheckFailedWriteFileContent func(fileName string, data []byte) syscall.Errno
 
 	// noKeyTemp: in-memory temp files created when key check failed. Never persisted to DB.
-	noKeyTempMu       sync.RWMutex
-	noKeyTempNextID   int64
-	noKeyTempByID     map[int64]*noKeyTempFile
-	noKeyTempByParent map[int64]map[string]int64
+	noKeyTempMu     sync.RWMutex
+	noKeyTempByID   map[int64]*noKeyTempFile
+	noKeyTempByName map[string]int64
 }
 
 type noKeyTempFile struct {
 	id    int64
-	pid   int64
 	name  string
 	data  []byte
 	mtime int64
@@ -185,9 +183,8 @@ func NewOrcasFSWithConfig(h core.Handler, c core.Ctx, bktID int64, cfg *core.Con
 		requireKey: reqKey,
 		Config:     config,
 		// init noKeyTemp with very negative IDs to avoid collisions
-		noKeyTempNextID:   -1_000_000_000_000,
-		noKeyTempByID:     make(map[int64]*noKeyTempFile),
-		noKeyTempByParent: make(map[int64]map[string]int64),
+		noKeyTempByID:   make(map[int64]*noKeyTempFile),
+		noKeyTempByName: make(map[string]int64),
 	}
 
 	// Initialize journal manager
@@ -299,6 +296,13 @@ func (fs *OrcasFS) SetEndecKey(key string) {
 		return
 	}
 	fs.Config.EndecKey = key
+	// When key is set, clear all no-key temporary in-memory files.
+	if key != "" {
+		fs.noKeyTempMu.Lock()
+		fs.noKeyTempByID = make(map[int64]*noKeyTempFile)
+		fs.noKeyTempByName = make(map[string]int64)
+		fs.noKeyTempMu.Unlock()
+	}
 }
 
 // getEndecKeyForFS returns the encryption key for a given OrcasFS
@@ -422,50 +426,47 @@ func (fs *OrcasFS) noKeyTempGetByID(id int64) (*noKeyTempFile, bool) {
 	return f, ok
 }
 
-func (fs *OrcasFS) noKeyTempGetIDByName(parentID int64, name string) (int64, bool) {
+func (fs *OrcasFS) noKeyTempGetIDByName(name string) (int64, bool) {
 	fs.noKeyTempMu.RLock()
 	defer fs.noKeyTempMu.RUnlock()
-	m, ok := fs.noKeyTempByParent[parentID]
-	if !ok {
-		return 0, false
-	}
-	id, ok := m[name]
+	id, ok := fs.noKeyTempByName[name]
 	return id, ok
 }
 
-func (fs *OrcasFS) noKeyTempList(parentID int64) map[string]int64 {
+func (fs *OrcasFS) noKeyTempList() map[string]int64 {
 	fs.noKeyTempMu.RLock()
 	defer fs.noKeyTempMu.RUnlock()
-	out := make(map[string]int64)
-	m := fs.noKeyTempByParent[parentID]
-	for k, v := range m {
+	out := make(map[string]int64, len(fs.noKeyTempByName))
+	for k, v := range fs.noKeyTempByName {
 		out[k] = v
 	}
 	return out
 }
 
-func (fs *OrcasFS) noKeyTempCreate(parentID int64, name string) *noKeyTempFile {
+func (fs *OrcasFS) noKeyTempCreate(name string) *noKeyTempFile {
 	fs.noKeyTempMu.Lock()
 	defer fs.noKeyTempMu.Unlock()
-	if fs.noKeyTempByParent[parentID] == nil {
-		fs.noKeyTempByParent[parentID] = make(map[string]int64)
-	}
-	if existingID, ok := fs.noKeyTempByParent[parentID][name]; ok {
-		if f, ok2 := fs.noKeyTempByID[existingID]; ok2 {
+	if existingID, ok := fs.noKeyTempByName[name]; ok {
+		if f, ok2 := fs.noKeyTempByID[existingID]; ok2 && f != nil {
 			return f
 		}
 	}
-	id := fs.noKeyTempNextID
-	fs.noKeyTempNextID--
+	// Base ID derived from filename, consistent with fallback IDs
+	id := hashBKRD(name)
+	// If already exists, treat as "same name" and reuse (no collision probing).
+	// Note: hash collisions will be treated as the same file by design.
+	if existing, exists := fs.noKeyTempByID[id]; exists && existing != nil {
+		fs.noKeyTempByName[name] = existing.id
+		return existing
+	}
 	f := &noKeyTempFile{
 		id:    id,
-		pid:   parentID,
 		name:  name,
 		data:  nil,
 		mtime: core.Now(),
 	}
 	fs.noKeyTempByID[id] = f
-	fs.noKeyTempByParent[parentID][name] = id
+	fs.noKeyTempByName[name] = id
 	return f
 }
 
