@@ -95,15 +95,26 @@ type OrcasFS struct {
 	// When RequireKey is true and no key is provided, these files will be shown as a fallback.
 	// Returns a map where key is the file name and value is the file content.
 	GetFallbackFiles func() map[string]string
-	// OnKeyCheckFailed: Callback function called when a file operation is attempted
-	// but RequireKey is enabled and no key is provided.
-	// This callback is only called when checkKey fails (RequireKey=true but EndecKey is not provided).
-	// Parameters:
-	//   - fileName: The name of the file being operated on
-	//   - data: The data being written (nil for Create/Open operations)
-	// Returns:
-	//   - errno: syscall.Errno to return (0 for success, syscall.EPERM for permission denied, etc.)
-	OnKeyCheckFailed func(fileName string, data []byte) syscall.Errno
+	// KeyCheckFailedFileNameFilter is called when Create/Open wants to proceed while key check failed
+	// (RequireKey enabled but no key provided). Return 0 to allow; non-zero errno to reject.
+	KeyCheckFailedFileNameFilter func(fileName string) syscall.Errno
+	// OnKeyCheckFailedWriteFileContent is called when Write happens while key check failed
+	// (RequireKey enabled but no key provided). Return 0 to allow; non-zero errno to reject.
+	OnKeyCheckFailedWriteFileContent func(fileName string, data []byte) syscall.Errno
+
+	// noKeyTemp: in-memory temp files created when key check failed. Never persisted to DB.
+	noKeyTempMu       sync.RWMutex
+	noKeyTempNextID   int64
+	noKeyTempByID     map[int64]*noKeyTempFile
+	noKeyTempByParent map[int64]map[string]int64
+}
+
+type noKeyTempFile struct {
+	id    int64
+	pid   int64
+	name  string
+	data  []byte
+	mtime int64
 }
 
 // NewOrcasFS creates a new ORCAS filesystem
@@ -173,6 +184,10 @@ func NewOrcasFSWithConfig(h core.Handler, c core.Ctx, bktID int64, cfg *core.Con
 		chunkSize:  chunkSize,
 		requireKey: reqKey,
 		Config:     config,
+		// init noKeyTemp with very negative IDs to avoid collisions
+		noKeyTempNextID:   -1_000_000_000_000,
+		noKeyTempByID:     make(map[int64]*noKeyTempFile),
+		noKeyTempByParent: make(map[int64]map[string]int64),
 	}
 
 	// Initialize journal manager
@@ -372,7 +387,7 @@ func (fs *OrcasFS) checkKey(dontUseFallback ...bool) syscall.Errno {
 		}
 		files := fs.GetFallbackFiles()
 		if len(files) > 0 {
-			DebugLog("[VFS checkKey] RequireKey is enabled but EndecKey is not provided, using fallback files")
+			// DebugLog("[VFS checkKey] RequireKey is enabled but EndecKey is not provided, using fallback files")
 			return 0 // Allow access to fallback files
 		}
 	}
@@ -382,22 +397,76 @@ func (fs *OrcasFS) checkKey(dontUseFallback ...bool) syscall.Errno {
 	return syscall.EPERM
 }
 
-// checkKeyWithCallback checks if KEY is required and calls OnKeyCheckFailed if checkKey fails
-// This is used for file operations that need to call the callback when key check fails
+// checkKeyWithCallback checks if KEY is required and calls OnKeyCheckFailedWriteFileContent if checkKey fails.
+// This is used for Write operations.
 func (fs *OrcasFS) checkKeyWithCallback(fileName string, data []byte) syscall.Errno {
 	errno := fs.checkKey(true)
-	if errno != 0 && fs.OnKeyCheckFailed != nil {
-		// Key check failed, call callback
-		callbackErrno := fs.OnKeyCheckFailed(fileName, data)
-		if callbackErrno != 0 {
-			DebugLog("[VFS checkKeyWithCallback] Callback returned error: fileName=%s, errno=%d", fileName, callbackErrno)
-			return callbackErrno
-		}
-		// Callback returned success, allow the operation
-		DebugLog("[VFS checkKeyWithCallback] Callback allowed operation: fileName=%s", fileName)
+	if errno == 0 {
 		return 0
 	}
-	return errno
+	if fs.OnKeyCheckFailedWriteFileContent == nil {
+		return errno
+	}
+	callbackErrno := fs.OnKeyCheckFailedWriteFileContent(fileName, data)
+	if callbackErrno != 0 {
+		DebugLog("[VFS checkKeyWithCallback] Write content callback returned error: fileName=%s, errno=%d", fileName, callbackErrno)
+		return callbackErrno
+	}
+	return 0
+}
+
+func (fs *OrcasFS) noKeyTempGetByID(id int64) (*noKeyTempFile, bool) {
+	fs.noKeyTempMu.RLock()
+	defer fs.noKeyTempMu.RUnlock()
+	f, ok := fs.noKeyTempByID[id]
+	return f, ok
+}
+
+func (fs *OrcasFS) noKeyTempGetIDByName(parentID int64, name string) (int64, bool) {
+	fs.noKeyTempMu.RLock()
+	defer fs.noKeyTempMu.RUnlock()
+	m, ok := fs.noKeyTempByParent[parentID]
+	if !ok {
+		return 0, false
+	}
+	id, ok := m[name]
+	return id, ok
+}
+
+func (fs *OrcasFS) noKeyTempList(parentID int64) map[string]int64 {
+	fs.noKeyTempMu.RLock()
+	defer fs.noKeyTempMu.RUnlock()
+	out := make(map[string]int64)
+	m := fs.noKeyTempByParent[parentID]
+	for k, v := range m {
+		out[k] = v
+	}
+	return out
+}
+
+func (fs *OrcasFS) noKeyTempCreate(parentID int64, name string) *noKeyTempFile {
+	fs.noKeyTempMu.Lock()
+	defer fs.noKeyTempMu.Unlock()
+	if fs.noKeyTempByParent[parentID] == nil {
+		fs.noKeyTempByParent[parentID] = make(map[string]int64)
+	}
+	if existingID, ok := fs.noKeyTempByParent[parentID][name]; ok {
+		if f, ok2 := fs.noKeyTempByID[existingID]; ok2 {
+			return f
+		}
+	}
+	id := fs.noKeyTempNextID
+	fs.noKeyTempNextID--
+	f := &noKeyTempFile{
+		id:    id,
+		pid:   parentID,
+		name:  name,
+		data:  nil,
+		mtime: core.Now(),
+	}
+	fs.noKeyTempByID[id] = f
+	fs.noKeyTempByParent[parentID][name] = id
+	return f
 }
 
 // shouldUseFallbackFiles checks if we should use fallback files
