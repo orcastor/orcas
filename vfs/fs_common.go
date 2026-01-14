@@ -375,13 +375,25 @@ func (fs *OrcasFS) getBucketConfig() *core.BucketInfo {
 // Returns 0 if key is present or if fallback files are available
 // Note: This should not happen if mount-time validation is working correctly,
 // but we keep this check as a safety measure
-func (fs *OrcasFS) checkKey() syscall.Errno {
+func (fs *OrcasFS) checkKey(dontUseFallback ...bool) syscall.Errno {
 	if !fs.requireKey {
 		return 0 // Key not required
 	}
 	// Check if EndecKey exists in OrcasFS.Config
 	if fs.Config.EndecKey != "" {
 		return 0 // Key is present
+	}
+	// Key is required but not provided
+	// If fallback files are configured, allow read-only access to them
+	if fs.GetFallbackFiles != nil {
+		if len(dontUseFallback) > 0 && dontUseFallback[0] {
+			return syscall.EPERM
+		}
+		files := fs.GetFallbackFiles()
+		if len(files) > 0 {
+			// DebugLog("[VFS checkKey] RequireKey is enabled but EndecKey is not provided, using fallback files")
+			return 0 // Allow access to fallback files
+		}
 	}
 	// Key is required but not provided and no fallback files
 	// This should have been caught at mount time, but return EPERM as fallback
@@ -392,7 +404,7 @@ func (fs *OrcasFS) checkKey() syscall.Errno {
 // checkKeyWithCallback checks if KEY is required and calls OnKeyCheckFailedWriteFileContent if checkKey fails.
 // This is used for Write operations.
 func (fs *OrcasFS) checkKeyWithCallback(fileName string, data []byte) syscall.Errno {
-	errno := fs.checkKey()
+	errno := fs.checkKey(true)
 	if errno == 0 {
 		return 0
 	}

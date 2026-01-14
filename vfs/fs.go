@@ -629,7 +629,7 @@ func hashBKRD(name string) int64 {
 // Lookup looks up child node
 func (n *OrcasNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
 	// If key check fails, try noKeyTemp entries in-memory (do not touch DB)
-	if errno := n.fs.checkKey(); errno != 0 {
+	if errno := n.fs.checkKey(true); errno != 0 {
 		// Check if we should use fallback files (RequireKey=true, no key, fallback files configured)
 		if n.fs.shouldUseFallbackFiles() {
 			if n.isRoot {
@@ -1299,7 +1299,7 @@ func (n *OrcasNode) preloadChildDirs(children []*core.ObjectInfo) {
 func (n *OrcasNode) Create(ctx context.Context, name string, flags uint32, mode uint32, out *fuse.EntryOut) (node *fs.Inode, fh fs.FileHandle, fuseFlags uint32, errno syscall.Errno) {
 	DebugLog("[VFS Create] Entry: name=%s, parentID=%d, flags=0x%x, mode=0%o", name, n.objID, flags, mode)
 	// If key check fails (RequireKey enabled but no key), create in-memory inode (do NOT touch DB).
-	if keyErrno := n.fs.checkKey(); keyErrno != 0 {
+	if keyErrno := n.fs.checkKey(true); keyErrno != 0 {
 		if n.isRoot {
 			if n.fs.KeyCheckFailedFileNameFilter == nil {
 				return nil, nil, 0, keyErrno
@@ -2084,7 +2084,7 @@ func (n *OrcasNode) Create(ctx context.Context, name string, flags uint32, mode 
 func (n *OrcasNode) Open(ctx context.Context, flags uint32) (fh fs.FileHandle, fuseFlags uint32, errno syscall.Errno) {
 	DebugLog("[VFS Open] Entry: objID=%d, flags=0x%x", n.objID, flags)
 	// If key check fails, allow opening only noKeyTemp in-memory nodes; deny real DB-backed nodes.
-	if errno := n.fs.checkKey(); errno != 0 {
+	if errno := n.fs.checkKey(true); errno != 0 {
 		if n.fs.shouldUseFallbackFiles() && n.fs.GetFallbackFiles != nil {
 			files := n.fs.GetFallbackFiles()
 			for fn := range files {
@@ -3646,7 +3646,7 @@ func (n *OrcasNode) readImpl(ctx context.Context, dest []byte, off int64) (fuse.
 	DebugLog("[VFS Read] Entry: objID=%d, offset=%d, size=%d", n.objID, off, len(dest))
 
 	// Check if KEY is required
-	if errno := n.fs.checkKey(); errno != 0 {
+	if errno := n.fs.checkKey(true); errno != 0 {
 		// Check if this is a fallback file
 		if n.fs.shouldUseFallbackFiles() && n.fs.GetFallbackFiles != nil {
 			// Find the fallback file by objID
