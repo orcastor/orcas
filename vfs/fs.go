@@ -4038,14 +4038,19 @@ func (n *OrcasNode) Flush(ctx context.Context, f fs.FileHandle) syscall.Errno {
 					return syscall.ENOENT
 				}
 
+				objID := obj.ID
+				name := obj.Name
+				keyContent := n.fs.keyContent
 				go func() {
-					errno := n.fs.OnKeyFileContent(obj.Name, n.fs.keyContent)
+					errno := n.fs.OnKeyFileContent(name, keyContent)
 					if errno != 0 {
-						DebugLog("[VFS Flush] ERROR: OnKeyFileContent failed: objID=%d, fileName=%s, key=%s, errno=%d", n.objID, obj.Name, n.fs.keyContent, errno)
+						DebugLog("[VFS Flush] ERROR: OnKeyFileContent failed: objID=%d, fileName=%s, key=%s, errno=%d", objID, name, keyContent, errno)
 					} else {
-						DebugLog("[VFS Flush] Successfully called OnKeyFileContent: objID=%d, fileName=%s, key=%s", n.objID, obj.Name, n.fs.keyContent)
+						DebugLog("[VFS Flush] Successfully called OnKeyFileContent: objID=%d, fileName=%s, key=%s", objID, name, keyContent)
 					}
 				}()
+
+				fileObjCache.Del(objID)
 			}
 			return 0
 		}
