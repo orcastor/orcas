@@ -3504,7 +3504,7 @@ func (n *OrcasNode) readImpl(ctx context.Context, dest []byte, off int64) (fuse.
 	DebugLog("[VFS Read] Entry: objID=%d, offset=%d, size=%d", n.objID, off, len(dest))
 
 	// Check if this is a fallback file (negative objID)
-	if n.objID < 0 && n.fs.shouldUseFallbackFiles() && n.fs.GetFallbackFiles != nil {
+	if n.fs.shouldUseFallbackFiles() && n.fs.GetFallbackFiles != nil {
 		// Find the fallback file by objID
 		// We need to match the objID with the filename hash used in Lookup
 		var fileName string
