@@ -610,14 +610,6 @@ func getMode(objType int) uint32 {
 	}
 }
 
-// abs returns the absolute value of an int64
-func abs(x int64) int64 {
-	if x < 0 {
-		return -x
-	}
-	return x
-}
-
 func hashBKRD(name string) int64 {
 	hash := int64(0)
 	for _, c := range name {
@@ -874,7 +866,7 @@ func (n *OrcasNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut)
 // Optimized: uses interface-level cache to avoid rebuilding entries every time
 // Implements delayed cache refresh: marks cache as stale instead of immediately deleting
 func (n *OrcasNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
-	if errno := n.fs.checkKey(); errno != 0 {
+	if errno := n.fs.checkKey(true); errno != 0 {
 		// Check if we should use fallback files (RequireKey=true, no key, fallback files configured)
 		if n.fs.shouldUseFallbackFiles() {
 			if n.isRoot {
