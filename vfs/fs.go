@@ -541,10 +541,7 @@ func (n *OrcasNode) invalidateDirListCache(dirID int64) {
 // Getattr gets file/directory attributes
 func (n *OrcasNode) Getattr(ctx context.Context, f fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
 	if !n.isRoot {
-		if errno := n.fs.checkKey(true); errno != 0 {
-			if n.fs.OnKeyFileContent != nil {
-				return 0
-			}
+		if errno := n.fs.checkKey(); errno != 0 {
 			DebugLog("[VFS Getattr] ERROR: checkKey failed: objID=%d, errno=%d", n.objID, errno)
 			return errno
 		}
@@ -552,6 +549,9 @@ func (n *OrcasNode) Getattr(ctx context.Context, f fs.FileHandle, out *fuse.Attr
 
 	obj, err := n.getObj()
 	if err != nil {
+		if n.fs.OnKeyFileContent != nil {
+			return 0
+		}
 		DebugLog("[VFS Getattr] ERROR: Failed to get object: objID=%d, error=%v", n.objID, err)
 		return syscall.ENOENT
 	}
