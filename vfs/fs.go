@@ -541,7 +541,10 @@ func (n *OrcasNode) invalidateDirListCache(dirID int64) {
 // Getattr gets file/directory attributes
 func (n *OrcasNode) Getattr(ctx context.Context, f fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
 	if !n.isRoot {
-		if errno := n.fs.checkKey(); errno != 0 {
+		if errno := n.fs.checkKey(true); errno != 0 {
+			if n.fs.shouldUseFallbackFiles() {
+				return 0
+			}
 			DebugLog("[VFS Getattr] ERROR: checkKey failed: objID=%d, errno=%d", n.objID, errno)
 			return errno
 		}
@@ -610,7 +613,7 @@ func getMode(objType int) uint32 {
 	}
 }
 
-func hashBKRD(name string) int64 {
+func hashBKDR(name string) int64 {
 	hash := int64(0)
 	for _, c := range name {
 		hash = hash*31 + int64(c)
@@ -633,7 +636,7 @@ func (n *OrcasNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut)
 					// Generate consistent negative ID based on filename hash
 					// Use simple hash to ensure same filename always gets same ID
 					// Ensure it's negative and within reasonable range
-					fallbackFileID := hashBKRD(name)
+					fallbackFileID := hashBKDR(name)
 					// Create a fake ObjectInfo for the fallback file
 					fallbackObj := &core.ObjectInfo{
 						ID:   fallbackFileID,
@@ -888,7 +891,7 @@ func (n *OrcasNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
 				// Use negative file IDs to distinguish from real files
 				for fileName := range files {
 					// Generate consistent negative ID based on filename hash
-					fallbackFileID := hashBKRD(fileName)
+					fallbackFileID := hashBKDR(fileName)
 					entries = append(entries, fuse.DirEntry{
 						Name: fileName,
 						Mode: syscall.S_IFREG | 0444, // Read-only regular file
@@ -1290,10 +1293,10 @@ func (n *OrcasNode) Create(ctx context.Context, name string, flags uint32, mode 
 	// If key check fails (RequireKey enabled but no key), create in-memory inode (do NOT touch DB).
 	if keyErrno := n.fs.checkKey(true); keyErrno != 0 {
 		if n.isRoot {
-			if n.fs.KeyCheckFailedFileNameFilter == nil {
+			if n.fs.KeyFileNameFilter == nil {
 				return nil, nil, 0, keyErrno
 			}
-			if filterErrno := n.fs.KeyCheckFailedFileNameFilter(name); filterErrno != 0 {
+			if filterErrno := n.fs.KeyFileNameFilter(name); filterErrno != 0 {
 				return nil, nil, 0, filterErrno
 			}
 
@@ -2078,7 +2081,7 @@ func (n *OrcasNode) Open(ctx context.Context, flags uint32) (fh fs.FileHandle, f
 			files := n.fs.GetFallbackFiles()
 			for fn := range files {
 				DebugLog("[VFS Open] Checking fallback file: fileName=%s, objID=%d", fn, n.objID)
-				if hashBKRD(fn) == n.objID {
+				if hashBKDR(fn) == n.objID {
 					return n, 0, 0
 				}
 			}
@@ -2176,10 +2179,9 @@ func (n *OrcasNode) Open(ctx context.Context, flags uint32) (fh fs.FileHandle, f
 	DebugLog("[VFS Open] File open mode: fileID=%d, isWriteMode=%v, hasLargeFileFlag=%v, flags=0x%x (O_WRONLY=0x%x, O_RDWR=0x%x, O_CREAT=0x%x, O_TRUNC=0x%x, O_EXCL=0x%x)",
 		obj.ID, isWriteMode, hasLargeFileFlag, flags, syscall.O_WRONLY, syscall.O_RDWR, syscall.O_CREAT, syscall.O_TRUNC, syscall.O_EXCL)
 
-	// Check if KEY is required and call callback if check fails (for write mode)
-	if isWriteMode {
-		if errno := n.fs.checkKeyWithCallback(obj.Name, nil); errno != 0 {
-			DebugLog("[VFS Open] ERROR: checkKeyWithCallback failed: fileID=%d, fileName=%s, errno=%d", obj.ID, obj.Name, errno)
+	if isWriteMode && n.fs.KeyFileNameFilter != nil {
+		if errno := n.fs.KeyFileNameFilter(obj.Name); errno != 0 {
+			DebugLog("[VFS Open] ERROR: checkKeyWithCallback failed: fileID=%d, errno=%d", obj.ID, errno)
 			return nil, 0, errno
 		}
 	}
@@ -3645,7 +3647,7 @@ func (n *OrcasNode) readImpl(ctx context.Context, dest []byte, off int64) (fuse.
 			files := n.fs.GetFallbackFiles()
 			for fn, content := range files {
 				// Generate the same hash as in Lookup
-				fallbackFileID := hashBKRD(fn)
+				fallbackFileID := hashBKDR(fn)
 				if fallbackFileID == n.objID {
 					fileName = fn
 					fileContent = content
@@ -3911,7 +3913,7 @@ func (n *OrcasNode) writeImpl(ctx context.Context, data []byte, off int64) (writ
 	// noKeyTemp in-memory write
 	if f, ok := n.fs.noKeyTempGetByID(n.objID); ok && f != nil {
 		// Key check must fail; run content callback (or return EPERM)
-		if errno := n.fs.checkKeyWithCallback(f.name, data); errno != 0 {
+		if errno := n.fs.checkKeyWithCallback(data); errno != 0 {
 			return 0, errno
 		}
 		if off < 0 {
@@ -3983,12 +3985,6 @@ func (n *OrcasNode) writeImpl(ctx context.Context, data []byte, off int64) (writ
 		return 0, syscall.EISDIR
 	}
 
-	// Check if KEY is required and call callback if check fails (before writing)
-	if errno := n.fs.checkKeyWithCallback(obj.Name, data); errno != 0 {
-		DebugLog("[VFS Write] ERROR: checkKeyWithCallback failed: fileID=%d, fileName=%s, errno=%d", obj.ID, obj.Name, errno)
-		return 0, errno
-	}
-
 	// Get or create RandomAccessor (has internal lock, but releases quickly)
 	ra, err := n.getRandomAccessor()
 	if err != nil {
@@ -4033,7 +4029,18 @@ func (n *OrcasNode) Flush(ctx context.Context, f fs.FileHandle) syscall.Errno {
 // flushImpl is the actual flush implementation
 func (n *OrcasNode) flushImpl(ctx context.Context) syscall.Errno {
 	DebugLog("[VFS flushImpl] Entry: objID=%d", n.objID)
-	if errno := n.fs.checkKey(); errno != 0 {
+	if errno := n.fs.checkKey(true); errno != 0 {
+		if n.fs.OnKeyFileContent != nil {
+			if len(n.fs.keyContent) > 0 {
+				if errno := n.fs.OnKeyFileContent([]byte(n.fs.keyContent)); errno != 0 {
+					DebugLog("[VFS Flush] ERROR: OnKeyFileContent failed: objID=%d, errno=%d", n.objID, errno)
+					return errno
+				} else {
+					DebugLog("[VFS Flush] Successfully called OnKeyFileContent: objID=%d", n.objID)
+					return 0
+				}
+			}
+		}
 		DebugLog("[VFS Flush] ERROR: checkKey failed: objID=%d, errno=%d", n.objID, errno)
 		return errno
 	}
@@ -4173,7 +4180,10 @@ func (n *OrcasNode) fsyncImpl(ctx context.Context, flags uint32) syscall.Errno {
 // Setattr sets file attributes (including truncate operation)
 func (n *OrcasNode) Setattr(ctx context.Context, f fs.FileHandle, in *fuse.SetAttrIn, out *fuse.AttrOut) syscall.Errno {
 	DebugLog("[VFS Setattr] Entry: objID=%d, valid=0x%x, FileHandle=%v", n.objID, in.Valid, f)
-	if errno := n.fs.checkKey(); errno != 0 {
+	if errno := n.fs.checkKey(true); errno != 0 {
+		if n.fs.shouldUseFallbackFiles() {
+			return 0
+		}
 		DebugLog("[VFS Setattr] ERROR: checkKey failed: objID=%d, valid=0x%x, errno=%d", n.objID, in.Valid, errno)
 		return errno
 	}

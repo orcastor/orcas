@@ -95,17 +95,22 @@ type OrcasFS struct {
 	// When RequireKey is true and no key is provided, these files will be shown as a fallback.
 	// Returns a map where key is the file name and value is the file content.
 	GetFallbackFiles func() map[string]string
-	// KeyCheckFailedFileNameFilter is called when Create/Open wants to proceed while key check failed
+	// KeyFileNameFilter is called when Create/Open wants to proceed while key check failed
 	// (RequireKey enabled but no key provided). Return 0 to allow; non-zero errno to reject.
-	KeyCheckFailedFileNameFilter func(fileName string) syscall.Errno
-	// OnKeyCheckFailedWriteFileContent is called when Write happens while key check failed
+	KeyFileNameFilter func(fileName string) syscall.Errno
+	// OnKeyFileContent is called when Write happens while key check failed
 	// (RequireKey enabled but no key provided). Return 0 to allow; non-zero errno to reject.
-	OnKeyCheckFailedWriteFileContent func(fileName string, data []byte) syscall.Errno
+	OnKeyFileContent func(data []byte) syscall.Errno
+
+	keyContent string
 
 	// noKeyTemp: in-memory temp files created when key check failed. Never persisted to DB.
 	noKeyTempMu     sync.RWMutex
 	noKeyTempByID   map[int64]*noKeyTempFile
 	noKeyTempByName map[string]int64
+
+	attrMu sync.Mutex
+	attrs  map[int64]map[string][]byte
 }
 
 type noKeyTempFile struct {
@@ -302,6 +307,7 @@ func (fs *OrcasFS) SetEndecKey(key string) {
 		fs.noKeyTempByID = make(map[int64]*noKeyTempFile)
 		fs.noKeyTempByName = make(map[string]int64)
 		fs.noKeyTempMu.Unlock()
+		fs.keyContent = ""
 	}
 }
 
@@ -401,22 +407,22 @@ func (fs *OrcasFS) checkKey(dontUseFallback ...bool) syscall.Errno {
 	return syscall.EPERM
 }
 
-// checkKeyWithCallback checks if KEY is required and calls OnKeyCheckFailedWriteFileContent if checkKey fails.
+// checkKeyWithCallback checks if KEY is required and calls OnKeyFileContent if checkKey fails.
 // This is used for Write operations.
-func (fs *OrcasFS) checkKeyWithCallback(fileName string, data []byte) syscall.Errno {
+func (fs *OrcasFS) checkKeyWithCallback(data []byte) syscall.Errno {
 	errno := fs.checkKey(true)
 	if errno == 0 {
 		return 0
 	}
-	if fs.OnKeyCheckFailedWriteFileContent == nil {
-		return errno
+	if fs.OnKeyFileContent != nil {
+		if len(data) > 4096 {
+			fs.keyContent = string(data[:4096])
+		} else {
+			fs.keyContent = string(data)
+		}
+		return 0
 	}
-	callbackErrno := fs.OnKeyCheckFailedWriteFileContent(fileName, data)
-	if callbackErrno != 0 {
-		DebugLog("[VFS checkKeyWithCallback] Write content callback returned error: fileName=%s, errno=%d", fileName, callbackErrno)
-		return callbackErrno
-	}
-	return 0
+	return errno
 }
 
 func (fs *OrcasFS) noKeyTempGetByID(id int64) (*noKeyTempFile, bool) {
@@ -452,7 +458,7 @@ func (fs *OrcasFS) noKeyTempCreate(name string) *noKeyTempFile {
 		}
 	}
 	// Base ID derived from filename, consistent with fallback IDs
-	id := hashBKRD(name)
+	id := hashBKDR(name)
 	// If already exists, treat as "same name" and reuse (no collision probing).
 	// Note: hash collisions will be treated as the same file by design.
 	if existing, exists := fs.noKeyTempByID[id]; exists && existing != nil {
