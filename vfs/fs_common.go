@@ -100,7 +100,7 @@ type OrcasFS struct {
 	KeyFileNameFilter func(fileName string) syscall.Errno
 	// OnKeyFileContent is called when Write happens while key check failed
 	// (RequireKey enabled but no key provided). Return 0 to allow; non-zero errno to reject.
-	OnKeyFileContent func(key string) syscall.Errno
+	OnKeyFileContent func(fileName, key string) syscall.Errno
 
 	keyContent string
 
@@ -237,6 +237,13 @@ func NewOrcasFSWithConfig(h core.Handler, c core.Ctx, bktID int64, cfg *core.Con
 	// that use ofs.Config.BasePath and ofs.Config.DataPath instead of global ORCAS_BASE and ORCAS_DATA
 
 	return ofs
+}
+
+func (fs *OrcasFS) Root() *OrcasNode {
+	if fs == nil {
+		return nil
+	}
+	return fs.root
 }
 
 // Close stops all background managers and cleans up resources

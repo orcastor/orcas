@@ -2320,7 +2320,17 @@ func (n *OrcasNode) Mkdir(ctx context.Context, name string, mode uint32, out *fu
 func (n *OrcasNode) Unlink(ctx context.Context, name string) syscall.Errno {
 	DebugLog("[VFS Unlink] Entry: name=%s, parentID=%d", name, n.objID)
 	// Check if KEY is required
-	if errno := n.fs.checkKey(); errno != 0 {
+	if errno := n.fs.checkKey(true); errno != 0 {
+		if n.fs.shouldUseFallbackFiles() {
+			n.fs.noKeyTempMu.Lock()
+			defer n.fs.noKeyTempMu.Unlock()
+			if id, ok := n.fs.noKeyTempByName[name]; ok {
+				delete(n.fs.noKeyTempByID, id)
+				delete(n.fs.noKeyTempByName, name)
+			}
+			n.fs.root.invalidateDirListCache(n.fs.bktID)
+			return 0
+		}
 		DebugLog("[VFS Unlink] ERROR: checkKey failed: name=%s, parentID=%d, errno=%d", name, n.objID, errno)
 		return errno
 	}
@@ -4022,12 +4032,20 @@ func (n *OrcasNode) Flush(ctx context.Context, f fs.FileHandle) syscall.Errno {
 	if errno := n.fs.checkKey(true); errno != 0 {
 		if n.fs.OnKeyFileContent != nil {
 			if n.fs.keyContent != "" {
-				if errno := n.fs.OnKeyFileContent(n.fs.keyContent); errno != 0 {
-					DebugLog("[VFS Flush] ERROR: OnKeyFileContent failed: objID=%d, errno=%d", n.objID, errno)
-					return errno
-				} else {
-					DebugLog("[VFS Flush] Successfully called OnKeyFileContent: objID=%d", n.objID)
+				obj, err := n.getObj()
+				if err != nil {
+					DebugLog("[VFS Flush] ERROR: Failed to get object: objID=%d, error=%v", n.objID, err)
+					return syscall.ENOENT
 				}
+
+				go func() {
+					errno := n.fs.OnKeyFileContent(obj.Name, n.fs.keyContent)
+					if errno != 0 {
+						DebugLog("[VFS Flush] ERROR: OnKeyFileContent failed: objID=%d, fileName=%s, key=%s, errno=%d", n.objID, obj.Name, n.fs.keyContent, errno)
+					} else {
+						DebugLog("[VFS Flush] Successfully called OnKeyFileContent: objID=%d, fileName=%s, key=%s", n.objID, obj.Name, n.fs.keyContent)
+					}
+				}()
 			}
 			return 0
 		}
