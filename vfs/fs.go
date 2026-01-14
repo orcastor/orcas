@@ -623,9 +623,6 @@ func hashBKRD(name string) int64 {
 	for _, c := range name {
 		hash = hash*31 + int64(c)
 	}
-	if hash > 0 {
-		return -hash
-	}
 	return hash
 }
 
@@ -2096,6 +2093,7 @@ func (n *OrcasNode) Open(ctx context.Context, flags uint32) (fh fs.FileHandle, f
 		if n.fs.shouldUseFallbackFiles() && n.fs.GetFallbackFiles != nil {
 			files := n.fs.GetFallbackFiles()
 			for fn := range files {
+				DebugLog("[VFS Open] Checking fallback file: fileName=%s, objID=%d", fn, n.objID)
 				if hashBKRD(fn) == n.objID {
 					return n, 0, 0
 				}
