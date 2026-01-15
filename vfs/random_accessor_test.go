@@ -6921,3 +6921,132 @@ func TestTmpFileWriteAfterRenameWithSparseSizeBug(t *testing.T) {
 		t.Logf("  4. Write succeeded using normal path (journal/sequential buffer)")
 	})
 }
+
+// TestChunkedFileWriterSizeMismatchFix reproduces the bug where:
+// 1. A chunk is partially written (interrupted write)
+// 2. Later, we try to write the same chunk with different (correct) size
+// 3. writeChunkSync returns "chunk exists but size mismatch" error
+// 4. This test verifies the fix: deleting and rewriting the chunk when size mismatch occurs
+func TestChunkedFileWriterSizeMismatchFix(t *testing.T) {
+	Convey("ChunkedFileWriter size mismatch fix", t, func() {
+		c := context.Background()
+		ig := idgen.NewIDGen(nil, 0)
+		testBktID, _ := ig.New()
+		err := core.InitBucketDB(".", testBktID)
+		So(err, ShouldBeNil)
+
+		dma := &core.DefaultMetadataAdapter{
+			DefaultBaseMetadataAdapter: &core.DefaultBaseMetadataAdapter{},
+			DefaultDataMetadataAdapter: &core.DefaultDataMetadataAdapter{},
+		}
+		dma.DefaultBaseMetadataAdapter.SetPath(".")
+		dma.DefaultDataMetadataAdapter.SetPath(".")
+		dda := &core.DefaultDataAdapter{}
+
+		lh := core.NewLocalHandler("", "").(*core.LocalHandler)
+		lh.SetAdapter(dma, dda)
+
+		testCtx, userInfo, _, err := lh.Login(c, "orcas", "orcas")
+		So(err, ShouldBeNil)
+
+		bucket := &core.BucketInfo{
+			ID:       testBktID,
+			Name:     "test_bucket",
+			Type:     1,
+			Quota:    500000000,
+			Used:     0,
+			RealUsed: 0,
+		}
+		admin := core.NewLocalAdmin(".", ".")
+		So(admin.PutBkt(testCtx, []*core.BucketInfo{bucket}), ShouldBeNil)
+
+		if userInfo != nil && userInfo.ID > 0 {
+			So(admin.PutACL(testCtx, testBktID, userInfo.ID, core.ALL), ShouldBeNil)
+		}
+
+		encryptionKey := "this-is-a-test-encryption-key-that-is-long-enough-for-aes256-encryption-12345678901234567890"
+		cfg := &core.Config{
+			EndecWay: core.DATA_ENDEC_AES256,
+			EndecKey: encryptionKey,
+		}
+		ofs := NewOrcasFSWithConfig(lh, testCtx, testBktID, cfg)
+
+		// Create a .tmp file
+		tmpFileID, _ := ig.New()
+		tmpFileObj := &core.ObjectInfo{
+			ID:    tmpFileID,
+			PID:   testBktID,
+			Type:  core.OBJ_TYPE_FILE,
+			Name:  "test.tmp",
+			Size:  0,
+			MTime: core.Now(),
+		}
+		_, err = dma.PutObj(testCtx, testBktID, []*core.ObjectInfo{tmpFileObj})
+		So(err, ShouldBeNil)
+
+		// Create RandomAccessor for .tmp file
+		ra, err := NewRandomAccessor(ofs, tmpFileID)
+		So(err, ShouldBeNil)
+		So(ra, ShouldNotBeNil)
+		defer ra.Close()
+
+		// Get or create ChunkedFileWriter
+		cw, err := ra.getOrCreateChunkedWriter(WRITER_TYPE_TMP)
+		So(err, ShouldBeNil)
+		So(cw, ShouldNotBeNil)
+
+		dataID := cw.dataID
+		sn := 38 // Same sn as in the error log
+
+		// Simulate partial/interrupted write: write a smaller chunk first
+		partialSize := 4194332 // Size from error log
+		partialData := make([]byte, partialSize)
+		for i := range partialData {
+			partialData[i] = byte(i % 256)
+		}
+
+		// Manually write partial chunk to simulate interrupted write
+		// This simulates the scenario where a chunk was partially written
+		_, err = lh.PutData(testCtx, testBktID, dataID, sn, partialData)
+		So(err, ShouldBeNil)
+		t.Logf("  Simulated partial write: sn=%d, size=%d", sn, partialSize)
+
+		// Now try to write the correct full-size chunk using writeChunkSync directly
+		// This simulates the scenario where flushChunk calls writeChunkSync
+		fullSize := 10485788 // Size from error log
+		fullData := make([]byte, fullSize)
+		for i := range fullData {
+			fullData[i] = byte((i + 100) % 256) // Different pattern to ensure it's different data
+		}
+
+		// Directly call writeChunkSync to test the size mismatch handling
+		// Before fix: this would return error "chunk exists but size mismatch"
+		// After fix: this should delete the partial chunk and rewrite it
+		err = cw.writeChunkSync(sn, fullData)
+		So(err, ShouldBeNil)
+		t.Logf("  ✅ writeChunkSync succeeded - size mismatch was handled correctly")
+
+		// Verify the chunk was rewritten correctly
+		readBack, err := lh.GetData(testCtx, testBktID, dataID, sn)
+		So(err, ShouldBeNil)
+		So(len(readBack), ShouldEqual, fullSize)
+		t.Logf("  Verified chunk was rewritten: sn=%d, size=%d (was %d)", sn, len(readBack), partialSize)
+
+		// Verify data matches
+		if len(readBack) == len(fullData) {
+			match := true
+			for i := 0; i < min(1000, len(fullData)); i++ {
+				if readBack[i] != fullData[i] {
+					match = false
+					break
+				}
+			}
+			So(match, ShouldBeTrue)
+			t.Logf("  Verified chunk data matches expected data")
+		}
+
+		// Clean up
+		err = ra.Close()
+		So(err, ShouldBeNil)
+	})
+}

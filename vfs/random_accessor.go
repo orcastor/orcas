@@ -1624,10 +1624,54 @@ func (cw *ChunkedFileWriter) writeChunkSync(sn int, finalData []byte) error {
 						return fmt.Errorf("chunk exists but data mismatch: %w", err)
 					}
 				} else {
-					// Chunk exists but size doesn't match - this is an error
-					DebugLog("[VFS ChunkedFileWriter writeChunkSync] ERROR: Chunk exists but size mismatch (ERR_OPEN_FILE), cannot skip write: fileID=%d, dataID=%d, sn=%d, writtenSize=%d, existingSize=%d",
+					// Chunk exists but size doesn't match - need to delete and rewrite
+					// This can happen if:
+					// 1. Previous write was interrupted/partial
+					// 2. Concurrent writes to same chunk
+					// 3. File was modified externally
+					DebugLog("[VFS ChunkedFileWriter writeChunkSync] WARNING: Chunk exists but size mismatch (ERR_OPEN_FILE), will delete and rewrite: fileID=%d, dataID=%d, sn=%d, writtenSize=%d, existingSize=%d",
 						cw.fileID, cw.dataID, sn, len(finalData), len(existingData))
-					return fmt.Errorf("chunk exists but size mismatch: %w", err)
+					// Try to delete the existing chunk first
+					if cw.lh != nil {
+						da := cw.lh.GetDataAdapter()
+						if da != nil {
+							deleteErr := da.Delete(cw.fs.c, cw.fs.bktID, cw.dataID, sn)
+							if deleteErr != nil {
+								DebugLog("[VFS ChunkedFileWriter writeChunkSync] WARNING: Failed to delete existing chunk before rewrite (size mismatch): fileID=%d, dataID=%d, sn=%d, error=%v",
+									cw.fileID, cw.dataID, sn, deleteErr)
+								// Return error with context about deletion failure
+								return fmt.Errorf("chunk exists but size mismatch (failed to delete existing chunk): %w (delete error: %v)", err, deleteErr)
+							} else {
+								DebugLog("[VFS ChunkedFileWriter writeChunkSync] Deleted existing chunk before rewrite (size mismatch): fileID=%d, dataID=%d, sn=%d",
+									cw.fileID, cw.dataID, sn)
+								// Retry PutData after deletion
+								_, retryErr := cw.fs.h.PutData(cw.fs.c, cw.fs.bktID, cw.dataID, sn, finalData)
+								if retryErr == nil {
+									DebugLog("[VFS ChunkedFileWriter writeChunkSync] Successfully rewrote chunk after deletion (size mismatch): fileID=%d, dataID=%d, sn=%d, size=%d",
+										cw.fileID, cw.dataID, sn, len(finalData))
+									return nil
+								} else {
+									// Check if it's still ERR_OPEN_FILE (chunk still exists somehow)
+									if retryErr == core.ERR_OPEN_FILE {
+										DebugLog("[VFS ChunkedFileWriter writeChunkSync] ERROR: Chunk still exists after deletion (size mismatch): fileID=%d, dataID=%d, sn=%d, error=%v",
+											cw.fileID, cw.dataID, sn, retryErr)
+										return fmt.Errorf("chunk still exists after deletion (size mismatch), cannot rewrite: %w", retryErr)
+									}
+									DebugLog("[VFS ChunkedFileWriter writeChunkSync] ERROR: Failed to rewrite chunk after deletion (size mismatch): fileID=%d, dataID=%d, sn=%d, error=%v",
+										cw.fileID, cw.dataID, sn, retryErr)
+									return fmt.Errorf("failed to rewrite chunk after deletion (size mismatch): %w", retryErr)
+								}
+							}
+						} else {
+							DebugLog("[VFS ChunkedFileWriter writeChunkSync] ERROR: DataAdapter is nil, cannot delete chunk (size mismatch): fileID=%d, dataID=%d, sn=%d",
+								cw.fileID, cw.dataID, sn)
+							return fmt.Errorf("chunk exists but size mismatch (DataAdapter unavailable): %w", err)
+						}
+					} else {
+						DebugLog("[VFS ChunkedFileWriter writeChunkSync] ERROR: LocalHandler is nil, cannot delete chunk (size mismatch): fileID=%d, dataID=%d, sn=%d",
+							cw.fileID, cw.dataID, sn)
+						return fmt.Errorf("chunk exists but size mismatch (LocalHandler unavailable): %w", err)
+					}
 				}
 			} else {
 				// ERR_OPEN_FILE but chunk doesn't exist - this is a real error (permission, disk space, etc.)
