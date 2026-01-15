@@ -4257,10 +4257,17 @@ func (n *OrcasNode) Setattr(ctx context.Context, f fs.FileHandle, in *fuse.SetAt
 
 		// If size changed, execute truncate
 		if newSize != oldSize {
-			if errno := n.truncateFile(newSize); errno != 0 {
-				return errno
+			// Check if file is currently being written to prevent truncating during active upload
+			if n.isFileBeingWritten() {
+				DebugLog("[VFS Setattr] Skipping truncate: file is currently being written: objID=%d, oldSize=%d, newSize=%d", n.objID, oldSize, newSize)
+				// Don't return error, just skip the truncate operation
+				// The size will be updated when the write completes
+			} else {
+				if errno := n.truncateFile(newSize); errno != 0 {
+					return errno
+				}
+				obj.Size = newSize
 			}
-			obj.Size = newSize
 		}
 	}
 
@@ -4362,6 +4369,59 @@ func (n *OrcasNode) Setattr(ctx context.Context, f fs.FileHandle, in *fuse.SetAt
 
 	DebugLog("[VFS Setattr] Successfully completed: objID=%d, mode=0%o, size=%d, mtime=%d", n.objID, out.Mode, out.Size, out.Mtime)
 	return 0
+}
+
+// isFileBeingWritten checks if a file is currently being written to
+// Returns true if there are pending writes in buffer or incomplete chunks in ChunkedFileWriter
+func (n *OrcasNode) isFileBeingWritten() bool {
+	// Check if RandomAccessor exists
+	val := n.ra.Load()
+	if val == nil {
+		// Also check global registry
+		if n.fs != nil {
+			if ra := n.fs.getRandomAccessorByFileID(n.objID); ra != nil {
+				val = ra
+			}
+		}
+		if val == nil {
+			return false
+		}
+	}
+
+	ra, ok := val.(*RandomAccessor)
+	if !ok || ra == nil {
+		return false
+	}
+
+	// Validate RandomAccessor
+	if ra.fs == nil || ra.fileID <= 0 || ra.fileID != n.objID {
+		return false
+	}
+
+	// Check if there are pending writes in buffer
+	if ra.buffer != nil {
+		writeIndex := atomic.LoadInt64(&ra.buffer.writeIndex)
+		totalSize := atomic.LoadInt64(&ra.buffer.totalSize)
+		if writeIndex > 0 && totalSize > 0 {
+			DebugLog("[VFS isFileBeingWritten] File has pending writes in buffer: objID=%d, writeIndex=%d, totalSize=%d", n.objID, writeIndex, totalSize)
+			return true
+		}
+	}
+
+	// Check if ChunkedFileWriter has incomplete chunks
+	if val := ra.chunkedWriter.Load(); val != nil && val != clearedChunkedWriterMarker {
+		if cw, ok := val.(*ChunkedFileWriter); ok && cw != nil {
+			cw.mu.Lock()
+			hasIncompleteChunks := len(cw.chunks) > 0
+			cw.mu.Unlock()
+			if hasIncompleteChunks {
+				DebugLog("[VFS isFileBeingWritten] File has incomplete chunks in ChunkedFileWriter: objID=%d, chunkCount=%d", n.objID, len(cw.chunks))
+				return true
+			}
+		}
+	}
+
+	return false
 }
 
 // truncateFile truncates file to specified size
