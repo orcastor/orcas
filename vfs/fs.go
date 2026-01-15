@@ -540,6 +540,20 @@ func (n *OrcasNode) invalidateDirListCache(dirID int64) {
 
 // Getattr gets file/directory attributes
 func (n *OrcasNode) Getattr(ctx context.Context, f fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
+	// If filesystem is in "locked" state (RequireKey enabled but no key provided),
+	// force root mtime to "now" so SMB clients will refresh instead of caching.
+	// Also avoid touching DB while locked.
+	if n.isRoot && n.fs != nil && n.fs.requireKey && n.fs.Config.EndecKey == "" {
+		out.Mode = syscall.S_IFDIR | 0o777
+		out.Size = 0
+		now := uint64(time.Now().Unix())
+		out.Mtime = now
+		out.Ctime = now
+		out.Atime = now
+		out.Nlink = 1
+		return 0
+	}
+
 	if !n.isRoot {
 		if errno := n.fs.checkKey(); errno != 0 {
 			DebugLog("[VFS Getattr] ERROR: checkKey failed: objID=%d, errno=%d", n.objID, errno)
