@@ -2178,9 +2178,13 @@ func (n *OrcasNode) Open(ctx context.Context, flags uint32) (fh fs.FileHandle, f
 		obj.ID, isWriteMode, hasLargeFileFlag, flags, syscall.O_WRONLY, syscall.O_RDWR, syscall.O_CREAT, syscall.O_TRUNC, syscall.O_EXCL)
 
 	if isWriteMode && n.fs.KeyFileNameFilter != nil {
-		if errno := n.fs.KeyFileNameFilter(obj.Name); errno != 0 {
-			DebugLog("[VFS Open] ERROR: KeyFileNameFilter failed: fileID=%d, errno=%d", obj.ID, errno)
-			return nil, 0, errno
+		if errno := n.fs.checkKey(true); errno != 0 {
+			if n.fs.shouldUseFallbackFiles() {
+				if errno := n.fs.KeyFileNameFilter(obj.Name); errno != 0 {
+					DebugLog("[VFS Open] ERROR: KeyFileNameFilter failed: fileID=%d, errno=%d", obj.ID, errno)
+					return nil, 0, errno
+				}
+			}
 		}
 	}
 
