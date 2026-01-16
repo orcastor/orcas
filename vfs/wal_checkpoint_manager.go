@@ -194,7 +194,7 @@ func (wcm *WALCheckpointManager) checkpointBucket(bktID int64) error {
 	if info, err := os.Stat(dbFilePath); err == nil {
 		// 检查文件权限
 		if info.Mode().Perm()&0200 == 0 {
-			log.Printf("[WAL Checkpoint Manager] WARNING: Database file is not writable for bucket %d (permissions: %v)", 
+			log.Printf("[WAL Checkpoint Manager] WARNING: Database file is not writable for bucket %d (permissions: %v)",
 				bktID, info.Mode().Perm())
 			return nil
 		}
@@ -207,9 +207,9 @@ func (wcm *WALCheckpointManager) checkpointBucket(bktID int64) error {
 	if err != nil {
 		errMsg := err.Error()
 		// 如果是只读错误，记录警告但不返回错误（避免日志污染）
-		if strings.Contains(errMsg, "readonly") || 
-		   strings.Contains(errMsg, "read-only") || 
-		   strings.Contains(errMsg, "attempt to write a readonly database") {
+		if strings.Contains(errMsg, "readonly") ||
+			strings.Contains(errMsg, "read-only") ||
+			strings.Contains(errMsg, "attempt to write a readonly database") {
 			log.Printf("[WAL Checkpoint Manager] WARNING: Cannot checkpoint bucket %d: database is read-only (this may be due to file permissions or filesystem mount options)", bktID)
 			return nil
 		}

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -207,17 +208,26 @@ func (dp *DBPool) ReleaseDB(dirPath string) {
 // ForceReleaseDB forcefully releases a database pool regardless of reference count
 // This is useful when you need to ensure all connections are closed
 func (dp *DBPool) ForceReleaseDB(dirPath string) {
-	dbPath := filepath.Join(dirPath, ".db")
-	poolKey := dbPath
+	if !strings.HasSuffix(dirPath, "/") {
+		dirPath += "/"
+	}
 
-	if pool, ok := dp.pools.LoadAndDelete(poolKey); ok {
-		if dbPool, ok := pool.(*DatabasePool); ok {
-			dbPool.mu.Lock()
-			// Force close connections regardless of reference count
-			dbPool.readPool.Close()
-			dbPool.writePool.Close()
-			dbPool.mu.Unlock()
+	needDelete := make([]string, 0)
+	dp.pools.Range(func(key, value interface{}) bool {
+		if strings.HasPrefix(key.(string), dirPath) {
+			if dbPool, ok := value.(*DatabasePool); ok {
+				dbPool.mu.Lock()
+				dbPool.readPool.Close()
+				dbPool.writePool.Close()
+				needDelete = append(needDelete, key.(string))
+				dbPool.mu.Unlock()
+			}
 		}
+		return true
+	})
+
+	for _, key := range needDelete {
+		dp.pools.Delete(key)
 	}
 }
 
