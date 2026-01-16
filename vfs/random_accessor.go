@@ -127,8 +127,10 @@ var (
 
 // putChunkDataToPool asynchronously clears the buffer content (zeros all bytes) and returns it to the pool
 // The buffer capacity is preserved for reuse, only length is reset to 0
+// Automatically selects the correct pool based on buffer capacity
 func putChunkDataToPool(data []byte) {
 	if len(data) == 0 {
+		// For empty buffers, use small pool by default
 		chunkDataPool.Put(data)
 		return
 	}
@@ -136,8 +138,10 @@ func putChunkDataToPool(data []byte) {
 	// The underlying array will remain valid until GC, so we can safely reference it in goroutine
 	dataCap := cap(data)
 	dataLen := len(data)
+	// Determine which pool to use based on capacity
+	useLargePool := dataCap >= int(LargeChunkPoolCap)
 	// Asynchronously clear the buffer content (zero all bytes) before putting it back to the pool
-	go func(buf []byte, bufCap int, bufLen int) {
+	go func(buf []byte, bufCap int, bufLen int, useLarge bool) {
 		// Clear the entire underlying array content (zero all bytes) using efficient batch clearing
 		// Use full capacity to ensure all data in the underlying array is cleared
 		// This allows buffer reuse without data leakage
@@ -151,9 +155,13 @@ func putChunkDataToPool(data []byte) {
 			copy(bufSlice[cleared:cleared+chunk], zeroSlice[:chunk])
 			cleared += chunk
 		}
-		// Reset length to 0 (preserve capacity) and put back to pool for reuse
-		chunkDataPool.Put(buf[:0])
-	}(data, dataCap, dataLen)
+		// Reset length to 0 (preserve capacity) and put back to appropriate pool for reuse
+		if useLarge {
+			largeChunkDataPool.Put(buf[:0])
+		} else {
+			chunkDataPool.Put(buf[:0])
+		}
+	}(data, dataCap, dataLen, useLargePool)
 }
 
 var (
@@ -1346,7 +1354,33 @@ func (cw *ChunkedFileWriter) flushChunkWithBuffer(sn int, buf *chunkBuffer) erro
 	// Copy all data up to offsetInChunk
 	// IMPORTANT: After adjusting offsetInChunk above, it should match len(buf.data)
 	// So we only copy actual data, no zero-filling needed
-	chunkData := make([]byte, buf.offsetInChunk)
+	// CRITICAL: Use pool to allocate chunkData to avoid memory leak
+	// For large chunks (>= 4MB), use largeChunkDataPool, otherwise use chunkDataPool
+	chunkDataSize := int(buf.offsetInChunk)
+	var chunkData []byte
+	var chunkDataFromPool bool
+	if chunkDataSize >= int(LargeChunkPoolCap) {
+		pooledBuf := largeChunkDataPool.Get().([]byte)
+		if cap(pooledBuf) < chunkDataSize {
+			// Pool buffer too small, allocate new one
+			chunkData = make([]byte, chunkDataSize)
+			chunkDataFromPool = false
+		} else {
+			chunkData = pooledBuf[:chunkDataSize]
+			chunkDataFromPool = true
+		}
+	} else {
+		pooledBuf := chunkDataPool.Get().([]byte)
+		if cap(pooledBuf) < chunkDataSize {
+			// Pool buffer too small, allocate new one
+			chunkData = make([]byte, chunkDataSize)
+			chunkDataFromPool = false
+		} else {
+			chunkData = pooledBuf[:chunkDataSize]
+			chunkDataFromPool = true
+		}
+	}
+
 	copyLen := int64(len(buf.data))
 	if copyLen > buf.offsetInChunk {
 		copyLen = buf.offsetInChunk
@@ -1396,6 +1430,10 @@ func (cw *ChunkedFileWriter) flushChunkWithBuffer(sn int, buf *chunkBuffer) erro
 		finalData, err = core.ProcessData(chunkData, &cw.dataInfo.Kind, getCmprQltyForFS(cw.fs), getEndecKeyForFS(cw.fs), isFirstChunk)
 		if err != nil {
 			DebugLog("[VFS ChunkedFileWriter flushChunk] ERROR: Failed to process chunk data: fileID=%d, dataID=%d, sn=%d, error=%v", cw.fileID, cw.dataID, sn, err)
+			// Return chunkData to pool before returning error
+			if chunkDataFromPool {
+				putChunkDataToPool(chunkData)
+			}
 			return err
 		}
 
@@ -1419,6 +1457,12 @@ func (cw *ChunkedFileWriter) flushChunkWithBuffer(sn int, buf *chunkBuffer) erro
 	err = cw.writeChunkSync(sn, finalData)
 	if err != nil {
 		DebugLog("[VFS ChunkedFileWriter Write] ERROR: Failed to write chunk synchronously: fileID=%d, dataID=%d, sn=%d, size=%d, error=%v", cw.fileID, cw.dataID, sn, len(finalData), err)
+		// Return chunkData to pool before returning error
+		// Note: finalData may be different from chunkData (if ProcessData allocated new buffer)
+		// But we only return chunkData to pool here, finalData is managed by ProcessData/PutData
+		if chunkDataFromPool {
+			putChunkDataToPool(chunkData)
+		}
 		return err
 	}
 
@@ -1517,6 +1561,14 @@ func (cw *ChunkedFileWriter) flushChunkWithBuffer(sn int, buf *chunkBuffer) erro
 				}()
 			}
 		}
+	}
+
+	// CRITICAL: Return chunkData to pool after successful write
+	// chunkData is no longer needed after writeChunkSync completes
+	// Note: If enableRealtime is false, finalData == chunkData, so we can safely return chunkData
+	// If enableRealtime is true, finalData is a new buffer from ProcessData, chunkData can be returned
+	if chunkDataFromPool {
+		putChunkDataToPool(chunkData)
 	}
 
 	return nil
