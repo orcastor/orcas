@@ -193,6 +193,8 @@ func (dp *DBPool) ReleaseDB(dirPath string) {
 			dbPool.refCount--
 			if dbPool.refCount <= 0 {
 				// Close connections and remove from pool
+				// CRITICAL: Close connections before removing from pool
+				// This ensures all file handles are released
 				dbPool.readPool.Close()
 				dbPool.writePool.Close()
 				dp.pools.Delete(poolKey)
@@ -202,44 +204,37 @@ func (dp *DBPool) ReleaseDB(dirPath string) {
 	}
 }
 
+// ForceReleaseDB forcefully releases a database pool regardless of reference count
+// This is useful when you need to ensure all connections are closed
+func (dp *DBPool) ForceReleaseDB(dirPath string) {
+	dbPath := filepath.Join(dirPath, ".db")
+	poolKey := dbPath
+
+	if pool, ok := dp.pools.LoadAndDelete(poolKey); ok {
+		if dbPool, ok := pool.(*DatabasePool); ok {
+			dbPool.mu.Lock()
+			// Force close connections regardless of reference count
+			dbPool.readPool.Close()
+			dbPool.writePool.Close()
+			dbPool.mu.Unlock()
+		}
+	}
+}
+
 // Close closes all database connections in the pool
+// CRITICAL: This forcefully closes all connections regardless of reference count
+// Use this when you need to ensure all database files are released
+// This allows external components (like WAL checkpoint manager) to stop first
 func (dp *DBPool) Close() {
 	dp.pools.Range(func(key, value interface{}) bool {
 		if dbPool, ok := value.(*DatabasePool); ok {
+			// Force close connections regardless of reference count
 			dbPool.readPool.Close()
 			dbPool.writePool.Close()
 		}
 		dp.pools.Delete(key)
 		return true
 	})
-}
-
-// CloseDBForPath closes all database connections for a specific database path
-// This is useful when renaming database files (e.g., on Windows where files
-// cannot be renamed while open). It closes all pools that match the given path,
-// regardless of the encryption key.
-func (dp *DBPool) CloseDBForPath(dbPath string) {
-	var keysToDelete []interface{}
-
-	dp.pools.Range(func(key, value interface{}) bool {
-		if dbPool, ok := value.(*DatabasePool); ok {
-			// Check if this pool matches the database path
-			if dbPool.path == dbPath {
-				dbPool.mu.Lock()
-				// Force close all connections regardless of refCount
-				dbPool.readPool.Close()
-				dbPool.writePool.Close()
-				dbPool.mu.Unlock()
-				keysToDelete = append(keysToDelete, key)
-			}
-		}
-		return true
-	})
-
-	// Delete all matching pools
-	for _, key := range keysToDelete {
-		dp.pools.Delete(key)
-	}
 }
 
 // GetDBStats returns statistics about the connection pool
