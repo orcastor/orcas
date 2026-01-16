@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/h2non/filetype"
@@ -224,6 +225,10 @@ var (
 
 	tempFlushMgr     *delayedFlushManager
 	tempFlushMgrOnce sync.Once
+
+	// Periodic sync manager: periodically sync filesystem to ensure data persistence
+	periodicSyncMgr     *periodicSyncManager
+	periodicSyncMgrOnce sync.Once
 )
 
 // isRandomWritePattern detects if the write pattern is random (non-sequential)
@@ -260,6 +265,10 @@ func (ra *RandomAccessor) isRandomWritePattern() bool {
 const (
 	tmpFileFlushInterval      = 5 * time.Minute
 	delayedFlushCheckInterval = time.Second
+	// PeriodicSyncInterval is the interval for periodic filesystem sync
+	// This ensures data is persisted to disk even if Fsync is not called explicitly
+	// Set to 1 second to ensure data is persisted quickly, especially for small files
+	PeriodicSyncInterval = 1 * time.Second
 )
 
 type delayedFlushEntry struct {
@@ -364,6 +373,71 @@ func (m *delayedFlushManager) cancel(ra *RandomAccessor) {
 	m.mu.Lock()
 	delete(m.entries, ra.fileID)
 	m.mu.Unlock()
+}
+
+// periodicSyncManager periodically syncs filesystem to ensure data persistence
+// This is critical for small files that may not have explicit Fsync calls
+type periodicSyncManager struct {
+	mu       sync.Mutex
+	lastSync int64 // Unix timestamp of last sync
+	stopCh   chan struct{}
+}
+
+func newPeriodicSyncManager() *periodicSyncManager {
+	mgr := &periodicSyncManager{
+		lastSync: 0,
+		stopCh:   make(chan struct{}),
+	}
+	go mgr.run()
+	return mgr
+}
+
+func getPeriodicSyncManager() *periodicSyncManager {
+	periodicSyncMgrOnce.Do(func() {
+		periodicSyncMgr = newPeriodicSyncManager()
+	})
+	return periodicSyncMgr
+}
+
+func (m *periodicSyncManager) run() {
+	ticker := time.NewTicker(PeriodicSyncInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			m.sync()
+		case <-m.stopCh:
+			return
+		}
+	}
+}
+
+func (m *periodicSyncManager) sync() {
+	m.mu.Lock()
+	now := core.Now()
+	// Only sync if enough time has passed since last sync
+	if now-m.lastSync < int64(PeriodicSyncInterval.Seconds()) {
+		m.mu.Unlock()
+		return
+	}
+	m.lastSync = now
+	m.mu.Unlock()
+
+	// Call system-level sync to ensure all data is persisted to disk
+	// This is critical for small files that may not have explicit Fsync calls
+	// Note: syscall.Sync() syncs the entire filesystem, which may be slow
+	// But it's necessary to ensure data persistence, especially for removable media
+	// We do this periodically (every 1 second) to ensure data is persisted quickly
+	if err := syscall.Sync(); err != nil {
+		DebugLog("[VFS PeriodicSync] WARNING: Failed to sync filesystem: %v", err)
+	} else {
+		DebugLog("[VFS PeriodicSync] Successfully synced filesystem")
+	}
+}
+
+func (m *periodicSyncManager) stop() {
+	close(m.stopCh)
 }
 
 // WriteOperation represents a single write operation

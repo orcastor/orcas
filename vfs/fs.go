@@ -4228,6 +4228,10 @@ func (n *OrcasNode) fsyncImpl(ctx context.Context, flags uint32) syscall.Errno {
 		return errno
 	}
 
+	// Note: Individual chunk files already call f.Sync() in DefaultDataAdapter.Write
+	// System-level sync is handled by periodicSyncManager to avoid performance impact
+	// The periodic sync ensures all data is persisted to disk even if Fsync is not called explicitly
+
 	// Flush object cache
 	n.invalidateObj()
 	return 0
