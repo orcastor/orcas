@@ -614,6 +614,7 @@ type DefaultBaseMetadataAdapter struct {
 }
 
 func (dba *DefaultBaseMetadataAdapter) Close() {
+	GetDBPool().ReleaseDB(dba.basePath)
 }
 
 // SetPath sets the base path for the adapter (for main database)
@@ -641,6 +642,7 @@ type DefaultDataMetadataAdapter struct {
 }
 
 func (dda *DefaultDataMetadataAdapter) Close() {
+	GetDBPool().ReleaseDB(dda.dataPath)
 }
 
 // SetPath sets the data path for the adapter (for bucket databases and data files)
@@ -841,6 +843,8 @@ func (dma *DefaultMetadataAdapter) SetDataKey(key string) {
 
 func (dma *DefaultMetadataAdapter) Close() {
 	// Both adapters are embedded, no need to close separately
+	GetDBPool().ReleaseDB(dma.DefaultBaseMetadataAdapter.basePath)
+	GetDBPool().ReleaseDB(dma.DefaultDataMetadataAdapter.dataPath)
 }
 
 // encryptObjNames encrypts object names in-place if dataDBKey is set
