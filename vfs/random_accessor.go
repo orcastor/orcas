@@ -429,11 +429,9 @@ func (m *periodicSyncManager) sync() {
 	// Note: syscall.Sync() syncs the entire filesystem, which may be slow
 	// But it's necessary to ensure data persistence, especially for removable media
 	// We do this periodically (every 1 second) to ensure data is persisted quickly
-	if err := syscall.Sync(); err != nil {
-		DebugLog("[VFS PeriodicSync] WARNING: Failed to sync filesystem: %v", err)
-	} else {
-		DebugLog("[VFS PeriodicSync] Successfully synced filesystem")
-	}
+	// Note: syscall.Sync() has no return value, so we can't check for errors
+	syscall.Sync()
+	DebugLog("[VFS PeriodicSync] Synced filesystem")
 }
 
 func (m *periodicSyncManager) stop() {
