@@ -996,7 +996,16 @@ func (n *OrcasNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
 			// Parent is root (bucketID), use bucketID
 			dotDotIno = uint64(n.fs.bktID)
 		} else {
-			dotDotIno = uint64(obj.PID)
+			// Verify parent directory exists to prevent panic when parent is deleted
+			// If parent doesn't exist, fall back to root directory
+			parentObjs, err := n.fs.h.Get(n.fs.c, n.fs.bktID, []int64{obj.PID})
+			if err != nil || len(parentObjs) == 0 || parentObjs[0] == nil {
+				// Parent directory doesn't exist (may have been deleted), use root
+				DebugLog("[VFS Readdir] WARNING: Parent directory not found (may have been deleted): objID=%d, PID=%d, falling back to root", obj.ID, obj.PID)
+				dotDotIno = uint64(n.fs.bktID)
+			} else {
+				dotDotIno = uint64(obj.PID)
+			}
 		}
 	}
 	entries = append(entries, fuse.DirEntry{

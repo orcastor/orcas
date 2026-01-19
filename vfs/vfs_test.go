@@ -18,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/hanwen/go-fuse/v2/fuse"
 	"github.com/orca-zhang/idgen"
 	"github.com/orcastor/orcas/core"
 	. "github.com/smartystreets/goconvey/convey"
@@ -4350,6 +4351,52 @@ func TestXattrSetGetRemove(t *testing.T) {
 			errno3 := fileNode.Removexattr(ctx, attrName)
 			So(errno3, ShouldEqual, syscall.ENODATA)
 		})
+	})
+}
+
+// Readdir should not panic when parent directory metadata is missing.
+func TestReaddirParentMissingFallsBack(t *testing.T) {
+	Convey("Readdir falls back to root when parent is missing", t, func() {
+		testDir := t.TempDir()
+		fs, bktID := setupTestFS(t, testDir)
+		defer cleanupFS(fs)
+
+		lh, ok := fs.h.(*core.LocalHandler)
+		So(ok, ShouldBeTrue)
+
+		missingParentID := core.NewID()
+		orphanDir := &core.ObjectInfo{
+			ID:    core.NewID(),
+			PID:   missingParentID, // parent does not exist
+			Type:  core.OBJ_TYPE_DIR,
+			Name:  "orphan",
+			MTime: core.Now(),
+		}
+		_, err := lh.Put(fs.c, bktID, []*core.ObjectInfo{orphanDir})
+		So(err, ShouldBeNil)
+
+		node := &OrcasNode{
+			fs:    fs,
+			objID: orphanDir.ID,
+		}
+		node.obj.Store(orphanDir)
+
+		stream, errno := node.Readdir(context.Background())
+		So(errno, ShouldEqual, syscall.Errno(0))
+		defer stream.Close()
+
+		var entries []fuse.DirEntry
+		for stream.HasNext() {
+			entry, nextErrno := stream.Next()
+			So(nextErrno, ShouldEqual, syscall.Errno(0))
+			entries = append(entries, entry)
+		}
+
+		So(len(entries), ShouldEqual, 2)
+		So(entries[0].Name, ShouldEqual, ".")
+		So(entries[0].Ino, ShouldEqual, uint64(orphanDir.ID))
+		So(entries[1].Name, ShouldEqual, "..")
+		So(entries[1].Ino, ShouldEqual, uint64(bktID))
 	})
 }
 
