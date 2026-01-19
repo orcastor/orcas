@@ -7881,3 +7881,317 @@ func TestSparseFileIncrementalWrite(t *testing.T) {
 	t.Logf("✓ Data integrity verified in both initial and incremental regions")
 	t.Logf("✓ Sparse file incremental write test completed")
 }
+
+// TestJournalWALRecoveryDeletedFile tests that WAL files are deleted when file doesn't exist
+func TestJournalWALRecoveryDeletedFile(t *testing.T) {
+	testDir := filepath.Join(os.TempDir(), "orcas_test_wal_recovery_deleted")
+	defer cleanupTestDir(t, testDir)
+
+	fs, bktID := setupTestFS(t, testDir)
+	defer cleanupFS(fs)
+
+	// Create a file and write some data to trigger journal creation
+	fileID, err := createTestFile(t, fs, bktID, "test_deleted.txt")
+	if err != nil {
+		t.Fatalf("Failed to create test file: %v", err)
+	}
+
+	ra, err := getOrCreateRandomAccessor(fs, fileID)
+	if err != nil {
+		t.Fatalf("Failed to get RandomAccessor: %v", err)
+	}
+
+	// Write initial data to create base
+	initialData := []byte("Initial data")
+	err = ra.Write(0, initialData)
+	if err != nil {
+		t.Fatalf("Failed to write initial data: %v", err)
+	}
+	_, err = ra.Flush()
+	if err != nil {
+		t.Fatalf("Failed to flush: %v", err)
+	}
+
+	// Get file object to get dataID
+	fileObjs, err := fs.h.Get(fs.c, bktID, []int64{fileID})
+	if err != nil || len(fileObjs) == 0 {
+		t.Fatalf("Failed to get file object: %v", err)
+	}
+	dataID := fileObjs[0].DataID
+	if dataID == 0 || dataID == core.EmptyDataID {
+		t.Fatal("File should have dataID after flush")
+	}
+
+	// Manually create journal and WAL for testing (simulating journal usage)
+	journal := fs.journalMgr.GetOrCreate(fileID, dataID, int64(len(initialData)))
+	journal.entries = append(journal.entries, JournalEntry{
+		Offset: 100,
+		Length: 12,
+		Data:   []byte("Random write"),
+	})
+	atomic.StoreInt32(&journal.isDirty, 1)
+
+	// Create WAL snapshot
+	if journal.wal == nil {
+		// WAL should exist for file with dataID
+		t.Fatal("WAL should exist for file with data")
+	}
+	if err := journal.wal.CreateSnapshot(journal); err != nil {
+		t.Fatalf("Failed to create WAL snapshot: %v", err)
+	}
+
+	ra.Close()
+
+	// Verify WAL files exist
+	journalDir := filepath.Join(testDir, "journals")
+	snapPath := filepath.Join(journalDir, fmt.Sprintf("%d.jwal.snap", fileID))
+	if _, err := os.Stat(snapPath); os.IsNotExist(err) {
+		t.Fatal("WAL snapshot should exist before file deletion")
+	}
+
+	// Delete the file
+	if err := fs.h.Delete(fs.c, bktID, fileID); err != nil {
+		t.Fatalf("Failed to delete file: %v", err)
+	}
+
+	// Create a new FS instance to trigger recovery
+	fs2, _ := setupTestFS(t, testDir)
+	defer cleanupFS(fs2)
+
+	// Wait for async recovery to complete
+	time.Sleep(200 * time.Millisecond)
+
+	// Verify WAL files are deleted after recovery
+	if _, err := os.Stat(snapPath); !os.IsNotExist(err) {
+		t.Errorf("WAL snapshot should be deleted for non-existent file, but file still exists")
+	}
+
+	walPath := filepath.Join(journalDir, fmt.Sprintf("%d.jwal", fileID))
+	if _, err := os.Stat(walPath); !os.IsNotExist(err) {
+		t.Errorf("WAL file should be deleted for non-existent file, but file still exists")
+	}
+
+	t.Logf("✓ WAL files correctly deleted for non-existent file")
+}
+
+// TestJournalWALNewFileNoWAL tests that new files (dataID=0) don't create WAL
+func TestJournalWALNewFileNoWAL(t *testing.T) {
+	testDir := filepath.Join(os.TempDir(), "orcas_test_wal_new_file")
+	defer cleanupTestDir(t, testDir)
+
+	fs, bktID := setupTestFS(t, testDir)
+	defer cleanupFS(fs)
+
+	// Create a new file (dataID=0)
+	fileID, err := createTestFile(t, fs, bktID, "test_new.txt")
+	if err != nil {
+		t.Fatalf("Failed to create test file: %v", err)
+	}
+
+	// Get file object to verify it's a new file
+	fileObjs, err := fs.h.Get(fs.c, bktID, []int64{fileID})
+	if err != nil || len(fileObjs) == 0 {
+		t.Fatalf("Failed to get file object: %v", err)
+	}
+
+	if fileObjs[0].DataID != 0 && fileObjs[0].DataID != core.EmptyDataID {
+		t.Fatalf("File should be new (dataID=0), but got dataID=%d", fileObjs[0].DataID)
+	}
+
+	// Get or create journal for new file
+	journal := fs.journalMgr.GetOrCreate(fileID, 0, 0)
+
+	// Verify WAL is not created for new file
+	if journal.wal != nil {
+		t.Errorf("WAL should not be created for new file (dataID=0), but WAL exists")
+	}
+
+	t.Logf("✓ WAL correctly not created for new file")
+}
+
+// TestJournalWALRecoveryNewFile tests that new file WALs are skipped during recovery
+func TestJournalWALRecoveryNewFile(t *testing.T) {
+	testDir := filepath.Join(os.TempDir(), "orcas_test_wal_recovery_new")
+	defer cleanupTestDir(t, testDir)
+
+	fs, bktID := setupTestFS(t, testDir)
+	defer cleanupFS(fs)
+
+	// Create a new file
+	fileID, err := createTestFile(t, fs, bktID, "test_new_recovery.txt")
+	if err != nil {
+		t.Fatalf("Failed to create test file: %v", err)
+	}
+
+	// Manually create WAL files for a new file (simulating old behavior)
+	journalDir := filepath.Join(testDir, "journals")
+	if err := os.MkdirAll(journalDir, 0755); err != nil {
+		t.Fatalf("Failed to create journal directory: %v", err)
+	}
+
+	walConfig := DefaultJournalWALConfig()
+	walConfig.Enabled = true
+	jwal, err := NewJournalWAL(fileID, testDir, walConfig)
+	if err != nil {
+		t.Fatalf("Failed to create WAL: %v", err)
+	}
+
+	// Create a snapshot for new file (simulating old behavior)
+	journal := &Journal{
+		fileID:      fileID,
+		dataID:      0, // New file
+		baseSize:    0,
+		virtualSize: 0,
+		isSparse:    false,
+		entries: []JournalEntry{
+			{Offset: 0, Length: 10, Data: []byte("test data")},
+		},
+	}
+
+	if err := jwal.CreateSnapshot(journal); err != nil {
+		t.Fatalf("Failed to create snapshot: %v", err)
+	}
+	jwal.Close()
+
+	// Verify WAL files exist
+	snapPath := filepath.Join(journalDir, fmt.Sprintf("%d.jwal.snap", fileID))
+	if _, err := os.Stat(snapPath); os.IsNotExist(err) {
+		t.Fatal("WAL snapshot should exist before recovery")
+	}
+
+	// Create a new FS instance to trigger recovery
+	fs2, _ := setupTestFS(t, testDir)
+	defer cleanupFS(fs2)
+
+	// Wait for async recovery to complete
+	time.Sleep(200 * time.Millisecond)
+
+	// Verify WAL files are deleted (new file WALs should be cleaned up)
+	if _, err := os.Stat(snapPath); !os.IsNotExist(err) {
+		t.Errorf("WAL snapshot should be deleted for new file during recovery, but file still exists")
+	}
+
+	walPath := filepath.Join(journalDir, fmt.Sprintf("%d.jwal", fileID))
+	if _, err := os.Stat(walPath); !os.IsNotExist(err) {
+		t.Errorf("WAL file should be deleted for new file during recovery, but file still exists")
+	}
+
+	// Verify journal was not recovered (new files don't need recovery)
+	recoveredJournal, exists := fs2.journalMgr.Get(fileID)
+	if exists && recoveredJournal != nil {
+		t.Errorf("Journal should not be recovered for new file, but it was recovered")
+	}
+
+	t.Logf("✓ New file WAL correctly skipped and deleted during recovery")
+}
+
+// TestJournalWALFlushDeletesAllFiles tests that Flush deletes all WAL files (not just snapshot)
+func TestJournalWALFlushDeletesAllFiles(t *testing.T) {
+	testDir := filepath.Join(os.TempDir(), "orcas_test_wal_flush_delete")
+	defer cleanupTestDir(t, testDir)
+
+	fs, bktID := setupTestFS(t, testDir)
+	defer cleanupFS(fs)
+
+	// Create a file with existing data
+	fileID, err := createTestFile(t, fs, bktID, "test_flush.txt")
+	if err != nil {
+		t.Fatalf("Failed to create test file: %v", err)
+	}
+
+	ra, err := getOrCreateRandomAccessor(fs, fileID)
+	if err != nil {
+		t.Fatalf("Failed to get RandomAccessor: %v", err)
+	}
+
+	// Write initial data to create base
+	initialData := []byte("Initial data for flush test")
+	err = ra.Write(0, initialData)
+	if err != nil {
+		t.Fatalf("Failed to write initial data: %v", err)
+	}
+	_, err = ra.Flush()
+	if err != nil {
+		t.Fatalf("Failed to flush initial data: %v", err)
+	}
+
+	// Get file object to get dataID
+	fileObjs, err := fs.h.Get(fs.c, bktID, []int64{fileID})
+	if err != nil || len(fileObjs) == 0 {
+		t.Fatalf("Failed to get file object: %v", err)
+	}
+	dataID := fileObjs[0].DataID
+	if dataID == 0 || dataID == core.EmptyDataID {
+		t.Fatal("File should have dataID after flush")
+	}
+
+	// Write random data to trigger journal usage
+	randomData := []byte("Random write for flush test")
+	err = ra.Write(100, randomData)
+	if err != nil {
+		t.Fatalf("Failed to write random data: %v", err)
+	}
+
+	// Get journal from RandomAccessor
+	ra.journalMu.RLock()
+	journal := ra.journal
+	ra.journalMu.RUnlock()
+
+	// If journal doesn't exist, manually create it for testing
+	if journal == nil {
+		// Manually create journal and WAL for testing
+		journal = fs.journalMgr.GetOrCreate(fileID, dataID, int64(len(initialData)))
+		journal.entries = append(journal.entries, JournalEntry{
+			Offset: 100,
+			Length: 25,
+			Data:   []byte("Random write for flush test"),
+		})
+		atomic.StoreInt32(&journal.isDirty, 1)
+		// Associate journal with RandomAccessor
+		ra.journalMu.Lock()
+		ra.journal = journal
+		ra.journalMu.Unlock()
+	}
+
+	if journal.wal == nil {
+		t.Fatal("WAL should exist for file with data")
+	}
+
+	// Create WAL snapshot
+	if err := journal.wal.CreateSnapshot(journal); err != nil {
+		t.Fatalf("Failed to create WAL snapshot: %v", err)
+	}
+
+	// Verify WAL files exist before flush
+	journalDir := filepath.Join(testDir, "journals")
+	snapPath := filepath.Join(journalDir, fmt.Sprintf("%d.jwal.snap", fileID))
+	walPath := filepath.Join(journalDir, fmt.Sprintf("%d.jwal", fileID))
+
+	if _, err := os.Stat(snapPath); os.IsNotExist(err) {
+		t.Fatal("WAL snapshot should exist before flush")
+	}
+	if _, err := os.Stat(walPath); os.IsNotExist(err) {
+		t.Fatal("WAL file should exist before flush")
+	}
+
+	// Flush journal
+	_, err = ra.Flush()
+	if err != nil {
+		t.Fatalf("Failed to flush journal: %v", err)
+	}
+
+	// Verify all WAL files are deleted after flush
+	if _, err := os.Stat(snapPath); !os.IsNotExist(err) {
+		t.Errorf("WAL snapshot should be deleted after flush, but file still exists")
+	}
+	if _, err := os.Stat(walPath); !os.IsNotExist(err) {
+		t.Errorf("WAL file should be deleted after flush, but file still exists")
+	}
+
+	// Verify WAL handle is closed
+	if journal.wal != nil {
+		t.Errorf("WAL handle should be nil after flush")
+	}
+
+	t.Logf("✓ All WAL files correctly deleted after flush")
+}

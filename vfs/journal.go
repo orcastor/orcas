@@ -172,18 +172,24 @@ func (jm *JournalManager) GetOrCreate(fileID, dataID, baseSize int64) *Journal {
 	atomic.StoreInt32(&j.isDirty, 0)
 
 	// Initialize JournalWAL for crash recovery
-	dataPath := jm.fs.GetDataPath()
-	if dataPath != "" {
-		walConfig := DefaultJournalWALConfig()
-		walConfig.Enabled = true
-		walConfig.SyncMode = "FULL" // Use FULL mode for maximum safety
-		wal, err := NewJournalWAL(fileID, dataPath, walConfig)
-		if err != nil {
-			DebugLog("[Journal GetOrCreate] WARNING: Failed to create JournalWAL: fileID=%d, error=%v", fileID, err)
-		} else {
-			j.wal = wal
-			DebugLog("[Journal GetOrCreate] JournalWAL initialized: fileID=%d", fileID)
+	// OPTIMIZATION: Skip WAL for new files (dataID=0) - they don't need recovery
+	// WAL is only needed for files with existing data that might need recovery
+	if dataID != 0 && dataID != core.EmptyDataID {
+		dataPath := jm.fs.GetDataPath()
+		if dataPath != "" {
+			walConfig := DefaultJournalWALConfig()
+			walConfig.Enabled = true
+			walConfig.SyncMode = "FULL" // Use FULL mode for maximum safety
+			wal, err := NewJournalWAL(fileID, dataPath, walConfig)
+			if err != nil {
+				DebugLog("[Journal GetOrCreate] WARNING: Failed to create JournalWAL: fileID=%d, error=%v", fileID, err)
+			} else {
+				j.wal = wal
+				DebugLog("[Journal GetOrCreate] JournalWAL initialized: fileID=%d", fileID)
+			}
 		}
+	} else {
+		DebugLog("[Journal GetOrCreate] Skipping WAL for new file (dataID=0): fileID=%d", fileID)
 	}
 
 	jm.journals[fileID] = j
@@ -261,6 +267,35 @@ func (jm *JournalManager) RecoverFromWAL() error {
 		fileID, err := strconv.ParseInt(fileIDStr, 10, 64)
 		if err != nil {
 			DebugLog("[JournalManager RecoverFromWAL] WARNING: Invalid snapshot filename: %s", name)
+			continue
+		}
+
+		// OPTIMIZATION: Check if file still exists before recovering
+		// If file doesn't exist, delete WAL files to free disk space and avoid memory usage
+		fileObjs, err := jm.fs.h.Get(jm.fs.c, jm.fs.bktID, []int64{fileID})
+		if err != nil || len(fileObjs) == 0 {
+			// File doesn't exist, delete WAL files
+			DebugLog("[JournalManager RecoverFromWAL] File not found, deleting orphaned WAL: fileID=%d", fileID)
+			walConfig := DefaultJournalWALConfig()
+			jwal, err := NewJournalWAL(fileID, dataPath, walConfig)
+			if err == nil {
+				jwal.DeleteFiles() // Delete both .jwal and .jwal.snap
+				jwal.Close()
+			}
+			continue
+		}
+
+		// OPTIMIZATION: Skip recovery for new files (dataID=0)
+		// New files don't need WAL recovery because they have no state to recover
+		if fileObjs[0].DataID == 0 || fileObjs[0].DataID == core.EmptyDataID {
+			DebugLog("[JournalManager RecoverFromWAL] Skipping recovery for new file (no dataID): fileID=%d", fileID)
+			// Delete WAL files for new files to free space
+			walConfig := DefaultJournalWALConfig()
+			jwal, err := NewJournalWAL(fileID, dataPath, walConfig)
+			if err == nil {
+				jwal.DeleteFiles()
+				jwal.Close()
+			}
 			continue
 		}
 
@@ -1369,13 +1404,17 @@ func (j *Journal) flushSmallFile(newSize int64) (int64, int64, error) {
 	atomic.StoreInt64(&j.currentSize, newSize)
 	atomic.StoreInt32(&j.isDirty, 0)
 
-	// Delete WAL snapshot after successful flush
+	// Delete all WAL files after successful flush (both .jwal and .jwal.snap)
+	// This frees disk space and prevents unnecessary memory usage on next startup
 	if j.wal != nil {
-		if err := j.wal.DeleteSnapshot(); err != nil {
-			DebugLog("[Journal flushSmallFile] WARNING: Failed to delete WAL snapshot: fileID=%d, error=%v", j.fileID, err)
+		if err := j.wal.DeleteFiles(); err != nil {
+			DebugLog("[Journal flushSmallFile] WARNING: Failed to delete WAL files: fileID=%d, error=%v", j.fileID, err)
 		} else {
-			DebugLog("[Journal flushSmallFile] WAL snapshot deleted: fileID=%d", j.fileID)
+			DebugLog("[Journal flushSmallFile] WAL files deleted: fileID=%d", j.fileID)
 		}
+		// Close WAL handle after deletion
+		j.wal.Close()
+		j.wal = nil
 	}
 
 	DebugLog("[Journal flushSmallFile] Flushed small file: fileID=%d, newDataID=%d, newSize=%d",
@@ -1729,13 +1768,17 @@ func (j *Journal) flushLargeFileChunked(newSize int64) (int64, int64, error) {
 	atomic.StoreInt64(&j.currentSize, newSize)
 	atomic.StoreInt32(&j.isDirty, 0)
 
-	// Delete WAL snapshot after successful flush
+	// Delete all WAL files after successful flush (both .jwal and .jwal.snap)
+	// This frees disk space and prevents unnecessary memory usage on next startup
 	if j.wal != nil {
-		if err := j.wal.DeleteSnapshot(); err != nil {
-			DebugLog("[Journal flushLargeFileChunked] WARNING: Failed to delete WAL snapshot: fileID=%d, error=%v", j.fileID, err)
+		if err := j.wal.DeleteFiles(); err != nil {
+			DebugLog("[Journal flushLargeFileChunked] WARNING: Failed to delete WAL files: fileID=%d, error=%v", j.fileID, err)
 		} else {
-			DebugLog("[Journal flushLargeFileChunked] WAL snapshot deleted: fileID=%d", j.fileID)
+			DebugLog("[Journal flushLargeFileChunked] WAL files deleted: fileID=%d", j.fileID)
 		}
+		// Close WAL handle after deletion
+		j.wal.Close()
+		j.wal = nil
 	}
 
 	duration := time.Since(startTime)
