@@ -4086,7 +4086,7 @@ func (n *OrcasNode) Flush(ctx context.Context, f fs.FileHandle) syscall.Errno {
 				if _, ok := n.fs.noKeyTempGetByID(objID); ok {
 					isNoKeyTemp = true
 				}
-				
+
 				go func() {
 					errno := n.fs.OnKeyFileContent(name, keyContent)
 					if errno != 0 {
@@ -4100,6 +4100,8 @@ func (n *OrcasNode) Flush(ctx context.Context, f fs.FileHandle) syscall.Errno {
 					} else {
 						DebugLog("[VFS Flush] Successfully called OnKeyFileContent: objID=%d, fileName=%s, key=%s", objID, name, keyContent)
 					}
+					// Clear keyContent after OnKeyFileContent is called
+					n.fs.keyContent = ""
 				}()
 
 				n.invalidateObj()
