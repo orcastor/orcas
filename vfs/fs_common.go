@@ -457,6 +457,16 @@ func (fs *OrcasFS) noKeyTempCreate(name string) *noKeyTempFile {
 	return f
 }
 
+// noKeyTempDelete deletes a noKeyTemp file by name
+func (fs *OrcasFS) noKeyTempDelete(name string) {
+	fs.noKeyTempMu.Lock()
+	defer fs.noKeyTempMu.Unlock()
+	if id, ok := fs.noKeyTempByName[name]; ok {
+		delete(fs.noKeyTempByID, id)
+		delete(fs.noKeyTempByName, name)
+	}
+}
+
 // shouldUseFallbackFiles checks if we should use fallback files
 // Returns true if RequireKey is true, no key is provided, and fallback files are configured
 func (fs *OrcasFS) shouldUseFallbackFiles() bool {

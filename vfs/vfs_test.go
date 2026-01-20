@@ -4926,3 +4926,350 @@ func TestVFSRecycleBinDelete(t *testing.T) {
 		*/
 	})
 }
+
+// TestNoKeyTempFileOverwrite tests that noKeyTemp files can be overwritten with O_TRUNC flag
+func TestNoKeyTempFileOverwrite(t *testing.T) {
+	Convey("Test noKeyTemp file overwrite with O_TRUNC", t, func() {
+		ensureTestUser(t)
+		handler := core.NewLocalHandler("", "")
+		ctx := context.Background()
+		ctx, _, _, err := handler.Login(ctx, "orcas", "orcas")
+		So(err, ShouldBeNil)
+
+		ig := idgen.NewIDGen(nil, 0)
+		testBktID, _ := ig.New()
+		err = core.InitBucketDB(".", testBktID)
+		So(err, ShouldBeNil)
+
+		// Get user info for bucket creation
+		_, _, _, err = handler.Login(ctx, "orcas", "orcas")
+		So(err, ShouldBeNil)
+
+		// Create bucket
+		admin := core.NewLocalAdmin(".", ".")
+		bkt := &core.BucketInfo{
+			ID:        testBktID,
+			Name:      "test-nokeytemp-overwrite-bucket",
+			Type:      1,
+			Quota:     -1,
+			ChunkSize: 4 * 1024 * 1024, // 4MB chunk size
+		}
+		err = admin.PutBkt(ctx, []*core.BucketInfo{bkt})
+		So(err, ShouldBeNil)
+
+		// Create filesystem with requireKey=true but no key provided
+		ofs := NewOrcasFS(handler, ctx, testBktID, true)
+
+		// Set KeyFileNameFilter to allow keyfile
+		keyFileName := "ZIMAOS_KEYFILE"
+		ofs.KeyFileNameFilter = func(fileName string) syscall.Errno {
+			if fileName == keyFileName {
+				return 0 // Allow keyfile
+			}
+			return syscall.EPERM // Reject other files
+		}
+
+		// Track OnKeyFileContent calls
+		onKeyFileContentCalls := make([]struct {
+			fileName string
+			key      string
+		}, 0)
+		onKeyFileContentMu := sync.Mutex{}
+
+		// Set OnKeyFileContent callback
+		ofs.OnKeyFileContent = func(fileName, key string) syscall.Errno {
+			onKeyFileContentMu.Lock()
+			defer onKeyFileContentMu.Unlock()
+			onKeyFileContentCalls = append(onKeyFileContentCalls, struct {
+				fileName string
+				key      string
+			}{fileName, key})
+			// Simulate failure (wrong key)
+			return syscall.EINVAL
+		}
+
+		// Create temporary mount point
+		mountPoint, err := os.MkdirTemp("", "orcas-vfs-test-*")
+		So(err, ShouldBeNil)
+		defer os.RemoveAll(mountPoint)
+
+		// Create FUSE mount options
+		fuseOpts := &fuse.MountOptions{
+			Options: []string{
+				"default_permissions",
+			},
+		}
+		server, err := ofs.Mount(mountPoint, fuseOpts)
+		if err != nil {
+			t.Skipf("Skipping test: FUSE mount failed (may not be available in test environment): %v", err)
+			return
+		}
+		So(server, ShouldNotBeNil)
+		go server.Serve()
+		defer server.Unmount()
+
+		// Wait for mount to be ready
+		time.Sleep(500 * time.Millisecond)
+
+		keyfilePath := filepath.Join(mountPoint, keyFileName)
+		firstKeyContent := "first-key-content-12345678901234567890123456789012"
+		secondKeyContent := "second-key-content-12345678901234567890123456789012"
+
+		// Step 1: Create keyfile (first attempt)
+		err = os.WriteFile(keyfilePath, []byte(firstKeyContent), 0644)
+		So(err, ShouldBeNil)
+
+		// Wait for flush to complete
+		time.Sleep(200 * time.Millisecond)
+
+		// Verify OnKeyFileContent was called with first key
+		onKeyFileContentMu.Lock()
+		So(len(onKeyFileContentCalls), ShouldEqual, 1)
+		So(onKeyFileContentCalls[0].fileName, ShouldEqual, keyFileName)
+		So(onKeyFileContentCalls[0].key, ShouldContainSubstring, firstKeyContent)
+		onKeyFileContentMu.Unlock()
+
+		// Verify file still exists (noKeyTemp file)
+		_, err = os.Stat(keyfilePath)
+		So(err, ShouldBeNil)
+
+		// Step 2: Try to overwrite with O_TRUNC (second attempt)
+		// This should delete the old noKeyTemp file and create a new one
+		file, err := os.OpenFile(keyfilePath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
+		So(err, ShouldBeNil)
+		_, err = file.WriteString(secondKeyContent)
+		So(err, ShouldBeNil)
+		err = file.Close()
+		So(err, ShouldBeNil)
+
+		// Wait for flush to complete
+		time.Sleep(200 * time.Millisecond)
+
+		// Verify OnKeyFileContent was called again with second key
+		onKeyFileContentMu.Lock()
+		So(len(onKeyFileContentCalls), ShouldEqual, 2)
+		So(onKeyFileContentCalls[1].fileName, ShouldEqual, keyFileName)
+		So(onKeyFileContentCalls[1].key, ShouldContainSubstring, secondKeyContent)
+		onKeyFileContentMu.Unlock()
+
+		// Verify file still exists
+		_, err = os.Stat(keyfilePath)
+		So(err, ShouldBeNil)
+
+		// Verify file content is updated
+		content, err := os.ReadFile(keyfilePath)
+		So(err, ShouldBeNil)
+		So(string(content), ShouldEqual, secondKeyContent)
+
+		t.Logf("Successfully tested noKeyTemp file overwrite: created, failed, overwritten")
+	})
+}
+
+// TestNoKeyTempFileDeleteOnFailure tests that noKeyTemp files are deleted when OnKeyFileContent fails
+func TestNoKeyTempFileDeleteOnFailure(t *testing.T) {
+	Convey("Test noKeyTemp file deletion on OnKeyFileContent failure", t, func() {
+		ensureTestUser(t)
+		handler := core.NewLocalHandler("", "")
+		ctx := context.Background()
+		ctx, _, _, err := handler.Login(ctx, "orcas", "orcas")
+		So(err, ShouldBeNil)
+
+		ig := idgen.NewIDGen(nil, 0)
+		testBktID, _ := ig.New()
+		err = core.InitBucketDB(".", testBktID)
+		So(err, ShouldBeNil)
+
+		// Get user info for bucket creation
+		_, _, _, err = handler.Login(ctx, "orcas", "orcas")
+		So(err, ShouldBeNil)
+
+		// Create bucket
+		admin := core.NewLocalAdmin(".", ".")
+		bkt := &core.BucketInfo{
+			ID:        testBktID,
+			Name:      "test-nokeytemp-delete-bucket",
+			Type:      1,
+			Quota:     -1,
+			ChunkSize: 4 * 1024 * 1024, // 4MB chunk size
+		}
+		err = admin.PutBkt(ctx, []*core.BucketInfo{bkt})
+		So(err, ShouldBeNil)
+
+		// Create filesystem with requireKey=true but no key provided
+		ofs := NewOrcasFS(handler, ctx, testBktID, true)
+
+		// Set KeyFileNameFilter to allow keyfile
+		keyFileName := "ZIMAOS_KEYFILE"
+		ofs.KeyFileNameFilter = func(fileName string) syscall.Errno {
+			if fileName == keyFileName {
+				return 0 // Allow keyfile
+			}
+			return syscall.EPERM // Reject other files
+		}
+
+		// Track OnKeyFileContent calls
+		onKeyFileContentCalls := 0
+		onKeyFileContentMu := sync.Mutex{}
+
+		// Set OnKeyFileContent callback that always fails
+		ofs.OnKeyFileContent = func(fileName, key string) syscall.Errno {
+			onKeyFileContentMu.Lock()
+			onKeyFileContentCalls++
+			onKeyFileContentMu.Unlock()
+			// Always fail to simulate wrong key
+			return syscall.EINVAL
+		}
+
+		// Create temporary mount point
+		mountPoint, err := os.MkdirTemp("", "orcas-vfs-test-*")
+		So(err, ShouldBeNil)
+		defer os.RemoveAll(mountPoint)
+
+		// Create FUSE mount options
+		fuseOpts := &fuse.MountOptions{
+			Options: []string{
+				"default_permissions",
+			},
+		}
+		server, err := ofs.Mount(mountPoint, fuseOpts)
+		if err != nil {
+			t.Skipf("Skipping test: FUSE mount failed (may not be available in test environment): %v", err)
+			return
+		}
+		So(server, ShouldNotBeNil)
+		go server.Serve()
+		defer server.Unmount()
+
+		// Wait for mount to be ready
+		time.Sleep(500 * time.Millisecond)
+
+		keyfilePath := filepath.Join(mountPoint, keyFileName)
+		keyContent := "test-key-content-12345678901234567890123456789012"
+
+		// Step 1: Create keyfile
+		err = os.WriteFile(keyfilePath, []byte(keyContent), 0644)
+		So(err, ShouldBeNil)
+
+		// Wait for flush to complete
+		time.Sleep(200 * time.Millisecond)
+
+		// Verify OnKeyFileContent was called
+		onKeyFileContentMu.Lock()
+		So(onKeyFileContentCalls, ShouldEqual, 1)
+		onKeyFileContentMu.Unlock()
+
+		// Step 2: Verify file is deleted from noKeyTemp after failure
+		// Wait a bit more for async deletion to complete
+		time.Sleep(100 * time.Millisecond)
+
+		// Try to create the file again - it should succeed (not fail with EEXIST)
+		// because the previous file should have been deleted
+		err = os.WriteFile(keyfilePath, []byte(keyContent+"-retry"), 0644)
+		So(err, ShouldBeNil)
+
+		// Wait for flush
+		time.Sleep(200 * time.Millisecond)
+
+		// Verify OnKeyFileContent was called again (second attempt)
+		onKeyFileContentMu.Lock()
+		So(onKeyFileContentCalls, ShouldEqual, 2)
+		onKeyFileContentMu.Unlock()
+
+		// Verify file content is updated (not the old content)
+		content, err := os.ReadFile(keyfilePath)
+		So(err, ShouldBeNil)
+		So(string(content), ShouldEqual, keyContent+"-retry")
+
+		t.Logf("Successfully tested noKeyTemp file deletion on failure: created, failed, deleted, recreated")
+	})
+}
+
+// TestNoKeyTempFileOExcl tests that O_EXCL flag prevents overwriting existing noKeyTemp files
+func TestNoKeyTempFileOExcl(t *testing.T) {
+	Convey("Test O_EXCL flag prevents overwriting existing noKeyTemp files", t, func() {
+		ensureTestUser(t)
+		handler := core.NewLocalHandler("", "")
+		ctx := context.Background()
+		ctx, _, _, err := handler.Login(ctx, "orcas", "orcas")
+		So(err, ShouldBeNil)
+
+		ig := idgen.NewIDGen(nil, 0)
+		testBktID, _ := ig.New()
+		err = core.InitBucketDB(".", testBktID)
+		So(err, ShouldBeNil)
+
+		// Get user info for bucket creation
+		_, _, _, err = handler.Login(ctx, "orcas", "orcas")
+		So(err, ShouldBeNil)
+
+		// Create bucket
+		admin := core.NewLocalAdmin(".", ".")
+		bkt := &core.BucketInfo{
+			ID:        testBktID,
+			Name:      "test-nokeytemp-oexcl-bucket",
+			Type:      1,
+			Quota:     -1,
+			ChunkSize: 4 * 1024 * 1024, // 4MB chunk size
+		}
+		err = admin.PutBkt(ctx, []*core.BucketInfo{bkt})
+		So(err, ShouldBeNil)
+
+		// Create filesystem with requireKey=true but no key provided
+		ofs := NewOrcasFS(handler, ctx, testBktID, true)
+
+		// Set KeyFileNameFilter to allow keyfile
+		keyFileName := "ZIMAOS_KEYFILE"
+		ofs.KeyFileNameFilter = func(fileName string) syscall.Errno {
+			if fileName == keyFileName {
+				return 0 // Allow keyfile
+			}
+			return syscall.EPERM // Reject other files
+		}
+
+		// Set OnKeyFileContent callback (doesn't matter for this test)
+		ofs.OnKeyFileContent = func(fileName, key string) syscall.Errno {
+			return 0 // Success (doesn't matter for O_EXCL test)
+		}
+
+		// Create temporary mount point
+		mountPoint, err := os.MkdirTemp("", "orcas-vfs-test-*")
+		So(err, ShouldBeNil)
+		defer os.RemoveAll(mountPoint)
+
+		// Create FUSE mount options
+		fuseOpts := &fuse.MountOptions{
+			Options: []string{
+				"default_permissions",
+			},
+		}
+		server, err := ofs.Mount(mountPoint, fuseOpts)
+		if err != nil {
+			t.Skipf("Skipping test: FUSE mount failed (may not be available in test environment): %v", err)
+			return
+		}
+		So(server, ShouldNotBeNil)
+		go server.Serve()
+		defer server.Unmount()
+
+		// Wait for mount to be ready
+		time.Sleep(500 * time.Millisecond)
+
+		keyfilePath := filepath.Join(mountPoint, keyFileName)
+		keyContent := "test-key-content-12345678901234567890123456789012"
+
+		// Step 1: Create keyfile
+		err = os.WriteFile(keyfilePath, []byte(keyContent), 0644)
+		So(err, ShouldBeNil)
+
+		// Wait for file to be created
+		time.Sleep(100 * time.Millisecond)
+
+		// Step 2: Try to create again with O_EXCL - should fail with "file exists"
+		file, err := os.OpenFile(keyfilePath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0644)
+		So(err, ShouldNotBeNil)
+		So(file, ShouldBeNil)
+		So(os.IsExist(err), ShouldBeTrue)
+
+		t.Logf("Successfully tested O_EXCL prevents overwriting: created, O_EXCL create failed as expected")
+	})
+}

@@ -1320,27 +1320,35 @@ func (n *OrcasNode) Create(ctx context.Context, name string, flags uint32, mode 
 				if flags&syscall.O_EXCL != 0 {
 					return nil, nil, 0, syscall.EEXIST
 				}
-				if f, ok2 := n.fs.noKeyTempGetByID(existingID); ok2 && f != nil {
-					obj := &core.ObjectInfo{
-						ID:     f.id,
-						PID:    n.fs.bktID,
-						Type:   core.OBJ_TYPE_FILE,
-						Name:   f.name,
-						Size:   int64(len(f.data)),
-						DataID: core.EmptyDataID,
-						MTime:  f.mtime,
+				// If O_TRUNC is set, delete existing noKeyTemp file to allow overwrite
+				if flags&syscall.O_TRUNC != 0 {
+					DebugLog("[VFS Create] O_TRUNC set for existing noKeyTemp file, deleting to allow overwrite: name=%s, fileID=%d", name, existingID)
+					n.fs.noKeyTempDelete(name)
+					// Continue to create new file below
+				} else {
+					// No truncate, open existing file
+					if f, ok2 := n.fs.noKeyTempGetByID(existingID); ok2 && f != nil {
+						obj := &core.ObjectInfo{
+							ID:     f.id,
+							PID:    n.fs.bktID,
+							Type:   core.OBJ_TYPE_FILE,
+							Name:   f.name,
+							Size:   int64(len(f.data)),
+							DataID: core.EmptyDataID,
+							MTime:  f.mtime,
+						}
+						fileNode := &OrcasNode{fs: n.fs, objID: f.id}
+						fileNode.obj.Store(obj)
+						stableAttr := fs.StableAttr{Mode: syscall.S_IFREG, Ino: uint64(f.id)}
+						fileInode := n.NewInode(ctx, fileNode, stableAttr)
+						out.Mode = syscall.S_IFREG | 0o644
+						out.Size = uint64(obj.Size)
+						out.Mtime = uint64(obj.MTime)
+						out.Ctime = out.Mtime
+						out.Atime = out.Mtime
+						out.Ino = uint64(obj.ID)
+						return fileInode, fileNode, 0, 0
 					}
-					fileNode := &OrcasNode{fs: n.fs, objID: f.id}
-					fileNode.obj.Store(obj)
-					stableAttr := fs.StableAttr{Mode: syscall.S_IFREG, Ino: uint64(f.id)}
-					fileInode := n.NewInode(ctx, fileNode, stableAttr)
-					out.Mode = syscall.S_IFREG | 0o644
-					out.Size = uint64(obj.Size)
-					out.Mtime = uint64(obj.MTime)
-					out.Ctime = out.Mtime
-					out.Atime = out.Mtime
-					out.Ino = uint64(obj.ID)
-					return fileInode, fileNode, 0, 0
 				}
 			}
 
@@ -4073,10 +4081,22 @@ func (n *OrcasNode) Flush(ctx context.Context, f fs.FileHandle) syscall.Errno {
 				objID := obj.ID
 				name := obj.Name
 				keyContent := n.fs.keyContent
+				// Check if this is a noKeyTemp file before attempting database operations
+				isNoKeyTemp := false
+				if _, ok := n.fs.noKeyTempGetByID(objID); ok {
+					isNoKeyTemp = true
+				}
+				
 				go func() {
 					errno := n.fs.OnKeyFileContent(name, keyContent)
 					if errno != 0 {
 						DebugLog("[VFS Flush] ERROR: OnKeyFileContent failed: objID=%d, fileName=%s, key=%s, errno=%d", objID, name, keyContent, errno)
+						// Delete from noKeyTemp since the file is in-memory and OnKeyFileContent failed
+						// This allows user to retry uploading the keyfile
+						if isNoKeyTemp {
+							n.fs.noKeyTempDelete(name)
+							DebugLog("[VFS Flush] Deleted noKeyTemp file after OnKeyFileContent failure: name=%s", name)
+						}
 					} else {
 						DebugLog("[VFS Flush] Successfully called OnKeyFileContent: objID=%d, fileName=%s, key=%s", objID, name, keyContent)
 					}
@@ -4084,7 +4104,11 @@ func (n *OrcasNode) Flush(ctx context.Context, f fs.FileHandle) syscall.Errno {
 
 				n.invalidateObj()
 				fileObjCache.Del(objID)
-				n.fs.h.Delete(n.fs.c, n.fs.bktID, objID)
+				// Only delete from database if the file is actually in the database
+				// For noKeyTemp files, they are in-memory only and will be deleted by noKeyTempDelete above
+				if !isNoKeyTemp {
+					n.fs.h.Delete(n.fs.c, n.fs.bktID, objID)
+				}
 				n.fs.root.invalidateDirListCache(n.fs.bktID)
 			}
 			return 0
