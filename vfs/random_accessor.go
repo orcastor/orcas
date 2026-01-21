@@ -79,14 +79,6 @@ var (
 )
 
 var (
-	// Object pool: reuse byte buffers to reduce memory allocation
-	// Optimization: use smaller initial capacity for small file operations
-	chunkDataPool = sync.Pool{
-		New: func() interface{} {
-			return make([]byte, 0, SmallChunkPoolCap) // 64KB for small files
-		},
-	}
-
 	// Object pool: reuse write operation slices
 	writeOpsPool = sync.Pool{
 		New: func() interface{} {
@@ -94,27 +86,10 @@ var (
 		},
 	}
 
-	// Object pool for large buffers (used when small pool buffer is insufficient)
-	largeChunkDataPool = sync.Pool{
-		New: func() interface{} {
-			return make([]byte, 0, LargeChunkPoolCap) // 4MB for large files
-		},
-	}
-
 	// Object pool for int slices (used for remainingChunks, etc.)
 	intSlicePool = sync.Pool{
 		New: func() interface{} {
 			return make([]int, 0, DefaultIntSlicePoolCap)
-		},
-	}
-
-	// Object pool for chunk buffers (reuse large chunk buffers to reduce allocations)
-	chunkBufferPool = sync.Pool{
-		New: func() interface{} {
-			return &chunkBuffer{
-				data:          make([]byte, 0, DefaultChunkPoolCap), // 10MB
-				offsetInChunk: 0,
-			}
 		},
 	}
 
@@ -126,43 +101,22 @@ var (
 	clearedChunkedWriterMarker = &ChunkedFileWriter{}
 )
 
-// putChunkDataToPool asynchronously clears the buffer content (zeros all bytes) and returns it to the pool
-// The buffer capacity is preserved for reuse, only length is reset to 0
-// Automatically selects the correct pool based on buffer capacity
-func putChunkDataToPool(data []byte) {
-	if len(data) == 0 {
-		// For empty buffers, use small pool by default
-		chunkDataPool.Put(data)
-		return
+func allocChunkData(size int) []byte {
+	if size <= 0 {
+		return nil
 	}
-	// Save slice information for async clearing
-	// The underlying array will remain valid until GC, so we can safely reference it in goroutine
-	dataCap := cap(data)
-	dataLen := len(data)
-	// Determine which pool to use based on capacity
-	useLargePool := dataCap >= int(LargeChunkPoolCap)
-	// Asynchronously clear the buffer content (zero all bytes) before putting it back to the pool
-	go func(buf []byte, bufCap int, bufLen int, useLarge bool) {
-		// Clear the entire underlying array content (zero all bytes) using efficient batch clearing
-		// Use full capacity to ensure all data in the underlying array is cleared
-		// This allows buffer reuse without data leakage
-		bufSlice := buf[:bufCap]
-		clearLen := len(bufSlice)
-		for cleared := 0; cleared < clearLen; {
-			chunk := clearLen - cleared
-			if chunk > len(zeroSlice) {
-				chunk = len(zeroSlice)
-			}
-			copy(bufSlice[cleared:cleared+chunk], zeroSlice[:chunk])
-			cleared += chunk
-		}
-		// Reset length to 0 (preserve capacity) and put back to appropriate pool for reuse
-		if useLarge {
-			largeChunkDataPool.Put(buf[:0])
-		} else {
-			chunkDataPool.Put(buf[:0])
-		}
-	}(data, dataCap, dataLen, useLargePool)
+	return make([]byte, size)
+}
+
+func allocChunkBuffer(size int64) *chunkBuffer {
+	if size <= 0 {
+		return &chunkBuffer{data: nil}
+	}
+	return &chunkBuffer{
+		data:          make([]byte, size),
+		offsetInChunk: 0,
+		ranges:        nil,
+	}
 }
 
 var (
@@ -930,33 +884,12 @@ func (cw *ChunkedFileWriter) Write(offset int64, data []byte) error {
 					}
 					existingChunkSize := int64(len(processedChunk))
 
-					// Always use 10MB buffer from pool
-					pooledBuf := chunkBufferPool.Get().(*chunkBuffer)
-					// Set length to chunk size, but keep capacity at 10MB
+					// Allocate a fresh buffer (no object pool) sized to hold the chunk
 					bufferLength := chunkSize
 					if existingChunkSize > bufferLength {
 						bufferLength = existingChunkSize
 					}
-					// Ensure bufferLength doesn't exceed capacity
-					if bufferLength > int64(cap(pooledBuf.data)) {
-						bufferLength = int64(cap(pooledBuf.data))
-					}
-					pooledBuf.data = pooledBuf.data[:bufferLength]
-					// CRITICAL: Zero-fill buffer to prevent data corruption from pool reuse
-					// Buffer from pool may contain old data, so we must clear it before use
-					// Use efficient batch clearing with copy
-					clearLen := len(pooledBuf.data)
-					for cleared := 0; cleared < clearLen; {
-						chunk := clearLen - cleared
-						if chunk > len(zeroSlice) {
-							chunk = len(zeroSlice)
-						}
-						copy(pooledBuf.data[cleared:cleared+chunk], zeroSlice[:chunk])
-						cleared += chunk
-					}
-					pooledBuf.offsetInChunk = 0
-					pooledBuf.ranges = pooledBuf.ranges[:0]
-					buf = pooledBuf
+					buf = allocChunkBuffer(bufferLength)
 
 					// Load existing data into buffer
 					// IMPORTANT: Always load existing data into buffer, even if chunk is complete
@@ -1061,32 +994,12 @@ func (cw *ChunkedFileWriter) Write(offset int64, data []byte) error {
 					}
 					existingChunkSize := int64(len(processedChunk))
 
-					// Always use 10MB buffer from pool
-					pooledBuf := chunkBufferPool.Get().(*chunkBuffer)
+					// Allocate a fresh buffer (no object pool) sized to hold the chunk
 					bufferLength := chunkSize
 					if existingChunkSize > bufferLength {
 						bufferLength = existingChunkSize
 					}
-					// Ensure bufferLength doesn't exceed capacity
-					if bufferLength > int64(cap(pooledBuf.data)) {
-						bufferLength = int64(cap(pooledBuf.data))
-					}
-					pooledBuf.data = pooledBuf.data[:bufferLength]
-					// CRITICAL: Zero-fill buffer to prevent data corruption from pool reuse
-					// Buffer from pool may contain old data, so we must clear it before use
-					// Use efficient batch clearing with copy
-					clearLen := len(pooledBuf.data)
-					for cleared := 0; cleared < clearLen; {
-						chunk := clearLen - cleared
-						if chunk > len(zeroSlice) {
-							chunk = len(zeroSlice)
-						}
-						copy(pooledBuf.data[cleared:cleared+chunk], zeroSlice[:chunk])
-						cleared += chunk
-					}
-					pooledBuf.offsetInChunk = 0
-					pooledBuf.ranges = pooledBuf.ranges[:0]
-					buf = pooledBuf
+					buf = allocChunkBuffer(bufferLength)
 
 					// Load existing data into buffer
 					// IMPORTANT: Always load existing data into buffer, even if chunk is complete
@@ -1140,26 +1053,9 @@ func (cw *ChunkedFileWriter) Write(offset int64, data []byte) error {
 					cw.chunks[sn] = buf
 					cw.mu.Unlock()
 				} else {
-					// Chunk still doesn't exist, create empty buffer using 10MB pool buffer
+					// Chunk still doesn't exist, create empty buffer
 					// No read operation needed - pure append write from beginning
-					pooledBuf := chunkBufferPool.Get().(*chunkBuffer)
-					// Pre-size buffer to chunkSize to avoid resizing during writes
-					// CRITICAL: Zero-fill buffer to prevent data corruption from pool reuse
-					pooledBuf.data = pooledBuf.data[:chunkSize]
-					// Clear all data in buffer (buffer from pool may contain old data)
-					// Use efficient batch clearing with copy
-					clearLen := len(pooledBuf.data)
-					for cleared := 0; cleared < clearLen; {
-						chunk := clearLen - cleared
-						if chunk > len(zeroSlice) {
-							chunk = len(zeroSlice)
-						}
-						copy(pooledBuf.data[cleared:cleared+chunk], zeroSlice[:chunk])
-						cleared += chunk
-					}
-					pooledBuf.offsetInChunk = 0
-					pooledBuf.ranges = pooledBuf.ranges[:0]
-					buf = pooledBuf
+					buf = allocChunkBuffer(chunkSize)
 					cw.chunks[sn] = buf
 					cw.mu.Unlock()
 				}
@@ -1324,7 +1220,7 @@ func (cw *ChunkedFileWriter) Write(offset int64, data []byte) error {
 						buf.data = buf.data[:0] // Reset length, keep capacity
 						buf.offsetInChunk = 0
 						buf.ranges = buf.ranges[:0] // Reset ranges
-						chunkBufferPool.Put(buf)
+						// no chunk buffer pool: allow GC to reclaim
 					}
 				} else {
 					// This should not happen if chunkComplete check is correct
@@ -1426,32 +1322,8 @@ func (cw *ChunkedFileWriter) flushChunkWithBuffer(sn int, buf *chunkBuffer) erro
 	// Copy all data up to offsetInChunk
 	// IMPORTANT: After adjusting offsetInChunk above, it should match len(buf.data)
 	// So we only copy actual data, no zero-filling needed
-	// CRITICAL: Use pool to allocate chunkData to avoid memory leak
-	// For large chunks (>= 4MB), use largeChunkDataPool, otherwise use chunkDataPool
 	chunkDataSize := int(buf.offsetInChunk)
-	var chunkData []byte
-	var chunkDataFromPool bool
-	if chunkDataSize >= int(LargeChunkPoolCap) {
-		pooledBuf := largeChunkDataPool.Get().([]byte)
-		if cap(pooledBuf) < chunkDataSize {
-			// Pool buffer too small, allocate new one
-			chunkData = make([]byte, chunkDataSize)
-			chunkDataFromPool = false
-		} else {
-			chunkData = pooledBuf[:chunkDataSize]
-			chunkDataFromPool = true
-		}
-	} else {
-		pooledBuf := chunkDataPool.Get().([]byte)
-		if cap(pooledBuf) < chunkDataSize {
-			// Pool buffer too small, allocate new one
-			chunkData = make([]byte, chunkDataSize)
-			chunkDataFromPool = false
-		} else {
-			chunkData = pooledBuf[:chunkDataSize]
-			chunkDataFromPool = true
-		}
-	}
+	chunkData := allocChunkData(chunkDataSize)
 
 	copyLen := int64(len(buf.data))
 	if copyLen > buf.offsetInChunk {
@@ -1502,10 +1374,6 @@ func (cw *ChunkedFileWriter) flushChunkWithBuffer(sn int, buf *chunkBuffer) erro
 		finalData, err = core.ProcessData(chunkData, &cw.dataInfo.Kind, getCmprQltyForFS(cw.fs), getEndecKeyForFS(cw.fs), isFirstChunk)
 		if err != nil {
 			DebugLog("[VFS ChunkedFileWriter flushChunk] ERROR: Failed to process chunk data: fileID=%d, dataID=%d, sn=%d, error=%v", cw.fileID, cw.dataID, sn, err)
-			// Return chunkData to pool before returning error
-			if chunkDataFromPool {
-				putChunkDataToPool(chunkData)
-			}
 			return err
 		}
 
@@ -1529,12 +1397,6 @@ func (cw *ChunkedFileWriter) flushChunkWithBuffer(sn int, buf *chunkBuffer) erro
 	err = cw.writeChunkSync(sn, finalData)
 	if err != nil {
 		DebugLog("[VFS ChunkedFileWriter Write] ERROR: Failed to write chunk synchronously: fileID=%d, dataID=%d, sn=%d, size=%d, error=%v", cw.fileID, cw.dataID, sn, len(finalData), err)
-		// Return chunkData to pool before returning error
-		// Note: finalData may be different from chunkData (if ProcessData allocated new buffer)
-		// But we only return chunkData to pool here, finalData is managed by ProcessData/PutData
-		if chunkDataFromPool {
-			putChunkDataToPool(chunkData)
-		}
 		return err
 	}
 
@@ -1635,13 +1497,7 @@ func (cw *ChunkedFileWriter) flushChunkWithBuffer(sn int, buf *chunkBuffer) erro
 		}
 	}
 
-	// CRITICAL: Return chunkData to pool after successful write
-	// chunkData is no longer needed after writeChunkSync completes
-	// Note: If enableRealtime is false, finalData == chunkData, so we can safely return chunkData
-	// If enableRealtime is true, finalData is a new buffer from ProcessData, chunkData can be returned
-	if chunkDataFromPool {
-		putChunkDataToPool(chunkData)
-	}
+	// chunkData is no longer needed after writeChunkSync completes (no pool; allow GC)
 
 	return nil
 }
@@ -1933,7 +1789,7 @@ func (cw *ChunkedFileWriter) Flush(force bool) error {
 						buf.data = buf.data[:0] // Reset length, keep capacity
 						buf.offsetInChunk = 0
 						buf.ranges = buf.ranges[:0] // Reset ranges
-						chunkBufferPool.Put(buf)
+						// no chunk buffer pool: allow GC to reclaim
 					}
 
 					return nil, nil
@@ -2198,6 +2054,31 @@ func (ra *RandomAccessor) Write(offset int64, data []byte) error {
 		ra.updateWriteRange(offset, int64(len(data)))
 	}
 
+	// 如果当前存在顺序写缓冲（seqBuffer），但本次写入的位置已经不再是顺序追加（offset != seqOffset），
+	// 说明写入模式从「顺序写」切换为「随机写」：
+	// - 为了保证后续 journal 基于的 base 数据是完整的，需要先把 seqBuffer 中的数据 flush 到后端、
+	//   更新 fileObj.DataID / Size，然后再决定是否启用 journal。
+	// - 这样在 TestJournalRandomWrites 这类场景中，第一次从 offset=0 的顺序写会作为 base 数据落盘，
+	//   后续 offset=100/50 等随机写则通过 journal 叠加在 base 之上，Read 时才能同时看到两部分数据。
+	if ra.seqBuffer != nil {
+		ra.seqBuffer.mu.Lock()
+		seqOffset := ra.seqBuffer.offset
+		seqClosed := ra.seqBuffer.closed
+		hasSeqData := ra.seqBuffer.hasData
+		ra.seqBuffer.mu.Unlock()
+
+		if hasSeqData && !seqClosed && offset != seqOffset {
+			if flushErr := ra.flushSequentialBuffer(); flushErr != nil {
+				DebugLog("[VFS RandomAccessor Write] ERROR: Failed to flush sequential buffer before switching to random/journal: fileID=%d, offset=%d, seqOffset=%d, size=%d, error=%v",
+					ra.fileID, offset, seqOffset, len(data), flushErr)
+				return flushErr
+			}
+			ra.seqBuffer.mu.Lock()
+			ra.seqBuffer.closed = true
+			ra.seqBuffer.mu.Unlock()
+		}
+	}
+
 	// PRIORITY 1: Check if should use journal
 	// Journal provides version control for random writes on existing files
 	// Pass offset and length for sparse file local sequential range detection
@@ -2366,17 +2247,26 @@ func (ra *RandomAccessor) Write(offset int64, data []byte) error {
 	// - 非 .tmp 文件
 	// - 当前 fileObj 没有 DataID（新文件）
 	// - 从 offset=0 开始写
-	// 其它场景仍然走原有 seqBuffer / buffer / journal 路径，尽量减小行为影响范围。
+	// - 首次写入的数据量足够大（>= chunkSize），明确属于「大文件顺序上传」
+	// 其它场景仍然走原有 seqBuffer / buffer / journal 路径，尽量减小行为影响范围，避免影响
+	// 小文件以及依赖 journal 行为的测试（如 TestJournalBasicWriteRead / TestJournalRandomWrites 等）。
 	if !ra.isTmpFile && (fileObj.DataID == 0 || fileObj.DataID == core.EmptyDataID) && fileObj.Size == 0 && offset == 0 {
-		atomic.StoreInt64(&ra.lastActivity, core.Now())
-		getDelayedFlushManager().schedule(ra, false)
-
-		cw, err := ra.getOrCreateChunkedWriter(WRITER_TYPE_SEQ)
-		if err == nil && cw != nil {
-			DebugLog("[VFS RandomAccessor Write] Using WRITER_TYPE_SEQ ChunkedFileWriter for new sequential upload: fileID=%d, offset=%d, size=%d", ra.fileID, offset, len(data))
-			return cw.Write(offset, data)
+		chunkSize := ra.fs.chunkSize
+		if chunkSize <= 0 {
+			chunkSize = DefaultChunkSize
 		}
-		DebugLog("[VFS RandomAccessor Write] WARNING: Failed to create WRITER_TYPE_SEQ ChunkedFileWriter, fallback to seqBuffer/random: fileID=%d, error=%v", ra.fileID, err)
+		// 如果当前写入的数据量小于一个 chunk，则认为不是「大文件顺序上传」，保持原有路径
+		if int64(len(data)) >= chunkSize {
+			atomic.StoreInt64(&ra.lastActivity, core.Now())
+			getDelayedFlushManager().schedule(ra, false)
+
+			cw, err := ra.getOrCreateChunkedWriter(WRITER_TYPE_SEQ)
+			if err == nil && cw != nil {
+				DebugLog("[VFS RandomAccessor Write] Using WRITER_TYPE_SEQ ChunkedFileWriter for new sequential upload: fileID=%d, offset=%d, size=%d", ra.fileID, offset, len(data))
+				return cw.Write(offset, data)
+			}
+			DebugLog("[VFS RandomAccessor Write] WARNING: Failed to create WRITER_TYPE_SEQ ChunkedFileWriter, fallback to seqBuffer/random: fileID=%d, error=%v", ra.fileID, err)
+		}
 	}
 
 	// Check if in sequential write mode (only for non-.tmp files)
@@ -5137,12 +5027,7 @@ func (ra *RandomAccessor) processWritesStreaming(
 						ra.fileID, chunkIdx, sn, len(encryptedChunk))
 
 					// Still need to read original data for hash calculation
-					chunkData := chunkDataPool.Get().([]byte)
-					if cap(chunkData) < actualChunkSize {
-						chunkData = make([]byte, actualChunkSize)
-					} else {
-						chunkData = chunkData[:actualChunkSize]
-					}
+					chunkData := allocChunkData(actualChunkSize)
 
 					n, readErr := reader.Read(chunkData, pos)
 					if readErr == nil || readErr == io.EOF {
@@ -5185,7 +5070,6 @@ func (ra *RandomAccessor) processWritesStreaming(
 						dataXXH3 = xxh3Hash.Sum64()
 					}
 
-					putChunkDataToPool(chunkData)
 					sn++
 					continue // Skip normal processing
 				}
@@ -5197,13 +5081,8 @@ func (ra *RandomAccessor) processWritesStreaming(
 		// actualChunkSize is already correct based on totalSize
 		DebugLog("[VFS processWritesStreaming] Processing chunk: fileID=%d, dataID=%d, chunkIdx=%d, sn=%d, pos=%d, chunkEnd=%d, actualChunkSize=%d, writesCount=%d", ra.fileID, dataInfo.ID, chunkIdx, sn, pos, chunkEnd, actualChunkSize, len(writesByChunk[chunkIdx]))
 
-		// Get chunk buffer from object pool
-		chunkData := chunkDataPool.Get().([]byte)
-		if cap(chunkData) < actualChunkSize {
-			chunkData = make([]byte, actualChunkSize)
-		} else {
-			chunkData = chunkData[:actualChunkSize]
-		}
+		// Allocate chunk buffer on demand (no object pool)
+		chunkData := allocChunkData(actualChunkSize)
 
 		// 1. Read this chunk of original data from reader (using Read(buf, offset))
 		if reader != nil {
@@ -5223,8 +5102,7 @@ func (ra *RandomAccessor) processWritesStreaming(
 					}
 					n = 0 // Treat as no data read
 				} else {
-					// For other errors, return error (async clear)
-					putChunkDataToPool(chunkData)
+					// For other errors, return error
 					return 0, fmt.Errorf("failed to read chunk: %w", err)
 				}
 			}
@@ -5394,14 +5272,12 @@ func (ra *RandomAccessor) processWritesStreaming(
 		DebugLog("[VFS applyWritesStreamingCompressed] Writing encoded chunk to disk: fileID=%d, dataID=%d, chunkIdx=%d, sn=%d, pos=%d, size=%d, writesCount=%d", ra.fileID, dataInfo.ID, chunkIdx, sn, pos, len(encodedChunkCopy), len(writesByChunk[chunkIdx]))
 		if _, err := ra.fs.h.PutData(ra.fs.c, ra.fs.bktID, dataInfo.ID, sn, encodedChunkCopy); err != nil {
 			DebugLog("[VFS applyWritesStreamingCompressed] ERROR: Failed to write encoded chunk to disk: fileID=%d, dataID=%d, sn=%d, error=%v", ra.fileID, dataInfo.ID, sn, err)
-			putChunkDataToPool(chunkData)
 			return 0, err
 		}
 		DebugLog("[VFS applyWritesStreamingCompressed] Successfully wrote encoded chunk to disk: fileID=%d, dataID=%d, sn=%d, size=%d", ra.fileID, dataInfo.ID, sn, len(encodedChunkCopy))
 		sn++
 
-		// Return chunkData to object pool (async clear)
-		putChunkDataToPool(chunkData)
+		// chunkData no longer needed (no object pool; allow GC)
 	}
 
 	// Set XXH3, SHA-256 and checksum
@@ -7391,26 +7267,8 @@ func mergeWriteOperations(operations []WriteOperation) []WriteOperation {
 					copy(mergedData[op.Offset-startOffset:], op.Data)
 				}
 			} else {
-				// Need new buffer, use appropriate object pool based on size
-				if mergedSize <= 64<<10 {
-					// Small buffer, use small pool
-					mergedData = chunkDataPool.Get().([]byte)
-					if cap(mergedData) < mergedSize {
-						mergedData = make([]byte, mergedSize)
-						putChunkDataToPool(mergedData[:0]) // Return empty pool item
-					} else {
-						mergedData = mergedData[:mergedSize]
-					}
-				} else {
-					// Large buffer, use large pool
-					mergedData = largeChunkDataPool.Get().([]byte)
-					if cap(mergedData) < mergedSize {
-						mergedData = make([]byte, mergedSize)
-						largeChunkDataPool.Put(mergedData[:0]) // Return empty pool item
-					} else {
-						mergedData = mergedData[:mergedSize]
-					}
-				}
+				// Need new buffer (no object pool)
+				mergedData = make([]byte, mergedSize)
 
 				// IMPORTANT: Copy old data first, then overwrite with new data
 				// Since operations are sorted by offset and maintain original order for same offset,
@@ -7531,6 +7389,14 @@ func (ra *RandomAccessor) shouldUseJournal(fileObj *core.ObjectInfo, offset, len
 				return false
 			}
 		}
+	}
+
+	// Fast-path: any non-zero offset write is a random write candidate.
+	// To ensure correctness (especially for files with existing or future data),
+	// prefer journaling so reads can see these modifications immediately.
+	if offset != 0 {
+		DebugLog("[VFS shouldUseJournal] Non-zero offset write, using journal: fileID=%d, offset=%d, length=%d", ra.fileID, offset, length)
+		return true
 	}
 
 	// OPTIMIZATION: Don't use journal for small files after truncate(0) with sequential writes
@@ -7697,9 +7563,12 @@ func (ra *RandomAccessor) shouldUseJournal(fileObj *core.ObjectInfo, offset, len
 	}
 
 	// STRATEGY 1: Use journal for files with existing data (modifications)
-	// This is the primary use case for journal
-	if fileObj.DataID > 0 && fileObj.DataID != core.EmptyDataID && fileObj.Size > 0 {
-		DebugLog("[VFS shouldUseJournal] Using journal for existing file modification: fileID=%d, size=%d", ra.fileID, fileObj.Size)
+	// This is the primary use case for journal.
+	// NOTE: Only checking DataID here is enough to identify "existing file with data".
+	// Cached fileObj.Size may be stale (e.g. after Flush), so don't require Size > 0.
+	if fileObj.DataID > 0 && fileObj.DataID != core.EmptyDataID {
+		DebugLog("[VFS shouldUseJournal] Using journal for existing file modification: fileID=%d, size=%d, dataID=%d",
+			ra.fileID, fileObj.Size, fileObj.DataID)
 		return true
 	}
 
