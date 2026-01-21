@@ -1113,11 +1113,9 @@ func (n *OrcasNode) getDirListWithCache(dirID int64) ([]*core.ObjectInfo, syscal
 			}
 		}
 
-		// List directory contents from database
+		// List directory contents from database (fetch all pages)
 		// DebugLog("[VFS getDirListWithCache] Querying database: dirID=%d", dirID)
-		children, _, _, err := n.fs.h.List(n.fs.c, n.fs.bktID, dirID, core.ListOptions{
-			Count: core.DefaultListPageSize,
-		})
+		children, err := n.fs.listAllObjects(dirID, core.ListOptions{})
 		if err != nil {
 			DebugLog("[VFS getDirListWithCache] ERROR: Failed to list directory: dirID=%d, error=%v", dirID, err)
 			return nil, err
@@ -1273,11 +1271,9 @@ func (n *OrcasNode) preloadChildDirs(children []*core.ObjectInfo) {
 					return nil, nil
 				}
 
-				// List directory contents
+				// List directory contents (fetch all pages)
 				// DebugLog("[VFS preloadChildDirs] Preloading directory: dirID=%d", dirID)
-				children, _, _, err := n.fs.h.List(n.fs.c, n.fs.bktID, dirID, core.ListOptions{
-					Count: core.DefaultListPageSize,
-				})
+				children, err := n.fs.listAllObjects(dirID, core.ListOptions{})
 				if err != nil {
 					DebugLog("[VFS preloadChildDirs] ERROR: Failed to preload directory: dirID=%d, error=%v", dirID, err)
 					return nil, err
@@ -1415,10 +1411,8 @@ func (n *OrcasNode) Create(ctx context.Context, name string, flags uint32, mode 
 		}
 	}
 
-	// Query database to get accurate list
-	children, _, _, err = n.fs.h.List(n.fs.c, n.fs.bktID, obj.ID, core.ListOptions{
-		Count: core.DefaultListPageSize,
-	})
+	// Query database to get accurate list (all pages)
+	children, err = n.fs.listAllObjects(obj.ID, core.ListOptions{})
 	if err != nil {
 		DebugLog("[VFS Create] ERROR: Failed to list directory children for parentID=%d: %v", obj.ID, err)
 		return nil, nil, 0, syscall.EIO
@@ -1692,9 +1686,7 @@ func (n *OrcasNode) Create(ctx context.Context, name string, flags uint32, mode 
 		if err == core.ERR_DUP_KEY {
 			DebugLog("[VFS Create] Duplicate key error (concurrent create), re-querying database: name=%s, parentID=%d", name, obj.ID)
 			// Re-query database to get the existing file
-			children, _, _, listErr := n.fs.h.List(n.fs.c, n.fs.bktID, obj.ID, core.ListOptions{
-				Count: core.DefaultListPageSize,
-			})
+			children, listErr := n.fs.listAllObjects(obj.ID, core.ListOptions{})
 			if listErr == nil {
 				for _, child := range children {
 					if child.Name == name && child.Type == core.OBJ_TYPE_FILE {
@@ -1739,9 +1731,7 @@ func (n *OrcasNode) Create(ctx context.Context, name string, flags uint32, mode 
 		// includes deleted files (PID < 0), so we need to query directly
 		if existingFileID == 0 {
 			// First try List (non-deleted files)
-			children, _, _, listErr := n.fs.h.List(n.fs.c, n.fs.bktID, obj.ID, core.ListOptions{
-				Count: core.DefaultListPageSize,
-			})
+			children, listErr := n.fs.listAllObjects(obj.ID, core.ListOptions{})
 			if listErr == nil {
 				for _, child := range children {
 					if child.Name == name && child.Type == core.OBJ_TYPE_FILE {
@@ -1786,9 +1776,7 @@ func (n *OrcasNode) Create(ctx context.Context, name string, flags uint32, mode 
 				}
 
 				// Query database again (including deleted files)
-				children, _, _, listErr := n.fs.h.List(n.fs.c, n.fs.bktID, obj.ID, core.ListOptions{
-					Count: core.DefaultListPageSize,
-				})
+				children, listErr := n.fs.listAllObjects(obj.ID, core.ListOptions{})
 				if listErr == nil {
 					for _, child := range children {
 						if child.Name == name && child.Type == core.OBJ_TYPE_FILE {
@@ -2268,9 +2256,7 @@ func (n *OrcasNode) Mkdir(ctx context.Context, name string, mode uint32, out *fu
 	}
 
 	// Check if a file or directory with the same name already exists
-	children, _, _, err := n.fs.h.List(n.fs.c, n.fs.bktID, obj.ID, core.ListOptions{
-		Count: core.DefaultListPageSize,
-	})
+	children, err := n.fs.listAllObjects(obj.ID, core.ListOptions{})
 	if err != nil {
 		DebugLog("[VFS Mkdir] ERROR: Failed to list directory children for parentID=%d: %v", obj.ID, err)
 		return nil, syscall.EIO
@@ -2408,9 +2394,7 @@ func (n *OrcasNode) Unlink(ctx context.Context, name string) syscall.Errno {
 
 	// If not found in RandomAccessor registry, try to find from List
 	if targetID == 0 {
-		children, _, _, err := n.fs.h.List(n.fs.c, n.fs.bktID, obj.ID, core.ListOptions{
-			Count: core.DefaultListPageSize,
-		})
+		children, err := n.fs.listAllObjects(obj.ID, core.ListOptions{})
 		if err != nil {
 			DebugLog("[VFS Unlink] ERROR: Failed to list directory children: name=%s, parentID=%d, error=%v", name, obj.ID, err)
 			return syscall.EIO
@@ -2692,9 +2676,7 @@ func (n *OrcasNode) Rmdir(ctx context.Context, name string) syscall.Errno {
 
 	// Find child directory
 	// If List fails (I/O error), try to find from cache or assume directory doesn't exist
-	children, _, _, err := n.fs.h.List(n.fs.c, n.fs.bktID, obj.ID, core.ListOptions{
-		Count: core.DefaultListPageSize,
-	})
+	children, err := n.fs.listAllObjects(obj.ID, core.ListOptions{})
 
 	var targetID int64
 	if err != nil {
@@ -2750,7 +2732,7 @@ func (n *OrcasNode) Rmdir(ctx context.Context, name string) syscall.Errno {
 
 	// Check if directory is empty
 	// If List fails (I/O error), assume directory is empty or already deleted
-	dirChildren, _, _, err := n.fs.h.List(n.fs.c, n.fs.bktID, targetID, core.ListOptions{
+	dirChildren, err := n.fs.listAllObjects(targetID, core.ListOptions{
 		Count: 1,
 	})
 	if err != nil {
@@ -2849,9 +2831,7 @@ func (n *OrcasNode) Rename(ctx context.Context, name string, newParent fs.InodeE
 	var sourceObj *core.ObjectInfo
 	if sourceID == 0 {
 		// Try to get from List result, but also check cache for each child
-		children, _, _, err := n.fs.h.List(n.fs.c, n.fs.bktID, obj.ID, core.ListOptions{
-			Count: core.DefaultListPageSize,
-		})
+		children, err := n.fs.listAllObjects(obj.ID, core.ListOptions{})
 		if err != nil {
 			DebugLog("[VFS Unlink] ERROR: Failed to list directory children: name=%s, parentID=%d, error=%v", name, obj.ID, err)
 			return syscall.EIO
@@ -3116,9 +3096,7 @@ func (n *OrcasNode) Rename(ctx context.Context, name string, newParent fs.InodeE
 	// If not found in RandomAccessor, call List and check cache for each child
 	// Also check for files that may have had .tmp suffix removed by TempFileWriter.Flush()
 	if existingTargetID == 0 {
-		targetChildren, _, _, err := n.fs.h.List(n.fs.c, n.fs.bktID, newParentObj.ID, core.ListOptions{
-			Count: core.DefaultListPageSize,
-		})
+		targetChildren, err := n.fs.listAllObjects(newParentObj.ID, core.ListOptions{})
 		if err != nil {
 			DebugLog("[VFS Unlink] ERROR: Failed to list directory children: name=%s, parentID=%d, error=%v", name, obj.ID, err)
 			return syscall.EIO
@@ -3468,9 +3446,7 @@ func (n *OrcasNode) Rename(ctx context.Context, name string, newParent fs.InodeE
 			var conflictFileID int64 = 0
 
 			// First, try to get from List (non-deleted files)
-			conflictChildren, _, _, listErr := n.fs.h.List(n.fs.c, n.fs.bktID, newParentObj.ID, core.ListOptions{
-				Count: core.DefaultListPageSize,
-			})
+			conflictChildren, listErr := n.fs.listAllObjects(newParentObj.ID, core.ListOptions{})
 			if listErr == nil {
 				for _, child := range conflictChildren {
 					if child.Name == newName && child.Type == core.OBJ_TYPE_FILE && child.ID != sourceID {

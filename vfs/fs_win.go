@@ -567,10 +567,8 @@ func dokanyFindFiles(ofs *OrcasFS, fileName string, fillFindData func(fileName s
 		return DOKAN_ERROR
 	}
 
-	// List directory contents
-	children, _, _, err := ofs.h.List(ofs.c, ofs.bktID, obj.ID, core.ListOptions{
-		Count: core.DefaultListPageSize,
-	})
+	// List directory contents (fetch all pages)
+	children, err := ofs.listAllObjects(obj.ID, core.ListOptions{})
 	if err != nil {
 		return DOKAN_ERROR
 	}
@@ -624,8 +622,8 @@ func dokanyDeleteDirectory(ofs *OrcasFS, fileName string, context uintptr) int {
 		return DOKAN_ERROR
 	}
 
-	// Check if directory is empty
-	children, _, _, err := ofs.h.List(ofs.c, ofs.bktID, obj.ID, core.ListOptions{
+	// Check if directory is empty (fetch all pages)
+	children, err := ofs.listAllObjects(obj.ID, core.ListOptions{
 		Count: 1,
 	})
 	if err != nil {
@@ -893,10 +891,8 @@ func findObjectByPath(ofs *OrcasFS, path string) (*core.ObjectInfo, error) {
 			continue
 		}
 
-		// List current directory
-		children, _, _, err := ofs.h.List(ofs.c, ofs.bktID, currentID, core.ListOptions{
-			Count: core.DefaultListPageSize,
-		})
+		// List current directory (fetch all pages)
+		children, err := ofs.listAllObjects(currentID, core.ListOptions{})
 		if err != nil {
 			return nil, err
 		}
@@ -1019,9 +1015,7 @@ func (n *OrcasNode) Unlink(ctx context.Context, name string) syscall.Errno {
 
 	// If not found in RandomAccessor registry, try to find from List
 	if targetID == 0 {
-		children, _, _, err := n.fs.h.List(n.fs.c, n.fs.bktID, obj.ID, core.ListOptions{
-			Count: core.DefaultListPageSize,
-		})
+		children, err := n.fs.listAllObjects(obj.ID, core.ListOptions{})
 		if err != nil {
 			DebugLog("[VFS Unlink] ERROR: Failed to list directory children: name=%s, parentID=%d, error=%v", name, obj.ID, err)
 			return syscall.EIO
