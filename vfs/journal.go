@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -123,6 +124,10 @@ func NewJournalManager(fs *OrcasFS, config JournalConfig) *JournalManager {
 	if config.EnableAutoMerge && config.MergeInterval > 0 {
 		go jm.autoMergeWorker()
 	}
+
+	// MEMORY LEAK FIX: Start periodic journal cleanup worker
+	// This prevents accumulation of inactive journals
+	go jm.journalCleanupWorker()
 
 	// Recover journals from WAL snapshots
 	if fs.GetDataPath() != "" {
@@ -2042,6 +2047,110 @@ func (jm *JournalManager) autoMergeWorker() {
 			if j.isLargeFile && j.GetEntryCount() > 10 {
 				j.MergeEntries()
 			}
+		}
+	}
+}
+
+// MEMORY LEAK FIX: journalCleanupWorker periodically cleans up inactive journals
+// This prevents memory leak from journals that are never properly closed
+func (jm *JournalManager) journalCleanupWorker() {
+	// Run cleanup every 5 minutes
+	ticker := time.NewTicker(5 * time.Minute)
+	defer ticker.Stop()
+
+	// Initial cleanup after 2 minutes
+	time.Sleep(2 * time.Minute)
+
+	for range ticker.C {
+		jm.cleanupInactiveJournals()
+	}
+}
+
+// cleanupInactiveJournals removes journals that have been inactive for too long
+// MEMORY LEAK FIX: Prevents accumulation of orphaned journals
+func (jm *JournalManager) cleanupInactiveJournals() {
+	const (
+		inactivityThreshold = 15 * time.Minute // Remove journals inactive for 15+ minutes
+		checkInterval       = 5 * time.Minute
+	)
+
+	now := time.Now().Unix()
+	cleanedCount := 0
+	totalBefore := 0
+
+	jm.mu.RLock()
+	totalBefore = len(jm.journals)
+
+	// Collect inactive journal fileIDs
+	var inactiveFileIDs []int64
+	for fileID, j := range jm.journals {
+		// Check last modification time
+		lastMod := atomic.LoadInt64(&j.modified)
+		inactiveDuration := time.Duration(now-lastMod) * time.Second
+
+		// Skip if recently active
+		if inactiveDuration < inactivityThreshold {
+			continue
+		}
+
+		// Check if journal has any entries (empty journals can be removed immediately)
+		entryCount := j.GetEntryCount()
+		memUsage := atomic.LoadInt64(&j.memoryUsage)
+
+		// Remove if:
+		// 1. No entries and inactive for threshold, OR
+		// 2. Has entries but inactive for 2x threshold AND memory usage is significant
+		shouldRemove := false
+		if entryCount == 0 && inactiveDuration >= inactivityThreshold {
+			shouldRemove = true
+			DebugLog("[JournalManager Cleanup] Found empty inactive journal: fileID=%d, inactiveDuration=%v",
+				fileID, inactiveDuration)
+		} else if entryCount > 0 && inactiveDuration >= inactivityThreshold*2 && memUsage > 10*1024*1024 {
+			// Journal with entries, inactive for 30+ minutes, using >10MB memory
+			shouldRemove = true
+			DebugLog("[JournalManager Cleanup] Found old inactive journal with data: fileID=%d, entries=%d, memUsage=%d, inactiveDuration=%v",
+				fileID, entryCount, memUsage, inactiveDuration)
+		}
+
+		if shouldRemove {
+			inactiveFileIDs = append(inactiveFileIDs, fileID)
+		}
+	}
+	jm.mu.RUnlock()
+
+	// Remove inactive journals (need write lock for actual removal)
+	if len(inactiveFileIDs) > 0 {
+		jm.mu.Lock()
+		for _, fileID := range inactiveFileIDs {
+			if j, exists := jm.journals[fileID]; exists {
+				// Subtract memory usage
+				memUsage := atomic.LoadInt64(&j.memoryUsage)
+				atomic.AddInt64(&jm.totalMemory, -memUsage)
+
+				// Delete WAL files if exists
+				if j.wal != nil {
+					if err := j.wal.DeleteFiles(); err != nil {
+						DebugLog("[JournalManager Cleanup] WARNING: Failed to delete WAL files: fileID=%d, error=%v", fileID, err)
+					}
+				}
+
+				delete(jm.journals, fileID)
+				cleanedCount++
+				DebugLog("[JournalManager Cleanup] Removed inactive journal: fileID=%d, freedMemory=%d", fileID, memUsage)
+			}
+		}
+		jm.mu.Unlock()
+	}
+
+	if cleanedCount > 0 {
+		DebugLog("[JournalManager Cleanup] Completed: total=%d, cleaned=%d, remaining=%d",
+			totalBefore, cleanedCount, totalBefore-cleanedCount)
+
+		// MEMORY LEAK FIX: Force GC after cleaning up journals
+		// This helps reclaim memory from journal entries containing large data slices
+		if cleanedCount >= 3 {
+			DebugLog("[JournalManager Cleanup] Forcing GC after cleanup of %d journals", cleanedCount)
+			runtime.GC()
 		}
 	}
 }

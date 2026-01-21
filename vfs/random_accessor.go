@@ -1171,11 +1171,24 @@ func (cw *ChunkedFileWriter) Write(offset int64, data []byte) error {
 			// For sequential writes, synchronous flushing prevents memory accumulation
 			// by freeing the buffer immediately after flush
 
-			// Remove chunk from cw.chunks IMMEDIATELY to prevent further writes
-			// This ensures that subsequent writes to this chunk will read from disk instead
+			// CRITICAL: Extract chunk buffer before deleting from map to ensure we can clean it up
 			cw.mu.Lock()
+			bufToDelete := cw.chunks[sn]
 			delete(cw.chunks, sn) // Remove immediately to prevent concurrent writes
 			cw.mu.Unlock()
+
+			// MEMORY LEAK FIX: Explicitly clear chunk buffer data to help GC
+			// This prevents 10MB buffers from accumulating in memory during continuous uploads
+			if bufToDelete != nil {
+				bufToDelete.mu.Lock()
+				if cap(bufToDelete.data) > 0 {
+					// Clear the entire underlying array to allow GC to reclaim memory
+					// Set to nil instead of just clearing to ensure immediate release
+					bufToDelete.data = nil
+				}
+				bufToDelete.ranges = nil
+				bufToDelete.mu.Unlock()
+			}
 
 			// Use singleflight to ensure only one flush per chunk at a time
 			// Key format: "flush_<dataID>_<sn>"
@@ -1750,7 +1763,18 @@ func (cw *ChunkedFileWriter) Flush(force bool) error {
 			// Flush chunk concurrently
 			wg.Add(1)
 			go func(chunkSN int, buf *chunkBuffer) {
-				defer wg.Done()
+				// MEMORY LEAK FIX: Clean up buffer after flush completes
+				defer func() {
+					if buf != nil {
+						buf.mu.Lock()
+						if cap(buf.data) > 0 {
+							buf.data = nil // Explicitly release 10MB buffer
+						}
+						buf.ranges = nil
+						buf.mu.Unlock()
+					}
+					wg.Done()
+				}()
 
 				// Use singleflight to ensure only one flush per chunk at a time
 				// Key format: "flush_<dataID>_<sn>"

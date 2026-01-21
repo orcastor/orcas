@@ -4,6 +4,7 @@ package vfs
 import (
 	"fmt"
 	"os"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -108,6 +109,9 @@ type OrcasFS struct {
 	noKeyTempMu     sync.RWMutex
 	noKeyTempByID   map[int64]*noKeyTempFile
 	noKeyTempByName map[string]int64
+
+	// MEMORY LEAK FIX: Track raRegistry cleanup state
+	raCleanupStopped atomic.Bool // Whether raRegistry cleanup worker has stopped
 }
 
 type noKeyTempFile struct {
@@ -208,6 +212,10 @@ func NewOrcasFSWithConfig(h core.Handler, c core.Ctx, bktID int64, cfg *core.Con
 	DebugLog("[VFS NewOrcasFSWithConfig] Version retention manager initialized: enabled=%v",
 		retentionPolicy.Enabled)
 
+	// MEMORY LEAK FIX: Start RandomAccessor cleanup worker
+	// This prevents memory leak from inactive RandomAccessors accumulating in raRegistry
+	go ofs.raRegistryCleanupWorker()
+
 	// Initialize WAL checkpoint manager
 	// This periodically flushes WAL to main database to reduce dirty read issues
 	if config.DataPath != "" {
@@ -252,6 +260,9 @@ func (fs *OrcasFS) Close() error {
 	if fs == nil {
 		return nil
 	}
+
+	// MEMORY LEAK FIX: Stop raRegistry cleanup worker
+	fs.raCleanupStopped.Store(true)
 
 	// Stop WAL checkpoint manager
 	if fs.walCheckpointManager != nil {
@@ -543,4 +554,97 @@ func (fs *OrcasFS) getRandomAccessorByFileID(fileID int64) *RandomAccessor {
 		}
 	}
 	return nil
+}
+
+// MEMORY LEAK FIX: raRegistryCleanupWorker periodically cleans up inactive RandomAccessors
+// This prevents memory leak from RandomAccessors that are never properly released
+func (fs *OrcasFS) raRegistryCleanupWorker() {
+	// Run cleanup every 5 minutes
+	ticker := time.NewTicker(5 * time.Minute)
+	defer ticker.Stop()
+
+	// Initial cleanup after 1 minute
+	time.Sleep(1 * time.Minute)
+
+	for {
+		select {
+		case <-ticker.C:
+			fs.cleanupInactiveRandomAccessors()
+		default:
+			// Check if we should stop
+			if fs.raCleanupStopped.Load() {
+				DebugLog("[VFS RA Registry] Cleanup worker stopped")
+				return
+			}
+			time.Sleep(10 * time.Second)
+		}
+	}
+}
+
+// cleanupInactiveRandomAccessors removes RandomAccessors that have been inactive for too long
+// MEMORY LEAK FIX: Prevents accumulation of orphaned RandomAccessors in raRegistry
+func (fs *OrcasFS) cleanupInactiveRandomAccessors() {
+	if fs == nil {
+		return
+	}
+
+	const inactivityThreshold = 10 * time.Minute // Remove RandomAccessors inactive for 10+ minutes
+	now := time.Now().Unix()
+
+	cleanedCount := 0
+	totalBefore := 0
+
+	// Collect inactive RandomAccessors
+	var inactiveFileIDs []int64
+	fs.raRegistry.Range(func(key, value interface{}) bool {
+		totalBefore++
+		fileID, ok := key.(int64)
+		if !ok {
+			return true
+		}
+		ra, ok := value.(*RandomAccessor)
+		if !ok || ra == nil {
+			// Invalid entry, remove it
+			inactiveFileIDs = append(inactiveFileIDs, fileID)
+			return true
+		}
+
+		// Check last activity time (atomic load from RandomAccessor.lastActivity)
+		lastActivity := atomic.LoadInt64(&ra.lastActivity)
+		inactiveDuration := time.Duration(now-lastActivity) * time.Second
+
+		if inactiveDuration >= inactivityThreshold {
+			DebugLog("[VFS RA Registry] Found inactive RandomAccessor: fileID=%d, inactiveDuration=%v, lastActivity=%d",
+				fileID, inactiveDuration, lastActivity)
+			inactiveFileIDs = append(inactiveFileIDs, fileID)
+		}
+		return true
+	})
+
+	// Remove inactive RandomAccessors
+	for _, fileID := range inactiveFileIDs {
+		if val, ok := fs.raRegistry.Load(fileID); ok {
+			if ra, ok := val.(*RandomAccessor); ok && ra != nil {
+				// Try to close the RandomAccessor to release resources
+				if err := ra.Close(); err != nil {
+					DebugLog("[VFS RA Registry] WARNING: Failed to close inactive RandomAccessor: fileID=%d, error=%v",
+						fileID, err)
+				}
+			}
+		}
+		fs.raRegistry.Delete(fileID)
+		cleanedCount++
+	}
+
+	if cleanedCount > 0 {
+		DebugLog("[VFS RA Registry] Cleanup completed: total=%d, cleaned=%d, remaining=%d",
+			totalBefore, cleanedCount, totalBefore-cleanedCount)
+
+		// MEMORY LEAK FIX: Force GC after cleaning up multiple RandomAccessors
+		// This helps reclaim memory from closed RandomAccessors and their chunks
+		if cleanedCount >= 5 {
+			DebugLog("[VFS RA Registry] Forcing GC after cleanup of %d RandomAccessors", cleanedCount)
+			runtime.GC()
+		}
+	}
 }
