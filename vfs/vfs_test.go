@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"sync"
 	"syscall"
 	"testing"
@@ -62,6 +63,153 @@ func WriteToFullPath(data []byte, fullPath string, perm fs.FileMode) error {
 	_, err = file.Write(data)
 
 	return err
+}
+
+// mockHandler implements core.Handler but only List is used by these tests.
+// All other methods panic if called.
+type mockHandler struct {
+	objects    []*core.ObjectInfo
+	listCounts []int // record opt.Count per call
+}
+
+func (m *mockHandler) New(h core.Handler) core.Handler { panic("not used") }
+func (m *mockHandler) Close()                          {}
+func (m *mockHandler) SetAdapter(core.MetadataAdapter, core.DataAdapter) {
+	panic("not used")
+}
+func (m *mockHandler) SetAccessCtrlMgr(core.AccessCtrlMgr) { panic("not used") }
+func (m *mockHandler) MetadataAdapter() core.MetadataAdapter {
+	panic("not used")
+}
+func (m *mockHandler) DataAdapter() core.DataAdapter { panic("not used") }
+func (m *mockHandler) AccessCtrlMgr() core.AccessCtrlMgr {
+	panic("not used")
+}
+func (m *mockHandler) Login(core.Ctx, string, string) (core.Ctx, *core.UserInfo, []*core.BucketInfo, error) {
+	panic("not used")
+}
+func (m *mockHandler) Ref(core.Ctx, int64, []*core.DataInfo) ([]int64, error) { panic("not used") }
+func (m *mockHandler) PutData(core.Ctx, int64, int64, int, []byte) (int64, error) {
+	panic("not used")
+}
+func (m *mockHandler) GetData(core.Ctx, int64, int64, int, ...int) ([]byte, error) { panic("not used") }
+func (m *mockHandler) PutDataInfo(core.Ctx, int64, []*core.DataInfo) ([]int64, error) {
+	panic("not used")
+}
+func (m *mockHandler) PutDataInfoAndObj(core.Ctx, int64, []*core.DataInfo, []*core.ObjectInfo) error {
+	panic("not used")
+}
+func (m *mockHandler) GetDataInfo(core.Ctx, int64, int64) (*core.DataInfo, error) { panic("not used") }
+func (m *mockHandler) Put(core.Ctx, int64, []*core.ObjectInfo) ([]int64, error)   { panic("not used") }
+func (m *mockHandler) Get(core.Ctx, int64, []int64) ([]*core.ObjectInfo, error)   { panic("not used") }
+
+// List implements delimiter-based pagination: opt.Delim is an index into m.objects.
+// It returns up to opt.Count objects, and sets delim to the next index, or "" when done.
+func (m *mockHandler) List(_ core.Ctx, _ int64, _ int64, opt core.ListOptions) ([]*core.ObjectInfo, int64, string, error) {
+	m.listCounts = append(m.listCounts, opt.Count)
+	if opt.Count <= 0 {
+		return nil, int64(len(m.objects)), "", fmt.Errorf("mockHandler: invalid Count=%d", opt.Count)
+	}
+	start := 0
+	if opt.Delim != "" {
+		i, err := strconv.Atoi(opt.Delim)
+		if err != nil {
+			return nil, int64(len(m.objects)), "", fmt.Errorf("mockHandler: invalid Delim=%q", opt.Delim)
+		}
+		start = i
+	}
+	if start >= len(m.objects) {
+		return []*core.ObjectInfo{}, int64(len(m.objects)), "", nil
+	}
+	end := start + opt.Count
+	if end > len(m.objects) {
+		end = len(m.objects)
+	}
+	page := m.objects[start:end]
+	next := ""
+	if end < len(m.objects) {
+		next = strconv.Itoa(end)
+	}
+	return page, int64(len(m.objects)), next, nil
+}
+
+func (m *mockHandler) Rename(core.Ctx, int64, int64, string) error  { panic("not used") }
+func (m *mockHandler) MoveTo(core.Ctx, int64, int64, int64) error   { panic("not used") }
+func (m *mockHandler) Recycle(core.Ctx, int64, int64) error         { panic("not used") }
+func (m *mockHandler) Delete(core.Ctx, int64, int64) error          { panic("not used") }
+func (m *mockHandler) CleanRecycleBin(core.Ctx, int64, int64) error { panic("not used") }
+func (m *mockHandler) ListRecycleBin(core.Ctx, int64, core.ListOptions) ([]*core.ObjectInfo, int64, string, error) {
+	panic("not used")
+}
+func (m *mockHandler) UpdateFileLatestVersion(core.Ctx, int64) error { panic("not used") }
+func (m *mockHandler) GetBktInfo(core.Ctx, int64) (*core.BucketInfo, error) {
+	panic("not used")
+}
+func (m *mockHandler) ScanOrphanedChunks(core.Ctx, int64, int) (*core.ScanOrphanedChunksResult, error) {
+	panic("not used")
+}
+
+func makeObjs(n int) []*core.ObjectInfo {
+	out := make([]*core.ObjectInfo, 0, n)
+	for i := 0; i < n; i++ {
+		out = append(out, &core.ObjectInfo{ID: int64(i + 1), Name: fmt.Sprintf("o-%d", i+1)})
+	}
+	return out
+}
+
+func TestListAllObjects_TotalCount_DecrementsRemaining(t *testing.T) {
+	h := &mockHandler{objects: makeObjs(10)}
+
+	got, err := listAllObjects(nil, h, 1, 2, core.ListOptions{Count: 5})
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if len(got) != 5 {
+		t.Fatalf("got %d objs, want 5", len(got))
+	}
+	// Count < DefaultListPageSize should request exactly Count in a single call.
+	if len(h.listCounts) != 1 || h.listCounts[0] != 5 {
+		t.Fatalf("listCounts=%v, want [5]", h.listCounts)
+	}
+}
+
+func TestListAllObjects_TotalCount_UsesRemainingOnFinalPage(t *testing.T) {
+	// Need multiple pages: total count > DefaultListPageSize.
+	total := core.DefaultListPageSize + 10
+	h := &mockHandler{objects: makeObjs(total + 50)}
+
+	got, err := listAllObjects(nil, h, 1, 2, core.ListOptions{Count: total})
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if len(got) != total {
+		t.Fatalf("got %d objs, want %d", len(got), total)
+	}
+	if len(h.listCounts) < 2 {
+		t.Fatalf("expected at least 2 list calls, got %d", len(h.listCounts))
+	}
+	if h.listCounts[0] != core.DefaultListPageSize {
+		t.Fatalf("first page Count=%d, want %d", h.listCounts[0], core.DefaultListPageSize)
+	}
+	if h.listCounts[1] != 10 {
+		t.Fatalf("second page Count=%d, want 10", h.listCounts[1])
+	}
+}
+
+func TestListAllObjects_CountLEZero_FetchAllPages(t *testing.T) {
+	h := &mockHandler{objects: makeObjs(2500)} // will require multiple pages
+	got, err := listAllObjects(nil, h, 1, 2, core.ListOptions{Count: 0})
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if len(got) != 2500 {
+		t.Fatalf("got %d objs, want 2500", len(got))
+	}
+	for i, c := range h.listCounts {
+		if c != core.DefaultListPageSize {
+			t.Fatalf("call %d Count=%d, want %d", i, c, core.DefaultListPageSize)
+		}
+	}
 }
 
 // TestVFSWriteToFullPath tests WriteToFullPath function on mounted VFS
