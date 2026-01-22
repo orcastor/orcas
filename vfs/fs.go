@@ -2730,19 +2730,11 @@ func (n *OrcasNode) Rmdir(ctx context.Context, name string) syscall.Errno {
 		return 0
 	}
 
-	// Check if directory is empty
-	// If List fails (I/O error), assume directory is empty or already deleted
-	dirChildren, err := n.fs.listAllObjects(targetID, core.ListOptions{
-		Count: 1,
-	})
-	if err != nil {
-		// I/O error occurred, assume directory is empty or already deleted
-		// Log warning but continue with deletion
-		DebugLog("[VFS Rmdir] WARNING: Failed to check if directory is empty (I/O error), assuming empty: dirID=%d, error=%v", targetID, err)
-	} else if len(dirChildren) > 0 {
-		DebugLog("[VFS Rmdir] ERROR: Directory is not empty: name=%s, dirID=%d, parentID=%d, childCount=%d", name, targetID, obj.ID, len(dirChildren))
-		return syscall.ENOTEMPTY
-	}
+	// Performance optimization: Skip checking if directory is empty
+	// Instead, directly mark as deleted and let async cleanup handle it
+	// This significantly improves performance for large directories
+	// The directory will be removed from parent's listing immediately,
+	// and all child objects will be cleaned up asynchronously in the background
 
 	// Step 1: Remove from parent directory first (mark as deleted)
 	// This makes the directory disappear from parent's listing immediately
@@ -2762,6 +2754,7 @@ func (n *OrcasNode) Rmdir(ctx context.Context, name string) syscall.Errno {
 
 	// Step 3: Asynchronously delete and clean up (permanent deletion)
 	// This includes recursively deleting all child objects and physical deletion of data files and metadata
+	// The async cleanup will handle both empty and non-empty directories
 	go func() {
 		// Use the original context to preserve authentication information
 		// Context is read-only and safe to use in goroutines

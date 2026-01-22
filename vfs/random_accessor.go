@@ -2334,7 +2334,7 @@ func (ra *RandomAccessor) Write(offset int64, data []byte) error {
 	// Initialize sequential write buffer
 	// NOTE: This code should not execute for .tmp files or when ChunkedFileWriter exists (they should have returned above)
 	// But we keep the check here for safety in case fileObj cache is stale
-	if ra.seqBuffer == nil && len(data) > 0 {
+	if len(data) > 0 {
 		// Reuse cached fileObj (already loaded above)
 		if fileObj != nil {
 			// Re-check if ChunkedFileWriter exists (should have returned above, but check for safety)
@@ -2348,15 +2348,56 @@ func (ra *RandomAccessor) Write(offset int64, data []byte) error {
 				// Fall through to random write mode
 			} else {
 				// No ChunkedFileWriter, can proceed with sequential buffer initialization
-				if offset == 0 && (fileObj.DataID == 0 || fileObj.DataID == core.EmptyDataID) {
+				// OPTIMIZATION: Support sequential append after flush
+				// If offset == fileObj.Size, this is sequential append, should continue using sequential buffer
+				isSequentialAppend := offset == fileObj.Size && fileObj.DataID > 0 && fileObj.DataID != core.EmptyDataID
+				isNewFile := offset == 0 && (fileObj.DataID == 0 || fileObj.DataID == core.EmptyDataID)
+				
+				var initErr error
+				if isNewFile {
 					// File has no data, can initialize sequential write buffer
-					var initErr error
 					if initErr = ra.initSequentialBuffer(false); initErr == nil {
 						// Initialization succeeded, use sequential write
 						return ra.writeSequential(offset, data)
 					}
 					// Initialization failed, fallback to random write
 					DebugLog("[VFS RandomAccessor Write] WARNING: Failed to initialize sequential buffer, falling back to random write: fileID=%d, offset=%d, size=%d, error=%v", ra.fileID, offset, len(data), initErr)
+				} else if isSequentialAppend {
+					// Sequential append after flush - reset or reinitialize sequential buffer
+					if ra.seqBuffer != nil {
+						ra.seqBuffer.mu.Lock()
+						if ra.seqBuffer.closed {
+							// Sequential buffer was closed after flush, reset it for continued sequential writes
+							DebugLog("[VFS RandomAccessor Write] Resetting sequential buffer for continued sequential append: fileID=%d, offset=%d, fileSize=%d", ra.fileID, offset, fileObj.Size)
+							ra.seqBuffer.closed = false
+							ra.seqBuffer.offset = fileObj.Size
+							ra.seqBuffer.buffer = ra.seqBuffer.buffer[:0] // Clear buffer but keep capacity
+							ra.seqBuffer.hasData = false
+							// Update dataID to current file's DataID for continued writes
+							ra.seqBuffer.dataID = fileObj.DataID
+							// Reset DataInfo for new chunk sequence
+							ra.seqBuffer.dataInfo.OrigSize = 0
+							ra.seqBuffer.dataInfo.Size = 0
+							ra.seqBuffer.sn = 0
+							ra.seqBuffer.mu.Unlock()
+							return ra.writeSequential(offset, data)
+						} else {
+							// Sequential buffer is still active, use it directly
+							ra.seqBuffer.mu.Unlock()
+							return ra.writeSequential(offset, data)
+						}
+					} else {
+						// No sequential buffer exists, but this is sequential append
+						// For files with existing data, we should use journal for safety
+						// But user wants sequential buffer, so we'll initialize it with existing DataID
+						DebugLog("[VFS RandomAccessor Write] Sequential append but no sequential buffer, initializing with existing DataID: fileID=%d, offset=%d, dataID=%d", ra.fileID, offset, fileObj.DataID)
+						initErr = ra.initSequentialBufferForAppend(fileObj)
+						if initErr == nil {
+							return ra.writeSequential(offset, data)
+						}
+						// Initialization failed, fallback to journal
+						DebugLog("[VFS RandomAccessor Write] WARNING: Failed to initialize sequential buffer for append, falling back to journal: fileID=%d, offset=%d, size=%d, error=%v", ra.fileID, offset, len(data), initErr)
+					}
 				}
 			}
 		}
@@ -2649,6 +2690,61 @@ func (ra *RandomAccessor) initSequentialBufferWithNewData() error {
 		}
 	}
 
+	return nil
+}
+
+// initSequentialBufferForAppend initializes sequential buffer for appending to existing file
+// This is used when flush happened but file is still open and we want to continue sequential writes
+func (ra *RandomAccessor) initSequentialBufferForAppend(fileObj *core.ObjectInfo) error {
+	if fileObj.DataID == 0 || fileObj.DataID == core.EmptyDataID {
+		return fmt.Errorf("file has no data, use initSequentialBuffer instead")
+	}
+
+	// Determine chunk size based on bucket configuration
+	chunkSize := ra.fs.chunkSize
+	if chunkSize <= 0 {
+		chunkSize = DefaultChunkSize // 10MB default
+	}
+
+	// Create new DataID for the appended chunks (they will be merged later)
+	newDataID := core.NewID()
+
+	// Initialize DataInfo for new chunks
+	dataInfo := &core.DataInfo{
+		ID:       newDataID,
+		OrigSize: 0,
+		Size:     0,
+		XXH3:     0,
+		SHA256_0: 0,
+		SHA256_1: 0,
+		SHA256_2: 0,
+		SHA256_3: 0,
+		Kind:     0,
+	}
+
+	// Set compression and encryption flags (if enabled)
+	cmprWay := getCmprWayForFS(ra.fs)
+	endecWay := getEndecWayForFS(ra.fs)
+	if cmprWay > 0 {
+		dataInfo.Kind |= cmprWay
+	}
+	if endecWay > 0 {
+		dataInfo.Kind |= endecWay
+	}
+
+	ra.seqBuffer = &SequentialWriteBuffer{
+		fileID:    ra.fileID,
+		dataID:    newDataID, // New DataID for appended chunks
+		sn:        0,         // Start from chunk 0 for new chunks
+		chunkSize: chunkSize,
+		buffer:    make([]byte, 0, chunkSize), // Pre-allocate but length is 0
+		offset:    fileObj.Size,               // Start from current file size
+		hasData:   false,
+		closed:    false,
+		dataInfo:  dataInfo,
+	}
+
+	DebugLog("[VFS initSequentialBufferForAppend] Initialized sequential buffer for append: fileID=%d, offset=%d, newDataID=%d, baseDataID=%d", ra.fileID, fileObj.Size, newDataID, fileObj.DataID)
 	return nil
 }
 
@@ -4005,7 +4101,11 @@ func (ra *RandomAccessor) flushInternal(force bool) (int64, error) {
 		}
 	}
 
-	// If sequential write buffer has data, flush it first
+	// OPTIMIZATION: For regular files, only flush sequential buffer if:
+	// 1. force=true (ForceFlush/Release) - always flush
+	// 2. buffer is full (>= chunkSize) - flush to avoid memory bloat
+	// 3. For regular Flush (force=false), skip if buffer is not full
+	// This reduces disk I/O and improves performance by batching writes
 	if ra.seqBuffer != nil {
 		ra.seqBuffer.mu.Lock()
 		seqHasData := ra.seqBuffer.hasData
@@ -4013,38 +4113,57 @@ func (ra *RandomAccessor) flushInternal(force bool) (int64, error) {
 		seqDataID := ra.seqBuffer.dataID
 		seqSn := ra.seqBuffer.sn
 		seqBufferSize := len(ra.seqBuffer.buffer)
+		seqChunkSize := ra.seqBuffer.chunkSize
 		ra.seqBuffer.mu.Unlock()
 
 		if seqHasData && !seqClosed {
-			DebugLog("[VFS RandomAccessor Flush] Flushing sequential buffer: fileID=%d, dataID=%d, sn=%d, bufferSize=%d", ra.fileID, seqDataID, seqSn, seqBufferSize)
-			if err := ra.flushSequentialBuffer(); err != nil {
-				DebugLog("[VFS RandomAccessor Flush] ERROR: Failed to flush sequential buffer: fileID=%d, error=%v", ra.fileID, err)
-				return 0, err
-			}
-			// After sequential write completes, close sequential buffer
-			ra.seqBuffer.mu.Lock()
-			ra.seqBuffer.closed = true
-			ra.seqBuffer.mu.Unlock()
-			// After sequential write completes, return new version ID (actually the version corresponding to current DataID)
-			fileObj, err := ra.getFileObj()
-			if err != nil {
-				DebugLog("[VFS RandomAccessor Flush] ERROR: Failed to get file object after sequential flush: fileID=%d, error=%v", ra.fileID, err)
-				return 0, err
-			}
-			DebugLog("[VFS RandomAccessor Flush] Sequential flush completed: fileID=%d, dataID=%d, size=%d", ra.fileID, fileObj.DataID, fileObj.Size)
-
-			// IMPORTANT: flushSequentialBuffer already updated the cache, don't re-read from database
-			// Just verify the cache is correct to avoid WAL dirty read
-			if cachedObj := ra.fileObj.Load(); cachedObj != nil {
-				if obj, ok := cachedObj.(*core.ObjectInfo); ok && obj != nil {
-					DebugLog("[VFS RandomAccessor Flush] Verified file object cache after sequential flush: fileID=%d, size=%d, dataID=%d, mtime=%d",
-						obj.ID, obj.Size, obj.DataID, obj.MTime)
-					fileObj = obj
+			// Check if we should flush:
+			// - force=true: always flush (Release/ForceFlush)
+			// - buffer is full: flush to avoid memory bloat
+			shouldFlush := force || int64(seqBufferSize) >= seqChunkSize
+			
+			if shouldFlush {
+				DebugLog("[VFS RandomAccessor Flush] Flushing sequential buffer: fileID=%d, dataID=%d, sn=%d, bufferSize=%d, chunkSize=%d, force=%v", 
+					ra.fileID, seqDataID, seqSn, seqBufferSize, seqChunkSize, force)
+				if err := ra.flushSequentialBuffer(); err != nil {
+					DebugLog("[VFS RandomAccessor Flush] ERROR: Failed to flush sequential buffer: fileID=%d, error=%v", ra.fileID, err)
+					return 0, err
 				}
-			}
+				// After sequential write completes, close sequential buffer only if force=true
+				// For regular flush with full chunk, keep buffer open for continued writes
+				if force {
+					ra.seqBuffer.mu.Lock()
+					ra.seqBuffer.closed = true
+					ra.seqBuffer.mu.Unlock()
+				}
+				// After sequential write completes, return new version ID (actually the version corresponding to current DataID)
+				fileObj, err := ra.getFileObj()
+				if err != nil {
+					DebugLog("[VFS RandomAccessor Flush] ERROR: Failed to get file object after sequential flush: fileID=%d, error=%v", ra.fileID, err)
+					return 0, err
+				}
+				DebugLog("[VFS RandomAccessor Flush] Sequential flush completed: fileID=%d, dataID=%d, size=%d", ra.fileID, fileObj.DataID, fileObj.Size)
 
-			if fileObj.DataID > 0 {
-				return core.NewID(), nil // Return new version ID
+				// IMPORTANT: flushSequentialBuffer already updated the cache, don't re-read from database
+				// Just verify the cache is correct to avoid WAL dirty read
+				if cachedObj := ra.fileObj.Load(); cachedObj != nil {
+					if obj, ok := cachedObj.(*core.ObjectInfo); ok && obj != nil {
+						DebugLog("[VFS RandomAccessor Flush] Verified file object cache after sequential flush: fileID=%d, size=%d, dataID=%d, mtime=%d",
+							obj.ID, obj.Size, obj.DataID, obj.MTime)
+						fileObj = obj
+					}
+				}
+
+				if fileObj.DataID > 0 {
+					return core.NewID(), nil // Return new version ID
+				}
+			} else {
+				// Buffer is not full and force=false, skip flush for better performance
+				// Data will be flushed when:
+				// 1. Buffer becomes full (>= chunkSize) - automatic flush in writeSequential
+				// 2. Release is called (force=true) - forced flush
+				DebugLog("[VFS RandomAccessor Flush] Skipping sequential buffer flush (buffer not full): fileID=%d, bufferSize=%d, chunkSize=%d, force=%v", 
+					ra.fileID, seqBufferSize, seqChunkSize, force)
 			}
 		}
 	}
@@ -7412,6 +7531,32 @@ func (ra *RandomAccessor) shouldUseJournal(fileObj *core.ObjectInfo, offset, len
 				DebugLog("[VFS shouldUseJournal] ChunkedFileWriter active (type=%d), not using journal: fileID=%d", cw.writerType, ra.fileID)
 				return false
 			}
+		}
+	}
+
+	// OPTIMIZATION: Check if this is a sequential append (offset == current file size)
+	// If flush happened but file is still open, we should continue using sequential buffer
+	// for sequential writes from the end of the file
+	if offset == fileObj.Size {
+		// Sequential append from end of file - check if we can reuse sequential buffer
+		if ra.seqBuffer != nil {
+			ra.seqBuffer.mu.Lock()
+			seqClosed := ra.seqBuffer.closed
+			ra.seqBuffer.mu.Unlock()
+			if !seqClosed {
+				// Sequential buffer is still active, continue using it
+				DebugLog("[VFS shouldUseJournal] Sequential append from file end (offset=%d == size=%d), continuing with sequential buffer: fileID=%d", offset, fileObj.Size, ra.fileID)
+				return false
+			} else {
+				// Sequential buffer was closed after flush, but this is still sequential append
+				// We should reinitialize sequential buffer instead of using journal
+				DebugLog("[VFS shouldUseJournal] Sequential append after flush (offset=%d == size=%d), should reinit sequential buffer: fileID=%d", offset, fileObj.Size, ra.fileID)
+				return false
+			}
+		} else {
+			// No sequential buffer, but this is sequential append - should initialize sequential buffer
+			DebugLog("[VFS shouldUseJournal] Sequential append from file end (offset=%d == size=%d), should use sequential buffer: fileID=%d", offset, fileObj.Size, ra.fileID)
+			return false
 		}
 	}
 

@@ -5597,6 +5597,291 @@ func TestSequentialBufferFlushWithJournalWritesEncryption(t *testing.T) {
 	})
 }
 
+// TestSequentialWriteAfterFlush tests that sequential writes continue using sequential buffer
+// after flush, instead of switching to journal. This prevents memory bloat from journal entries.
+// Scenario:
+// 1. Write sequentially from offset 0 (uses sequential buffer)
+// 2. Flush (but don't close file)
+// 3. Continue sequential write from file end (should continue using sequential buffer, not journal)
+// 4. Verify data correctness and that journal was not used
+func TestSequentialWriteAfterFlush(t *testing.T) {
+	Convey("Sequential write after flush continues using sequential buffer", t, func() {
+		ig := idgen.NewIDGen(nil, 0)
+		testBktID, _ := ig.New()
+		err := core.InitBucketDB(".", testBktID)
+		So(err, ShouldBeNil)
+
+		dma := &core.DefaultMetadataAdapter{
+			DefaultBaseMetadataAdapter: &core.DefaultBaseMetadataAdapter{},
+			DefaultDataMetadataAdapter: &core.DefaultDataMetadataAdapter{},
+		}
+		dma.DefaultBaseMetadataAdapter.SetPath(".")
+		dma.DefaultDataMetadataAdapter.SetPath(".")
+		dda := &core.DefaultDataAdapter{}
+
+		lh := core.NewLocalHandler("", "").(*core.LocalHandler)
+		lh.SetAdapter(dma, dda)
+
+		testCtx, userInfo, _, err := lh.Login(c, "orcas", "orcas")
+		So(err, ShouldBeNil)
+
+		bucket := &core.BucketInfo{
+			ID:       testBktID,
+			Name:     "test_bucket",
+			Type:     1,
+			Quota:    100000000, // 100MB quota
+			Used:     0,
+			RealUsed: 0,
+		}
+		admin := core.NewLocalAdmin(".", ".")
+		So(admin.PutBkt(testCtx, []*core.BucketInfo{bucket}), ShouldBeNil)
+
+		if userInfo != nil && userInfo.ID > 0 {
+			So(admin.PutACL(testCtx, testBktID, userInfo.ID, core.ALL), ShouldBeNil)
+		}
+
+		// Test with encryption enabled (matching the log scenario)
+		encryptionKey := "this-is-a-test-encryption-key-that-is-long-enough-for-aes256-encryption-12345678901234567890"
+		cfg := &core.Config{
+			EndecWay: core.DATA_ENDEC_AES256,
+			EndecKey: encryptionKey,
+		}
+		ofs := NewOrcasFSWithConfig(lh, testCtx, testBktID, cfg)
+
+		// Create a file
+		fileName := "test_sequential_after_flush.jpg"
+		fileID, _ := ig.New()
+		fileObj := &core.ObjectInfo{
+			ID:    fileID,
+			PID:   testBktID,
+			Type:  core.OBJ_TYPE_FILE,
+			Name:  fileName,
+			Size:  0,
+			MTime: core.Now(),
+		}
+		_, err = dma.PutObj(testCtx, testBktID, []*core.ObjectInfo{fileObj})
+		So(err, ShouldBeNil)
+
+		ra, err := NewRandomAccessor(ofs, fileID)
+		So(err, ShouldBeNil)
+		So(ra, ShouldNotBeNil)
+		defer ra.Close()
+
+		// Generate test data
+		chunkSize := int64(524288) // 512KB chunks (matching log scenario)
+		totalSize := chunkSize * 3 // 3 chunks total
+		expectedData := make([]byte, totalSize)
+		for i := range expectedData {
+			expectedData[i] = byte(i % 256)
+		}
+
+		// Step 1: Write first chunk sequentially from offset 0 (uses sequential buffer)
+		chunk1 := expectedData[0:chunkSize]
+		err = ra.Write(0, chunk1)
+		So(err, ShouldBeNil)
+
+		// Verify sequential buffer is being used
+		So(ra.seqBuffer, ShouldNotBeNil)
+		ra.seqBuffer.mu.Lock()
+		hasSeqData := ra.seqBuffer.hasData && !ra.seqBuffer.closed
+		seqOffset := ra.seqBuffer.offset
+		ra.seqBuffer.mu.Unlock()
+		So(hasSeqData, ShouldBeTrue)
+		So(seqOffset, ShouldEqual, chunkSize)
+
+		// Step 2: Flush (but don't close file)
+		// This simulates the scenario where flush happens but file remains open
+		_, err = ra.Flush()
+		So(err, ShouldBeNil)
+
+		// Verify file size was updated after flush
+		fileObjAfterFlush, err := ra.getFileObj()
+		So(err, ShouldBeNil)
+		So(fileObjAfterFlush.Size, ShouldEqual, chunkSize)
+
+		// Step 3: Continue sequential write from file end (offset == fileSize)
+		// This should continue using sequential buffer, NOT switch to journal
+		chunk2 := expectedData[chunkSize : chunkSize*2]
+		err = ra.Write(chunkSize, chunk2)
+		So(err, ShouldBeNil)
+
+		// Verify sequential buffer is still being used (not journal)
+		// After write, hasData should be true and closed should be false
+		So(ra.seqBuffer, ShouldNotBeNil)
+		ra.seqBuffer.mu.Lock()
+		hasSeqData2 := ra.seqBuffer.hasData
+		isClosed2 := ra.seqBuffer.closed
+		seqOffset2 := ra.seqBuffer.offset
+		ra.seqBuffer.mu.Unlock()
+		So(hasSeqData2, ShouldBeTrue)
+		So(isClosed2, ShouldBeFalse)
+		So(seqOffset2, ShouldEqual, chunkSize*2)
+
+		// Verify journal was NOT used (check that journal doesn't exist or is not dirty)
+		// Access journal through journalMgr to check if it exists
+		journal := ra.fs.journalMgr.GetOrCreate(ra.fileID, fileObjAfterFlush.DataID, fileObjAfterFlush.Size)
+		if journal != nil {
+			isDirty := atomic.LoadInt32(&journal.isDirty)
+			So(isDirty, ShouldEqual, 0)
+			memUsage := atomic.LoadInt64(&journal.memoryUsage)
+			So(memUsage, ShouldEqual, 0)
+		}
+
+		// Step 4: Write third chunk (still sequential)
+		chunk3 := expectedData[chunkSize*2 : chunkSize*3]
+		err = ra.Write(chunkSize*2, chunk3)
+		So(err, ShouldBeNil)
+
+		// Final flush
+		_, err = ra.Flush()
+		So(err, ShouldBeNil)
+
+		// Verify final file size
+		fileObjFinal, err := ra.getFileObj()
+		So(err, ShouldBeNil)
+		So(fileObjFinal.Size, ShouldEqual, totalSize)
+
+		// Step 5: Read back and verify data correctness
+		readData, err := ra.Read(0, int(totalSize))
+		So(err, ShouldBeNil)
+		So(len(readData), ShouldEqual, int(totalSize))
+		So(bytes.Equal(readData, expectedData), ShouldBeTrue)
+
+		// Verify journal was never used (memory should be 0)
+		finalJournal := ra.fs.journalMgr.GetOrCreate(ra.fileID, fileObjFinal.DataID, fileObjFinal.Size)
+		if finalJournal != nil {
+			finalMemUsage := atomic.LoadInt64(&finalJournal.memoryUsage)
+			So(finalMemUsage, ShouldEqual, 0)
+		}
+
+		t.Logf("✅ Successfully verified sequential write after flush continues using sequential buffer: %d bytes", totalSize)
+		t.Logf("   - Sequential buffer was reused after flush")
+		t.Logf("   - Journal was not used (memory usage: 0)")
+		t.Logf("   - Data integrity verified")
+	})
+}
+
+// TestSequentialWriteAfterFlushNoEncryption tests the same scenario without encryption
+// to ensure the optimization works in both cases
+func TestSequentialWriteAfterFlushNoEncryption(t *testing.T) {
+	Convey("Sequential write after flush (no encryption)", t, func() {
+		ig := idgen.NewIDGen(nil, 0)
+		testBktID, _ := ig.New()
+		err := core.InitBucketDB(".", testBktID)
+		So(err, ShouldBeNil)
+
+		dma := &core.DefaultMetadataAdapter{
+			DefaultBaseMetadataAdapter: &core.DefaultBaseMetadataAdapter{},
+			DefaultDataMetadataAdapter: &core.DefaultDataMetadataAdapter{},
+		}
+		dma.DefaultBaseMetadataAdapter.SetPath(".")
+		dma.DefaultDataMetadataAdapter.SetPath(".")
+		dda := &core.DefaultDataAdapter{}
+
+		lh := core.NewLocalHandler("", "").(*core.LocalHandler)
+		lh.SetAdapter(dma, dda)
+
+		testCtx, userInfo, _, err := lh.Login(c, "orcas", "orcas")
+		So(err, ShouldBeNil)
+
+		bucket := &core.BucketInfo{
+			ID:       testBktID,
+			Name:     "test_bucket",
+			Type:     1,
+			Quota:    100000000,
+			Used:     0,
+			RealUsed: 0,
+		}
+		admin := core.NewLocalAdmin(".", ".")
+		So(admin.PutBkt(testCtx, []*core.BucketInfo{bucket}), ShouldBeNil)
+
+		if userInfo != nil && userInfo.ID > 0 {
+			So(admin.PutACL(testCtx, testBktID, userInfo.ID, core.ALL), ShouldBeNil)
+		}
+
+		// No encryption
+		cfg := &core.Config{
+			EndecWay: 0,
+			EndecKey: "",
+		}
+		ofs := NewOrcasFSWithConfig(lh, testCtx, testBktID, cfg)
+
+		fileID, _ := ig.New()
+		fileObj := &core.ObjectInfo{
+			ID:    fileID,
+			PID:   testBktID,
+			Type:  core.OBJ_TYPE_FILE,
+			Name:  "test_no_encrypt.txt",
+			Size:  0,
+			MTime: core.Now(),
+		}
+		_, err = dma.PutObj(testCtx, testBktID, []*core.ObjectInfo{fileObj})
+		So(err, ShouldBeNil)
+
+		ra, err := NewRandomAccessor(ofs, fileID)
+		So(err, ShouldBeNil)
+		So(ra, ShouldNotBeNil)
+		defer ra.Close()
+
+		chunkSize := int64(524288)
+		totalSize := chunkSize * 2
+		expectedData := make([]byte, totalSize)
+		for i := range expectedData {
+			expectedData[i] = byte(i % 256)
+		}
+
+		// Write first chunk sequentially from offset 0
+		err = ra.Write(0, expectedData[0:chunkSize])
+		So(err, ShouldBeNil)
+
+		// Verify sequential buffer is being used
+		So(ra.seqBuffer, ShouldNotBeNil)
+		ra.seqBuffer.mu.Lock()
+		hasSeqData1 := ra.seqBuffer.hasData && !ra.seqBuffer.closed
+		ra.seqBuffer.mu.Unlock()
+		So(hasSeqData1, ShouldBeTrue)
+
+		// Flush (but don't close file)
+		_, err = ra.Flush()
+		So(err, ShouldBeNil)
+
+		// Verify file size was updated after flush
+		fileObjAfterFlush, err := ra.getFileObj()
+		So(err, ShouldBeNil)
+		So(fileObjAfterFlush.Size, ShouldEqual, chunkSize)
+
+		// Continue sequential write from file end (offset == fileSize)
+		err = ra.Write(chunkSize, expectedData[chunkSize:totalSize])
+		So(err, ShouldBeNil)
+
+		// Verify sequential buffer is still being used (not journal)
+		So(ra.seqBuffer, ShouldNotBeNil)
+		ra.seqBuffer.mu.Lock()
+		hasSeqData2 := ra.seqBuffer.hasData
+		isClosed2 := ra.seqBuffer.closed
+		ra.seqBuffer.mu.Unlock()
+		So(hasSeqData2, ShouldBeTrue)
+		So(isClosed2, ShouldBeFalse)
+
+		// Final flush and verify
+		_, err = ra.Flush()
+		So(err, ShouldBeNil)
+
+		// Verify final file size
+		fileObjFinal, err := ra.getFileObj()
+		So(err, ShouldBeNil)
+		So(fileObjFinal.Size, ShouldEqual, totalSize)
+
+		// Read back and verify data correctness
+		readData, err := ra.Read(0, int(totalSize))
+		So(err, ShouldBeNil)
+		So(len(readData), ShouldEqual, int(totalSize))
+		So(bytes.Equal(readData, expectedData), ShouldBeTrue)
+
+		t.Logf("✅ Sequential write after flush works without encryption")
+	})
+}
+
 // TestSparseFileLocalSequentialWrite tests that writes within a few chunks
 // are treated as sequential even if out of order, avoiding journal usage
 func TestSparseFileLocalSequentialWrite(t *testing.T) {
