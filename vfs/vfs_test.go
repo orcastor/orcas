@@ -5759,3 +5759,286 @@ func TestNoKeyTempFileOExcl(t *testing.T) {
 		t.Logf("Successfully tested O_EXCL prevents overwriting: created, O_EXCL create failed as expected")
 	})
 }
+
+// ensureTestUserForBenchmark ensures test user exists for benchmark tests
+func ensureTestUserForBenchmark(tb testing.TB) {
+	// Try to login first, if successful, user already exists
+	handler := core.NewLocalHandler("", "")
+	ctx := context.Background()
+	_, _, _, err := handler.Login(ctx, "orcas", "orcas")
+	if err == nil {
+		// User already exists, return directly
+		return
+	}
+
+	// User doesn't exist, need to create. Since creating user requires admin permission, we create directly via database
+	// Use the same password hash as the original default user
+	hashedPwd := "1000:Zd54dfEjoftaY8NiAINGag==:q1yB510yT5tGIGNewItVSg=="
+	db, err := core.GetMainDBWithKey(".", "")
+	if err != nil {
+		tb.Logf("Warning: Failed to get DB: %v", err)
+		return
+	}
+	defer db.Close()
+
+	// Use INSERT OR IGNORE to avoid duplicate creation
+	_, err = db.Exec(`INSERT OR IGNORE INTO usr (id, role, usr, pwd, name, avatar, key) VALUES (1, 1, 'orcas', ?, 'orcas', '', '')`, hashedPwd)
+	if err != nil {
+		tb.Logf("Warning: Failed to create test user: %v", err)
+	}
+}
+
+// createTestFileForUnlink creates a test file using handler.Put for unlink tests
+func createTestFileForUnlink(handler core.Handler, ctx core.Ctx, bktID int64, fileName string) error {
+	fileObj := &core.ObjectInfo{
+		ID:    core.NewID(),
+		PID:   bktID,
+		Type:  core.OBJ_TYPE_FILE,
+		Name:  fileName,
+		Size:  0,
+		MTime: core.Now(),
+	}
+	_, err := handler.Put(ctx, bktID, []*core.ObjectInfo{fileObj})
+	return err
+}
+
+// BenchmarkUnlinkSingle benchmarks single file unlink operations
+func BenchmarkUnlinkSingle(b *testing.B) {
+	ensureTestUserForBenchmark(b)
+	handler := core.NewLocalHandler("", "")
+	ctx := context.Background()
+	ctx, _, _, err := handler.Login(ctx, "orcas", "orcas")
+	if err != nil {
+		b.Fatalf("Login failed: %v", err)
+	}
+
+	ig := idgen.NewIDGen(nil, 0)
+	testBktID, _ := ig.New()
+	err = core.InitBucketDB(".", testBktID)
+	if err != nil {
+		b.Fatalf("InitBucketDB failed: %v", err)
+	}
+
+	// Create bucket
+	admin := core.NewLocalAdmin(".", ".")
+	bkt := &core.BucketInfo{
+		ID:        testBktID,
+		Name:      "bench-unlink-single-bucket",
+		Type:      1,
+		Quota:     -1,
+		ChunkSize: 4 * 1024 * 1024,
+	}
+	err = admin.PutBkt(ctx, []*core.BucketInfo{bkt})
+	if err != nil {
+		b.Fatalf("PutBkt failed: %v", err)
+	}
+
+	ofs := NewOrcasFS(handler, ctx, testBktID)
+	root := ofs.Root()
+
+	// Create test files before benchmark
+	numFiles := 100
+	fileNames := make([]string, numFiles)
+	for i := 0; i < numFiles; i++ {
+		fileNames[i] = fmt.Sprintf("test_file_%d.txt", i)
+		err := createTestFileForUnlink(handler, ctx, testBktID, fileNames[i])
+		if err != nil {
+			b.Fatalf("Create file failed: %v", err)
+		}
+	}
+
+	b.ResetTimer()
+	b.ReportAllocs()
+
+	for i := 0; i < b.N; i++ {
+		// Recreate files for each iteration
+		if i > 0 {
+			for j := 0; j < numFiles; j++ {
+				err := createTestFileForUnlink(handler, ctx, testBktID, fileNames[j])
+				if err != nil {
+					b.Fatalf("Create file failed: %v", err)
+				}
+			}
+		}
+
+		// Delete files one by one
+		for j := 0; j < numFiles; j++ {
+			errno := root.Unlink(ctx, fileNames[j])
+			if errno != 0 {
+				b.Fatalf("Unlink failed: %v", errno)
+			}
+		}
+	}
+}
+
+// BenchmarkUnlinkBatch benchmarks batch file unlink operations
+func BenchmarkUnlinkBatch(b *testing.B) {
+	ensureTestUserForBenchmark(b)
+	handler := core.NewLocalHandler("", "")
+	ctx := context.Background()
+	ctx, _, _, err := handler.Login(ctx, "orcas", "orcas")
+	if err != nil {
+		b.Fatalf("Login failed: %v", err)
+	}
+
+	ig := idgen.NewIDGen(nil, 0)
+	testBktID, _ := ig.New()
+	err = core.InitBucketDB(".", testBktID)
+	if err != nil {
+		b.Fatalf("InitBucketDB failed: %v", err)
+	}
+
+	// Create bucket
+	admin := core.NewLocalAdmin(".", ".")
+	bkt := &core.BucketInfo{
+		ID:        testBktID,
+		Name:      "bench-unlink-batch-bucket",
+		Type:      1,
+		Quota:     -1,
+		ChunkSize: 4 * 1024 * 1024,
+	}
+	err = admin.PutBkt(ctx, []*core.BucketInfo{bkt})
+	if err != nil {
+		b.Fatalf("PutBkt failed: %v", err)
+	}
+
+	ofs := NewOrcasFS(handler, ctx, testBktID)
+	root := ofs.Root()
+
+	// Create test files before benchmark
+	numFiles := 100
+	fileNames := make([]string, numFiles)
+	for i := 0; i < numFiles; i++ {
+		fileNames[i] = fmt.Sprintf("test_file_%d.txt", i)
+		err := createTestFileForUnlink(handler, ctx, testBktID, fileNames[i])
+		if err != nil {
+			b.Fatalf("Create file failed: %v", err)
+		}
+	}
+
+	b.ResetTimer()
+	b.ReportAllocs()
+
+	for i := 0; i < b.N; i++ {
+		// Recreate files for each iteration
+		if i > 0 {
+			for j := 0; j < numFiles; j++ {
+				err := createTestFileForUnlink(handler, ctx, testBktID, fileNames[j])
+				if err != nil {
+					b.Fatalf("Create file failed: %v", err)
+				}
+			}
+		}
+
+		// Delete files in batch
+		errno := root.UnlinkBatch(ctx, fileNames)
+		if errno != 0 {
+			b.Fatalf("UnlinkBatch failed: %v", errno)
+		}
+	}
+}
+
+// TestUnlinkPerformanceComparison tests and compares performance of single vs batch unlink
+func TestUnlinkPerformanceComparison(t *testing.T) {
+	ensureTestUser(t)
+	handler := core.NewLocalHandler("", "")
+	ctx := context.Background()
+	ctx, _, _, err := handler.Login(ctx, "orcas", "orcas")
+	if err != nil {
+		t.Fatalf("Login failed: %v", err)
+	}
+
+	ig := idgen.NewIDGen(nil, 0)
+	testBktID, _ := ig.New()
+	err = core.InitBucketDB(".", testBktID)
+	if err != nil {
+		t.Fatalf("InitBucketDB failed: %v", err)
+	}
+
+	// Create bucket
+	admin := core.NewLocalAdmin(".", ".")
+	bkt := &core.BucketInfo{
+		ID:        testBktID,
+		Name:      "perf-unlink-comparison-bucket",
+		Type:      1,
+		Quota:     -1,
+		ChunkSize: 4 * 1024 * 1024,
+	}
+	err = admin.PutBkt(ctx, []*core.BucketInfo{bkt})
+	if err != nil {
+		t.Fatalf("PutBkt failed: %v", err)
+	}
+
+	ofs := NewOrcasFS(handler, ctx, testBktID)
+	root := ofs.Root()
+
+	// Test different file counts
+	fileCounts := []int{10, 50, 100, 200, 500}
+
+	for _, numFiles := range fileCounts {
+		t.Run(fmt.Sprintf("Files_%d", numFiles), func(t *testing.T) {
+			// Create test files
+			fileNames := make([]string, numFiles)
+			for i := 0; i < numFiles; i++ {
+				fileNames[i] = fmt.Sprintf("perf_test_file_%d_%d.txt", numFiles, i)
+				err := createTestFileForUnlink(handler, ctx, testBktID, fileNames[i])
+				if err != nil {
+					t.Fatalf("Create file failed: %v", err)
+				}
+			}
+
+			// Test single unlink performance
+			startSingle := time.Now()
+			for i := 0; i < numFiles; i++ {
+				// Recreate file if needed
+				if i > 0 {
+					err := createTestFileForUnlink(handler, ctx, testBktID, fileNames[i])
+					if err != nil {
+						t.Fatalf("Create file failed: %v", err)
+					}
+				}
+				errno := root.Unlink(ctx, fileNames[i])
+				if errno != 0 {
+					t.Fatalf("Unlink failed: %v", errno)
+				}
+			}
+			durationSingle := time.Since(startSingle)
+
+			// Recreate all files for batch test
+			for i := 0; i < numFiles; i++ {
+				err := createTestFileForUnlink(handler, ctx, testBktID, fileNames[i])
+				if err != nil {
+					t.Fatalf("Create file failed: %v", err)
+				}
+			}
+
+			// Test batch unlink performance
+			startBatch := time.Now()
+			errno := root.UnlinkBatch(ctx, fileNames)
+			if errno != 0 {
+				t.Fatalf("UnlinkBatch failed: %v", errno)
+			}
+			durationBatch := time.Since(startBatch)
+
+			// Calculate performance metrics
+			opsPerSecSingle := float64(numFiles) / durationSingle.Seconds()
+			opsPerSecBatch := float64(numFiles) / durationBatch.Seconds()
+			speedup := durationSingle.Seconds() / durationBatch.Seconds()
+
+			t.Logf("=== Performance Comparison for %d files ===", numFiles)
+			t.Logf("Single Unlink:  %v (%.2f ops/sec)", durationSingle, opsPerSecSingle)
+			t.Logf("Batch Unlink:   %v (%.2f ops/sec)", durationBatch, opsPerSecBatch)
+			t.Logf("Speedup:        %.2fx", speedup)
+			t.Logf("Time saved:     %v (%.1f%%)", durationSingle-durationBatch,
+				(float64(durationSingle-durationBatch)/durationSingle.Seconds())*100)
+			t.Logf("")
+
+			// Verify batch is faster (or at least not significantly slower)
+			if speedup < 1.0 {
+				t.Logf("WARNING: Batch unlink is slower than single unlink for %d files", numFiles)
+			} else {
+				t.Logf("✓ Batch unlink is %.2fx faster than single unlink for %d files", speedup, numFiles)
+			}
+		})
+	}
+}
