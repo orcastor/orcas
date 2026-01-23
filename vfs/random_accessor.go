@@ -36,6 +36,18 @@ const (
 	LargeChunkPoolCap   = 4 << 20  // 4MB - capacity for large file chunk pool
 	DefaultChunkPoolCap = 10 << 20 // 10MB - default chunk buffer pool capacity
 	ZeroSliceSize       = 64 << 10 // 64KB - zero slice size for efficient clearing
+	// Sequential buffer tiered pool configuration
+	// Three tiers: 128KB (small), 1MB (medium), 10MB (large)
+	// Larger buffers are more expensive, so we keep fewer of them
+	SequentialBufferTier1Cap = 128 << 10 // 128KB - tier 1: small files, keep more buffers
+	SequentialBufferTier2Cap = 1 << 20   // 1MB - tier 2: medium files, keep moderate buffers
+	SequentialBufferTier3Cap = 10 << 20  // 10MB - tier 3: large files, keep fewer buffers
+
+	// Maximum number of buffers to keep in each pool tier
+	// Larger buffers consume more memory, so we limit them more strictly
+	SequentialBufferTier1Max = 100 // 128KB buffers: ~12.8MB total
+	SequentialBufferTier2Max = 20  // 1MB buffers: ~20MB total
+	SequentialBufferTier3Max = 5   // 10MB buffers: ~50MB total
 
 	// Buffer operation limits
 	DefaultMaxBufferOps  = 10000     // Maximum number of write operations in buffer
@@ -95,6 +107,48 @@ var (
 		},
 	}
 
+	// Tiered buffer pool with capacity limits
+	// Three tiers: 128KB, 1MB, 10MB with decreasing pool sizes
+	bufferTier1Pool = &limitedPool{
+		pool: sync.Pool{
+			New: func() interface{} {
+				return make([]byte, 0, SequentialBufferTier1Cap)
+			},
+		},
+		maxCount: SequentialBufferTier1Max,
+		count:    0,
+		mu:       sync.Mutex{},
+	}
+
+	bufferTier2Pool = &limitedPool{
+		pool: sync.Pool{
+			New: func() interface{} {
+				return make([]byte, 0, SequentialBufferTier2Cap)
+			},
+		},
+		maxCount: SequentialBufferTier2Max,
+		count:    0,
+		mu:       sync.Mutex{},
+	}
+
+	bufferTier3Pool = &limitedPool{
+		pool: sync.Pool{
+			New: func() interface{} {
+				return make([]byte, 0, SequentialBufferTier3Cap)
+			},
+		},
+		maxCount: SequentialBufferTier3Max,
+		count:    0,
+		mu:       sync.Mutex{},
+	}
+
+	// Object pool for SequentialWriteBuffer (without buffer, buffer comes from tiered pools)
+	sequentialBufferPool = sync.Pool{
+		New: func() interface{} {
+			return &SequentialWriteBuffer{}
+		},
+	}
+
 	// Zero slice for efficient zero-filling (reused to avoid allocations)
 	zeroSlice = make([]byte, ZeroSliceSize) // 64KB zero slice
 
@@ -102,6 +156,42 @@ var (
 	// atomic.Value cannot store nil, so we use this marker instead
 	clearedChunkedWriterMarker = &ChunkedFileWriter{}
 )
+
+// limitedPool is a sync.Pool wrapper with capacity limit
+type limitedPool struct {
+	pool     sync.Pool
+	maxCount int
+	count    int
+	mu       sync.Mutex
+}
+
+// Get gets an object from the pool if available and under capacity limit
+func (p *limitedPool) Get() interface{} {
+	p.mu.Lock()
+	if p.count > 0 {
+		p.count--
+		p.mu.Unlock()
+		return p.pool.Get()
+	}
+	p.mu.Unlock()
+	return nil
+}
+
+// Put puts an object back to the pool if under capacity limit
+func (p *limitedPool) Put(x interface{}) {
+	if x == nil {
+		return
+	}
+	p.mu.Lock()
+	if p.count < p.maxCount {
+		p.count++
+		p.mu.Unlock()
+		p.pool.Put(x)
+	} else {
+		p.mu.Unlock()
+		// Pool is full, discard the object (let GC handle it)
+	}
+}
 
 func allocChunkData(size int) []byte {
 	if size <= 0 {
@@ -2451,7 +2541,7 @@ func (ra *RandomAccessor) Write(offset int64, data []byte) error {
 							DebugLog("[VFS RandomAccessor Write] Resetting sequential buffer for continued sequential append: fileID=%d, offset=%d, fileSize=%d", ra.fileID, offset, fileObj.Size)
 							ra.seqBuffer.closed = false
 							ra.seqBuffer.offset = fileObj.Size
-							ra.seqBuffer.buffer = ra.seqBuffer.buffer[:0] // Clear buffer but keep capacity
+							ra.clearSeqBuffer() // Clear buffer and shrink capacity if needed
 							ra.seqBuffer.hasData = false
 							// Update dataID to current file's DataID for continued writes
 							ra.seqBuffer.dataID = fileObj.DataID
@@ -2734,17 +2824,17 @@ func (ra *RandomAccessor) initSequentialBufferWithNewData() error {
 	}
 	DebugLog("[VFS initSequentialBufferWithNewData] Final DataInfo Kind: fileID=%d, Kind=0x%x", ra.fileID, dataInfo.Kind)
 
-	ra.seqBuffer = &SequentialWriteBuffer{
-		fileID:    ra.fileID,
-		dataID:    newDataID,
-		sn:        0,
-		chunkSize: chunkSize,
-		buffer:    make([]byte, 0, chunkSize), // Pre-allocate but length is 0
-		offset:    0,
-		hasData:   false,
-		closed:    false,
-		dataInfo:  dataInfo,
-	}
+	// Get SequentialWriteBuffer from pool to reduce allocations
+	// Buffer starts from tier 1 (128KB), will upgrade automatically as needed
+	ra.seqBuffer = getSequentialBuffer()
+	ra.seqBuffer.fileID = ra.fileID
+	ra.seqBuffer.dataID = newDataID
+	ra.seqBuffer.sn = 0
+	ra.seqBuffer.chunkSize = chunkSize
+	ra.seqBuffer.offset = 0
+	ra.seqBuffer.hasData = false
+	ra.seqBuffer.closed = false
+	ra.seqBuffer.dataInfo = dataInfo
 
 	// Update file object with new DataID immediately (but keep Size unchanged)
 	// This allows the DataID to be visible before Flush, while Size will be updated on Flush
@@ -2812,17 +2902,17 @@ func (ra *RandomAccessor) initSequentialBufferForAppend(fileObj *core.ObjectInfo
 		dataInfo.Kind |= endecWay
 	}
 
-	ra.seqBuffer = &SequentialWriteBuffer{
-		fileID:    ra.fileID,
-		dataID:    newDataID, // New DataID for appended chunks
-		sn:        0,         // Start from chunk 0 for new chunks
-		chunkSize: chunkSize,
-		buffer:    make([]byte, 0, chunkSize), // Pre-allocate but length is 0
-		offset:    fileObj.Size,               // Start from current file size
-		hasData:   false,
-		closed:    false,
-		dataInfo:  dataInfo,
-	}
+	// Get SequentialWriteBuffer from pool to reduce allocations
+	// Buffer starts from tier 1 (128KB), will upgrade automatically as needed
+	ra.seqBuffer = getSequentialBuffer()
+	ra.seqBuffer.fileID = ra.fileID
+	ra.seqBuffer.dataID = newDataID // New DataID for appended chunks
+	ra.seqBuffer.sn = 0             // Start from chunk 0 for new chunks
+	ra.seqBuffer.chunkSize = chunkSize
+	ra.seqBuffer.offset = fileObj.Size // Start from current file size
+	ra.seqBuffer.hasData = false
+	ra.seqBuffer.closed = false
+	ra.seqBuffer.dataInfo = dataInfo
 
 	DebugLog("[VFS initSequentialBufferForAppend] Initialized sequential buffer for append: fileID=%d, offset=%d, newDataID=%d, baseDataID=%d", ra.fileID, fileObj.Size, newDataID, fileObj.DataID)
 	return nil
@@ -2869,6 +2959,29 @@ func (ra *RandomAccessor) writeSequential(offset int64, data []byte) error {
 			writeSize = remainingInChunk
 		}
 
+		// Check if buffer needs upgrade before writing
+		currentTier := getBufferTier(cap(ra.seqBuffer.buffer))
+		neededCap := int64(len(ra.seqBuffer.buffer)) + writeSize
+
+		// Upgrade buffer if needed capacity exceeds current tier
+		if neededCap > int64(cap(ra.seqBuffer.buffer)) {
+			var targetTier int
+			if neededCap > SequentialBufferTier2Cap {
+				targetTier = 3 // Need tier 3 (10MB)
+			} else if neededCap > SequentialBufferTier1Cap {
+				targetTier = 2 // Need tier 2 (1MB)
+			} else {
+				targetTier = 1 // Stay at tier 1 (128KB)
+			}
+
+			if targetTier > currentTier {
+				// Upgrade buffer to larger tier
+				ra.seqBuffer.buffer = upgradeBuffer(ra.seqBuffer.buffer, targetTier)
+				DebugLog("[VFS writeSequential] Upgraded buffer: fileID=%d, dataID=%d, fromTier=%d, toTier=%d, neededCap=%d",
+					ra.fileID, ra.seqBuffer.dataID, currentTier, targetTier, neededCap)
+			}
+		}
+
 		// Write to current chunk buffer
 		ra.seqBuffer.buffer = append(ra.seqBuffer.buffer, dataLeft[:writeSize]...)
 		ra.seqBuffer.offset += writeSize
@@ -2889,6 +3002,208 @@ func (ra *RandomAccessor) writeSequential(offset int64, data []byte) error {
 	}
 
 	return nil
+}
+
+// getBufferFromTier gets a buffer from the appropriate tier pool
+// Returns buffer from tier 1 (128KB) by default
+func getBufferFromTier(tier int) []byte {
+	var pool *limitedPool
+	switch tier {
+	case 1:
+		pool = bufferTier1Pool
+	case 2:
+		pool = bufferTier2Pool
+	case 3:
+		pool = bufferTier3Pool
+	default:
+		pool = bufferTier1Pool
+	}
+
+	if buf := pool.Get(); buf != nil {
+		return buf.([]byte)[:0] // Reset length but keep capacity
+	}
+
+	// Pool is empty or at capacity, create new buffer
+	switch tier {
+	case 1:
+		return make([]byte, 0, SequentialBufferTier1Cap)
+	case 2:
+		return make([]byte, 0, SequentialBufferTier2Cap)
+	case 3:
+		return make([]byte, 0, SequentialBufferTier3Cap)
+	default:
+		return make([]byte, 0, SequentialBufferTier1Cap)
+	}
+}
+
+// putBufferToTier returns a buffer to the appropriate tier pool
+func putBufferToTier(buf []byte) {
+	if buf == nil {
+		return
+	}
+
+	cap := cap(buf)
+	buf = buf[:0] // Reset length but keep capacity
+
+	var pool *limitedPool
+	switch {
+	case cap <= SequentialBufferTier1Cap:
+		pool = bufferTier1Pool
+	case cap <= SequentialBufferTier2Cap:
+		pool = bufferTier2Pool
+	case cap <= SequentialBufferTier3Cap:
+		pool = bufferTier3Pool
+	default:
+		// Buffer is larger than tier 3, don't pool it (let GC handle it)
+		return
+	}
+
+	pool.Put(buf)
+}
+
+// upgradeBuffer upgrades buffer to a larger tier, copying data and returning old buffer
+func upgradeBuffer(oldBuf []byte, targetTier int) []byte {
+	if oldBuf == nil {
+		return getBufferFromTier(targetTier)
+	}
+
+	// Get new buffer from target tier
+	newBuf := getBufferFromTier(targetTier)
+
+	// Copy data if there's any
+	if len(oldBuf) > 0 {
+		// Ensure new buffer has enough capacity
+		if cap(newBuf) < len(oldBuf) {
+			// New buffer from pool is too small, create larger one
+			putBufferToTier(newBuf) // Return the small one
+			switch targetTier {
+			case 2:
+				newBuf = make([]byte, len(oldBuf), SequentialBufferTier2Cap)
+			case 3:
+				newBuf = make([]byte, len(oldBuf), SequentialBufferTier3Cap)
+			default:
+				newBuf = make([]byte, len(oldBuf), SequentialBufferTier1Cap)
+			}
+		}
+		copy(newBuf, oldBuf)
+		newBuf = newBuf[:len(oldBuf)]
+	}
+
+	// Return old buffer to its tier pool
+	putBufferToTier(oldBuf)
+
+	return newBuf
+}
+
+// downgradeBuffer downgrades buffer to a smaller tier, copying data and returning old buffer
+func downgradeBuffer(oldBuf []byte, targetTier int) []byte {
+	if oldBuf == nil {
+		return getBufferFromTier(targetTier)
+	}
+
+	// Get new buffer from target tier
+	newBuf := getBufferFromTier(targetTier)
+
+	// Copy data if it fits in the smaller buffer
+	if len(oldBuf) > 0 {
+		if len(oldBuf) <= cap(newBuf) {
+			copy(newBuf, oldBuf)
+			newBuf = newBuf[:len(oldBuf)]
+		} else {
+			// Data doesn't fit, keep old buffer (shouldn't happen in practice)
+			putBufferToTier(newBuf) // Return the small one
+			return oldBuf
+		}
+	}
+
+	// Return old buffer to its tier pool
+	putBufferToTier(oldBuf)
+
+	return newBuf
+}
+
+// getBufferTier determines which tier a buffer capacity belongs to
+func getBufferTier(cap int) int {
+	switch {
+	case cap <= SequentialBufferTier1Cap:
+		return 1
+	case cap <= SequentialBufferTier2Cap:
+		return 2
+	case cap <= SequentialBufferTier3Cap:
+		return 3
+	default:
+		return 3 // Larger than tier 3, treat as tier 3
+	}
+}
+
+// clearSeqBuffer clears the sequential buffer and downgrades if too large
+// This reduces memory usage when many files are open simultaneously
+func (ra *RandomAccessor) clearSeqBuffer() {
+	if ra.seqBuffer == nil {
+		return
+	}
+
+	oldCap := cap(ra.seqBuffer.buffer)
+	currentTier := getBufferTier(oldCap)
+
+	// If buffer is tier 3 (10MB), downgrade to tier 2 (1MB) after flush
+	// If buffer is tier 2 (1MB), keep it (tier 2 is reasonable for active writes)
+	// If buffer is tier 1 (128KB), just clear it
+	if currentTier == 3 {
+		// Downgrade from tier 3 to tier 2
+		ra.seqBuffer.buffer = downgradeBuffer(ra.seqBuffer.buffer, 2)
+		DebugLog("[VFS clearSeqBuffer] Downgraded buffer from tier 3 to tier 2: fileID=%d, dataID=%d, oldCap=%d, newCap=%d",
+			ra.fileID, ra.seqBuffer.dataID, oldCap, cap(ra.seqBuffer.buffer))
+	} else {
+		// Just clear the buffer, keep capacity
+		ra.seqBuffer.buffer = ra.seqBuffer.buffer[:0]
+	}
+}
+
+// getSequentialBuffer gets a SequentialWriteBuffer from pool or creates a new one
+// Buffer comes from tier 1 pool (128KB) initially
+func getSequentialBuffer() *SequentialWriteBuffer {
+	if pooled := sequentialBufferPool.Get(); pooled != nil {
+		sb := pooled.(*SequentialWriteBuffer)
+		// Reset fields
+		sb.fileID = 0
+		sb.dataID = 0
+		sb.sn = 0
+		sb.chunkSize = 0
+		sb.offset = 0
+		sb.hasData = false
+		sb.closed = false
+		sb.dataInfo = nil
+		sb.xxh3Hash = nil
+		sb.sha256Hash = nil
+
+		// Return old buffer to appropriate tier pool and get tier 1 buffer
+		if sb.buffer != nil {
+			putBufferToTier(sb.buffer) // Return old buffer to pool
+		}
+		sb.buffer = getBufferFromTier(1) // Get tier 1 buffer (128KB)
+		return sb
+	}
+
+	// Create new SequentialWriteBuffer with tier 1 buffer
+	return &SequentialWriteBuffer{
+		buffer: getBufferFromTier(1),
+	}
+}
+
+// putSequentialBuffer returns a SequentialWriteBuffer to pool for reuse
+// Buffer is returned to appropriate tier pool based on its capacity
+func putSequentialBuffer(sb *SequentialWriteBuffer) {
+	if sb == nil {
+		return
+	}
+
+	// Return buffer to appropriate tier pool
+	putBufferToTier(sb.buffer)
+	sb.buffer = nil // Clear reference
+
+	// Return SequentialWriteBuffer object to pool (without buffer)
+	sequentialBufferPool.Put(sb)
 }
 
 // flushSequentialChunk flushes current sequential write chunk (writes a complete chunk)
@@ -3003,8 +3318,8 @@ func (ra *RandomAccessor) flushSequentialChunkLocked() error {
 		ra.fileID, ra.seqBuffer.dataID, ra.seqBuffer.sn, len(encodedChunk), ra.seqBuffer.dataInfo.OrigSize, ra.seqBuffer.dataInfo.Size)
 
 	ra.seqBuffer.sn++
-	ra.seqBuffer.buffer = ra.seqBuffer.buffer[:0] // Clear buffer but keep capacity
-	ra.seqBuffer.hasData = true                   // Mark that data has been written (OrigSize > 0)
+	ra.clearSeqBuffer()         // Clear buffer and shrink capacity if needed
+	ra.seqBuffer.hasData = true // Mark that data has been written (OrigSize > 0)
 
 	DebugLog("[VFS flushSequentialChunk] After flush: fileID=%d, dataID=%d, sn=%d, bufferLen=%d, hasData=%v, OrigSize=%d, Size=%d",
 		ra.fileID, ra.seqBuffer.dataID, ra.seqBuffer.sn, len(ra.seqBuffer.buffer), ra.seqBuffer.hasData,
@@ -3204,7 +3519,7 @@ func (ra *RandomAccessor) flushSequentialBuffer() error {
 							}
 							// Clear sequential buffer
 							ra.seqBuffer.hasData = false
-							ra.seqBuffer.buffer = ra.seqBuffer.buffer[:0]
+							ra.clearSeqBuffer() // Clear buffer and shrink capacity if needed
 							return nil
 						}
 					}
@@ -6700,6 +7015,7 @@ func (ra *RandomAccessor) Truncate(newSize int64) (int64, error) {
 						atomic.StoreInt64(&ra.buffer.totalSize, 0)
 						atomic.StoreInt64(&ra.lastOffset, -1)
 						if ra.seqBuffer != nil {
+							putSequentialBuffer(ra.seqBuffer) // Return to pool for reuse
 							ra.seqBuffer = nil
 						}
 
@@ -6969,6 +7285,7 @@ func (ra *RandomAccessor) Truncate(newSize int64) (int64, error) {
 						atomic.StoreInt64(&ra.buffer.totalSize, 0)
 						atomic.StoreInt64(&ra.lastOffset, -1)
 						if ra.seqBuffer != nil {
+							putSequentialBuffer(ra.seqBuffer) // Return to pool for reuse
 							ra.seqBuffer = nil
 						}
 
@@ -7249,6 +7566,7 @@ func (ra *RandomAccessor) Truncate(newSize int64) (int64, error) {
 	atomic.StoreInt64(&ra.buffer.totalSize, 0)
 	// Clear sequential buffer if it exists
 	if ra.seqBuffer != nil {
+		putSequentialBuffer(ra.seqBuffer) // Return to pool for reuse
 		ra.seqBuffer = nil
 	}
 
@@ -8812,7 +9130,7 @@ func (ra *RandomAccessor) migrateSeqBufferToJournal() error {
 
 	// Clear seqBuffer
 	ra.seqBuffer.hasData = false
-	ra.seqBuffer.buffer = ra.seqBuffer.buffer[:0]
+	ra.clearSeqBuffer() // Clear buffer and shrink capacity if needed
 
 	return nil
 }
