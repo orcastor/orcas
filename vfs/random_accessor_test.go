@@ -1450,14 +1450,19 @@ func TestWriteToExistingFile(t *testing.T) {
 			// 第二次写入（追加）
 			ra2, err := NewRandomAccessor(ofs, fileID1)
 			So(err, ShouldBeNil)
-			defer ra2.Close()
 			err = ra2.Write(16, []byte(" appended"))
 			So(err, ShouldBeNil)
 			_, err = ra2.Flush()
 			So(err, ShouldBeNil)
+			// 关闭以确保所有缓冲数据已经持久化
+			So(ra2.Close(), ShouldBeNil)
 
-			// 读取验证
-			data, err := ra2.Read(0, 26)
+			// 重新打开文件进行读取验证，模拟真实场景下“写完再读”的行为
+			ra3, err := NewRandomAccessor(ofs, fileID1)
+			So(err, ShouldBeNil)
+			defer ra3.Close()
+
+			data, err := ra3.Read(0, 26)
 			So(err, ShouldBeNil)
 			So(string(data), ShouldEqual, "Original content appended")
 		})

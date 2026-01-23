@@ -38,6 +38,13 @@ func ensureTestUser(t *testing.T) {
 
 // ensureTestUserInPath ensures test user exists in the specified base path
 func ensureTestUserInPath(t *testing.T, basePath string) {
+	// Ensure main DB and schema are initialized for the given basePath.
+	// This is safe and idempotent in tests, and guarantees the `usr` table exists
+	// before we try to insert or query the test user.
+	if err := core.InitDB(basePath, ""); err != nil {
+		t.Logf("Warning: InitDB failed for basePath %q: %v", basePath, err)
+	}
+
 	// Try to login first, if successful, user already exists
 	handler := core.NewLocalHandler(basePath, "")
 	ctx := context.Background()
