@@ -494,6 +494,13 @@ func setupTestEnv(t *testing.T) (core.Handler, core.Ctx, int64, func()) {
 		t.Fatalf("Failed to create temp dir: %v", err)
 	}
 
+	// Initialize database before login
+	err = core.InitDB(tempDir, "")
+	if err != nil {
+		os.RemoveAll(tempDir)
+		t.Fatalf("Failed to init DB: %v", err)
+	}
+
 	// Create handler
 	h := core.NewLocalHandler(tempDir, tempDir)
 	ctx := context.Background()
