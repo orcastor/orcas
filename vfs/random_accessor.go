@@ -2156,6 +2156,13 @@ func (ra *RandomAccessor) Write(offset int64, data []byte) error {
 			}
 		}
 
+		// Migrate sequential buffer data to Journal (if any)
+		if ra.seqBuffer != nil {
+			if err := ra.migrateSeqBufferToJournal(); err != nil {
+				DebugLog("[VFS RandomAccessor Write] WARNING: Failed to migrate SeqBuffer to Journal: %v", err)
+			}
+		}
+
 		return ra.writeToJournal(offset, data)
 	}
 
@@ -7709,6 +7716,21 @@ func (ra *RandomAccessor) shouldUseJournal(fileObj *core.ObjectInfo, offset, len
 		}
 	}
 
+	// PRIORITY CHECK: If we are already using sequential buffer, continue using it
+	// This allows sequential writes (even non-zero offset) to bypass journal
+	// and continue using the efficient sequential buffer path
+	if ra.seqBuffer != nil {
+		ra.seqBuffer.mu.Lock()
+		seqOffset := ra.seqBuffer.offset
+		seqClosed := ra.seqBuffer.closed
+		ra.seqBuffer.mu.Unlock()
+
+		if !seqClosed && offset == seqOffset {
+			DebugLog("[VFS shouldUseJournal] Sequential write matching buffer offset, ensuring sequential buffer usage: fileID=%d, offset=%d", ra.fileID, offset)
+			return false
+		}
+	}
+
 	// Fast-path: any non-zero offset write is a random write candidate.
 	// To ensure correctness (especially for files with existing or future data),
 	// prefer journaling so reads can see these modifications immediately.
@@ -8737,4 +8759,40 @@ func (ra *RandomAccessor) getJournalSize() int64 {
 	}
 
 	return journal.GetSize()
+}
+
+// migrateSeqBufferToJournal migrates pending seqBuffer data to Journal
+func (ra *RandomAccessor) migrateSeqBufferToJournal() error {
+	ra.seqBuffer.mu.Lock()
+	defer ra.seqBuffer.mu.Unlock()
+
+	// Always mark as closed since we are moving data to journal
+	ra.seqBuffer.closed = true
+
+	if !ra.seqBuffer.hasData || len(ra.seqBuffer.buffer) == 0 {
+		return nil
+	}
+
+	// Calculate data range
+	// seqBuffer contains chunks. sn determines start offset.
+	chunkSize := ra.seqBuffer.chunkSize
+	startOffset := int64(ra.seqBuffer.sn) * chunkSize
+	bufferData := ra.seqBuffer.buffer
+
+	DebugLog("[VFS migrateSeqBufferToJournal] Migrating seqBuffer to Journal: fileID=%d, offset=%d, size=%d", ra.fileID, startOffset, len(bufferData))
+
+	journal, err := ra.getOrCreateJournal()
+	if err != nil {
+		return fmt.Errorf("failed to get or create journal: %w", err)
+	}
+
+	if err := journal.Write(startOffset, bufferData); err != nil {
+		return fmt.Errorf("failed to write seqBuffer data to journal: %w", err)
+	}
+
+	// Clear seqBuffer
+	ra.seqBuffer.hasData = false
+	ra.seqBuffer.buffer = ra.seqBuffer.buffer[:0]
+
+	return nil
 }
