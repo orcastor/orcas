@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"hash"
 	"io"
+	"os"
 	"sort"
 	"strings"
 	"sync"
@@ -83,6 +84,7 @@ var (
 	DataCacheSize        = 512              // Number of data info objects to cache
 	DirCacheSize         = 512              // Number of directory listings to cache
 	ReaderCacheSize      = 64               // Number of decoding readers to cache
+	DecodedFileCacheSize = 16               // Number of decoded packaged file blobs to cache (memory-heavy)
 	StatfsCacheSize      = 16               // Number of statfs results to cache
 	CacheShardCount      = 16               // Number of cache shards for concurrency
 	CacheTTL             = 30 * time.Second // Cache time-to-live for file/data cache
@@ -257,7 +259,7 @@ var (
 
 	// ecache cache: global cache for decoded file data (for packaged files)
 	// key: dataID (int64), value: []byte
-	globalDecodedFileCache = ecache2.NewLRUCache[int64](uint16(CacheShardCount/4), uint16(FileCacheSize), time.Minute)
+	globalDecodedFileCache = ecache2.NewLRUCache[int64](uint16(CacheShardCount/4), uint16(DecodedFileCacheSize), time.Minute)
 
 	// singleflight group: prevent duplicate concurrent requests for the same directory
 
@@ -287,6 +289,46 @@ var (
 	periodicSyncMgr     *periodicSyncManager
 	periodicSyncMgrOnce sync.Once
 )
+
+var (
+	// ORCAS_CACHE_EVICT_TO_POOL=0 disables returning evicted cached []byte to tier pools.
+	// Default is ON.
+	cacheEvictToPool atomic.Bool
+)
+
+func init() {
+	// Default ON; allow emergency disable.
+	cacheEvictToPool.Store(true)
+	if os.Getenv("ORCAS_CACHE_EVICT_TO_POOL") == "0" {
+		cacheEvictToPool.Store(false)
+	}
+
+	// Attach low-overhead probes to memory-heavy caches.
+	// NOTE: ecache2 signals eviction by calling inspector with action=PUT, status=-1,
+	// passing the evicted item's key/value.
+	globalChunkCache.Inspect(func(action int, _ [2]int64, iface *interface{}, _ []byte, status int) {
+		if !cacheEvictToPool.Load() {
+			return
+		}
+		if action != ecache2.PUT || status != -1 || iface == nil || *iface == nil {
+			return
+		}
+		if b, ok := (*iface).([]byte); ok && len(b) > 0 {
+			putBufferToTier(b)
+		}
+	})
+	globalDecodedFileCache.Inspect(func(action int, _ int64, iface *interface{}, _ []byte, status int) {
+		if !cacheEvictToPool.Load() {
+			return
+		}
+		if action != ecache2.PUT || status != -1 || iface == nil || *iface == nil {
+			return
+		}
+		if b, ok := (*iface).([]byte); ok && len(b) > 0 {
+			putBufferToTier(b)
+		}
+	})
+}
 
 // isRandomWritePattern detects if the write pattern is random (non-sequential)
 func (ra *RandomAccessor) isRandomWritePattern() bool {
@@ -3137,7 +3179,7 @@ func getBufferTier(cap int) int {
 	}
 }
 
-// clearSeqBuffer clears the sequential buffer and downgrades if too large
+// clearSeqBuffer clears the sequential buffer and releases large buffers back to pool
 // This reduces memory usage when many files are open simultaneously
 func (ra *RandomAccessor) clearSeqBuffer() {
 	if ra.seqBuffer == nil {
@@ -3147,18 +3189,18 @@ func (ra *RandomAccessor) clearSeqBuffer() {
 	oldCap := cap(ra.seqBuffer.buffer)
 	currentTier := getBufferTier(oldCap)
 
-	// If buffer is tier 3 (10MB), downgrade to tier 2 (1MB) after flush
-	// If buffer is tier 2 (1MB), keep it (tier 2 is reasonable for active writes)
-	// If buffer is tier 1 (128KB), just clear it
+	// If buffer is tier 3 (10MB), return it to pool and reset to tier 1 (128KB).
+	// This avoids an extra copy (tier3->tier2) and keeps memory low when many files are open.
 	if currentTier == 3 {
-		// Downgrade from tier 3 to tier 2
-		ra.seqBuffer.buffer = downgradeBuffer(ra.seqBuffer.buffer, 2)
-		DebugLog("[VFS clearSeqBuffer] Downgraded buffer from tier 3 to tier 2: fileID=%d, dataID=%d, oldCap=%d, newCap=%d",
+		putBufferToTier(ra.seqBuffer.buffer)
+		ra.seqBuffer.buffer = getBufferFromTier(1)
+		DebugLog("[VFS clearSeqBuffer] Released tier 3 buffer and reset to tier 1: fileID=%d, dataID=%d, oldCap=%d, newCap=%d",
 			ra.fileID, ra.seqBuffer.dataID, oldCap, cap(ra.seqBuffer.buffer))
-	} else {
-		// Just clear the buffer, keep capacity
-		ra.seqBuffer.buffer = ra.seqBuffer.buffer[:0]
+		return
 	}
+
+	// For tier 1/2, just clear and keep capacity for better throughput on continued sequential writes.
+	ra.seqBuffer.buffer = ra.seqBuffer.buffer[:0]
 }
 
 // getSequentialBuffer gets a SequentialWriteBuffer from pool or creates a new one

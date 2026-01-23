@@ -240,6 +240,51 @@ func TestVFSRandomAccessor(t *testing.T) {
 	})
 }
 
+func TestClearSeqBuffer_Tier3ReleasedAndResetToTier1(t *testing.T) {
+	ra := &RandomAccessor{
+		fileID: 123,
+		seqBuffer: &SequentialWriteBuffer{
+			dataID:  456,
+			buffer:  make([]byte, 0, SequentialBufferTier3Cap),
+			hasData: true,
+		},
+	}
+
+	// Simulate some data (len > 0), then clear.
+	ra.seqBuffer.buffer = append(ra.seqBuffer.buffer, 1, 2, 3)
+	ra.clearSeqBuffer()
+
+	if ra.seqBuffer == nil {
+		t.Fatalf("seqBuffer should not be nil")
+	}
+	if gotLen := len(ra.seqBuffer.buffer); gotLen != 0 {
+		t.Fatalf("expected cleared buffer length 0, got %d", gotLen)
+	}
+	if gotCap := cap(ra.seqBuffer.buffer); gotCap != SequentialBufferTier1Cap {
+		t.Fatalf("expected tier1 cap=%d after clear, got %d", SequentialBufferTier1Cap, gotCap)
+	}
+}
+
+func TestClearSeqBuffer_Tier2KeptCapacity(t *testing.T) {
+	ra := &RandomAccessor{
+		fileID: 123,
+		seqBuffer: &SequentialWriteBuffer{
+			dataID: 456,
+			buffer: make([]byte, 0, SequentialBufferTier2Cap),
+		},
+	}
+
+	ra.seqBuffer.buffer = append(ra.seqBuffer.buffer, 1, 2, 3)
+	ra.clearSeqBuffer()
+
+	if gotLen := len(ra.seqBuffer.buffer); gotLen != 0 {
+		t.Fatalf("expected cleared buffer length 0, got %d", gotLen)
+	}
+	if gotCap := cap(ra.seqBuffer.buffer); gotCap != SequentialBufferTier2Cap {
+		t.Fatalf("expected tier2 cap=%d to be kept, got %d", SequentialBufferTier2Cap, gotCap)
+	}
+}
+
 func TestVFSRandomAccessorWithSDK(t *testing.T) {
 	Convey("VFS RandomAccessor with SDK (compression and encryption)", t, func() {
 		ig := idgen.NewIDGen(nil, 0)
