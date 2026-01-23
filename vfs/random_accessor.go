@@ -90,6 +90,7 @@ var (
 	CacheTTL             = 30 * time.Second // Cache time-to-live for file/data cache
 	ReaderCacheTTL       = 5 * time.Minute  // Cache TTL for decoding readers
 	StatfsCacheTTL       = 5 * time.Second  // Cache TTL for statfs results
+	ChunkCacheTTL        = 10 * time.Second // Cache TTL for chunks
 	ChunkCacheSize       = 8                // Number of chunks to cache per reader (reduced from hardcoded 64 to save memory)
 	GlobalChunkCacheSize = 32               // Total number of chunks to cache globally (approx 320MB at 10MB/chunk)
 	// Increased from 16 to 32 to reduce repeated AES decryption and temporary buffer allocations
@@ -255,32 +256,21 @@ var (
 	// ecache cache: global cache for chunks (plain or decompressed/decrypted)
 	// key: [2]int64{dataID, sn}, value: []byte
 	// Global limit controls total memory usage for cached chunks
-	globalChunkCache = ecache2.NewLRUCache[[2]int64](uint16(CacheShardCount), uint16(GlobalChunkCacheSize), time.Minute)
+	globalChunkCache = ecache2.NewLRUCache[[2]int64](uint16(CacheShardCount), uint16(GlobalChunkCacheSize), ChunkCacheTTL)
 
 	// ecache cache: global cache for decoded file data (for packaged files)
 	// key: dataID (int64), value: []byte
-	globalDecodedFileCache = ecache2.NewLRUCache[int64](uint16(CacheShardCount/4), uint16(DecodedFileCacheSize), time.Minute)
+	globalDecodedFileCache = ecache2.NewLRUCache[int64](uint16(CacheShardCount/4), uint16(DecodedFileCacheSize), ChunkCacheTTL)
 
-	// singleflight group: prevent duplicate concurrent requests for the same directory
-
-	// key: "<dirID>", ensures only one request per directory at a time
-	dirListSingleFlight singleflight.Group
-
-	// singleflight group: prevent duplicate concurrent chunk reads
-	// key: "chunk_<dataID>_<sn>", ensures only one read per chunk at a time
-	chunkReadSingleFlight singleflight.Group
-
-	// singleflight group: prevent duplicate concurrent chunk flushes
-	// key: "flush_<dataID>_<sn>", ensures only one flush per chunk at a time
-	chunkFlushSingleFlight singleflight.Group
-
-	// singleflight group: prevent duplicate concurrent package file decoding
-	// key: "decode_pkg_<dataID>", ensures only one decode per package file at a time
-	packageDecodeSingleFlight singleflight.Group
-
-	// singleflight group: prevent duplicate concurrent DataInfo updates for sequential writes
-	// key: "update_datainfo_<dataID>", ensures only one update per DataID at a time
-	seqDataInfoUpdateSingleFlight singleflight.Group
+	// singleflight group: prevent duplicate concurrent operations globally.
+	//
+	// Key prefixes MUST remain unique per operation type to avoid cross-talk:
+	// - dir list: "<dirID>"
+	// - chunk read: "chunk_<dataID>_<sn>"
+	// - chunk flush: "flush_<dataID>_<sn>"
+	// - package decode: "decode_pkg_<dataID>"
+	// - seq datainfo update: "update_datainfo_<dataID>"
+	globalSingleFlight singleflight.Group
 
 	tempFlushMgr     *delayedFlushManager
 	tempFlushMgrOnce sync.Once
@@ -979,7 +969,7 @@ func (cw *ChunkedFileWriter) Write(offset int64, data []byte) error {
 
 			// Wait for any ongoing flush to complete (non-blocking if no flush in progress)
 			// This ensures we don't create a buffer for a chunk that's being flushed
-			_, _, _ = chunkFlushSingleFlight.Do(flushKey, func() (interface{}, error) {
+			_, _, _ = globalSingleFlight.Do(flushKey, func() (interface{}, error) {
 				return nil, nil
 			})
 
@@ -1091,7 +1081,7 @@ func (cw *ChunkedFileWriter) Write(offset int64, data []byte) error {
 			} else {
 				// Chunk doesn't exist on disk, might be flushing
 				// Wait for any ongoing flush to complete (non-blocking if no flush in progress)
-				_, _, _ = chunkFlushSingleFlight.Do(flushKey, func() (interface{}, error) {
+				_, _, _ = globalSingleFlight.Do(flushKey, func() (interface{}, error) {
 					// If flush is already in progress, this will wait for it to complete
 					// If flush is not in progress, this will return immediately
 					return nil, nil
@@ -1327,7 +1317,7 @@ func (cw *ChunkedFileWriter) Write(offset int64, data []byte) error {
 			flushKey := fmt.Sprintf("flush_%d_%d", cw.dataID, sn)
 
 			// Flush synchronously (using singleflight to prevent duplicate flushes)
-			_, err, _ := chunkFlushSingleFlight.Do(flushKey, func() (interface{}, error) {
+			_, err, _ := globalSingleFlight.Do(flushKey, func() (interface{}, error) {
 				// Flush the chunk using the buffer (no copy needed for synchronous flush)
 				// IMPORTANT: Must flush BEFORE clearing buffer data
 				flushErr := cw.flushChunkWithBuffer(sn, buf)
@@ -1634,7 +1624,7 @@ func (cw *ChunkedFileWriter) flushChunkWithBuffer(sn int, buf *chunkBuffer) erro
 				// Async DataInfo update
 				go func() {
 					updateKey := fmt.Sprintf("update_datainfo_%d", dataID)
-					_, err, _ := seqDataInfoUpdateSingleFlight.Do(updateKey, func() (interface{}, error) {
+					_, err, _ := globalSingleFlight.Do(updateKey, func() (interface{}, error) {
 						_, updateErr := lh.PutDataInfo(ctx, bktID, []*core.DataInfo{&dataInfoSnapshot})
 						if updateErr != nil {
 							DebugLog("[VFS ChunkedFileWriter flushChunk] WARNING: Failed to update DataInfo: fileID=%d, dataID=%d, sn=%d, error=%v", fileID, dataID, currentSN, updateErr)
@@ -1927,7 +1917,7 @@ func (cw *ChunkedFileWriter) Flush(force bool) error {
 				// Key format: "flush_<dataID>_<sn>"
 				flushKey := fmt.Sprintf("flush_%d_%d", cw.dataID, chunkSN)
 
-				_, err, _ := chunkFlushSingleFlight.Do(flushKey, func() (interface{}, error) {
+				_, err, _ := globalSingleFlight.Do(flushKey, func() (interface{}, error) {
 					// Process chunk (compression/encryption) - reuse flushChunkWithBuffer logic
 					flushErr := cw.flushChunkWithBuffer(chunkSN, buf)
 					if flushErr != nil {
@@ -3422,7 +3412,7 @@ func (ra *RandomAccessor) flushSequentialChunkLocked() error {
 				go func() {
 					// Use singleflight to ensure only one update per DataID at a time
 					// This prevents duplicate updates and ensures consistency
-					_, err, _ := seqDataInfoUpdateSingleFlight.Do(updateKey, func() (interface{}, error) {
+					_, err, _ := globalSingleFlight.Do(updateKey, func() (interface{}, error) {
 						// Create a copy of DataInfo snapshot for update
 						dataInfoCopy := dataInfoSnapshot
 
@@ -6267,7 +6257,7 @@ func (cr *chunkReader) ReadAt(buf []byte, offset int64) (int, error) {
 			// Key format: "decode_pkg_<dataID>" to uniquely identify each package file
 			sfKey := fmt.Sprintf("decode_pkg_%d", cr.dataID)
 
-			result, err, _ := packageDecodeSingleFlight.Do(sfKey, func() (interface{}, error) {
+			result, err, _ := globalSingleFlight.Do(sfKey, func() (interface{}, error) {
 				// Double-check cache after acquiring singleflight lock
 				// Another goroutine might have already decoded it
 				if cached, ok := globalDecodedFileCache.Get(cr.dataID); ok {
@@ -6798,7 +6788,7 @@ func (cr *chunkReader) getChunk(sn int) ([]byte, error) {
 	// Key format: "chunk_<dataID>_<sn>" to uniquely identify each chunk globally
 	sfKey := fmt.Sprintf("chunk_%d_%d", cr.dataID, sn)
 
-	result, err, _ := chunkReadSingleFlight.Do(sfKey, func() (interface{}, error) {
+	result, err, _ := globalSingleFlight.Do(sfKey, func() (interface{}, error) {
 		// Double-check cache after acquiring singleflight lock
 		// Another goroutine might have already loaded it
 		if cached, ok := globalChunkCache.Get(cacheKey); ok {

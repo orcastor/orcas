@@ -1104,7 +1104,7 @@ func (n *OrcasNode) getDirListWithCache(dirID int64) ([]*core.ObjectInfo, syscal
 	// Use singleflight to prevent duplicate concurrent requests
 	// Convert dirID to string for singleflight key
 	key := fmt.Sprintf("%d", dirID)
-	result, err, _ := dirListSingleFlight.Do(key, func() (interface{}, error) {
+	result, err, _ := globalSingleFlight.Do(key, func() (interface{}, error) {
 		// Double-check cache after acquiring singleflight lock
 		if cached, ok := dirListCache.Get(cacheKey); ok {
 			if children, ok := cached.([]*core.ObjectInfo); ok && children != nil {
@@ -1265,7 +1265,7 @@ func (n *OrcasNode) preloadChildDirs(children []*core.ObjectInfo) {
 		// Use singleflight to prevent duplicate requests
 		key := fmt.Sprintf("%d", child.ID)
 		go func(dirID int64, dirListCacheKey int64, key string) {
-			_, err, _ := dirListSingleFlight.Do(key, func() (interface{}, error) {
+			_, err, _ := globalSingleFlight.Do(key, func() (interface{}, error) {
 				// Double-check cache
 				if _, ok := dirListCache.Get(dirListCacheKey); ok {
 					return nil, nil

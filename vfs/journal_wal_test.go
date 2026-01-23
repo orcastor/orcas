@@ -13,7 +13,7 @@ import (
 
 // TestJournalWALBasic 测试 Journal WAL 基本功能
 func TestJournalWALBasic(t *testing.T) {
-	testDir := filepath.Join(os.TempDir(), "orcas_test_journal_wal_basic")
+	testDir := testTmpDir("orcas_test_journal_wal_basic")
 	defer os.RemoveAll(testDir)
 
 	fileID := int64(1001)
@@ -49,7 +49,7 @@ func TestJournalWALBasic(t *testing.T) {
 
 // TestJournalWALSnapshot 测试快照创建和加载
 func TestJournalWALSnapshot(t *testing.T) {
-	testDir := filepath.Join(os.TempDir(), "orcas_test_journal_wal_snapshot")
+	testDir := testTmpDir("orcas_test_journal_wal_snapshot")
 	defer os.RemoveAll(testDir)
 
 	fileID := int64(2001)
@@ -152,7 +152,7 @@ func TestJournalWALSnapshot(t *testing.T) {
 
 // TestJournalWALRecover 测试从快照恢复
 func TestJournalWALRecover(t *testing.T) {
-	testDir := filepath.Join(os.TempDir(), "orcas_test_journal_wal_recover")
+	testDir := testTmpDir("orcas_test_journal_wal_recover")
 	defer os.RemoveAll(testDir)
 
 	fileID := int64(3001)
@@ -256,7 +256,7 @@ func TestJournalWALRecover(t *testing.T) {
 
 // TestJournalWALDeleteSnapshot 测试删除快照
 func TestJournalWALDeleteSnapshot(t *testing.T) {
-	testDir := filepath.Join(os.TempDir(), "orcas_test_journal_wal_delete")
+	testDir := testTmpDir("orcas_test_journal_wal_delete")
 	defer os.RemoveAll(testDir)
 
 	fileID := int64(4001)
@@ -310,7 +310,7 @@ func TestJournalWALDeleteSnapshot(t *testing.T) {
 
 // TestJournalWALDisabled 测试禁用 Journal WAL
 func TestJournalWALDisabled(t *testing.T) {
-	testDir := filepath.Join(os.TempDir(), "orcas_test_journal_wal_disabled")
+	testDir := testTmpDir("orcas_test_journal_wal_disabled")
 	defer os.RemoveAll(testDir)
 
 	fileID := int64(5001)
@@ -383,7 +383,7 @@ func TestJournalWALDisabled(t *testing.T) {
 
 // TestJournalWALTruncate 测试 WAL 截断
 func TestJournalWALTruncate(t *testing.T) {
-	testDir := filepath.Join(os.TempDir(), "orcas_test_journal_wal_truncate")
+	testDir := testTmpDir("orcas_test_journal_wal_truncate")
 	defer os.RemoveAll(testDir)
 
 	fileID := int64(6001)
@@ -434,7 +434,7 @@ func TestJournalWALTruncate(t *testing.T) {
 
 // TestJournalWALConcurrent 测试并发操作
 func TestJournalWALConcurrent(t *testing.T) {
-	testDir := filepath.Join(os.TempDir(), "orcas_test_journal_wal_concurrent")
+	testDir := testTmpDir("orcas_test_journal_wal_concurrent")
 	defer os.RemoveAll(testDir)
 
 	fileID := int64(7001)
@@ -492,7 +492,7 @@ func TestJournalWALConcurrent(t *testing.T) {
 
 // BenchmarkJournalWALCreateSnapshot 性能测试：创建快照
 func BenchmarkJournalWALCreateSnapshot(b *testing.B) {
-	testDir := filepath.Join(os.TempDir(), "orcas_bench_journal_wal_snap")
+	testDir := testTmpDir("orcas_bench_journal_wal_snap")
 	defer os.RemoveAll(testDir)
 
 	fileID := int64(8001)
@@ -528,7 +528,7 @@ func BenchmarkJournalWALCreateSnapshot(b *testing.B) {
 
 // BenchmarkJournalWALLoadSnapshot 性能测试：加载快照
 func BenchmarkJournalWALLoadSnapshot(b *testing.B) {
-	testDir := filepath.Join(os.TempDir(), "orcas_bench_journal_wal_load")
+	testDir := testTmpDir("orcas_bench_journal_wal_load")
 	defer os.RemoveAll(testDir)
 
 	fileID := int64(8002)
@@ -566,7 +566,7 @@ func BenchmarkJournalWALLoadSnapshot(b *testing.B) {
 
 // TestJournalWALCrashSimulation 模拟崩溃场景测试
 func TestJournalWALCrashSimulation(t *testing.T) {
-	testDir := filepath.Join(os.TempDir(), "orcas_crash_test")
+	testDir := testTmpDir("orcas_crash_test")
 	defer os.RemoveAll(testDir)
 
 	fileID := int64(1001)
@@ -755,7 +755,7 @@ func TestJournalWALCrashSimulation(t *testing.T) {
 
 // TestJournalWALConcurrentCrash 测试并发写入时的崩溃恢复
 func TestJournalWALConcurrentCrash(t *testing.T) {
-	testDir := filepath.Join(os.TempDir(), "orcas_concurrent_crash_test")
+	testDir := testTmpDir("orcas_concurrent_crash_test")
 	defer os.RemoveAll(testDir)
 
 	fileID := int64(2001)
@@ -868,7 +868,7 @@ func TestJournalWALConcurrentCrash(t *testing.T) {
 
 // TestJournalWALPartialWriteCrash 测试部分写入时崩溃的场景
 func TestJournalWALPartialWriteCrash(t *testing.T) {
-	testDir := filepath.Join(os.TempDir(), "orcas_partial_crash_test")
+	testDir := testTmpDir("orcas_partial_crash_test")
 	defer os.RemoveAll(testDir)
 
 	fileID := int64(3001)
@@ -988,7 +988,7 @@ func TestJournalWALPartialWriteCrash(t *testing.T) {
 
 // TestJournalWALMultipleCrashRecovery 测试多次崩溃恢复场景
 func TestJournalWALMultipleCrashRecovery(t *testing.T) {
-	testDir := filepath.Join(os.TempDir(), "orcas_multiple_crash_test")
+	testDir := testTmpDir("orcas_multiple_crash_test")
 	defer os.RemoveAll(testDir)
 
 	fileID := int64(4001)
@@ -1113,7 +1113,7 @@ func TestJournalWALMultipleCrashRecovery(t *testing.T) {
 
 // TestJournalWALChecksumValidation 测试校验和验证
 func TestJournalWALChecksumValidation(t *testing.T) {
-	testDir := filepath.Join(os.TempDir(), "orcas_checksum_test")
+	testDir := testTmpDir("orcas_checksum_test")
 	defer os.RemoveAll(testDir)
 
 	fileID := int64(5001)
@@ -1187,7 +1187,7 @@ func TestJournalWALChecksumValidation(t *testing.T) {
 // TestJournalWALVFSIntegration 测试 JournalWAL 在 VFS 中的集成
 // 这个测试验证 JournalWAL 是否正确集成到 Journal 生命周期中
 func TestJournalWALVFSIntegration(t *testing.T) {
-	testDir := filepath.Join(os.TempDir(), "orcas_journal_wal_vfs_test")
+	testDir := testTmpDir("orcas_journal_wal_vfs_test")
 	defer os.RemoveAll(testDir)
 
 	dataPath := filepath.Join(testDir, "data")
@@ -1354,7 +1354,7 @@ func TestJournalWALVFSIntegration(t *testing.T) {
 
 // TestJournalWALDeleteFiles 测试删除 jwal 文件
 func TestJournalWALDeleteFiles(t *testing.T) {
-	testDir := filepath.Join(os.TempDir(), "orcas_test_journal_wal_delete")
+	testDir := testTmpDir("orcas_test_journal_wal_delete")
 	defer os.RemoveAll(testDir)
 
 	fileID := int64(2001)

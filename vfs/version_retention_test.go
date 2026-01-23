@@ -2,8 +2,6 @@ package vfs
 
 import (
 	"fmt"
-	"os"
-	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -13,7 +11,7 @@ import (
 
 // TestVersionRetentionBasicCleanup tests basic version cleanup functionality
 func TestVersionRetentionBasicCleanup(t *testing.T) {
-	testDir := filepath.Join(os.TempDir(), "orcas_vr_test_basic")
+	testDir := testTmpDir("orcas_vr_test_basic")
 	defer cleanupTestDir(t, testDir)
 
 	fs, bktID := setupTestFS(t, testDir)
@@ -97,7 +95,7 @@ func TestVersionRetentionBasicCleanup(t *testing.T) {
 
 // TestJournalMergeBasic tests basic journal merge functionality
 func TestJournalMergeBasic(t *testing.T) {
-	testDir := filepath.Join(os.TempDir(), "orcas_vr_test_merge_basic")
+	testDir := testTmpDir("orcas_vr_test_merge_basic")
 	defer cleanupTestDir(t, testDir)
 
 	fs, bktID := setupTestFS(t, testDir)
@@ -343,7 +341,7 @@ func TestJournalMergeBasic(t *testing.T) {
 
 // TestJournalMergeWithMaxJournalsPolicy tests journal merge triggered by MaxJournalsPerBase policy
 func TestJournalMergeWithMaxJournalsPolicy(t *testing.T) {
-	testDir := filepath.Join(os.TempDir(), "orcas_vr_test_merge_policy")
+	testDir := testTmpDir("orcas_vr_test_merge_policy")
 	defer cleanupTestDir(t, testDir)
 
 	fs, bktID := setupTestFS(t, testDir)
@@ -469,7 +467,7 @@ func TestJournalMergeWithMaxJournalsPolicy(t *testing.T) {
 
 // TestJournalMergeConcurrentAccess tests concurrent access protection during merge
 func TestJournalMergeConcurrentAccess(t *testing.T) {
-	testDir := filepath.Join(os.TempDir(), "orcas_vr_test_merge_concurrent")
+	testDir := testTmpDir("orcas_vr_test_merge_concurrent")
 	defer cleanupTestDir(t, testDir)
 
 	fs, bktID := setupTestFS(t, testDir)
@@ -615,7 +613,7 @@ func TestJournalMergeConcurrentAccess(t *testing.T) {
 
 // TestJournalMergeDataIntegrity tests data integrity after merge
 func TestJournalMergeDataIntegrity(t *testing.T) {
-	testDir := filepath.Join(os.TempDir(), "orcas_vr_test_merge_integrity")
+	testDir := testTmpDir("orcas_vr_test_merge_integrity")
 	defer cleanupTestDir(t, testDir)
 
 	fs, bktID := setupTestFS(t, testDir)
@@ -811,7 +809,7 @@ func getFileVersionsHelper(fs *OrcasFS, bktID, fileID int64) ([]*core.ObjectInfo
 
 // TestJournalMergeStreaming tests streaming merge for large files
 func TestJournalMergeStreaming(t *testing.T) {
-	testDir := filepath.Join(os.TempDir(), "orcas_vr_test_merge_streaming")
+	testDir := testTmpDir("orcas_vr_test_merge_streaming")
 	defer cleanupTestDir(t, testDir)
 
 	fs, bktID := setupTestFS(t, testDir)
@@ -953,7 +951,7 @@ func TestJournalMergeStreaming(t *testing.T) {
 
 // TestJournalMergeBatches tests batch processing of many journals
 func TestJournalMergeBatches(t *testing.T) {
-	testDir := filepath.Join(os.TempDir(), "orcas_vr_test_merge_batches")
+	testDir := testTmpDir("orcas_vr_test_merge_batches")
 	defer cleanupTestDir(t, testDir)
 
 	fs, bktID := setupTestFS(t, testDir)
