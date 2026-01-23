@@ -67,15 +67,17 @@ var (
 	DefaultIntSlicePoolCap = 32 // Capacity for int slice pool
 
 	// Cache configuration
-	FileCacheSize   = 512              // Number of file objects to cache
-	DataCacheSize   = 512              // Number of data info objects to cache
-	DirCacheSize    = 512              // Number of directory listings to cache
-	ReaderCacheSize = 64               // Number of decoding readers to cache
-	StatfsCacheSize = 16               // Number of statfs results to cache
-	CacheShardCount = 16               // Number of cache shards for concurrency
-	CacheTTL        = 30 * time.Second // Cache time-to-live for file/data cache
-	ReaderCacheTTL  = 5 * time.Minute  // Cache TTL for decoding readers
-	StatfsCacheTTL  = 5 * time.Second  // Cache TTL for statfs results
+	FileCacheSize        = 512              // Number of file objects to cache
+	DataCacheSize        = 512              // Number of data info objects to cache
+	DirCacheSize         = 512              // Number of directory listings to cache
+	ReaderCacheSize      = 64               // Number of decoding readers to cache
+	StatfsCacheSize      = 16               // Number of statfs results to cache
+	CacheShardCount      = 16               // Number of cache shards for concurrency
+	CacheTTL             = 30 * time.Second // Cache time-to-live for file/data cache
+	ReaderCacheTTL       = 5 * time.Minute  // Cache TTL for decoding readers
+	StatfsCacheTTL       = 5 * time.Second  // Cache TTL for statfs results
+	ChunkCacheSize       = 8                // Number of chunks to cache per reader (reduced from hardcoded 64 to save memory)
+	GlobalChunkCacheSize = 16               // Total number of chunks to cache globally (approx 160MB at 10MB/chunk)
 )
 
 var (
@@ -157,7 +159,17 @@ var (
 	// TTL is short (5 seconds) but will be refreshed on access (LRU behavior)
 	statfsCache = ecache2.NewLRUCache[int64](uint16(CacheShardCount/4), uint16(StatfsCacheSize), StatfsCacheTTL)
 
+	// ecache cache: global cache for chunks (plain or decompressed/decrypted)
+	// key: [2]int64{dataID, sn}, value: []byte
+	// Global limit controls total memory usage for cached chunks
+	globalChunkCache = ecache2.NewLRUCache[[2]int64](uint16(CacheShardCount), uint16(GlobalChunkCacheSize), time.Minute)
+
+	// ecache cache: global cache for decoded file data (for packaged files)
+	// key: dataID (int64), value: []byte
+	globalDecodedFileCache = ecache2.NewLRUCache[int64](uint16(CacheShardCount/4), uint16(FileCacheSize), time.Minute)
+
 	// singleflight group: prevent duplicate concurrent requests for the same directory
+
 	// key: "<dirID>", ensures only one request per directory at a time
 	dirListSingleFlight singleflight.Group
 
@@ -5800,15 +5812,13 @@ type chunkReader struct {
 	h                 core.Handler
 	bktID             int64
 	dataID            int64
-	kind              uint32                // Compression/encryption kind (0 for plain)
-	endecKey          string                // Encryption key (empty for plain)
-	origSize          int64                 // Original data size (decompressed size)
-	compressedSize    int64                 // Compressed/encrypted data size (for packaged files)
-	chunkSize         int64                 // Chunk size for original data
-	chunkCache        *ecache2.Cache[int64] // Cache for chunks: key sn (int64), value []byte
-	decodedFileCache  *ecache2.Cache[int64] // Cache for decoded file data (for packaged files): key dataID (int64), value []byte
-	prefetchThreshold float64               // Threshold percentage to trigger prefetch (default: 0.8 = 80%)
-	pkgOffset         uint32                // Package offset (for packaged files, 0 for non-packaged files)
+	kind              uint32  // Compression/encryption kind (0 for plain)
+	endecKey          string  // Encryption key (empty for plain)
+	origSize          int64   // Original data size (decompressed size)
+	compressedSize    int64   // Compressed/encrypted data size (for packaged files)
+	chunkSize         int64   // Chunk size for original data
+	prefetchThreshold float64 // Threshold percentage to trigger prefetch (default: 0.8 = 80%)
+	pkgOffset         uint32  // Package offset (for packaged files, 0 for non-packaged files)
 }
 
 // newChunkReader creates a unified chunk reader for both plain and compressed/encrypted data
@@ -5822,9 +5832,7 @@ func newChunkReader(c core.Ctx, h core.Handler, bktID int64, dataInfo *core.Data
 		h:                 h,
 		bktID:             bktID,
 		chunkSize:         chunkSize,
-		chunkCache:        ecache2.NewLRUCache[int64](4, 64, 5*time.Minute),
-		decodedFileCache:  ecache2.NewLRUCache[int64](1, 1, 5*time.Minute), // Cache decoded file data for packaged files
-		prefetchThreshold: 0.8,                                             // 80% threshold
+		prefetchThreshold: 0.8, // 80% threshold
 	}
 
 	if dataInfo != nil {
@@ -5881,14 +5889,14 @@ func (cr *chunkReader) ReadAt(buf []byte, offset int64) (int, error) {
 	if cr.pkgOffset > 0 {
 		// This is a packaged file, read entire package (sn=0)
 		// Check cache first for decoded file data
-		if cached, ok := cr.decodedFileCache.Get(cr.dataID); ok {
+		if cached, ok := globalDecodedFileCache.Get(cr.dataID); ok {
 			if decoded, ok := cached.([]byte); ok && len(decoded) > 0 {
 				// Truncate cached data to origSize (important for truncated files)
 				// Cached data may be from before truncate operation
 				if int64(len(decoded)) > cr.origSize {
 					decoded = decoded[:cr.origSize]
 					// Update cache with truncated data
-					cr.decodedFileCache.Put(cr.dataID, decoded)
+					globalDecodedFileCache.Put(cr.dataID, decoded)
 					DebugLog("[VFS chunkReader ReadAt] Truncated cached decoded file data to origSize: dataID=%d, cachedLen=%d, origSize=%d", cr.dataID, len(decoded), cr.origSize)
 				}
 				fileData = decoded
@@ -5904,7 +5912,7 @@ func (cr *chunkReader) ReadAt(buf []byte, offset int64) (int, error) {
 			result, err, _ := packageDecodeSingleFlight.Do(sfKey, func() (interface{}, error) {
 				// Double-check cache after acquiring singleflight lock
 				// Another goroutine might have already decoded it
-				if cached, ok := cr.decodedFileCache.Get(cr.dataID); ok {
+				if cached, ok := globalDecodedFileCache.Get(cr.dataID); ok {
 					if decoded, ok := cached.([]byte); ok && len(decoded) > 0 {
 						return decoded, nil
 					}
@@ -5945,7 +5953,7 @@ func (cr *chunkReader) ReadAt(buf []byte, offset int64) (int, error) {
 				}
 
 				// Cache decoded file data for future reads
-				cr.decodedFileCache.Put(cr.dataID, decodedFileData)
+				globalDecodedFileCache.Put(cr.dataID, decodedFileData)
 				// DebugLog("[VFS chunkReader ReadAt] Decoded file data: dataID=%d, decodedFileDataLen=%d, origSize=%d", cr.dataID, len(decodedFileData), cr.origSize)
 				return decodedFileData, nil
 			})
@@ -6383,7 +6391,9 @@ func (cr *chunkReader) ReadAt(buf []byte, offset int64) (int, error) {
 					capturedNextSn := nextSn
 					go func() {
 						// Check if not already cached before prefetching
-						if _, ok := cr.chunkCache.Get(int64(capturedNextSn)); !ok {
+						// Check global cache
+						cacheKey := [2]int64{cr.dataID, int64(capturedNextSn)}
+						if _, ok := globalChunkCache.Get(cacheKey); !ok {
 							// Prefetch next chunk (ignore errors)
 							_, _ = cr.getChunk(capturedNextSn)
 						}
@@ -6419,7 +6429,8 @@ func (cr *chunkReader) getChunk(sn int) ([]byte, error) {
 	}
 
 	// Check cache first (fast path)
-	if cached, ok := cr.chunkCache.Get(int64(sn)); ok {
+	cacheKey := [2]int64{cr.dataID, int64(sn)}
+	if cached, ok := globalChunkCache.Get(cacheKey); ok {
 		if chunkData, ok := cached.([]byte); ok && len(chunkData) > 0 {
 			return chunkData, nil
 		}
@@ -6432,7 +6443,7 @@ func (cr *chunkReader) getChunk(sn int) ([]byte, error) {
 	result, err, _ := chunkReadSingleFlight.Do(sfKey, func() (interface{}, error) {
 		// Double-check cache after acquiring singleflight lock
 		// Another goroutine might have already loaded it
-		if cached, ok := cr.chunkCache.Get(int64(sn)); ok {
+		if cached, ok := globalChunkCache.Get(cacheKey); ok {
 			if chunkData, ok := cached.([]byte); ok && len(chunkData) > 0 {
 				return chunkData, nil
 			}
@@ -6463,7 +6474,7 @@ func (cr *chunkReader) getChunk(sn int) ([]byte, error) {
 		}
 
 		// Cache the processed chunk before returning
-		cr.chunkCache.Put(int64(sn), finalChunk)
+		globalChunkCache.Put(cacheKey, finalChunk)
 
 		return finalChunk, nil
 	})
@@ -7367,6 +7378,15 @@ func (ra *RandomAccessor) Close() error {
 					DebugLog("[VFS RandomAccessor Close] Restored fileObj dataID: fileID=%d, dataID=%d", ra.fileID, savedDataID)
 				}
 			}
+		}
+	}
+
+	// Clean up decoding reader cache to free memory
+	// This honors the request to release cache on file close
+	if fileObj, _ := ra.getFileObj(); fileObj != nil {
+		if fileObj.DataID > 0 {
+			decodingReaderCache.Del(fileObj.DataID)
+			DebugLog("[VFS RandomAccessor Close] Removed from decodingReaderCache: fileID=%d, dataID=%d", ra.fileID, fileObj.DataID)
 		}
 	}
 
