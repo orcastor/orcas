@@ -88,7 +88,7 @@ var (
 	StatfsCacheSize      = 16               // Number of statfs results to cache
 	CacheShardCount      = 16               // Number of cache shards for concurrency
 	CacheTTL             = 30 * time.Second // Cache time-to-live for file/data cache
-	ReaderCacheTTL       = 5 * time.Minute  // Cache TTL for decoding readers
+	ReaderCacheTTL       = 30 * time.Second // Cache TTL for decoding readers
 	StatfsCacheTTL       = 5 * time.Second  // Cache TTL for statfs results
 	ChunkCacheTTL        = 10 * time.Second // Cache TTL for chunks
 	ChunkCacheSize       = 8                // Number of chunks to cache per reader (reduced from hardcoded 64 to save memory)
