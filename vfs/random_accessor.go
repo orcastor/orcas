@@ -89,7 +89,8 @@ var (
 	ReaderCacheTTL       = 5 * time.Minute  // Cache TTL for decoding readers
 	StatfsCacheTTL       = 5 * time.Second  // Cache TTL for statfs results
 	ChunkCacheSize       = 8                // Number of chunks to cache per reader (reduced from hardcoded 64 to save memory)
-	GlobalChunkCacheSize = 16               // Total number of chunks to cache globally (approx 160MB at 10MB/chunk)
+	GlobalChunkCacheSize = 32               // Total number of chunks to cache globally (approx 320MB at 10MB/chunk)
+	// Increased from 16 to 32 to reduce repeated AES decryption and temporary buffer allocations
 )
 
 var (
@@ -7657,6 +7658,37 @@ func (ra *RandomAccessor) Close() error {
 	// Save the dataID before Flush() to restore it if needed
 	// CRITICAL: Use ForceFlush() instead of Flush() to ensure all data is flushed on Close
 	// This is important for deferred flush optimization - buffer may not be full but should still be flushed
+	// MEMORY OPTIMIZATION: Check if there's any data to flush before calling ForceFlush
+	// This avoids unnecessary decryption operations when cleaning up inactive RandomAccessors
+	hasDataToFlush := false
+
+	// Check if there's data in buffer
+	writeIndex := atomic.LoadInt64(&ra.buffer.writeIndex)
+	totalSize := atomic.LoadInt64(&ra.buffer.totalSize)
+	if writeIndex > 0 || totalSize > 0 {
+		hasDataToFlush = true
+	}
+
+	// Check if there's data in sequential buffer
+	if !hasDataToFlush && ra.seqBuffer != nil {
+		ra.seqBuffer.mu.Lock()
+		hasSeqData := ra.seqBuffer.hasData || len(ra.seqBuffer.buffer) > 0
+		ra.seqBuffer.mu.Unlock()
+		if hasSeqData {
+			hasDataToFlush = true
+		}
+	}
+
+	// Check if there's a journal with data
+	if !hasDataToFlush {
+		ra.journalMu.RLock()
+		hasJournal := ra.journal != nil
+		ra.journalMu.RUnlock()
+		if hasJournal {
+			hasDataToFlush = true
+		}
+	}
+
 	var savedDataID int64 = 0
 	if sparseSize > 0 {
 		if cachedObj := ra.fileObj.Load(); cachedObj != nil {
@@ -7667,13 +7699,17 @@ func (ra *RandomAccessor) Close() error {
 		}
 	}
 
-	DebugLog("[VFS RandomAccessor Close] Calling ForceFlush: fileID=%d", ra.fileID)
-	_, err := ra.ForceFlush()
-	if err != nil {
-		DebugLog("[VFS RandomAccessor Close] ERROR: ForceFlush failed: fileID=%d, error=%v", ra.fileID, err)
-		return err
+	if hasDataToFlush {
+		DebugLog("[VFS RandomAccessor Close] Calling ForceFlush: fileID=%d", ra.fileID)
+		_, err := ra.ForceFlush()
+		if err != nil {
+			DebugLog("[VFS RandomAccessor Close] ERROR: ForceFlush failed: fileID=%d, error=%v", ra.fileID, err)
+			return err
+		}
+		DebugLog("[VFS RandomAccessor Close] ForceFlush completed: fileID=%d", ra.fileID)
+	} else {
+		DebugLog("[VFS RandomAccessor Close] Skipping ForceFlush (no data to flush): fileID=%d", ra.fileID)
 	}
-	DebugLog("[VFS RandomAccessor Close] ForceFlush completed: fileID=%d", ra.fileID)
 
 	// Log final file object state after flush
 	fileObjAfterFlush, err := ra.getFileObj()
