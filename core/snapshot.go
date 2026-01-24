@@ -978,13 +978,8 @@ func (dma *DefaultMetadataAdapter) RestoreObjectsFromSnapshot(ctx Ctx, snapshotI
 		return err
 	}
 
-	// Get snapshot objects from main DB
-	mainDB, err := GetReadDB(dma.DefaultBaseMetadataAdapter.basePath)
-	if err != nil {
-		return err
-	}
-
-	rows, err := mainDB.Query(`
+	// Get snapshot objects from bucket DB (where CopyObjectsToSnapshot stores them)
+	rows, err := db.Query(`
 		SELECT obj_id, path, data_id, size, mtime
 		FROM snapshot_object
 		WHERE snapshot_id = ?
@@ -1003,9 +998,16 @@ func (dma *DefaultMetadataAdapter) RestoreObjectsFromSnapshot(ctx Ctx, snapshotI
 			return fmt.Errorf("failed to scan snapshot object: %w", err)
 		}
 
+		// Use INSERT ... ON CONFLICT DO UPDATE (upsert) to insert or update in place.
+		// Avoid REPLACE INTO which deletes then inserts, changing row identity.
 		_, err = db.Exec(`
-			INSERT OR REPLACE INTO obj (path, data_id, size, mtime, status)
+			INSERT INTO obj (path, data_id, size, mtime, status)
 			VALUES (?, ?, ?, ?, 0)
+			ON CONFLICT(path) DO UPDATE SET
+				data_id = excluded.data_id,
+				size = excluded.size,
+				mtime = excluded.mtime,
+				status = excluded.status
 		`, path, dataID, size, mtime)
 
 		if err != nil {

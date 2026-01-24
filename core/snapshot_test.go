@@ -327,3 +327,310 @@ func TestSnapshotManager_CleanupExpiredSnapshots(t *testing.T) {
 	t.Logf("✅ Cleanup completed: %d snapshots marked for deletion", deleted)
 }
 
+// TestSnapshotManager_RestoreSnapshot tests snapshot restore functionality
+func TestSnapshotManager_RestoreSnapshot(t *testing.T) {
+	// Create temporary directory
+	tmpDir, err := os.MkdirTemp("", "orcas_test_snapshot_restore_")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	// Initialize database
+	if err := InitDB(tmpDir, ""); err != nil {
+		t.Fatalf("Failed to init DB: %v", err)
+	}
+
+	// Initialize adapters
+	dma := NewDefaultMetadataAdapter()
+	dma.DefaultBaseMetadataAdapter.SetPath(tmpDir)
+	dma.SetDataPath(tmpDir)
+
+	dda := &DefaultDataAdapter{}
+	dda.SetDataPath(tmpDir)
+
+	// Initialize snapshot tables
+	db, _ := GetWriteDB(tmpDir)
+	if err := InitSnapshotTables(db); err != nil {
+		t.Fatalf("Failed to init snapshot tables: %v", err)
+	}
+
+	// Create bucket database
+	bktID := int64(5000)
+	bktPath := filepath.Join(tmpDir, "5000")
+	if err := os.MkdirAll(bktPath, 0755); err != nil {
+		t.Fatalf("Failed to create bucket dir: %v", err)
+	}
+
+	bktDB, err := GetWriteDB(bktPath)
+	if err != nil {
+		t.Fatalf("Failed to get bucket DB: %v", err)
+	}
+
+	// Create obj table
+	_, err = bktDB.Exec(`
+		CREATE TABLE IF NOT EXISTS obj (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			path TEXT UNIQUE NOT NULL,
+			data_id INTEGER,
+			size INTEGER,
+			mtime INTEGER,
+			status INTEGER DEFAULT 0
+		)
+	`)
+	if err != nil {
+		t.Fatalf("Failed to create obj table: %v", err)
+	}
+
+	// Create snapshot_object table in bucket DB
+	_, err = bktDB.Exec(`
+		CREATE TABLE IF NOT EXISTS snapshot_object (
+			snapshot_id INTEGER NOT NULL,
+			obj_id INTEGER NOT NULL,
+			path TEXT NOT NULL,
+			data_id INTEGER,
+			size INTEGER,
+			mtime INTEGER,
+			checksum TEXT,
+			PRIMARY KEY (snapshot_id, obj_id)
+		)
+	`)
+	if err != nil {
+		t.Fatalf("Failed to create snapshot_object table: %v", err)
+	}
+
+	// Insert test objects
+	testObjects := []struct {
+		path   string
+		dataID int64
+		size   int64
+		mtime  int64
+	}{
+		{"/file1.txt", 1001, 100, 1000000},
+		{"/file2.txt", 1002, 200, 1000001},
+		{"/file3.txt", 1003, 300, 1000002},
+	}
+
+	for _, obj := range testObjects {
+		_, err = bktDB.Exec(`
+			INSERT INTO obj (path, data_id, size, mtime, status)
+			VALUES (?, ?, ?, ?, 0)
+		`, obj.path, obj.dataID, obj.size, obj.mtime)
+		if err != nil {
+			t.Fatalf("Failed to insert test object: %v", err)
+		}
+	}
+
+	// Create snapshot manager
+	config := DefaultSnapshotConfig()
+	config.LazyMode = false // Use immediate mode for testing
+	config.COWEnabled = false
+	sm := NewSnapshotManager(dma, dda, config)
+
+	ctx := context.Background()
+
+	// Create snapshot
+	snapshot, err := sm.CreateSnapshot(ctx, bktID, "test_restore", "Test restore", SnapshotTypeManual)
+	if err != nil {
+		t.Fatalf("Failed to create snapshot: %v", err)
+	}
+
+	t.Logf("Created snapshot: id=%d, files=%d", snapshot.ID, snapshot.FileCount)
+
+	// Modify objects in bucket (simulate changes)
+	_, err = bktDB.Exec(`UPDATE obj SET size = 999, mtime = 2000000 WHERE path = ?`, "/file1.txt")
+	if err != nil {
+		t.Fatalf("Failed to update object: %v", err)
+	}
+
+	_, err = bktDB.Exec(`DELETE FROM obj WHERE path = ?`, "/file2.txt")
+	if err != nil {
+		t.Fatalf("Failed to delete object: %v", err)
+	}
+
+	// Verify changes
+	var size, mtime int64
+	err = bktDB.QueryRow(`SELECT size, mtime FROM obj WHERE path = ?`, "/file1.txt").Scan(&size, &mtime)
+	if err != nil {
+		t.Fatalf("Failed to query modified object: %v", err)
+	}
+	if size != 999 || mtime != 2000000 {
+		t.Errorf("Object not modified correctly: size=%d, mtime=%d", size, mtime)
+	}
+
+	var count int
+	err = bktDB.QueryRow(`SELECT COUNT(*) FROM obj WHERE path = ?`, "/file2.txt").Scan(&count)
+	if err != nil {
+		t.Fatalf("Failed to query deleted object: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("Object not deleted: count=%d", count)
+	}
+
+	// Restore snapshot
+	if err := sm.RestoreSnapshot(ctx, snapshot.ID, bktID); err != nil {
+		t.Fatalf("Failed to restore snapshot: %v", err)
+	}
+
+	t.Logf("Restored snapshot: id=%d", snapshot.ID)
+
+	// Verify restoration - file1.txt should be restored to original values
+	err = bktDB.QueryRow(`SELECT size, mtime FROM obj WHERE path = ?`, "/file1.txt").Scan(&size, &mtime)
+	if err != nil {
+		t.Fatalf("Failed to query restored object: %v", err)
+	}
+	if size != 100 || mtime != 1000000 {
+		t.Errorf("Object not restored correctly: size=%d (expected 100), mtime=%d (expected 1000000)", size, mtime)
+	}
+
+	// Verify file2.txt is restored
+	err = bktDB.QueryRow(`SELECT size, mtime FROM obj WHERE path = ?`, "/file2.txt").Scan(&size, &mtime)
+	if err != nil {
+		t.Fatalf("Failed to query restored object file2.txt: %v", err)
+	}
+	if size != 200 || mtime != 1000001 {
+		t.Errorf("Object file2.txt not restored correctly: size=%d (expected 200), mtime=%d (expected 1000001)", size, mtime)
+	}
+
+	// Verify all 3 files exist
+	err = bktDB.QueryRow(`SELECT COUNT(*) FROM obj WHERE status = 0`).Scan(&count)
+	if err != nil {
+		t.Fatalf("Failed to count restored objects: %v", err)
+	}
+	if count != 3 {
+		t.Errorf("Expected 3 restored objects, got %d", count)
+	}
+
+	t.Logf("✅ Snapshot restored successfully: all objects verified")
+}
+
+// TestRestoreObjectsFromSnapshot_ConflictHandling tests INSERT ON CONFLICT behavior
+func TestRestoreObjectsFromSnapshot_ConflictHandling(t *testing.T) {
+	// Create temporary directory
+	tmpDir, err := os.MkdirTemp("", "orcas_test_restore_conflict_")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	// Initialize database
+	if err := InitDB(tmpDir, ""); err != nil {
+		t.Fatalf("Failed to init DB: %v", err)
+	}
+
+	// Initialize adapters
+	dma := NewDefaultMetadataAdapter()
+	dma.DefaultBaseMetadataAdapter.SetPath(tmpDir)
+	dma.SetDataPath(tmpDir)
+
+	// Initialize snapshot tables
+	db, _ := GetWriteDB(tmpDir)
+	if err := InitSnapshotTables(db); err != nil {
+		t.Fatalf("Failed to init snapshot tables: %v", err)
+	}
+
+	// Create bucket database
+	bktID := int64(6000)
+	bktPath := filepath.Join(tmpDir, "6000")
+	if err := os.MkdirAll(bktPath, 0755); err != nil {
+		t.Fatalf("Failed to create bucket dir: %v", err)
+	}
+
+	bktDB, err := GetWriteDB(bktPath)
+	if err != nil {
+		t.Fatalf("Failed to get bucket DB: %v", err)
+	}
+
+	// Create obj table
+	_, err = bktDB.Exec(`
+		CREATE TABLE IF NOT EXISTS obj (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			path TEXT UNIQUE NOT NULL,
+			data_id INTEGER,
+			size INTEGER,
+			mtime INTEGER,
+			status INTEGER DEFAULT 0
+		)
+	`)
+	if err != nil {
+		t.Fatalf("Failed to create obj table: %v", err)
+	}
+
+	// Create snapshot_object table in bucket DB (not main DB)
+	_, err = bktDB.Exec(`
+		CREATE TABLE IF NOT EXISTS snapshot_object (
+			snapshot_id INTEGER NOT NULL,
+			obj_id INTEGER NOT NULL,
+			path TEXT NOT NULL,
+			data_id INTEGER,
+			size INTEGER,
+			mtime INTEGER,
+			checksum TEXT,
+			PRIMARY KEY (snapshot_id, obj_id)
+		)
+	`)
+	if err != nil {
+		t.Fatalf("Failed to create snapshot_object table: %v", err)
+	}
+
+	// Insert existing object in bucket
+	_, err = bktDB.Exec(`
+		INSERT INTO obj (id, path, data_id, size, mtime, status)
+		VALUES (1, '/conflict.txt', 2000, 500, 2000000, 0)
+	`)
+	if err != nil {
+		t.Fatalf("Failed to insert existing object: %v", err)
+	}
+
+	// Get the row ID before restore
+	var originalID int64
+	err = bktDB.QueryRow(`SELECT id FROM obj WHERE path = ?`, "/conflict.txt").Scan(&originalID)
+	if err != nil {
+		t.Fatalf("Failed to get original ID: %v", err)
+	}
+
+	// Insert snapshot object with same path but different data (in bucket DB)
+	snapshotID := int64(1)
+	_, err = bktDB.Exec(`
+		INSERT INTO snapshot_object (snapshot_id, obj_id, path, data_id, size, mtime)
+		VALUES (?, 1, '/conflict.txt', 1000, 100, 1000000)
+	`, snapshotID)
+	if err != nil {
+		t.Fatalf("Failed to insert snapshot object: %v", err)
+	}
+
+	ctx := context.Background()
+
+	// Restore objects from snapshot
+	if err := dma.RestoreObjectsFromSnapshot(ctx, snapshotID, bktID); err != nil {
+		t.Fatalf("Failed to restore objects: %v", err)
+	}
+
+	// Verify the object was updated (not deleted and re-inserted)
+	var newID, dataID, size, mtime int64
+	err = bktDB.QueryRow(`
+		SELECT id, data_id, size, mtime FROM obj WHERE path = ?
+	`, "/conflict.txt").Scan(&newID, &dataID, &size, &mtime)
+	if err != nil {
+		t.Fatalf("Failed to query restored object: %v", err)
+	}
+
+	// With INSERT ON CONFLICT DO UPDATE, the ID should remain the same
+	if newID != originalID {
+		t.Errorf("Row ID changed after restore: original=%d, new=%d (should be same with ON CONFLICT DO UPDATE)", originalID, newID)
+	}
+
+	// Verify data was updated
+	if dataID != 1000 {
+		t.Errorf("data_id not updated: got %d, expected 1000", dataID)
+	}
+	if size != 100 {
+		t.Errorf("size not updated: got %d, expected 100", size)
+	}
+	if mtime != 1000000 {
+		t.Errorf("mtime not updated: got %d, expected 1000000", mtime)
+	}
+
+	t.Logf("✅ Conflict handling verified: ID preserved (%d), data updated correctly", newID)
+}
+

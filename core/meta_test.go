@@ -1919,6 +1919,98 @@ func TestPutObjReturnsDecryptedName(t *testing.T) {
 			So(obj.Mode&MODE_NAME_ENCRYPTED, ShouldEqual, uint32(0))
 		})
 
+		Convey("PutDataAndObj should use upsert not replace on conflict", func() {
+			id, _ := ig.New()
+			pid, _ := ig.New()
+			did, _ := ig.New()
+
+			// First insert
+			obj1 := &ObjectInfo{
+				ID:     id,
+				PID:    pid,
+				MTime:  1000,
+				DataID: did,
+				Type:   OBJ_TYPE_FILE,
+				Name:   "test-upsert.txt",
+				Size:   1024,
+				Mode:   0o644,
+			}
+
+			dataInfo1 := &DataInfo{
+				ID:       did,
+				Size:     1024,
+				OrigSize: 1024,
+				XXH3:     0x1111111111111111,
+			}
+
+			err := dma.PutDataAndObj(testCtx, testBktID, []*DataInfo{dataInfo1}, []*ObjectInfo{obj1})
+			So(err, ShouldBeNil)
+
+			// Get the ROWID after first insert
+			bktDirPath := filepath.Join(dma.DefaultDataMetadataAdapter.dataPath, fmt.Sprint(testBktID))
+			db, err := GetReadDB(bktDirPath)
+			So(err, ShouldBeNil)
+
+			var originalRowID int64
+			err = db.QueryRow("SELECT rowid FROM obj WHERE id = ?", id).Scan(&originalRowID)
+			So(err, ShouldBeNil)
+
+			var originalDataRowID int64
+			err = db.QueryRow("SELECT rowid FROM data WHERE id = ?", did).Scan(&originalDataRowID)
+			So(err, ShouldBeNil)
+
+			// Second insert with same ID (conflict) - should update not replace
+			obj2 := &ObjectInfo{
+				ID:     id, // Same ID - will conflict
+				PID:    pid,
+				MTime:  2000, // Different mtime
+				DataID: did,
+				Type:   OBJ_TYPE_FILE,
+				Name:   "test-upsert-updated.txt", // Different name
+				Size:   2048,                      // Different size
+				Mode:   0o755,
+			}
+
+			dataInfo2 := &DataInfo{
+				ID:       did, // Same ID - will conflict
+				Size:     2048,
+				OrigSize: 2048,
+				XXH3:     0x2222222222222222, // Different hash
+			}
+
+			err = dma.PutDataAndObj(testCtx, testBktID, []*DataInfo{dataInfo2}, []*ObjectInfo{obj2})
+			So(err, ShouldBeNil)
+
+			// Get the ROWID after second insert
+			var newRowID int64
+			err = db.QueryRow("SELECT rowid FROM obj WHERE id = ?", id).Scan(&newRowID)
+			So(err, ShouldBeNil)
+
+			var newDataRowID int64
+			err = db.QueryRow("SELECT rowid FROM data WHERE id = ?", did).Scan(&newDataRowID)
+			So(err, ShouldBeNil)
+
+			// With INSERT ON CONFLICT DO UPDATE, ROWID should remain the same
+			So(newRowID, ShouldEqual, originalRowID)
+			So(newDataRowID, ShouldEqual, originalDataRowID)
+
+			// Verify data was updated
+			objs, err := dma.GetObj(testCtx, testBktID, []int64{id})
+			So(err, ShouldBeNil)
+			So(len(objs), ShouldEqual, 1)
+			So(objs[0].Name, ShouldEqual, "test-upsert-updated.txt")
+			So(objs[0].Size, ShouldEqual, int64(2048))
+			So(objs[0].MTime, ShouldEqual, int64(2000))
+
+			// Verify DataInfo was updated
+			dataInfo, err := dma.GetData(testCtx, testBktID, did)
+			So(err, ShouldBeNil)
+			So(dataInfo, ShouldNotBeNil)
+			So(dataInfo.Size, ShouldEqual, int64(2048))
+			So(dataInfo.XXH3, ShouldEqual, uint64(0x2222222222222222))
+		})
+
+
 		Convey("SetObj should return decrypted name when updating name", func() {
 			// First create an object
 			id, _ := ig.New()

@@ -1090,18 +1090,21 @@ func TestSparseFileFlushVersionIDConsistency(t *testing.T) {
 	ra.MarkSparseFile(sparseSize)
 	t.Logf("Created sparse file: fileID=%d, sparseSize=%d", fileID, sparseSize)
 
-	// Write some data at the beginning (simulating file modification)
-	// This will use journal for sparse file
-	writeData := make([]byte, 1024*1024) // 1MB of data
+	// Write some data beyond local sequential range (simulating file modification)
+	// This will use journal for sparse file (writes beyond local sequential range)
+	// Local sequential range = LocalSequentialChunkCount (2) * ChunkSize (1MB) = 2MB
+	// Write at offset 5MB to ensure journal is used
+	writeOffset := int64(5 * 1024 * 1024) // 5MB offset
+	writeData := make([]byte, 1024*1024)  // 1MB of data
 	for i := range writeData {
 		writeData[i] = byte(i % 256)
 	}
 
-	err = ra.Write(0, writeData)
+	err = ra.Write(writeOffset, writeData)
 	if err != nil {
 		t.Fatalf("Failed to write initial data: %v", err)
 	}
-	t.Logf("Written %d bytes at offset 0", len(writeData))
+	t.Logf("Written %d bytes at offset %d", len(writeData), writeOffset)
 
 	// First flush - should return a valid versionID
 	// This simulates the first flush in the log
@@ -1145,13 +1148,13 @@ func TestSparseFileFlushVersionIDConsistency(t *testing.T) {
 		writeData2[i] = byte((i + 100) % 256)
 	}
 
-	// Write at offset 5MB (middle of the sparse file)
-	writeOffset := int64(5 * 1024 * 1024)
-	err = ra.Write(writeOffset, writeData2)
+	// Write at offset 7MB (different from first write at 5MB)
+	writeOffset2 := int64(7 * 1024 * 1024)
+	err = ra.Write(writeOffset2, writeData2)
 	if err != nil {
 		t.Fatalf("Failed to write second chunk: %v", err)
 	}
-	t.Logf("Written %d bytes at offset %d (simulating partial modification)", len(writeData2), writeOffset)
+	t.Logf("Written %d bytes at offset %d (simulating partial modification)", len(writeData2), writeOffset2)
 
 	// Check journal state before flush to diagnose the issue
 	ra.journalMu.RLock()
@@ -1221,28 +1224,28 @@ func TestSparseFileFlushVersionIDConsistency(t *testing.T) {
 	}
 
 	// Verify data can be read back correctly
-	readData1, err := ra.Read(0, len(writeData))
+	readData1, err := ra.Read(writeOffset, len(writeData))
 	if err != nil {
 		t.Fatalf("Failed to read first chunk: %v", err)
 	}
 	if !bytes.Equal(readData1, writeData) {
-		t.Errorf("❌ Data mismatch at offset 0: first %d bytes don't match", min(100, len(readData1)))
+		t.Errorf("❌ Data mismatch at offset %d: first %d bytes don't match", writeOffset, min(100, len(readData1)))
 	} else {
-		t.Logf("✓ Data integrity verified at offset 0")
+		t.Logf("✓ Data integrity verified at offset %d", writeOffset)
 	}
 
-	readData2, err := ra.Read(writeOffset, len(writeData2))
+	readData2, err := ra.Read(writeOffset2, len(writeData2))
 	if err != nil {
-		t.Logf("⚠️  Failed to read second chunk at offset %d: %v", writeOffset, err)
+		t.Logf("⚠️  Failed to read second chunk at offset %d: %v", writeOffset2, err)
 		t.Logf("   This may indicate that the write didn't complete or flush didn't process the journal entry")
 		// Don't fail - this is informative about the issue
 	} else if len(readData2) == 0 {
-		t.Logf("⚠️  Read returned empty data at offset %d", writeOffset)
+		t.Logf("⚠️  Read returned empty data at offset %d", writeOffset2)
 		t.Logf("   This may indicate that the write didn't complete or flush didn't process the journal entry")
 	} else if !bytes.Equal(readData2, writeData2) {
-		t.Errorf("❌ Data mismatch at offset %d: first %d bytes don't match", writeOffset, min(100, len(readData2)))
+		t.Errorf("❌ Data mismatch at offset %d: first %d bytes don't match", writeOffset2, min(100, len(readData2)))
 	} else {
-		t.Logf("✓ Data integrity verified at offset %d", writeOffset)
+		t.Logf("✓ Data integrity verified at offset %d", writeOffset2)
 	}
 
 	// Verify sparse file reads zeros for unwritten regions
@@ -1719,6 +1722,12 @@ func TestSparseFileReadZeroPadding(t *testing.T) {
 	}
 
 	t.Logf("Written %d bytes at offset 0, sparseSize=%d", writeSize, sparseSize)
+
+	// Flush to persist the data (ChunkedFileWriter needs explicit flush)
+	_, err = ra.Flush()
+	if err != nil {
+		t.Fatalf("Failed to flush: %v", err)
+	}
 
 	// Read back the written data
 	readBuf, err := ra.Read(0, writeSize)

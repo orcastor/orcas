@@ -973,27 +973,19 @@ func (cw *ChunkedFileWriter) Write(offset int64, data []byte) error {
 				return nil, nil
 			})
 
-			// For pure append writes, check if chunk exists on disk only if writeStartInChunk > 0
-			// (meaning we're writing to middle/end of chunk, not the beginning)
-			// If writing from beginning (writeStartInChunk == 0), chunk shouldn't exist yet
+			// CRITICAL: Always try to read existing chunk from disk, even when writeStartInChunk == 0
+			// The chunk may exist if it was previously flushed, and we need to preserve existing data
+			// when doing partial overwrites (e.g., writing 512 bytes at offset 0 of a 1MB chunk)
 			var existingChunkData []byte
 			var readErr error
-			if writeStartInChunk > 0 {
-				// Writing to middle/end of chunk, might need to read existing data
-				DebugLog("[VFS ChunkedFileWriter Write] Reading chunk from disk: fileID=%d, dataID=%d, sn=%d, offsetInChunk=%d", cw.fileID, cw.dataID, sn, writeStartInChunk)
-				existingChunkData, readErr = cw.fs.h.GetData(cw.fs.c, cw.fs.bktID, cw.dataID, sn)
-				if readErr == nil && len(existingChunkData) > 0 {
-					DebugLog("[VFS ChunkedFileWriter Write] READ from disk successful: fileID=%d, dataID=%d, sn=%d, size=%d",
-						cw.fileID, cw.dataID, sn, len(existingChunkData))
-				} else {
-					DebugLog("[VFS ChunkedFileWriter Write] READ from disk failed or empty: fileID=%d, dataID=%d, sn=%d, error=%v, size=%d",
-						cw.fileID, cw.dataID, sn, readErr, len(existingChunkData))
-				}
+			DebugLog("[VFS ChunkedFileWriter Write] Reading chunk from disk: fileID=%d, dataID=%d, sn=%d, offsetInChunk=%d", cw.fileID, cw.dataID, sn, writeStartInChunk)
+			existingChunkData, readErr = cw.fs.h.GetData(cw.fs.c, cw.fs.bktID, cw.dataID, sn)
+			if readErr == nil && len(existingChunkData) > 0 {
+				DebugLog("[VFS ChunkedFileWriter Write] READ from disk successful: fileID=%d, dataID=%d, sn=%d, size=%d",
+					cw.fileID, cw.dataID, sn, len(existingChunkData))
 			} else {
-				// Writing from beginning, chunk shouldn't exist (pure append)
-				// Skip read to avoid unnecessary disk I/O
-				readErr = fmt.Errorf("chunk not found (expected for new chunk)")
-				DebugLog("[VFS ChunkedFileWriter Write] Skipping disk read for new chunk: fileID=%d, dataID=%d, sn=%d", cw.fileID, cw.dataID, sn)
+				DebugLog("[VFS ChunkedFileWriter Write] READ from disk failed or empty: fileID=%d, dataID=%d, sn=%d, error=%v, size=%d",
+					cw.fileID, cw.dataID, sn, readErr, len(existingChunkData))
 			}
 			if readErr == nil && len(existingChunkData) > 0 {
 				// Chunk exists on disk, re-acquire lock and create buffer
@@ -1088,25 +1080,18 @@ func (cw *ChunkedFileWriter) Write(offset int64, data []byte) error {
 				})
 
 				// After waiting, try reading from disk again (flush might have completed)
-				// Only read if writeStartInChunk > 0 (writing to middle/end of chunk)
+				// CRITICAL: Always try to read, even when writeStartInChunk == 0
 				var existingChunkData2 []byte
 				var readErr2 error
-				if writeStartInChunk > 0 {
-					DebugLog("[VFS ChunkedFileWriter Write] READING from disk after flush wait (non-zero offset): fileID=%d, dataID=%d, sn=%d, writeStartInChunk=%d",
-						cw.fileID, cw.dataID, sn, writeStartInChunk)
-					existingChunkData2, readErr2 = cw.fs.h.GetData(cw.fs.c, cw.fs.bktID, cw.dataID, sn)
-					if readErr2 == nil && len(existingChunkData2) > 0 {
-						DebugLog("[VFS ChunkedFileWriter Write] READ from disk after flush wait successful: fileID=%d, dataID=%d, sn=%d, size=%d",
-							cw.fileID, cw.dataID, sn, len(existingChunkData2))
-					} else {
-						DebugLog("[VFS ChunkedFileWriter Write] READ from disk after flush wait failed/empty: fileID=%d, dataID=%d, sn=%d, error=%v",
-							cw.fileID, cw.dataID, sn, readErr2)
-					}
+				DebugLog("[VFS ChunkedFileWriter Write] READING from disk after flush wait: fileID=%d, dataID=%d, sn=%d, writeStartInChunk=%d",
+					cw.fileID, cw.dataID, sn, writeStartInChunk)
+				existingChunkData2, readErr2 = cw.fs.h.GetData(cw.fs.c, cw.fs.bktID, cw.dataID, sn)
+				if readErr2 == nil && len(existingChunkData2) > 0 {
+					DebugLog("[VFS ChunkedFileWriter Write] READ from disk after flush wait successful: fileID=%d, dataID=%d, sn=%d, size=%d",
+						cw.fileID, cw.dataID, sn, len(existingChunkData2))
 				} else {
-					// Writing from beginning, skip read
-					DebugLog("[VFS ChunkedFileWriter Write] SKIPPING read after flush wait (pure append from offset 0): fileID=%d, dataID=%d, sn=%d",
-						cw.fileID, cw.dataID, sn)
-					readErr2 = fmt.Errorf("chunk not found (expected for new chunk)")
+					DebugLog("[VFS ChunkedFileWriter Write] READ from disk after flush wait failed/empty: fileID=%d, dataID=%d, sn=%d, error=%v",
+						cw.fileID, cw.dataID, sn, readErr2)
 				}
 
 				// Re-acquire lock
@@ -1450,48 +1435,72 @@ func (cw *ChunkedFileWriter) flushChunkWithBuffer(sn int, buf *chunkBuffer) erro
 		return nil // No data to flush
 	}
 
-	// Extract chunk data (only up to written size)
-	// IMPORTANT: Create a copy of the data to avoid data race when buffer is modified concurrently
-	// CRITICAL: Ensure we copy all data up to offsetInChunk
-	// buf.data should always have length >= offsetInChunk, but check to be safe
-	// First, ensure buf.data is extended to at least offsetInChunk before copying
-	// IMPORTANT: If buf.data length < offsetInChunk, it means data hasn't been fully written yet
-	// This can happen if flush is triggered before write completes (e.g., async writes)
-	// In this case, we should only flush up to len(buf.data), not offsetInChunk
-	if int64(len(buf.data)) < buf.offsetInChunk {
-		DebugLog("[VFS ChunkedFileWriter flushChunk] WARNING: buf.data length (%d) < offsetInChunk (%d), data not fully written: fileID=%d, dataID=%d, sn=%d",
-			len(buf.data), buf.offsetInChunk, cw.fileID, cw.dataID, sn)
-		// Use actual data length instead of offsetInChunk to avoid flushing unwritten data
-		// This prevents data corruption from premature flush
-		// Update offsetInChunk to match actual data length
-		buf.offsetInChunk = int64(len(buf.data))
-		DebugLog("[VFS ChunkedFileWriter flushChunk] Adjusted offsetInChunk to match actual data length: fileID=%d, dataID=%d, sn=%d, newOffsetInChunk=%d",
-			cw.fileID, cw.dataID, sn, buf.offsetInChunk)
+	// For files with non-sequential writes (holes), we need to determine the actual data size
+	// by checking the write ranges, not just offsetInChunk
+	// offsetInChunk tracks the maximum write position, but for files with holes,
+	// we should use the maximum end position from write ranges
+	actualDataSize := buf.offsetInChunk
+	if len(buf.ranges) > 0 {
+		// Find the maximum end position from all write ranges
+		maxEnd := int64(0)
+		for _, r := range buf.ranges {
+			if r.end > maxEnd {
+				maxEnd = r.end
+			}
+		}
+		// Use the larger of offsetInChunk and maxEnd
+		if maxEnd > actualDataSize {
+			actualDataSize = maxEnd
+			DebugLog("[VFS ChunkedFileWriter flushChunk] Using maxEnd from ranges: fileID=%d, dataID=%d, sn=%d, offsetInChunk=%d, maxEnd=%d",
+				cw.fileID, cw.dataID, sn, buf.offsetInChunk, maxEnd)
+		}
 	}
 
-	// Copy all data up to offsetInChunk
-	// IMPORTANT: After adjusting offsetInChunk above, it should match len(buf.data)
+	// Extract chunk data (only up to written size)
+	// IMPORTANT: Create a copy of the data to avoid data race when buffer is modified concurrently
+	// CRITICAL: Ensure we copy all data up to actualDataSize
+	// buf.data should always have length >= actualDataSize, but check to be safe
+	// First, ensure buf.data is extended to at least actualDataSize before copying
+	// IMPORTANT: If buf.data length < actualDataSize, it means data hasn't been fully written yet
+	// This can happen if flush is triggered before write completes (e.g., async writes)
+	// In this case, we should only flush up to len(buf.data), not actualDataSize
+	if int64(len(buf.data)) < actualDataSize {
+		DebugLog("[VFS ChunkedFileWriter flushChunk] WARNING: buf.data length (%d) < actualDataSize (%d), data not fully written: fileID=%d, dataID=%d, sn=%d",
+			len(buf.data), actualDataSize, cw.fileID, cw.dataID, sn)
+		// Use actual data length instead of actualDataSize to avoid flushing unwritten data
+		// This prevents data corruption from premature flush
+		// Update actualDataSize to match actual data length
+		actualDataSize = int64(len(buf.data))
+		DebugLog("[VFS ChunkedFileWriter flushChunk] Adjusted actualDataSize to match actual data length: fileID=%d, dataID=%d, sn=%d, newActualDataSize=%d",
+			cw.fileID, cw.dataID, sn, actualDataSize)
+	}
+
+	// Copy all data up to actualDataSize
+	// IMPORTANT: After adjusting actualDataSize above, it should match len(buf.data)
 	// So we only copy actual data, no zero-filling needed
-	chunkDataSize := int(buf.offsetInChunk)
+	chunkDataSize := int(actualDataSize)
 	chunkData := allocChunkData(chunkDataSize)
 
 	copyLen := int64(len(buf.data))
-	if copyLen > buf.offsetInChunk {
-		copyLen = buf.offsetInChunk
+	if copyLen > actualDataSize {
+		copyLen = actualDataSize
 	}
 	if copyLen > 0 {
 		copy(chunkData[:copyLen], buf.data[:copyLen])
 	}
 
-	// IMPORTANT: After adjusting offsetInChunk, copyLen should equal offsetInChunk
+	// IMPORTANT: After adjusting actualDataSize, copyLen should equal actualDataSize
 	// If not, it means there's still a mismatch (should not happen)
-	if copyLen < buf.offsetInChunk {
-		DebugLog("[VFS ChunkedFileWriter flushChunk] ERROR: copyLen (%d) < offsetInChunk (%d) after adjustment, this should not happen: fileID=%d, dataID=%d, sn=%d, bufDataLen=%d",
-			copyLen, buf.offsetInChunk, cw.fileID, cw.dataID, sn, len(buf.data))
+	if copyLen < actualDataSize {
+		DebugLog("[VFS ChunkedFileWriter flushChunk] ERROR: copyLen (%d) < actualDataSize (%d) after adjustment, this should not happen: fileID=%d, dataID=%d, sn=%d, bufDataLen=%d",
+			copyLen, actualDataSize, cw.fileID, cw.dataID, sn, len(buf.data))
 		// Adjust chunkData size to match actual data length
 		chunkData = chunkData[:copyLen]
-		buf.offsetInChunk = copyLen
+		actualDataSize = copyLen
 	}
+
+	// Update offsetInChunk to match actualDataSize for consistency
+	buf.offsetInChunk = actualDataSize
 
 	// Log buffer state for debugging
 	DebugLog("[VFS ChunkedFileWriter flushChunk] Buffer state: fileID=%d, dataID=%d, sn=%d, offsetInChunk=%d, bufDataLen=%d, chunkDataLen=%d, numRanges=%d",
@@ -1687,17 +1696,10 @@ func (cw *ChunkedFileWriter) writeChunkSync(sn int, finalData []byte) error {
 		return fmt.Errorf("ERR_OPEN_FILE but chunk doesn't exist (likely permission/disk issue): %w", err)
 	}
 
-	// Chunk exists, check if size matches
-	if len(existingData) == len(finalData) {
-		// Size matches, assume chunk is correct and skip write
-		DebugLog("[VFS ChunkedFileWriter writeChunkSync] Chunk already exists with matching size (ERR_OPEN_FILE), skipping write: fileID=%d, dataID=%d, sn=%d, size=%d",
-			cw.fileID, cw.dataID, sn, len(finalData))
-		return nil
-	}
-
-	// Chunk exists but size doesn't match - delete and rewrite
-	// This can happen if: previous write was interrupted/partial, concurrent writes, or external modification
-	DebugLog("[VFS ChunkedFileWriter writeChunkSync] WARNING: Chunk exists but size mismatch (ERR_OPEN_FILE), will delete and rewrite: fileID=%d, dataID=%d, sn=%d, writtenSize=%d, existingSize=%d",
+	// CRITICAL: Chunk exists - we need to rewrite it even if size matches
+	// This is necessary for partial overwrites where the size stays the same but data changes
+	// (e.g., writing 512 bytes at offset 0 of a 1MB chunk)
+	DebugLog("[VFS ChunkedFileWriter writeChunkSync] WARNING: Chunk exists (ERR_OPEN_FILE), will delete and rewrite: fileID=%d, dataID=%d, sn=%d, writtenSize=%d, existingSize=%d",
 		cw.fileID, cw.dataID, sn, len(finalData), len(existingData))
 
 	// Try to delete existing chunk (ignore deletion errors - will retry write anyway)
@@ -1716,15 +1718,36 @@ func (cw *ChunkedFileWriter) writeChunkSync(sn int, finalData []byte) error {
 	// Retry PutData after deletion attempt
 	_, retryErr := cw.fs.h.PutData(cw.fs.c, cw.fs.bktID, cw.dataID, sn, finalData)
 	if retryErr == nil {
-		DebugLog("[VFS ChunkedFileWriter writeChunkSync] Successfully rewrote chunk after deletion (size mismatch): fileID=%d, dataID=%d, sn=%d, size=%d",
+		DebugLog("[VFS ChunkedFileWriter writeChunkSync] Successfully rewrote chunk after deletion: fileID=%d, dataID=%d, sn=%d, size=%d",
 			cw.fileID, cw.dataID, sn, len(finalData))
+
+		// CRITICAL: Invalidate chunk cache after rewriting
+		// When a chunk is rewritten with different size, the cached data is stale
+		// and must be removed to ensure subsequent reads get the latest data
+		cacheKey := [2]int64{cw.dataID, int64(sn)}
+		globalChunkCache.Del(cacheKey)
+		DebugLog("[VFS ChunkedFileWriter writeChunkSync] Invalidated chunk cache after rewrite: fileID=%d, dataID=%d, sn=%d",
+			cw.fileID, cw.dataID, sn)
+
+		// CRITICAL: Also invalidate dataInfoCache after rewriting
+		// When a chunk is rewritten, the DataInfo (especially OrigSize) may be stale
+		// and must be removed to ensure subsequent reads get the latest metadata
+		dataInfoCache.Del(cw.dataID)
+		DebugLog("[VFS ChunkedFileWriter writeChunkSync] Invalidated dataInfo cache after rewrite: fileID=%d, dataID=%d, sn=%d",
+			cw.fileID, cw.dataID, sn)
+
+		// Also invalidate decodingReaderCache to ensure chunkReader uses fresh DataInfo
+		decodingReaderCache.Del(cw.dataID)
+		DebugLog("[VFS ChunkedFileWriter writeChunkSync] Invalidated decodingReader cache after rewrite: fileID=%d, dataID=%d, sn=%d",
+			cw.fileID, cw.dataID, sn)
+
 		return nil
 	}
 
 	// Retry failed
-	DebugLog("[VFS ChunkedFileWriter writeChunkSync] ERROR: Failed to rewrite chunk after deletion (size mismatch): fileID=%d, dataID=%d, sn=%d, error=%v",
+	DebugLog("[VFS ChunkedFileWriter writeChunkSync] ERROR: Failed to rewrite chunk after deletion: fileID=%d, dataID=%d, sn=%d, error=%v",
 		cw.fileID, cw.dataID, sn, retryErr)
-	return fmt.Errorf("failed to rewrite chunk after deletion (size mismatch): %w", retryErr)
+	return fmt.Errorf("failed to rewrite chunk after deletion: %w", retryErr)
 }
 
 // decodeChunkData decodes chunk data using specified Kind (compression/encryption configuration)
@@ -1988,12 +2011,18 @@ func (cw *ChunkedFileWriter) Flush(force bool) error {
 	dataInfo := cw.dataInfo
 
 	// OrigSize should be the logical file size (max write offset)
-	// For WRITER_TYPE_SEQ (sequential uploads), OrigSize is accumulated correctly in flushChunk
-	// and should not be overwritten with cw.size. Only use cw.size if OrigSize is 0 or less.
-	// For sparse files or files with holes, cw.size may be more accurate.
+	// IMPORTANT: For files with non-sequential writes or holes, we should use cw.size
+	// instead of the accumulated dataInfo.OrigSize, because dataInfo.OrigSize is accumulated
+	// by adding chunk sizes, which can be incorrect for files with holes or when chunks
+	// are flushed multiple times.
+	// cw.size tracks the maximum write position, which is the correct file size.
 	currentOrigSize := atomic.LoadInt64(&dataInfo.OrigSize)
-	if currentOrigSize == 0 || size > currentOrigSize {
-		// Use cw.size as OrigSize (for sparse files or when OrigSize wasn't accumulated)
+
+	// Always use cw.size as the authoritative file size
+	// This ensures correctness for files with holes, non-sequential writes, or re-flushed chunks
+	if size != currentOrigSize {
+		DebugLog("[VFS ChunkedFileWriter Flush] Correcting OrigSize: fileID=%d, accumulated=%d, actual=%d (using cw.size)",
+			cw.fileID, currentOrigSize, size)
 		dataInfo.OrigSize = size
 	}
 
@@ -7994,6 +8023,15 @@ func (ra *RandomAccessor) flushChunkedWriter(writerType WriterType) error {
 		return err
 	}
 
+	// CRITICAL: For non-.tmp files (WRITER_TYPE_SEQ), clear ChunkedFileWriter after flush
+	// This allows subsequent random writes to use journal instead of ChunkedFileWriter
+	// ChunkedFileWriter is optimized for sequential writes, not random writes
+	// For .tmp files, keep ChunkedFileWriter active for continued sequential writes
+	if writerType == WRITER_TYPE_SEQ && !ra.isTmpFile {
+		DebugLog("[VFS RandomAccessor flushChunkedWriter] Clearing ChunkedFileWriter after flush (non-.tmp file): fileID=%d", ra.fileID)
+		ra.chunkedWriter.Store(clearedChunkedWriterMarker)
+	}
+
 	// IMPORTANT: ChunkedFileWriter.Flush() already updated the cache, don't re-read from database
 	// Just verify the cache was updated to avoid WAL dirty read
 	if cachedObj := ra.fileObj.Load(); cachedObj != nil {
@@ -8276,11 +8314,14 @@ func (ra *RandomAccessor) shouldUseJournal(fileObj *core.ObjectInfo, offset, len
 	// which has been a source of subtle bugs (e.g. append not being persisted).
 	// CRITICAL: Only use journal for append if file already has data (DataID > 0 and Size > 0)
 	// For new files (DataID == 0 or EmptyDataID, Size == 0), allow sequential buffer initialization
+	// For sparse files, this allows them to reach their dedicated ChunkedFileWriter logic
 	if offset == fileObj.Size {
 		// Check if this is a new file (no data yet)
 		isNewFile := (fileObj.DataID == 0 || fileObj.DataID == core.EmptyDataID) && fileObj.Size == 0
 		if isNewFile {
 			// New file, don't use journal - allow sequential buffer initialization
+			// For sparse files, this allows them to reach their dedicated ChunkedFileWriter logic
+			// which will decide whether to use ChunkedFileWriter or journal based on local sequential range
 			DebugLog("[VFS shouldUseJournal] New file sequential write (offset=%d == size=%d), not using journal: fileID=%d", offset, fileObj.Size, ra.fileID)
 			return false
 		}
