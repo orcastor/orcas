@@ -932,7 +932,10 @@ func (dma *DefaultMetadataAdapter) PutBkt(c Ctx, o []*BucketInfo) error {
 
 		// Write bucket info to bucket database
 		bktSlice := []*BucketInfo{x}
-		if _, err = b.TableContext(c, db, BKT_TBL).ReplaceInto(&bktSlice); err != nil {
+		// Use INSERT ... ON CONFLICT DO UPDATE (upsert) to insert or update in place.
+		// Avoid REPLACE INTO which deletes then inserts, changing row identity.
+		if _, err = b.TableContext(c, db, BKT_TBL).Insert(&bktSlice,
+			b.OnConflictDoUpdateSet([]string{"id"}, []string{"q", "u", "ru", "lu", "ds", "t", "n", "cs"})); err != nil {
 			return fmt.Errorf("%w: PutBkt failed (bktID=%d, count=%d): %v", ERR_EXEC_DB, x.ID, len(o), err)
 		}
 		// Update cache with new bucket info
@@ -1045,8 +1048,10 @@ func (dba *DefaultBaseMetadataAdapter) PutACL(c Ctx, bktID int64, uid int64, per
 
 	acl := &BucketACL{BktID: bktID, UID: uid, Perm: perm}
 	aclSlice := []*BucketACL{acl}
-	// Use ReplaceInto to insert or replace (since we have composite primary key)
-	if _, err = b.TableContext(c, db, ACL_TBL).ReplaceInto(&aclSlice); err != nil {
+	// Use INSERT ... ON CONFLICT DO UPDATE (upsert) to insert or update in place.
+	// Avoid REPLACE INTO which deletes then inserts, changing row identity.
+	if _, err = b.TableContext(c, db, ACL_TBL).Insert(&aclSlice,
+		b.OnConflictDoUpdateSet([]string{"bkt_id", "uid"}, []string{"perm"})); err != nil {
 		return fmt.Errorf("%w: PutACL failed (bktID=%d, uid=%d, perm=%d): %v", ERR_EXEC_DB, bktID, uid, perm, err)
 	}
 	return nil
@@ -1274,8 +1279,11 @@ func (dma *DefaultMetadataAdapter) PutData(c Ctx, bktID int64, d []*DataInfo) er
 		}
 	}
 
-	if _, err = b.TableContext(c, db, DATA_TBL).ReplaceInto(&dataForDB); err != nil {
-		return fmt.Errorf("%w: PutData ReplaceInto failed (bktID=%d, count=%d): %v", ERR_EXEC_DB, bktID, len(d), err)
+	// Use INSERT ... ON CONFLICT DO UPDATE (upsert) to insert or update in place.
+	// Avoid REPLACE INTO which deletes then inserts, changing row identity.
+	if _, err = b.TableContext(c, db, DATA_TBL).Insert(&dataForDB,
+		b.OnConflictDoUpdateSet([]string{"id"}, []string{"s", "os", "h", "x", "s0", "s1", "s2", "s3", "k", "pi", "po"})); err != nil {
+		return fmt.Errorf("%w: PutData failed (bktID=%d, count=%d): %v", ERR_EXEC_DB, bktID, len(d), err)
 	}
 	return nil
 }
@@ -2049,7 +2057,10 @@ func (dba *DefaultBaseMetadataAdapter) PutUsr(c Ctx, u *UserInfo) error {
 	}
 	// Note: Don't close the connection, it's from the pool
 
-	if _, err = b.TableContext(c, db, USR_TBL).ReplaceInto(&u); err != nil {
+	// Use INSERT ... ON CONFLICT DO UPDATE (upsert) to insert or update in place.
+	// Avoid REPLACE INTO which deletes then inserts, changing row identity.
+	if _, err = b.TableContext(c, db, USR_TBL).Insert(u,
+		b.OnConflictDoUpdateSet([]string{"id"}, []string{"role", "usr", "pwd", "name", "avatar"})); err != nil {
 		return fmt.Errorf("%w: PutUsr failed (userID=%d, usr=%s): %v", ERR_EXEC_DB, u.ID, u.Usr, err)
 	}
 	return nil
@@ -2489,8 +2500,10 @@ func (dma *DefaultMetadataAdapter) SetAttr(c Ctx, bktID int64, objID int64, key 
 		Key:   key,
 		Value: value,
 	}
-	// Use REPLACE INTO to insert or update
-	if _, err = b.TableContext(c, db, ATTR_TBL).ReplaceInto(attrRow); err != nil {
+	// Use INSERT ... ON CONFLICT DO UPDATE (upsert) to insert or update in place.
+	// Avoid REPLACE INTO which deletes then inserts, changing row identity.
+	if _, err = b.TableContext(c, db, ATTR_TBL).Insert(attrRow,
+		b.OnConflictDoUpdateSet([]string{"id", "k"}, []string{"v"})); err != nil {
 		return fmt.Errorf("%w: SetAttr failed (bktID=%d, objID=%d, key=%s): %v", ERR_EXEC_DB, bktID, objID, key, err)
 	}
 	return nil

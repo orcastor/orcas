@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"testing"
 	"time"
 
@@ -1092,6 +1093,77 @@ func TestDeleteObj(t *testing.T) {
 	})
 }
 
+// TestAttrOperations tests SetAttr, GetAttr, ListAttrs, RemoveAttr.
+// SetAttr uses INSERT ON CONFLICT DO UPDATE (upsert) instead of REPLACE INTO,
+// so updates modify the row in place without delete+insert.
+func TestAttrOperations(t *testing.T) {
+	Convey("AttrOperations", t, func() {
+		baseDir, dataDir, cleanup := SetupTestDirs("test_attr")
+		defer cleanup()
+		InitDB(baseDir, "")
+		ig := idgen.NewIDGen(nil, 0)
+		tbktID, _ := ig.New()
+		InitBucketDB(dataDir, tbktID)
+		dma := &DefaultMetadataAdapter{
+			DefaultBaseMetadataAdapter:   &DefaultBaseMetadataAdapter{},
+			DefaultDataMetadataAdapter:   &DefaultDataMetadataAdapter{},
+		}
+		dma.DefaultBaseMetadataAdapter.SetPath(baseDir)
+		dma.DefaultDataMetadataAdapter.SetPath(dataDir)
+		ctx := context.Background()
+
+		Convey("SetAttr insert then GetAttr", func() {
+			objID, _ := ig.New()
+			err := dma.SetAttr(ctx, tbktID, objID, "user.k1", []byte("v1"))
+			So(err, ShouldBeNil)
+			val, err := dma.GetAttr(ctx, tbktID, objID, "user.k1")
+			So(err, ShouldBeNil)
+			So(val, ShouldResemble, []byte("v1"))
+		})
+
+		Convey("SetAttr update same key uses upsert not replace", func() {
+			objID, _ := ig.New()
+			err := dma.SetAttr(ctx, tbktID, objID, "user.k1", []byte("v1"))
+			So(err, ShouldBeNil)
+			bktDir := filepath.Join(dataDir, fmt.Sprint(tbktID))
+			db, err := GetWriteDB(bktDir)
+			So(err, ShouldBeNil)
+			var rowid1 int64
+			err = db.QueryRow("SELECT rowid FROM attr WHERE id = ? AND k = ?", objID, "user.k1").Scan(&rowid1)
+			So(err, ShouldBeNil)
+
+			err = dma.SetAttr(ctx, tbktID, objID, "user.k1", []byte("v2"))
+			So(err, ShouldBeNil)
+			val, err := dma.GetAttr(ctx, tbktID, objID, "user.k1")
+			So(err, ShouldBeNil)
+			So(val, ShouldResemble, []byte("v2"))
+
+			var rowid2 int64
+			err = db.QueryRow("SELECT rowid FROM attr WHERE id = ? AND k = ?", objID, "user.k1").Scan(&rowid2)
+			So(err, ShouldBeNil)
+			So(rowid2, ShouldEqual, rowid1)
+		})
+
+		Convey("ListAttrs and RemoveAttr", func() {
+			objID, _ := ig.New()
+			So(dma.SetAttr(ctx, tbktID, objID, "user.a", []byte("1")), ShouldBeNil)
+			So(dma.SetAttr(ctx, tbktID, objID, "user.b", []byte("2")), ShouldBeNil)
+			keys, err := dma.ListAttrs(ctx, tbktID, objID)
+			So(err, ShouldBeNil)
+			sort.Strings(keys)
+			So(keys, ShouldResemble, []string{"user.a", "user.b"})
+
+			err = dma.RemoveAttr(ctx, tbktID, objID, "user.a")
+			So(err, ShouldBeNil)
+			_, err = dma.GetAttr(ctx, tbktID, objID, "user.a")
+			So(err, ShouldNotBeNil)
+			keys, err = dma.ListAttrs(ctx, tbktID, objID)
+			So(err, ShouldBeNil)
+			So(keys, ShouldResemble, []string{"user.b"})
+		})
+	})
+}
+
 // TestPutBktWithCustomPath tests that PutBkt creates bucket database in custom path set via Handler
 func TestPutBktWithCustomPath(t *testing.T) {
 	Convey("PutBkt with custom path via Handler", t, func() {
@@ -1998,6 +2070,83 @@ func TestListOperationsReturnDecryptedNames(t *testing.T) {
 			for _, obj := range objsByDataID {
 				So(obj.Mode&MODE_NAME_ENCRYPTED, ShouldEqual, uint32(0))
 			}
+		})
+	})
+}
+
+// TestPutACLUpsert tests PutACL uses upsert (not replace) behavior
+func TestPutACLUpsert(t *testing.T) {
+	Convey("PutACL Upsert", t, func() {
+		baseDir, _, cleanup := SetupTestDirs("test_put_acl")
+		defer cleanup()
+		InitDB(baseDir, "")
+		dba := &DefaultBaseMetadataAdapter{}
+		dba.SetPath(baseDir)
+		ctx := context.Background()
+		ig := idgen.NewIDGen(nil, 0)
+		bktID, _ := ig.New()
+		uid, _ := ig.New()
+
+		Convey("PutACL insert then update", func() {
+			err := dba.PutACL(ctx, bktID, uid, 1)
+			So(err, ShouldBeNil)
+			acls, err := dba.ListACL(ctx, bktID)
+			So(err, ShouldBeNil)
+			So(len(acls), ShouldEqual, 1)
+			So(acls[0].Perm, ShouldEqual, 1)
+
+			// Update same ACL entry
+			err = dba.PutACL(ctx, bktID, uid, 2)
+			So(err, ShouldBeNil)
+			acls, err = dba.ListACL(ctx, bktID)
+			So(err, ShouldBeNil)
+			So(len(acls), ShouldEqual, 1)
+			So(acls[0].Perm, ShouldEqual, 2)
+		})
+	})
+}
+
+// TestPutUsrUpsert tests PutUsr uses upsert (not replace) behavior
+func TestPutUsrUpsert(t *testing.T) {
+	Convey("PutUsr Upsert", t, func() {
+		baseDir, _, cleanup := SetupTestDirs("test_put_usr")
+		defer cleanup()
+		InitDB(baseDir, "")
+		dba := &DefaultBaseMetadataAdapter{}
+		dba.SetPath(baseDir)
+		ctx := context.Background()
+		ig := idgen.NewIDGen(nil, 0)
+		userID, _ := ig.New()
+
+		Convey("PutUsr insert then update", func() {
+			usr := &UserInfo{
+				ID:     userID,
+				Usr:    "testuser",
+				Pwd:    "password1",
+				Role:   0,
+				Name:   "Test User",
+				Avatar: "",
+			}
+			err := dba.PutUsr(ctx, usr)
+			So(err, ShouldBeNil)
+
+			users, err := dba.GetUsr(ctx, []int64{userID})
+			So(err, ShouldBeNil)
+			So(len(users), ShouldEqual, 1)
+			So(users[0].Name, ShouldEqual, "Test User")
+			So(users[0].Pwd, ShouldEqual, "password1")
+
+			// Update same user
+			usr.Name = "Updated User"
+			usr.Pwd = "password2"
+			err = dba.PutUsr(ctx, usr)
+			So(err, ShouldBeNil)
+
+			users, err = dba.GetUsr(ctx, []int64{userID})
+			So(err, ShouldBeNil)
+			So(len(users), ShouldEqual, 1)
+			So(users[0].Name, ShouldEqual, "Updated User")
+			So(users[0].Pwd, ShouldEqual, "password2")
 		})
 	})
 }
