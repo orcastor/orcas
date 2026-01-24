@@ -43,7 +43,7 @@ func setupTestFSWithEncryption(t *testing.T, testDir string, encryptionKey strin
 // TestJournalBasicWriteRead tests basic write and read operations with journal
 func TestJournalBasicWriteRead(t *testing.T) {
 	// Setup test environment
-	testDir := filepath.Join(os.TempDir(), "orcas_journal_test_basic")
+	testDir := testTmpDir("orcas_journal_test_basic")
 	defer cleanupTestDir(t, testDir)
 
 	fs, bktID := setupTestFS(t, testDir)
@@ -108,7 +108,7 @@ func TestJournalBasicWriteRead(t *testing.T) {
 
 // TestJournalRandomWrites tests random write pattern
 func TestJournalRandomWrites(t *testing.T) {
-	testDir := filepath.Join(os.TempDir(), "orcas_journal_test_random")
+	testDir := testTmpDir("orcas_journal_test_random")
 	defer cleanupTestDir(t, testDir)
 
 	fs, bktID := setupTestFS(t, testDir)
@@ -161,7 +161,7 @@ func TestJournalRandomWrites(t *testing.T) {
 
 // TestJournalFlush tests journal flush operation
 func TestJournalFlush(t *testing.T) {
-	testDir := filepath.Join(os.TempDir(), "orcas_journal_test_flush")
+	testDir := testTmpDir("orcas_journal_test_flush")
 	defer cleanupTestDir(t, testDir)
 
 	fs, bktID := setupTestFS(t, testDir)
@@ -212,7 +212,7 @@ func TestJournalFlush(t *testing.T) {
 
 // TestJournalMemoryLimit tests memory limit enforcement
 func TestJournalMemoryLimit(t *testing.T) {
-	testDir := filepath.Join(os.TempDir(), "orcas_journal_test_memory")
+	testDir := testTmpDir("orcas_journal_test_memory")
 	defer cleanupTestDir(t, testDir)
 
 	fs, bktID := setupTestFS(t, testDir)
@@ -267,7 +267,7 @@ func TestJournalMemoryLimit(t *testing.T) {
 
 // TestJournalConcurrentWrites tests concurrent write operations
 func TestJournalConcurrentWrites(t *testing.T) {
-	testDir := filepath.Join(os.TempDir(), "orcas_journal_test_concurrent")
+	testDir := testTmpDir("orcas_journal_test_concurrent")
 	defer cleanupTestDir(t, testDir)
 
 	fs, bktID := setupTestFS(t, testDir)
@@ -362,7 +362,7 @@ func TestJournalConcurrentWrites(t *testing.T) {
 
 // TestJournalSmartFlushUpdatesFileObject tests that SmartFlush correctly updates file object's dataID and size
 func TestJournalSmartFlushUpdatesFileObject(t *testing.T) {
-	testDir := filepath.Join(os.TempDir(), "orcas_journal_test_smartflush")
+	testDir := testTmpDir("orcas_journal_test_smartflush")
 	defer cleanupTestDir(t, testDir)
 
 	fs, bktID := setupTestFS(t, testDir)
@@ -506,7 +506,7 @@ func TestJournalSmartFlushUpdatesFileObject(t *testing.T) {
 
 // TestJournalSnapshotDoesNotUpdateFileObject tests that journal snapshots don't update file object
 func TestJournalSnapshotDoesNotUpdateFileObject(t *testing.T) {
-	testDir := filepath.Join(os.TempDir(), "orcas_journal_test_snapshot_noupdate")
+	testDir := testTmpDir("orcas_journal_test_snapshot_noupdate")
 	defer cleanupTestDir(t, testDir)
 
 	fs, bktID := setupTestFS(t, testDir)
@@ -599,7 +599,7 @@ func TestJournalSnapshotDoesNotUpdateFileObject(t *testing.T) {
 
 // TestJournalFlushUpdatesFileObject tests flushJournal updates file object correctly
 func TestJournalFlushUpdatesFileObject(t *testing.T) {
-	testDir := filepath.Join(os.TempDir(), "orcas_journal_test_flush_update")
+	testDir := testTmpDir("orcas_journal_test_flush_update")
 	defer cleanupTestDir(t, testDir)
 
 	fs, bktID := setupTestFS(t, testDir)
@@ -686,7 +686,7 @@ func TestJournalFlushUpdatesFileObject(t *testing.T) {
 // This test verifies the fix where flushJournal now returns the actual versionID it creates,
 // instead of returning a random new ID. This prevents versionID mismatch issues.
 func TestJournalFlushVersionIDConsistency(t *testing.T) {
-	testDir := filepath.Join(os.TempDir(), "orcas_journal_test_versionid")
+	testDir := testTmpDir("orcas_journal_test_versionid")
 	defer cleanupTestDir(t, testDir)
 
 	fs, bktID := setupTestFS(t, testDir)
@@ -779,7 +779,7 @@ func TestJournalFlushVersionIDConsistency(t *testing.T) {
 // and during flush, an atomic replace operation is detected (pending deletion exists).
 // This scenario can occur when WPS opens pptx/ppt files.
 func TestJournalFlushWithAtomicReplace(t *testing.T) {
-	testDir := filepath.Join(os.TempDir(), "orcas_journal_test_atomic_replace")
+	testDir := testTmpDir("orcas_journal_test_atomic_replace")
 	defer cleanupTestDir(t, testDir)
 
 	fs, bktID := setupTestFS(t, testDir)
@@ -1066,7 +1066,7 @@ func TestJournalFlushWithAtomicReplace(t *testing.T) {
 // This simulates the scenario from the bug report: create a sparse file, then modify part of it
 // and verify that flush returns correct versionID (not 0 or random ID)
 func TestSparseFileFlushVersionIDConsistency(t *testing.T) {
-	testDir := filepath.Join(os.TempDir(), "orcas_sparse_file_flush_versionid")
+	testDir := testTmpDir("orcas_sparse_file_flush_versionid")
 	defer cleanupTestDir(t, testDir)
 
 	fs, bktID := setupTestFS(t, testDir)
@@ -1285,7 +1285,7 @@ func TestSparseFileFlushVersionIDConsistency(t *testing.T) {
 // TestCreateWithAtomicReplace tests Create with atomic replace scenario (unlink then create)
 // This test covers the case where a file is unlinked and then a new file with the same name is created.
 func TestCreateWithAtomicReplace(t *testing.T) {
-	testDir := filepath.Join(os.TempDir(), "orcas_create_atomic_replace")
+	testDir := testTmpDir("orcas_create_atomic_replace")
 	defer cleanupTestDir(t, testDir)
 
 	fs, bktID := setupTestFS(t, testDir)
@@ -1524,7 +1524,7 @@ func TestCreateWithAtomicReplace(t *testing.T) {
 // This fixes the issue: "decryption failed: cipher: message authentication failed"
 // when trying to read chunk sn=1 that doesn't exist.
 func TestChunkReaderReadAtSingleChunk(t *testing.T) {
-	testDir := filepath.Join(os.TempDir(), "orcas_chunkreader_single_chunk")
+	testDir := testTmpDir("orcas_chunkreader_single_chunk")
 	defer cleanupTestDir(t, testDir)
 
 	fs, bktID := setupTestFS(t, testDir)
@@ -1674,7 +1674,7 @@ func TestChunkReaderReadAtSingleChunk(t *testing.T) {
 // for unwritten regions. This fixes the issue where sparse files with DataID=0
 // would return empty data instead of zero-filled data.
 func TestSparseFileReadZeroPadding(t *testing.T) {
-	testDir := filepath.Join(os.TempDir(), "orcas_sparse_file_zero_padding")
+	testDir := testTmpDir("orcas_sparse_file_zero_padding")
 	defer cleanupTestDir(t, testDir)
 
 	fs, bktID := setupTestFS(t, testDir)
@@ -1913,7 +1913,7 @@ func TestSparseFileReadZeroPadding(t *testing.T) {
 // TestSparseFileEncryptionDecryption tests that sparse files correctly decrypt data when reading
 // This fixes the issue where encrypted data was returned as plaintext, causing file corruption
 func TestSparseFileEncryptionDecryption(t *testing.T) {
-	testDir := filepath.Join(os.TempDir(), "orcas_sparse_file_encryption_test")
+	testDir := testTmpDir("orcas_sparse_file_encryption_test")
 	defer cleanupTestDir(t, testDir)
 
 	// Setup filesystem with encryption enabled
@@ -2232,7 +2232,7 @@ func cleanupTestDir(t *testing.T, testDir string) {
 // - Reading beyond chunk 0 should read from journal, not try to read non-existent chunk 1
 func TestDecryptErrorOnChunk1(t *testing.T) {
 	// Setup test environment
-	testDir := filepath.Join(os.TempDir(), "orcas_decrypt_error_test")
+	testDir := testTmpDir("orcas_decrypt_error_test")
 	defer cleanupTestDir(t, testDir)
 
 	// Create filesystem with encryption enabled
@@ -2377,7 +2377,7 @@ func TestDecryptErrorOnChunk1(t *testing.T) {
 // TestJournalEncryptionSimple tests basic encryption without complex journal operations
 func TestJournalEncryptionSimple(t *testing.T) {
 	// Setup test environment
-	testDir := filepath.Join(os.TempDir(), "orcas_journal_encryption_simple_test")
+	testDir := testTmpDir("orcas_journal_encryption_simple_test")
 	defer cleanupTestDir(t, testDir)
 
 	fs, bktID := setupTestFS(t, testDir)
@@ -2530,7 +2530,7 @@ func TestJournalEncryptionSimple(t *testing.T) {
 // This verifies that the encryption in flushSmallFile works correctly
 func TestEncryptionWithoutJournal(t *testing.T) {
 	// Setup test environment
-	testDir := filepath.Join(os.TempDir(), "orcas_encryption_no_journal_test")
+	testDir := testTmpDir("orcas_encryption_no_journal_test")
 	defer cleanupTestDir(t, testDir)
 
 	fs, bktID := setupTestFS(t, testDir)
@@ -2642,7 +2642,7 @@ func TestEncryptionWithoutJournal(t *testing.T) {
 // This test verifies the fix for: "decryption failed: cipher: message authentication failed"
 func TestJournalEncryptionAfterTruncate(t *testing.T) {
 	// Setup test environment
-	testDir := filepath.Join(os.TempDir(), "orcas_journal_encryption_test")
+	testDir := testTmpDir("orcas_journal_encryption_test")
 	defer cleanupTestDir(t, testDir)
 
 	encryptionKey := "test-encryption-key-32-bytes!!"
@@ -2834,7 +2834,7 @@ func TestJournalEncryptionAfterTruncate(t *testing.T) {
 // TestJournalMultipleModifications tests multiple sequential modifications with encryption
 func TestJournalMultipleModifications(t *testing.T) {
 	// Setup test environment
-	testDir := filepath.Join(os.TempDir(), "orcas_journal_multi_mod_test")
+	testDir := testTmpDir("orcas_journal_multi_mod_test")
 	defer cleanupTestDir(t, testDir)
 
 	encryptionKey := "test-encryption-key-32-bytes!!"
@@ -2906,7 +2906,7 @@ func TestJournalMultipleModifications(t *testing.T) {
 // This verifies that encryption works correctly in the sequential write path
 func TestSequentialBufferEncryption(t *testing.T) {
 	// Setup test environment
-	testDir := filepath.Join(os.TempDir(), "orcas_encryption_no_journal_test")
+	testDir := testTmpDir("orcas_encryption_no_journal_test")
 	defer cleanupTestDir(t, testDir)
 
 	fs, bktID := setupTestFS(t, testDir)
@@ -3016,7 +3016,7 @@ func TestSequentialBufferEncryption(t *testing.T) {
 // TestSmallFileTruncateRewrite tests the optimized path: truncate(0) + sequential write
 // With the optimization, small files should use sequential buffer instead of journal
 func TestSmallFileTruncateRewrite(t *testing.T) {
-	testDir := filepath.Join(os.TempDir(), "orcas_encryption_after_truncate_test")
+	testDir := testTmpDir("orcas_encryption_after_truncate_test")
 	defer cleanupTestDir(t, testDir)
 
 	fs, bktID := setupTestFS(t, testDir)
@@ -3359,7 +3359,7 @@ func TestJournalReadOverlay(t *testing.T) {
 // 3. Layer 2 journal snapshot (applied on top of layer 1)
 // 4. Current journal entries (applied on top of layer 2)
 func TestJournalMultiLayerRead(t *testing.T) {
-	testDir := filepath.Join(os.TempDir(), "orcas_journal_multilayer_test")
+	testDir := testTmpDir("orcas_journal_multilayer_test")
 	defer cleanupTestDir(t, testDir)
 
 	fs, bktID := setupTestFS(t, testDir)
@@ -3631,7 +3631,7 @@ func TestJournalMultiLayerRead(t *testing.T) {
 // 4. New journal entries are added
 // 5. Reads should correctly apply all layers including snapshots
 func TestJournalMultiLayerReopenRead(t *testing.T) {
-	testDir := filepath.Join(os.TempDir(), "orcas_journal_multilayer_reopen_test")
+	testDir := testTmpDir("orcas_journal_multilayer_reopen_test")
 	defer cleanupTestDir(t, testDir)
 
 	fs, bktID := setupTestFS(t, testDir)
@@ -3913,7 +3913,7 @@ func TestJournalMultiLayerReopenRead(t *testing.T) {
 // 4. Current: Write "EEE" at offset 2-4 (overlaps with Layer1's AAA and Layer2's CCC)
 // Expected: Reads should correctly apply all layers with proper overlap resolution
 func TestJournalMultiLayerOverlappingEntries(t *testing.T) {
-	testDir := filepath.Join(os.TempDir(), "orcas_journal_overlap_test")
+	testDir := testTmpDir("orcas_journal_overlap_test")
 	defer cleanupTestDir(t, testDir)
 
 	fs, bktID := setupTestFS(t, testDir)
@@ -4198,7 +4198,7 @@ func TestJournalMultiLayerOverlappingEntries(t *testing.T) {
 // This test creates a scenario where entries in different layers have complex overlaps
 // that require careful ordering when applying journal entries
 func TestJournalMultiLayerComplexOverlap(t *testing.T) {
-	testDir := filepath.Join(os.TempDir(), "orcas_journal_complex_overlap_test")
+	testDir := testTmpDir("orcas_journal_complex_overlap_test")
 	defer cleanupTestDir(t, testDir)
 
 	fs, bktID := setupTestFS(t, testDir)
@@ -4433,7 +4433,7 @@ func TestJournalMultiLayerComplexOverlap(t *testing.T) {
 // reads correctly apply all snapshot layers before applying current journal entries.
 // This is the critical test case that may reveal the actual bug.
 func TestJournalMultiLayerSnapshotRead(t *testing.T) {
-	testDir := filepath.Join(os.TempDir(), "orcas_journal_snapshot_read_test")
+	testDir := testTmpDir("orcas_journal_snapshot_read_test")
 	defer cleanupTestDir(t, testDir)
 
 	fs, bktID := setupTestFS(t, testDir)
@@ -4649,7 +4649,7 @@ func TestJournalMultiLayerSnapshotRead(t *testing.T) {
 // The bug: readBaseData only reads fileObj.DataID, it doesn't check for journal snapshots
 // that need to be applied first. This means Layer 1 and Layer 2 entries are skipped!
 func TestJournalMultiLayerVersionChain(t *testing.T) {
-	testDir := filepath.Join(os.TempDir(), "orcas_journal_version_chain_test")
+	testDir := testTmpDir("orcas_journal_version_chain_test")
 	defer cleanupTestDir(t, testDir)
 
 	fs, bktID := setupTestFS(t, testDir)
@@ -4895,7 +4895,7 @@ func TestJournalMultiLayerVersionChain(t *testing.T) {
 // 4. Reopen file again, add current entries
 // 5. Read - should see all layers, but may only see current layer if bug exists
 func TestJournalMultiLayerReopenFromDatabase(t *testing.T) {
-	testDir := filepath.Join(os.TempDir(), "orcas_journal_reopen_db_test")
+	testDir := testTmpDir("orcas_journal_reopen_db_test")
 	defer cleanupTestDir(t, testDir)
 
 	fs, bktID := setupTestFS(t, testDir)
@@ -5172,7 +5172,7 @@ func TestJournalMultiLayerReopenFromDatabase(t *testing.T) {
 // Root cause: newSize calculation in Flush() only used currentSize,
 // which may not account for all journal entries correctly.
 func TestJournalFileSizeCorruptionBug(t *testing.T) {
-	testDir := filepath.Join(os.TempDir(), "orcas_journal_test_corruption")
+	testDir := testTmpDir("orcas_journal_test_corruption")
 	defer cleanupTestDir(t, testDir)
 
 	// Setup FS with encryption (as in the real scenario)
@@ -5383,7 +5383,7 @@ func TestJournalFileSizeCorruptionBug(t *testing.T) {
 // TestJournalLargeFileSizeCorruptionBug tests the same bug scenario for large files
 // that use chunked COW flush strategy instead of full flush.
 func TestJournalLargeFileSizeCorruptionBug(t *testing.T) {
-	testDir := filepath.Join(os.TempDir(), "orcas_journal_test_large_corruption")
+	testDir := testTmpDir("orcas_journal_test_large_corruption")
 	defer cleanupTestDir(t, testDir)
 
 	// Setup FS with encryption
@@ -5534,7 +5534,7 @@ func TestJournalLargeFileSizeCorruptionBug(t *testing.T) {
 // TestLogBasedReadWritePattern 完全模仿 log1.log 中的操作序列
 // 测试场景：读取完成后，进行写入操作，精确到同样的offset，最后验证文件内容和大小
 func TestLogBasedReadWritePattern(t *testing.T) {
-	testDir := filepath.Join(os.TempDir(), "orcas_log_based_test")
+	testDir := testTmpDir("orcas_log_based_test")
 	defer cleanupTestDir(t, testDir)
 
 	fs, bktID := setupTestFS(t, testDir)
@@ -5788,6 +5788,9 @@ func TestLogBasedReadWritePattern(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to read at offset %d: %v", verifyOffset, err)
 	}
+	if len(verifyData) != 1 {
+		t.Fatalf("Unexpected short read at offset %d: got %d bytes, want %d", verifyOffset, len(verifyData), 1)
+	}
 	if verifyData[0] != 0xBB {
 		t.Errorf("Data mismatch at offset %d: got 0x%02x, want 0x%02x", verifyOffset, verifyData[0], 0xBB)
 	} else {
@@ -5800,6 +5803,9 @@ func TestLogBasedReadWritePattern(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to read at offset %d: %v", verifyOffset, err)
 	}
+	if len(verifyData) != 1 {
+		t.Fatalf("Unexpected short read at offset %d: got %d bytes, want %d", verifyOffset, len(verifyData), 1)
+	}
 	if verifyData[0] != 0xDD {
 		t.Errorf("Data mismatch at offset %d: got 0x%02x, want 0x%02x", verifyOffset, verifyData[0], 0xDD)
 	} else {
@@ -5811,6 +5817,9 @@ func TestLogBasedReadWritePattern(t *testing.T) {
 	verifyData, err = ra.Read(verifyOffset, 32)
 	if err != nil {
 		t.Fatalf("Failed to read at offset %d: %v", verifyOffset, err)
+	}
+	if len(verifyData) != 32 {
+		t.Fatalf("Unexpected short read at offset %d: got %d bytes, want %d", verifyOffset, len(verifyData), 32)
 	}
 	for i := 0; i < 32; i++ {
 		expected := byte(0x80 + i)
@@ -5826,6 +5835,9 @@ func TestLogBasedReadWritePattern(t *testing.T) {
 	verifyData, err = ra.Read(verifyOffset, 512)
 	if err != nil {
 		t.Fatalf("Failed to read at offset %d: %v", verifyOffset, err)
+	}
+	if len(verifyData) != 512 {
+		t.Fatalf("Unexpected short read at offset %d: got %d bytes, want %d", verifyOffset, len(verifyData), 512)
 	}
 	for i := 0; i < 512; i++ {
 		expected := byte(0xA0 + (i % 256))
@@ -5845,7 +5857,7 @@ func TestLogBasedReadWritePattern(t *testing.T) {
 // TestLogBasedReadWritePatternWithNode 使用 VFS Node (OrcasNode) 来操作文件
 // 完全模仿 log1.log 中的操作序列，使用 Open/Read/Write/Fsync/Release API
 func TestLogBasedReadWritePatternWithNode(t *testing.T) {
-	testDir := filepath.Join(os.TempDir(), "orcas_log_based_node_test")
+	testDir := testTmpDir("orcas_log_based_node_test")
 	defer cleanupTestDir(t, testDir)
 
 	fs, bktID := setupTestFS(t, testDir)
@@ -6401,7 +6413,7 @@ func TestJournalDecryptionErrorOnSecondFlush(t *testing.T) {
 		t.Logf("Debug logging enabled via ORCAS_DEBUG environment variable")
 	}
 
-	testDir := filepath.Join(os.TempDir(), "orcas_journal_test_decrypt_error")
+	testDir := testTmpDir("orcas_journal_test_decrypt_error")
 	defer cleanupTestDir(t, testDir)
 
 	// Setup filesystem with encryption enabled (as in the logs)
@@ -6874,7 +6886,7 @@ func TestJournalDecryptionErrorOnSecondFlush(t *testing.T) {
 // The bug is in flushLargeFileChunked(): when j.dataID == 0 (new sparse file),
 // unmodified chunks beyond the written data are never created, causing GetData to fail.
 func TestLargeFileSparseUploadWithMemoryLimit(t *testing.T) {
-	testDir := filepath.Join(os.TempDir(), "orcas_large_file_sparse_upload")
+	testDir := testTmpDir("orcas_large_file_sparse_upload")
 	defer cleanupTestDir(t, testDir)
 
 	// Setup test filesystem with encryption (matching the log: needsEncrypt=true, endecKey length=32)
@@ -6901,9 +6913,9 @@ func TestLargeFileSparseUploadWithMemoryLimit(t *testing.T) {
 	}
 	defer ra.Close()
 
-	// Mark file as sparse with the exact size from the log: 1105911484 bytes (~1.05GB)
-	// Log shows: virtualSize=1105911484, totalChunks=106
-	sparseSize := int64(1105911484)
+	// Keep sparse size small to reduce disk usage in unit tests.
+	// Still spans multiple chunks and exercises the same code paths.
+	sparseSize := int64(32 << 20) // 32MB
 	ra.MarkSparseFile(sparseSize)
 	t.Logf("Created sparse file: fileID=%d, sparseSize=%d (~%.2f GB)", fileID, sparseSize, float64(sparseSize)/(1<<30))
 
@@ -7029,7 +7041,7 @@ func TestLargeFileSparseUploadWithMemoryLimit(t *testing.T) {
 // TestLargeFileSparseUploadWithMemoryLimitExactPattern tests with the exact write pattern from the log
 // This test uses the precise offsets and sizes observed in the failure log
 func TestLargeFileSparseUploadWithMemoryLimitExactPattern(t *testing.T) {
-	testDir := filepath.Join(os.TempDir(), "orcas_large_file_exact_pattern")
+	testDir := testTmpDir("orcas_large_file_exact_pattern")
 	defer cleanupTestDir(t, testDir)
 
 	// Setup with encryption (matching log: needsEncrypt=true)
@@ -7057,8 +7069,8 @@ func TestLargeFileSparseUploadWithMemoryLimitExactPattern(t *testing.T) {
 	}
 	defer ra.Close()
 
-	// Exact sparse size from log: 1105911484 bytes
-	sparseSize := int64(1105911484)
+	// Keep sparse size small to reduce disk usage.
+	sparseSize := int64(32 << 20) // 32MB
 	ra.MarkSparseFile(sparseSize)
 	t.Logf("File setup: sparseSize=%d, chunkSize=%d, totalChunks=%d",
 		sparseSize, fs.chunkSize, (sparseSize+int64(fs.chunkSize)-1)/int64(fs.chunkSize))
@@ -7146,7 +7158,7 @@ func TestLargeFileSparseUploadWithMemoryLimitExactPattern(t *testing.T) {
 // TestLargeFileSparseUploadChunkedFlushBug directly tests the flushLargeFileChunked bug
 // This test creates the exact conditions that cause chunk 5 to be missing
 func TestLargeFileSparseUploadChunkedFlushBug(t *testing.T) {
-	testDir := filepath.Join(os.TempDir(), "orcas_chunked_flush_bug")
+	testDir := testTmpDir("orcas_chunked_flush_bug")
 	defer cleanupTestDir(t, testDir)
 
 	// Setup with encryption
@@ -7156,9 +7168,9 @@ func TestLargeFileSparseUploadChunkedFlushBug(t *testing.T) {
 
 	// Use smaller values for faster testing but same ratio
 	// Original: sparseSize=1105911484 (~1GB), chunkSize=10MB, 106 chunks
-	// Test: sparseSize=110591148 (~100MB), chunkSize=10MB, 11 chunks
+	// Test: keep sparseSize small to reduce disk usage
 	fs.chunkSize = 10 << 20                  // 10MB chunks
-	sparseSize := int64(110591148)           // ~100MB (10x smaller for faster testing)
+	sparseSize := int64(32 << 20)            // 32MB
 	memoryLimit := int64(5 << 20)            // 5MB memory limit (triggers faster)
 	fs.journalMgr.config.MaxMemoryPerJournal = memoryLimit
 	fs.journalMgr.config.EnableMemoryLimit = true
@@ -7237,7 +7249,7 @@ func TestLargeFileSparseUploadChunkedFlushBug(t *testing.T) {
 // TestLargeFileSparseUploadDirectJournalFlush directly tests the journal flush mechanism
 // This test bypasses the RandomAccessor and tests the Journal directly to reproduce the bug
 func TestLargeFileSparseUploadDirectJournalFlush(t *testing.T) {
-	testDir := filepath.Join(os.TempDir(), "orcas_direct_journal_flush")
+	testDir := testTmpDir("orcas_direct_journal_flush")
 	defer cleanupTestDir(t, testDir)
 
 	// Setup with encryption (matching the log: needsEncrypt=true)
@@ -7261,7 +7273,8 @@ func TestLargeFileSparseUploadDirectJournalFlush(t *testing.T) {
 	// - baseSize=sparseSize (virtual size, not actual written size)
 	// - isSparse=true
 	// - isLargeFile=true (to trigger flushLargeFileChunked)
-	sparseSize := int64(1105911484) // Exact value from log
+	// Keep sparse size small to reduce disk usage.
+	sparseSize := int64(32 << 20) // 32MB
 	totalChunks := (sparseSize + int64(fs.chunkSize) - 1) / int64(fs.chunkSize)
 
 	journal := fs.journalMgr.GetOrCreate(fileID, 0, sparseSize) // baseDataID=0, baseSize=sparseSize
@@ -7380,7 +7393,7 @@ func TestLargeFileSparseUploadDirectJournalFlush(t *testing.T) {
 // TestNewSparseFileChunkedFlushWithEncryption specifically tests the scenario from the log
 // where a new encrypted sparse file fails during chunked flush
 func TestNewSparseFileChunkedFlushWithEncryption(t *testing.T) {
-	testDir := filepath.Join(os.TempDir(), "orcas_new_sparse_encrypted")
+	testDir := testTmpDir("orcas_new_sparse_encrypted")
 	defer cleanupTestDir(t, testDir)
 
 	// Setup with exact encryption parameters from log
@@ -7405,8 +7418,8 @@ func TestNewSparseFileChunkedFlushWithEncryption(t *testing.T) {
 	}
 	defer ra.Close()
 
-	// Use exact sparse size from log
-	sparseSize := int64(1105911484)
+	// Keep sparse size small to reduce disk usage.
+	sparseSize := int64(32 << 20) // 32MB
 	ra.MarkSparseFile(sparseSize)
 
 	totalChunks := (sparseSize + int64(fs.chunkSize) - 1) / int64(fs.chunkSize)
@@ -7500,7 +7513,7 @@ func TestNewSparseFileChunkedFlushWithEncryption(t *testing.T) {
 // Added else-if branch after the existing unmodified chunk copy logic to handle
 // new sparse files (dataID=0) by writing zero-filled chunks for unmodified regions.
 func TestFlushLargeFileChunkedBugFix(t *testing.T) {
-	testDir := filepath.Join(os.TempDir(), "orcas_chunked_flush_bugfix")
+	testDir := testTmpDir("orcas_chunked_flush_bugfix")
 	defer cleanupTestDir(t, testDir)
 
 	// Setup with encryption (same as the original bug scenario)
@@ -7605,7 +7618,7 @@ func TestFlushLargeFileChunkedBugFix(t *testing.T) {
 // where SetAllocationSize is called first (creating sparse file), then sequential writes follow.
 // This should use SequentialWriteBuffer path (more efficient) instead of Journal path.
 func TestSparseFileSequentialUpload(t *testing.T) {
-	testDir := filepath.Join(os.TempDir(), "orcas_sparse_sequential_upload")
+	testDir := testTmpDir("orcas_sparse_sequential_upload")
 	defer cleanupTestDir(t, testDir)
 
 	// Setup without encryption to test pure sequential path
@@ -7727,7 +7740,7 @@ func TestSparseFileSequentialUpload(t *testing.T) {
 // TestSparseFileIncrementalWrite tests incremental writes to an existing sparse file
 // This verifies that journal is used (not buffer path) to avoid rewriting the entire file
 func TestSparseFileIncrementalWrite(t *testing.T) {
-	testDir := filepath.Join(os.TempDir(), "orcas_sparse_incremental_write")
+	testDir := testTmpDir("orcas_sparse_incremental_write")
 	defer cleanupTestDir(t, testDir)
 
 	// Setup without encryption for clarity
@@ -7884,7 +7897,7 @@ func TestSparseFileIncrementalWrite(t *testing.T) {
 
 // TestJournalWALRecoveryDeletedFile tests that WAL files are deleted when file doesn't exist
 func TestJournalWALRecoveryDeletedFile(t *testing.T) {
-	testDir := filepath.Join(os.TempDir(), "orcas_test_wal_recovery_deleted")
+	testDir := testTmpDir("orcas_test_wal_recovery_deleted")
 	defer cleanupTestDir(t, testDir)
 
 	fs, bktID := setupTestFS(t, testDir)
@@ -7976,7 +7989,7 @@ func TestJournalWALRecoveryDeletedFile(t *testing.T) {
 
 // TestJournalWALNewFileNoWAL tests that new files (dataID=0) don't create WAL
 func TestJournalWALNewFileNoWAL(t *testing.T) {
-	testDir := filepath.Join(os.TempDir(), "orcas_test_wal_new_file")
+	testDir := testTmpDir("orcas_test_wal_new_file")
 	defer cleanupTestDir(t, testDir)
 
 	fs, bktID := setupTestFS(t, testDir)
@@ -8011,7 +8024,7 @@ func TestJournalWALNewFileNoWAL(t *testing.T) {
 
 // TestJournalWALRecoveryNewFile tests that new file WALs are skipped during recovery
 func TestJournalWALRecoveryNewFile(t *testing.T) {
-	testDir := filepath.Join(os.TempDir(), "orcas_test_wal_recovery_new")
+	testDir := testTmpDir("orcas_test_wal_recovery_new")
 	defer cleanupTestDir(t, testDir)
 
 	fs, bktID := setupTestFS(t, testDir)
@@ -8087,7 +8100,7 @@ func TestJournalWALRecoveryNewFile(t *testing.T) {
 
 // TestJournalWALFlushDeletesAllFiles tests that Flush deletes all WAL files (not just snapshot)
 func TestJournalWALFlushDeletesAllFiles(t *testing.T) {
-	testDir := filepath.Join(os.TempDir(), "orcas_test_wal_flush_delete")
+	testDir := testTmpDir("orcas_test_wal_flush_delete")
 	defer cleanupTestDir(t, testDir)
 
 	fs, bktID := setupTestFS(t, testDir)

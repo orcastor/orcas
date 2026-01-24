@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/orca-zhang/idgen"
 	"github.com/orcastor/orcas/core"
-	b "github.com/orca-zhang/borm"
 )
 
 // TestMemoryBenchmark_ChunkedFileWriter benchmarks memory usage of ChunkedFileWriter
@@ -50,8 +50,7 @@ func TestMemoryLeak_RandomAccessorRegistry(t *testing.T) {
 	h, c, bktID, cleanup := setupBenchmarkEnv(t)
 	defer cleanup()
 
-	chunkSize := int64(10 * 1024 * 1024)
-	ofs := NewOrcasFSWithConfig(h, c, bktID, &core.Config{ChunkSize: chunkSize})
+	ofs := NewOrcasFSWithConfig(h, c, bktID, &core.Config{})
 	defer ofs.Close()
 
 	stats := make([]MemoryStats, 0, 20)
@@ -61,8 +60,6 @@ func TestMemoryLeak_RandomAccessorRegistry(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 	stats = append(stats, collectMemoryStats("Baseline"))
 	printMemoryStats(stats[0])
-
-	ctx := context.Background()
 	chunk := make([]byte, 1024*1024) // 1MB
 	for i := range chunk {
 		chunk[i] = byte(i % 256)
@@ -76,7 +73,11 @@ func TestMemoryLeak_RandomAccessorRegistry(t *testing.T) {
 		filename := fmt.Sprintf("test_file_%d.dat", i)
 
 		// Create RandomAccessor
-		ra := NewRandomAccessor(ofs, int64(i+1000), &core.ObjectInfo{
+		ra, err := NewRandomAccessor(ofs, int64(i+1000))
+		if err != nil {
+			t.Fatalf("Failed to create RandomAccessor: %v", err)
+		}
+		ra.fileObj.Store(&core.ObjectInfo{
 			ID:   int64(i + 1000),
 			Name: filename,
 			Size: 0,
@@ -85,7 +86,7 @@ func TestMemoryLeak_RandomAccessorRegistry(t *testing.T) {
 
 		// Write 10MB
 		for offset := int64(0); offset < fileSize; offset += 1024 * 1024 {
-			_, err := ra.Write(chunk, offset)
+			err := ra.Write(offset, chunk)
 			if err != nil {
 				t.Fatalf("Failed to write: %v", err)
 			}
@@ -136,8 +137,7 @@ func TestMemoryLeak_JournalAccumulation(t *testing.T) {
 	h, c, bktID, cleanup := setupBenchmarkEnv(t)
 	defer cleanup()
 
-	chunkSize := int64(10 * 1024 * 1024)
-	ofs := NewOrcasFSWithConfig(h, c, bktID, &core.Config{ChunkSize: chunkSize})
+	ofs := NewOrcasFSWithConfig(h, c, bktID, &core.Config{})
 	defer ofs.Close()
 
 	stats := make([]MemoryStats, 0, 15)
@@ -146,8 +146,6 @@ func TestMemoryLeak_JournalAccumulation(t *testing.T) {
 	runtime.GC()
 	stats = append(stats, collectMemoryStats("Baseline"))
 	printMemoryStats(stats[0])
-
-	ctx := context.Background()
 	chunk := make([]byte, 1024*1024) // 1MB
 	for i := range chunk {
 		chunk[i] = byte(i % 256)
@@ -158,7 +156,11 @@ func TestMemoryLeak_JournalAccumulation(t *testing.T) {
 
 	// Create files with journals
 	for i := 0; i < numFiles; i++ {
-		ra := NewRandomAccessor(ofs, int64(i+2000), &core.ObjectInfo{
+		ra, err := NewRandomAccessor(ofs, int64(i+2000))
+		if err != nil {
+			t.Fatalf("Failed to create RandomAccessor: %v", err)
+		}
+		ra.fileObj.Store(&core.ObjectInfo{
 			ID:     int64(i + 2000),
 			Name:   fmt.Sprintf("journal_test_%d.dat", i),
 			Size:   0,
@@ -167,7 +169,7 @@ func TestMemoryLeak_JournalAccumulation(t *testing.T) {
 
 		// Write with random pattern to trigger journal
 		for offset := int64(0); offset < fileSize; offset += 1024 * 1024 {
-			ra.Write(chunk, offset)
+			ra.Write(offset, chunk)
 		}
 
 		ofs.registerRandomAccessor(int64(i+2000), ra)
@@ -215,8 +217,7 @@ func TestMemoryStress_ConcurrentLargeUploads(t *testing.T) {
 	h, c, bktID, cleanup := setupBenchmarkEnv(t)
 	defer cleanup()
 
-	chunkSize := int64(10 * 1024 * 1024)
-	ofs := NewOrcasFSWithConfig(h, c, bktID, &core.Config{ChunkSize: chunkSize})
+	ofs := NewOrcasFSWithConfig(h, c, bktID, &core.Config{})
 	defer ofs.Close()
 
 	stats := make([]MemoryStats, 0, 10)
@@ -232,8 +233,6 @@ func TestMemoryStress_ConcurrentLargeUploads(t *testing.T) {
 		numConcurrent = 20
 		fileSize      = 50 * 1024 * 1024 // 50MB per file
 	)
-
-	ctx := context.Background()
 	chunk := make([]byte, 1024*1024) // 1MB chunks
 	for i := range chunk {
 		chunk[i] = byte(i % 256)
@@ -273,7 +272,13 @@ func TestMemoryStress_ConcurrentLargeUploads(t *testing.T) {
 				}
 			}()
 
-			ra := NewRandomAccessor(ofs, int64(fileNum+3000), &core.ObjectInfo{
+			ra, err := NewRandomAccessor(ofs, int64(fileNum+3000))
+			if err != nil {
+				t.Errorf("Failed to create RandomAccessor: %v", err)
+				errors.Add(1)
+				return
+			}
+			ra.fileObj.Store(&core.ObjectInfo{
 				ID:     int64(fileNum + 3000),
 				Name:   fmt.Sprintf("stress_file_%d.dat", fileNum),
 				Size:   0,
@@ -282,13 +287,13 @@ func TestMemoryStress_ConcurrentLargeUploads(t *testing.T) {
 
 			// Write in 1MB chunks
 			for offset := int64(0); offset < fileSize; offset += 1024 * 1024 {
-				n, err := ra.Write(chunk, offset)
+				err := ra.Write(offset, chunk)
 				if err != nil {
 					t.Errorf("File %d write failed at offset %d: %v", fileNum, offset, err)
 					errors.Add(1)
 					return
 				}
-				totalBytesWritten.Add(int64(n))
+				totalBytesWritten.Add(int64(len(chunk)))
 			}
 
 			// Flush and close
@@ -346,7 +351,7 @@ func TestMemoryStress_ConcurrentLargeUploads(t *testing.T) {
 func runChunkedFileWriterBenchmark(t *testing.T, h core.Handler, c core.Ctx, bktID int64, fileSize, chunkSize int64) {
 	fmt.Printf("\n=== Benchmark: %d MB file, %d MB chunks ===\n", fileSize/1024/1024, chunkSize/1024/1024)
 
-	ofs := NewOrcasFSWithConfig(h, c, bktID, &core.Config{ChunkSize: chunkSize})
+	ofs := NewOrcasFSWithConfig(h, c, bktID, &core.Config{})
 	defer ofs.Close()
 
 	stats := make([]MemoryStats, 0, 20)
@@ -358,7 +363,11 @@ func runChunkedFileWriterBenchmark(t *testing.T, h core.Handler, c core.Ctx, bkt
 	printMemoryStats(stats[0])
 
 	// Create RandomAccessor
-	ra := NewRandomAccessor(ofs, 1, &core.ObjectInfo{
+	ra, err := NewRandomAccessor(ofs, 1)
+	if err != nil {
+		t.Fatalf("Failed to create RandomAccessor: %v", err)
+	}
+	ra.fileObj.Store(&core.ObjectInfo{
 		ID:     1,
 		Name:   "benchmark_file.dat",
 		Size:   0,
@@ -380,12 +389,12 @@ func runChunkedFileWriterBenchmark(t *testing.T, h core.Handler, c core.Ctx, bkt
 			writeSize = fileSize - bytesWritten
 		}
 
-		n, err := ra.Write(chunk[:writeSize], bytesWritten)
+		err := ra.Write(bytesWritten, chunk[:writeSize])
 		if err != nil {
 			t.Fatalf("Write failed: %v", err)
 		}
 
-		bytesWritten += int64(n)
+		bytesWritten += writeSize
 		newMBWritten := bytesWritten / 1024 / 1024
 
 		// Collect stats every 10MB
@@ -425,25 +434,47 @@ func setupBenchmarkEnv(t *testing.T) (core.Handler, core.Ctx, int64, func()) {
 		t.Fatalf("Failed to create temp dir: %v", err)
 	}
 
-	dbPath := "file:" + tempDir + "/orcas.db?cache=shared&_journal_mode=WAL"
-	db, err := b.Open(dbPath)
+	// Initialize database before login
+	err = core.InitDB(tempDir, "")
 	if err != nil {
 		os.RemoveAll(tempDir)
-		t.Fatalf("Failed to open database: %v", err)
+		t.Fatalf("Failed to init DB: %v", err)
 	}
 
-	h := core.NewLocalHandler(db)
-	c := core.NewCtx(context.Background(), h, nil, nil)
-
-	bktID, err := h.CreateBkt(c, "benchmark_bucket", "")
+	h := core.NewLocalHandler(tempDir, tempDir)
+	ctx := context.Background()
+	ctx, _, _, err = h.Login(ctx, "orcas", "orcas")
 	if err != nil {
-		db.Close()
+		os.RemoveAll(tempDir)
+		t.Fatalf("Failed to login: %v", err)
+	}
+
+	ig := idgen.NewIDGen(nil, 0)
+	bktID, _ := ig.New()
+	err = core.InitBucketDB(tempDir, bktID)
+	if err != nil {
+		os.RemoveAll(tempDir)
+		t.Fatalf("Failed to init bucket DB: %v", err)
+	}
+
+	// Create bucket using admin
+	admin := core.NewLocalAdmin(tempDir, tempDir)
+	bkt := &core.BucketInfo{
+		ID:        bktID,
+		Name:      "benchmark_bucket",
+		Type:      1,
+		Quota:     -1,
+		ChunkSize: 4 * 1024 * 1024, // 4MB chunk size
+	}
+	err = admin.PutBkt(ctx, []*core.BucketInfo{bkt})
+	if err != nil {
 		os.RemoveAll(tempDir)
 		t.Fatalf("Failed to create bucket: %v", err)
 	}
 
+	c := ctx
+
 	cleanup := func() {
-		db.Close()
 		os.RemoveAll(tempDir)
 	}
 

@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
@@ -39,6 +38,13 @@ func ensureTestUser(t *testing.T) {
 
 // ensureTestUserInPath ensures test user exists in the specified base path
 func ensureTestUserInPath(t *testing.T, basePath string) {
+	// Ensure main DB and schema are initialized for the given basePath.
+	// This is safe and idempotent in tests, and guarantees the `usr` table exists
+	// before we try to insert or query the test user.
+	if err := core.InitDB(basePath, ""); err != nil {
+		t.Logf("Warning: InitDB failed for basePath %q: %v", basePath, err)
+	}
+
 	// Try to login first, if successful, user already exists
 	handler := core.NewLocalHandler(basePath, "")
 	ctx := context.Background()
@@ -68,9 +74,9 @@ func ensureTestUserInPath(t *testing.T, basePath string) {
 // runPerformanceTest runs performance test and returns metrics
 func runPerformanceTest(t *testing.T, name string, dataSize, chunkSize int64, writeOps, concurrency int, cfg *core.Config) PerformanceMetrics {
 	// Initialize with temporary directories
-	tmpBaseDir := filepath.Join(os.TempDir(), "orcas_perf_test")
+	tmpBaseDir := testTmpDir("orcas_perf_test")
 	os.MkdirAll(tmpBaseDir, 0o755)
-	tmpDataDir := filepath.Join(os.TempDir(), "orcas_perf_test_data")
+	tmpDataDir := testTmpDir("orcas_perf_test_data")
 	os.MkdirAll(tmpDataDir, 0o755)
 
 	// Create Handler with paths
@@ -425,9 +431,9 @@ func TestPerformanceComprehensive(t *testing.T) {
 // runSequentialWriteTest runs sequential write performance test (test sequential write optimization)
 func runSequentialWriteTest(t *testing.T, name string, totalSize, chunkSize int64, cfg *core.Config) PerformanceMetrics {
 	// Initialize with temporary directories
-	tmpBaseDir := filepath.Join(os.TempDir(), "orcas_perf_test")
+	tmpBaseDir := testTmpDir("orcas_perf_test")
 	os.MkdirAll(tmpBaseDir, 0o755)
-	tmpDataDir := filepath.Join(os.TempDir(), "orcas_perf_test_data")
+	tmpDataDir := testTmpDir("orcas_perf_test_data")
 	os.MkdirAll(tmpDataDir, 0o755)
 
 	// Create context
@@ -572,9 +578,9 @@ func runSequentialWriteTest(t *testing.T, name string, totalSize, chunkSize int6
 // runRandomWriteTest runs random write performance test (different offsets, non-contiguous)
 func runRandomWriteTest(t *testing.T, name string, totalSize, chunkSize int64, cfg *core.Config) PerformanceMetrics {
 	// Initialize with temporary directories
-	tmpBaseDir := filepath.Join(os.TempDir(), "orcas_perf_test")
+	tmpBaseDir := testTmpDir("orcas_perf_test")
 	os.MkdirAll(tmpBaseDir, 0o755)
-	tmpDataDir := filepath.Join(os.TempDir(), "orcas_perf_test_data")
+	tmpDataDir := testTmpDir("orcas_perf_test_data")
 	os.MkdirAll(tmpDataDir, 0o755)
 
 	// Create context
@@ -743,9 +749,9 @@ func runRandomWriteTest(t *testing.T, name string, totalSize, chunkSize int64, c
 // runRandomWriteOverlappingTest runs random write performance test (overlapping writes)
 func runRandomWriteOverlappingTest(t *testing.T, name string, totalSize, chunkSize int64, cfg *core.Config) PerformanceMetrics {
 	// Initialize with temporary directories
-	tmpBaseDir := filepath.Join(os.TempDir(), "orcas_perf_test")
+	tmpBaseDir := testTmpDir("orcas_perf_test")
 	os.MkdirAll(tmpBaseDir, 0o755)
-	tmpDataDir := filepath.Join(os.TempDir(), "orcas_perf_test_data")
+	tmpDataDir := testTmpDir("orcas_perf_test_data")
 	os.MkdirAll(tmpDataDir, 0o755)
 
 	// Create context
@@ -881,9 +887,9 @@ func runRandomWriteOverlappingTest(t *testing.T, name string, totalSize, chunkSi
 // runRandomWriteSmallChunksTest runs random write performance test (small data chunks, multiple writes)
 func runRandomWriteSmallChunksTest(t *testing.T, name string, totalSize, chunkSize int64, cfg *core.Config) PerformanceMetrics {
 	// Initialize with temporary directories
-	tmpBaseDir := filepath.Join(os.TempDir(), "orcas_perf_test")
+	tmpBaseDir := testTmpDir("orcas_perf_test")
 	os.MkdirAll(tmpBaseDir, 0o755)
-	tmpDataDir := filepath.Join(os.TempDir(), "orcas_perf_test_data")
+	tmpDataDir := testTmpDir("orcas_perf_test_data")
 	os.MkdirAll(tmpDataDir, 0o755)
 
 	// Create context
@@ -1134,9 +1140,9 @@ func printAnalysis(results []PerformanceMetrics) {
 // runInstantUploadPerformanceTest runs instant upload performance test
 func runInstantUploadPerformanceTest(t *testing.T) {
 	// Initialize with temporary directories
-	tmpBaseDir := filepath.Join(os.TempDir(), "orcas_instant_upload_perf_test")
+	tmpBaseDir := testTmpDir("orcas_instant_upload_perf_test")
 	os.MkdirAll(tmpBaseDir, 0o755)
-	tmpDataDir := filepath.Join(os.TempDir(), "orcas_instant_upload_perf_test_data")
+	tmpDataDir := testTmpDir("orcas_instant_upload_perf_test_data")
 	os.MkdirAll(tmpDataDir, 0o755)
 
 	// Create context

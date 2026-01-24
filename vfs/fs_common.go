@@ -591,7 +591,6 @@ func (fs *OrcasFS) cleanupInactiveRandomAccessors() {
 	const inactivityThreshold = 10 * time.Minute // Remove RandomAccessors inactive for 10+ minutes
 	now := time.Now().Unix()
 
-	cleanedCount := 0
 	totalBefore := 0
 
 	// Collect inactive RandomAccessors
@@ -622,29 +621,140 @@ func (fs *OrcasFS) cleanupInactiveRandomAccessors() {
 	})
 
 	// Remove inactive RandomAccessors
-	for _, fileID := range inactiveFileIDs {
-		if val, ok := fs.raRegistry.Load(fileID); ok {
-			if ra, ok := val.(*RandomAccessor); ok && ra != nil {
-				// Try to close the RandomAccessor to release resources
-				if err := ra.Close(); err != nil {
-					DebugLog("[VFS RA Registry] WARNING: Failed to close inactive RandomAccessor: fileID=%d, error=%v",
-						fileID, err)
-				}
-			}
-		}
-		fs.raRegistry.Delete(fileID)
-		cleanedCount++
+	// MEMORY OPTIMIZATION: Process cleanup with limited concurrency using worker pool
+	// This prevents AES decryption temporary buffers from accumulating
+	const maxConcurrentCleanup = 5 // Limit concurrent cleanup operations
+
+	if len(inactiveFileIDs) == 0 {
+		return
 	}
 
-	if cleanedCount > 0 {
+	// Use worker pool pattern to safely limit concurrency
+	// This avoids channel deadlock/close issues by using a task queue and worker goroutines
+	taskChan := make(chan int64, len(inactiveFileIDs))
+	var wg sync.WaitGroup
+	var cleanedCount int64
+
+	// Start worker goroutines
+	for i := 0; i < maxConcurrentCleanup; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for fileID := range taskChan {
+				if val, ok := fs.raRegistry.Load(fileID); ok {
+					if ra, ok := val.(*RandomAccessor); ok && ra != nil {
+						// Try to close the RandomAccessor to release resources
+						// Note: Close() may trigger ForceFlush which reads/decrypts data
+						if err := ra.Close(); err != nil {
+							DebugLog("[VFS RA Registry] WARNING: Failed to close inactive RandomAccessor: fileID=%d, error=%v",
+								fileID, err)
+						}
+					}
+				}
+				fs.raRegistry.Delete(fileID)
+				atomic.AddInt64(&cleanedCount, 1)
+			}
+		}()
+	}
+
+	// Send all tasks to the queue
+	for _, fileID := range inactiveFileIDs {
+		taskChan <- fileID
+	}
+	close(taskChan) // Safe to close: all tasks are sent, workers will finish processing
+
+	// Wait for all workers to complete
+	wg.Wait()
+	cleanedCountInt := int(atomic.LoadInt64(&cleanedCount))
+
+	if cleanedCountInt > 0 {
 		DebugLog("[VFS RA Registry] Cleanup completed: total=%d, cleaned=%d, remaining=%d",
-			totalBefore, cleanedCount, totalBefore-cleanedCount)
+			totalBefore, cleanedCountInt, totalBefore-cleanedCountInt)
 
 		// MEMORY LEAK FIX: Force GC after cleaning up multiple RandomAccessors
 		// This helps reclaim memory from closed RandomAccessors and their chunks
-		if cleanedCount >= 5 {
-			DebugLog("[VFS RA Registry] Forcing GC after cleanup of %d RandomAccessors", cleanedCount)
+		if cleanedCountInt >= 5 {
+			DebugLog("[VFS RA Registry] Forcing GC after cleanup of %d RandomAccessors", cleanedCountInt)
 			runtime.GC()
 		}
 	}
+}
+
+// listAllObjects paginates through Handler.List until the requested count is reached or all pages are fetched.
+//
+// Count semantics:
+// - opt.Count > 0:  target total count to fetch
+//   - If Count < DefaultListPageSize: use Count as page size (single page)
+//   - If Count >= DefaultListPageSize: use DefaultListPageSize as page size (multiple pages)
+//
+// - opt.Count == -1: fetch ALL pages (use DefaultListPageSize as page size, no limit on total count)
+// - opt.Count == 0:  treated as "unspecified", fetch ALL pages (use DefaultListPageSize as page size)
+func listAllObjects(ctx core.Ctx, h core.Handler, bktID, pid int64, opt core.ListOptions) ([]*core.ObjectInfo, error) {
+	targetCount := opt.Count
+
+	// Normalize target count
+	if targetCount <= 0 {
+		// Fetch all pages: mark as "fetch all"
+		targetCount = -1
+	}
+
+	pageOpt := opt
+	pageOpt.Delim = "" // Start from first page
+
+	var all []*core.ObjectInfo
+
+	for {
+		// Determine page size for this request
+		if targetCount > 0 {
+			// Calculate remaining count needed
+			remaining := targetCount - len(all)
+			if remaining <= 0 {
+				// Already got enough, trim to exact target count if exceeded
+				if len(all) > targetCount {
+					all = all[:targetCount]
+				}
+				break
+			}
+			// Use remaining count if less than DefaultListPageSize, otherwise use DefaultListPageSize
+			if remaining < core.DefaultListPageSize {
+				pageOpt.Count = remaining
+			} else {
+				pageOpt.Count = core.DefaultListPageSize
+			}
+		} else {
+			// Fetch all pages: always use DefaultListPageSize
+			pageOpt.Count = core.DefaultListPageSize
+		}
+
+		objs, _, delim, err := h.List(ctx, bktID, pid, pageOpt)
+		if err != nil {
+			return nil, err
+		}
+
+		all = append(all, objs...)
+
+		// Check if we've reached the target count
+		if targetCount > 0 && len(all) >= targetCount {
+			// Trim to exact target count if we exceeded it
+			if len(all) > targetCount {
+				all = all[:targetCount]
+			}
+			break
+		}
+
+		// No more pages
+		if delim == "" || len(objs) == 0 {
+			break
+		}
+
+		// Continue with next page using returned delimiter
+		pageOpt.Delim = delim
+	}
+
+	return all, nil
+}
+
+// listAllObjectsForFS is a convenience wrapper bound to OrcasFS fields.
+func (fs *OrcasFS) listAllObjects(pid int64, opt core.ListOptions) ([]*core.ObjectInfo, error) {
+	return listAllObjects(fs.c, fs.h, fs.bktID, pid, opt)
 }

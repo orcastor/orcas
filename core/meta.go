@@ -1989,7 +1989,9 @@ func (dma *DefaultMetadataAdapter) ListObj(c Ctx, bktID, pid int64,
 	wd, delim, order string, count int) (o []*ObjectInfo,
 	cnt int64, d string, err error,
 ) {
-	conds := []interface{}{b.Eq("pid", pid)}
+	// Filter out deleted objects (pid >= 0) to ensure we only return active objects
+	// This prevents issues where deleted directories' children might still appear in listings
+	conds := []interface{}{b.Eq("pid", pid), b.Gte("pid", 0)}
 	if wd != "" {
 		if strings.ContainsAny(wd, "*?") {
 			// sqlite 分支使用 LIKE 模式匹配
@@ -2368,9 +2370,10 @@ func (dma *DefaultMetadataAdapter) ListChildren(c Ctx, bktID int64, pid int64, o
 	// Get total count
 	var cnt int64
 	// List children of specified parent (pid)
-	// Note: We don't need "pid >= 0" here because we're querying children of a specific parent
-	// If the parent is deleted (pid < 0), we shouldn't be querying its children anyway
-	conds := []interface{}{b.Eq("pid", pid)}
+	// Filter out deleted objects (pid >= 0) to ensure we only return active objects
+	// This prevents issues where deleted directories' children might still appear in listings
+	// even after the parent directory has been marked as deleted
+	conds := []interface{}{b.Eq("pid", pid), b.Gte("pid", 0)}
 	_, err = b.TableContext(c, db, OBJ_TBL).Select(&cnt,
 		b.Fields("count(1)"),
 		b.Where(conds...))

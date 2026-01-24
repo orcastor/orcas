@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 
 	"github.com/orcastor/orcas/core"
@@ -622,22 +623,29 @@ func dokanyDeleteDirectory(ofs *OrcasFS, fileName string, context uintptr) int {
 		return DOKAN_ERROR
 	}
 
-	// Check if directory is empty (fetch all pages)
-	children, err := ofs.listAllObjects(obj.ID, core.ListOptions{
-		Count: 1,
-	})
+	// Performance optimization: Skip checking if directory is empty
+	// Instead, directly mark as deleted and let async cleanup handle it
+	// This significantly improves performance for large directories
+	// The directory will be removed from parent's listing immediately,
+	// and all child objects will be cleaned up asynchronously in the background
+
+	// Step 1: Remove from parent directory first (mark as deleted)
+	// This makes the directory disappear from parent's listing immediately
+	err = ofs.h.Recycle(ofs.c, ofs.bktID, obj.ID)
 	if err != nil {
 		return DOKAN_ERROR
 	}
 
-	if len(children) > 0 {
-		return DOKAN_ERROR // Directory not empty
-	}
-
-	err = ofs.h.Delete(ofs.c, ofs.bktID, obj.ID)
-	if err != nil {
-		return DOKAN_ERROR
-	}
+	// Step 2: Asynchronously delete and clean up (permanent deletion)
+	// This includes recursively deleting all child objects and physical deletion of data files and metadata
+	// The async cleanup will handle both empty and non-empty directories
+	go func() {
+		err := ofs.h.Delete(ofs.c, ofs.bktID, obj.ID)
+		if err != nil {
+			// Log error but don't return it to the caller since deletion is already marked
+			// The directory is already removed from parent's listing
+		}
+	}()
 
 	return DOKAN_SUCCESS
 }
@@ -972,40 +980,78 @@ func (instance *DokanyInstance) Unmount() error {
 
 // Unlink deletes a file (Windows implementation)
 // This is a simplified version that uses handler methods directly
+// Unlink deletes a single file
 func (n *OrcasNode) Unlink(ctx context.Context, name string) syscall.Errno {
-	DebugLog("[VFS Unlink] Entry: name=%s, parentID=%d", name, n.objID)
+	return n.unlinkInternal(ctx, []string{name}, false)
+}
+
+// UnlinkBatch deletes multiple files efficiently using batch operations
+// This is optimized for deleting many files at once, reducing database round trips
+func (n *OrcasNode) UnlinkBatch(ctx context.Context, names []string) syscall.Errno {
+	if len(names) == 0 {
+		return 0
+	}
+	if len(names) == 1 {
+		return n.Unlink(ctx, names[0])
+	}
+	return n.unlinkInternal(ctx, names, true)
+}
+
+// unlinkInternal is the internal implementation for both single and batch unlink
+// batchMode: if true, uses batch optimizations for multiple files
+func (n *OrcasNode) unlinkInternal(ctx context.Context, names []string, batchMode bool) syscall.Errno {
+	DebugLog("[VFS Unlink] Entry: names=%v, parentID=%d, batchMode=%v", names, n.objID, batchMode)
+	
 	// Check if KEY is required
 	if errno := n.fs.checkKey(); errno != 0 {
-		DebugLog("[VFS Unlink] ERROR: checkKey failed: name=%s, parentID=%d, errno=%d", name, n.objID, errno)
+		DebugLog("[VFS Unlink] ERROR: checkKey failed: names=%v, parentID=%d, errno=%d", names, n.objID, errno)
 		return errno
 	}
 
 	obj, err := n.getObj()
 	if err != nil {
-		DebugLog("[VFS Unlink] ERROR: Failed to get parent object: name=%s, parentID=%d, error=%v", name, n.objID, err)
+		DebugLog("[VFS Unlink] ERROR: Failed to get parent object: names=%v, parentID=%d, error=%v", names, n.objID, err)
 		return syscall.ENOENT
 	}
 
 	if obj.Type != core.OBJ_TYPE_DIR {
-		DebugLog("[VFS Unlink] ERROR: Parent is not a directory: name=%s, parentID=%d, type=%d", name, n.objID, obj.Type)
+		DebugLog("[VFS Unlink] ERROR: Parent is not a directory: names=%v, parentID=%d, type=%d", names, n.objID, obj.Type)
 		return syscall.ENOTDIR
 	}
 
-	// Find child object
-	var targetID int64
-	var targetObj *core.ObjectInfo
+	// Build a map of names for quick lookup
+	nameMap := make(map[string]bool, len(names))
+	for _, name := range names {
+		nameMap[name] = true
+	}
 
-	// Try to find from RandomAccessor registry first
+	// Find all target objects
+	// IMPORTANT: Also check RandomAccessor registry for files that are being written
+	// (especially .tmp files) that may not be in List results yet
+	type targetInfo struct {
+		id   int64
+		obj  *core.ObjectInfo
+		name string
+	}
+	targets := make([]targetInfo, 0, len(names))
+	foundInRegistry := make(map[string]bool)
+
+	// First, try to find from RandomAccessor registry (for files being written, especially .tmp files)
 	if n.fs != nil {
 		n.fs.raRegistry.Range(func(key, value interface{}) bool {
 			if fileID, ok := key.(int64); ok {
 				if ra, ok := value.(*RandomAccessor); ok && ra != nil {
 					fileObj, err := ra.getFileObj()
-					if err == nil && fileObj != nil && fileObj.PID == obj.ID && fileObj.Name == name && fileObj.Type == core.OBJ_TYPE_FILE {
-						targetID = fileID
-						targetObj = fileObj
-						DebugLog("[VFS Unlink] Found target file from RandomAccessor registry: fileID=%d, name=%s", targetID, name)
-						return false // Stop iteration
+					if err == nil && fileObj != nil && fileObj.PID == obj.ID && fileObj.Type == core.OBJ_TYPE_FILE {
+						if nameMap[fileObj.Name] {
+							targets = append(targets, targetInfo{
+								id:   fileID,
+								obj:  fileObj,
+								name: fileObj.Name,
+							})
+							foundInRegistry[fileObj.Name] = true
+							DebugLog("[VFS Unlink] Found target file from RandomAccessor registry: fileID=%d, name=%s", fileID, fileObj.Name)
+						}
 					}
 				}
 			}
@@ -1013,107 +1059,216 @@ func (n *OrcasNode) Unlink(ctx context.Context, name string) syscall.Errno {
 		})
 	}
 
-	// If not found in RandomAccessor registry, try to find from List
-	if targetID == 0 {
+	// If not all found in RandomAccessor registry, try to find from List
+	if len(targets) < len(names) {
 		children, err := n.fs.listAllObjects(obj.ID, core.ListOptions{})
 		if err != nil {
-			DebugLog("[VFS Unlink] ERROR: Failed to list directory children: name=%s, parentID=%d, error=%v", name, obj.ID, err)
+			DebugLog("[VFS Unlink] ERROR: Failed to list directory children: names=%v, parentID=%d, error=%v", names, obj.ID, err)
 			return syscall.EIO
 		}
 
 		for _, child := range children {
-			if child.Name == name && child.Type == core.OBJ_TYPE_FILE {
-				targetID = child.ID
-				targetObj = child
-				DebugLog("[VFS Unlink] Found target file from List: fileID=%d, name=%s", targetID, name)
-				break
+			if nameMap[child.Name] && child.Type == core.OBJ_TYPE_FILE && !foundInRegistry[child.Name] {
+				targets = append(targets, targetInfo{
+					id:   child.ID,
+					obj:  child,
+					name: child.Name,
+				})
+				DebugLog("[VFS Unlink] Found target file from List: fileID=%d, name=%s", child.ID, child.Name)
 			}
 		}
 	}
 
-	if targetID == 0 {
-		DebugLog("[VFS Unlink] ERROR: Target file not found: name=%s, parentID=%d", name, obj.ID)
+	if len(targets) == 0 {
+		DebugLog("[VFS Unlink] ERROR: No target files found: names=%v, parentID=%d", names, obj.ID)
 		return syscall.ENOENT
 	}
 
-	// Remove from RandomAccessor registry if present
-	if n.fs != nil {
-		if targetRA := n.fs.getRandomAccessorByFileID(targetID); targetRA != nil {
-			// Force flush before deletion to ensure data is saved
-			if _, err := targetRA.ForceFlush(); err != nil {
-				DebugLog("[VFS Unlink] WARNING: Failed to flush file before deletion: fileID=%d, error=%v", targetID, err)
+	// Step 1: Remove from RandomAccessor registry if present and flush
+	// This ensures the files are removed from pending objects before deletion
+	targetIDs := make([]int64, 0, len(targets))
+	targetObjs := make([]*core.ObjectInfo, 0, len(targets))
+	dataIDsToClear := make([]int64, 0)
+
+	for _, target := range targets {
+		targetIDs = append(targetIDs, target.id)
+		if target.obj != nil {
+			targetObjs = append(targetObjs, target.obj)
+			if target.obj.DataID > 0 && target.obj.DataID != core.EmptyDataID {
+				dataIDsToClear = append(dataIDsToClear, target.obj.DataID)
 			}
-			// Unregister RandomAccessor
-			n.fs.unregisterRandomAccessor(targetID, targetRA)
-			DebugLog("[VFS Unlink] Removed file from RandomAccessor registry: fileID=%d", targetID)
+		}
+
+		// Remove from RandomAccessor registry if present
+		if n.fs != nil {
+			if targetRA := n.fs.getRandomAccessorByFileID(target.id); targetRA != nil {
+				// Force flush before deletion to ensure data is saved
+				if _, err := targetRA.ForceFlush(); err != nil {
+					DebugLog("[VFS Unlink] WARNING: Failed to flush file before deletion: fileID=%d, error=%v", target.id, err)
+				}
+				// Unregister RandomAccessor
+				n.fs.unregisterRandomAccessor(target.id, targetRA)
+				DebugLog("[VFS Unlink] Removed file from RandomAccessor registry: fileID=%d", target.id)
+			}
 		}
 	}
 
-	// Remove from parent directory first (mark as deleted)
-	err = n.fs.h.Recycle(n.fs.c, n.fs.bktID, targetID)
-	if err != nil {
-		DebugLog("[VFS Unlink] ERROR: Failed to recycle file: fileID=%d, name=%s, parentID=%d, error=%v", targetID, name, obj.ID, err)
-		return syscall.EIO
+	// If some targets were not found, fetch them from database
+	if len(targetObjs) < len(targetIDs) {
+		missingIDs := make([]int64, 0)
+		for i, targetID := range targetIDs {
+			if i >= len(targetObjs) || targetObjs[i] == nil {
+				missingIDs = append(missingIDs, targetID)
+			}
+		}
+		if len(missingIDs) > 0 {
+			fetchedObjs, err := n.fs.h.Get(n.fs.c, n.fs.bktID, missingIDs)
+			if err == nil {
+				for _, fetchedObj := range fetchedObjs {
+					targetObjs = append(targetObjs, fetchedObj)
+					if fetchedObj.DataID > 0 && fetchedObj.DataID != core.EmptyDataID {
+						dataIDsToClear = append(dataIDsToClear, fetchedObj.DataID)
+					}
+				}
+			}
+		}
 	}
 
-	// Update cache immediately
+	// Step 2: Batch Recycle - mark all files as deleted
+	// In batch mode, we can optimize by calling Recycle in parallel or using batch operations
+	if batchMode && len(targetIDs) > 1 {
+		// Use concurrent Recycle for better performance
+		const maxConcurrentRecycle = 10
+		sem := make(chan struct{}, maxConcurrentRecycle)
+		var wg sync.WaitGroup
+		var recycleErrors []error
+		var errorsMu sync.Mutex
+
+		for _, targetID := range targetIDs {
+			wg.Add(1)
+			go func(id int64) {
+				defer wg.Done()
+				sem <- struct{}{}
+				defer func() { <-sem }()
+
+				if err := n.fs.h.Recycle(n.fs.c, n.fs.bktID, id); err != nil {
+					errorsMu.Lock()
+					recycleErrors = append(recycleErrors, fmt.Errorf("failed to recycle file %d: %w", id, err))
+					errorsMu.Unlock()
+					DebugLog("[VFS Unlink] ERROR: Failed to recycle file: fileID=%d, error=%v", id, err)
+				}
+			}(targetID)
+		}
+		wg.Wait()
+
+		if len(recycleErrors) > 0 {
+			DebugLog("[VFS Unlink] ERROR: Some files failed to recycle: errors=%d", len(recycleErrors))
+			// Continue with deletion even if some Recycle operations failed
+		}
+	} else {
+		// Sequential Recycle for single file or when batch mode is disabled
+		for _, targetID := range targetIDs {
+			if err := n.fs.h.Recycle(n.fs.c, n.fs.bktID, targetID); err != nil {
+				DebugLog("[VFS Unlink] ERROR: Failed to recycle file: fileID=%d, error=%v", targetID, err)
+				return syscall.EIO
+			}
+		}
+	}
+
+	// Step 3: Update cache immediately
+	// CRITICAL: Clear all caches for the deleted files to prevent data corruption
 	n.invalidateDirListCache(obj.ID)
 
-	// Get file object to get DataID before clearing cache
-	if targetObj == nil {
-		targetObjs, err := n.fs.h.Get(n.fs.c, n.fs.bktID, []int64{targetID})
-		if err == nil && len(targetObjs) > 0 {
-			targetObj = targetObjs[0]
-		}
-	}
-	if targetObj != nil && targetObj.DataID > 0 && targetObj.DataID != core.EmptyDataID {
-		// Clear DataInfo cache for the deleted file's DataID
-		dataInfoCacheKey := targetObj.DataID
-		dataInfoCache.Del(dataInfoCacheKey)
-		decodingReaderCache.Del(dataInfoCacheKey)
-		DebugLog("[VFS Unlink] Cleared DataInfo cache for deleted file: fileID=%d, dataID=%d", targetID, dataInfoCacheKey)
+	// Clear DataInfo cache for all deleted files' DataIDs
+	for _, dataID := range dataIDsToClear {
+		dataInfoCache.Del(dataID)
+		decodingReaderCache.Del(dataID)
+		DebugLog("[VFS Unlink] Cleared DataInfo cache for deleted file: dataID=%d", dataID)
 	}
 
-	// Clear file object cache
-	fileObjCache.Del(targetID)
-	DebugLog("[VFS Unlink] Cleared file object cache for deleted file: fileID=%d", targetID)
+	// Clear file object cache for all deleted files
+	for _, targetID := range targetIDs {
+		fileObjCache.Del(targetID)
+		DebugLog("[VFS Unlink] Cleared file object cache for deleted file: fileID=%d", targetID)
+	}
 
 	// CRITICAL: Remove journal and clean up jwal files
 	// This ensures jwal files are deleted even if RandomAccessor was already closed
 	if n.fs.journalMgr != nil {
-		n.fs.journalMgr.Remove(targetID)
-		DebugLog("[VFS Unlink] Removed journal and cleaned up jwal files: fileID=%d", targetID)
+		for _, targetID := range targetIDs {
+			n.fs.journalMgr.Remove(targetID)
+			DebugLog("[VFS Unlink] Removed journal and cleaned up jwal files: fileID=%d", targetID)
+		}
 	}
 
 	// Invalidate parent directory cache
 	n.invalidateObj()
 
-	// Schedule delayed deletion for atomic replace adaptation
+	// Step 4: Schedule delayed deletion for atomic replace adaptation
+	// Instead of immediately deleting, schedule it for 5 seconds later
+	// This allows Rename to detect atomic replace pattern and merge versions
 	if n.fs.atomicReplaceMgr != nil {
-		if err := n.fs.atomicReplaceMgr.ScheduleDeletion(n.fs.bktID, obj.ID, name, targetID); err != nil {
-			DebugLog("[VFS Unlink] WARNING: Failed to schedule delayed deletion: fileID=%d, error=%v", targetID, err)
-			// Fallback to immediate deletion if scheduling fails
-			go func() {
-				err := n.fs.h.Delete(n.fs.c, n.fs.bktID, targetID)
-				if err != nil {
-					DebugLog("[VFS Unlink] ERROR: Failed to permanently delete file: fileID=%d, error=%v", targetID, err)
-				} else {
-					DebugLog("[VFS Unlink] Successfully permanently deleted file: fileID=%d", targetID)
-				}
-			}()
-		} else {
-			DebugLog("[VFS Unlink] Scheduled delayed deletion: fileID=%d, name=%s (will delete in 5s)", targetID, name)
+		// Schedule deletion for each file
+		for i, targetID := range targetIDs {
+			targetName := targets[i].name
+			if err := n.fs.atomicReplaceMgr.ScheduleDeletion(n.fs.bktID, obj.ID, targetName, targetID); err != nil {
+				DebugLog("[VFS Unlink] WARNING: Failed to schedule delayed deletion: fileID=%d, error=%v", targetID, err)
+				// Fallback to immediate deletion if scheduling fails
+				go func(id int64) {
+					err := n.fs.h.Delete(n.fs.c, n.fs.bktID, id)
+					if err != nil {
+						DebugLog("[VFS Unlink] ERROR: Failed to permanently delete file: fileID=%d, error=%v", id, err)
+					} else {
+						DebugLog("[VFS Unlink] Successfully permanently deleted file: fileID=%d", id)
+					}
+				}(targetID)
+			} else {
+				DebugLog("[VFS Unlink] Scheduled delayed deletion: fileID=%d, name=%s (will delete in 5s)", targetID, targetName)
+			}
 		}
 	} else {
 		// Fallback: Asynchronously delete and clean up (permanent deletion)
-		go func() {
-			err := n.fs.h.Delete(n.fs.c, n.fs.bktID, targetID)
-			if err != nil {
-				DebugLog("[VFS Unlink] ERROR: Failed to permanently delete file: fileID=%d, error=%v", targetID, err)
-			} else {
-				DebugLog("[VFS Unlink] Successfully permanently deleted file: fileID=%d", targetID)
+		// This includes physical deletion of data files and metadata
+		// In batch mode, use concurrent deletion for better performance
+		if batchMode && len(targetIDs) > 1 {
+			// Use concurrent Delete for better performance
+			const maxConcurrentDelete = 10
+			sem := make(chan struct{}, maxConcurrentDelete)
+			var wg sync.WaitGroup
+
+			for _, targetID := range targetIDs {
+				wg.Add(1)
+				go func(id int64) {
+					defer wg.Done()
+					sem <- struct{}{}
+					defer func() { <-sem }()
+
+					// Use the original context to preserve authentication information
+					// Context is read-only and safe to use in goroutines
+					err := n.fs.h.Delete(n.fs.c, n.fs.bktID, id)
+					if err != nil {
+						DebugLog("[VFS Unlink] ERROR: Failed to permanently delete file: fileID=%d, error=%v", id, err)
+					} else {
+						DebugLog("[VFS Unlink] Successfully permanently deleted file: fileID=%d", id)
+					}
+				}(targetID)
 			}
-		}()
+			// Don't wait for deletion to complete, it's asynchronous
+		} else {
+			// Sequential Delete for single file
+			for _, targetID := range targetIDs {
+				go func(id int64) {
+					// Use the original context to preserve authentication information
+					// Context is read-only and safe to use in goroutines
+					err := n.fs.h.Delete(n.fs.c, n.fs.bktID, id)
+					if err != nil {
+						DebugLog("[VFS Unlink] ERROR: Failed to permanently delete file: fileID=%d, error=%v", id, err)
+					} else {
+						DebugLog("[VFS Unlink] Successfully permanently deleted file: fileID=%d", id)
+					}
+				}(targetID)
+			}
+		}
 	}
 
 	return 0

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"hash"
 	"io"
+	"os"
 	"sort"
 	"strings"
 	"sync"
@@ -36,6 +37,18 @@ const (
 	LargeChunkPoolCap   = 4 << 20  // 4MB - capacity for large file chunk pool
 	DefaultChunkPoolCap = 10 << 20 // 10MB - default chunk buffer pool capacity
 	ZeroSliceSize       = 64 << 10 // 64KB - zero slice size for efficient clearing
+	// Sequential buffer tiered pool configuration
+	// Three tiers: 128KB (small), 1MB (medium), 10MB (large)
+	// Larger buffers are more expensive, so we keep fewer of them
+	SequentialBufferTier1Cap = 128 << 10 // 128KB - tier 1: small files, keep more buffers
+	SequentialBufferTier2Cap = 1 << 20   // 1MB - tier 2: medium files, keep moderate buffers
+	SequentialBufferTier3Cap = 10 << 20  // 10MB - tier 3: large files, keep fewer buffers
+
+	// Maximum number of buffers to keep in each pool tier
+	// Larger buffers consume more memory, so we limit them more strictly
+	SequentialBufferTier1Max = 100 // 128KB buffers: ~12.8MB total
+	SequentialBufferTier2Max = 20  // 1MB buffers: ~20MB total
+	SequentialBufferTier3Max = 5   // 10MB buffers: ~50MB total
 
 	// Buffer operation limits
 	DefaultMaxBufferOps  = 10000     // Maximum number of write operations in buffer
@@ -67,15 +80,20 @@ var (
 	DefaultIntSlicePoolCap = 32 // Capacity for int slice pool
 
 	// Cache configuration
-	FileCacheSize   = 512              // Number of file objects to cache
-	DataCacheSize   = 512              // Number of data info objects to cache
-	DirCacheSize    = 512              // Number of directory listings to cache
-	ReaderCacheSize = 64               // Number of decoding readers to cache
-	StatfsCacheSize = 16               // Number of statfs results to cache
-	CacheShardCount = 16               // Number of cache shards for concurrency
-	CacheTTL        = 30 * time.Second // Cache time-to-live for file/data cache
-	ReaderCacheTTL  = 5 * time.Minute  // Cache TTL for decoding readers
-	StatfsCacheTTL  = 5 * time.Second  // Cache TTL for statfs results
+	FileCacheSize        = 512              // Number of file objects to cache
+	DataCacheSize        = 512              // Number of data info objects to cache
+	DirCacheSize         = 512              // Number of directory listings to cache
+	ReaderCacheSize      = 64               // Number of decoding readers to cache
+	DecodedFileCacheSize = 16               // Number of decoded packaged file blobs to cache (memory-heavy)
+	StatfsCacheSize      = 16               // Number of statfs results to cache
+	CacheShardCount      = 16               // Number of cache shards for concurrency
+	CacheTTL             = 30 * time.Second // Cache time-to-live for file/data cache
+	ReaderCacheTTL       = 30 * time.Second // Cache TTL for decoding readers
+	StatfsCacheTTL       = 5 * time.Second  // Cache TTL for statfs results
+	ChunkCacheTTL        = 10 * time.Second // Cache TTL for chunks
+	ChunkCacheSize       = 8                // Number of chunks to cache per reader (reduced from hardcoded 64 to save memory)
+	GlobalChunkCacheSize = 32               // Total number of chunks to cache globally (approx 320MB at 10MB/chunk)
+	// Increased from 16 to 32 to reduce repeated AES decryption and temporary buffer allocations
 )
 
 var (
@@ -93,6 +111,48 @@ var (
 		},
 	}
 
+	// Tiered buffer pool with capacity limits
+	// Three tiers: 128KB, 1MB, 10MB with decreasing pool sizes
+	bufferTier1Pool = &limitedPool{
+		pool: sync.Pool{
+			New: func() interface{} {
+				return make([]byte, 0, SequentialBufferTier1Cap)
+			},
+		},
+		maxCount: SequentialBufferTier1Max,
+		count:    0,
+		mu:       sync.Mutex{},
+	}
+
+	bufferTier2Pool = &limitedPool{
+		pool: sync.Pool{
+			New: func() interface{} {
+				return make([]byte, 0, SequentialBufferTier2Cap)
+			},
+		},
+		maxCount: SequentialBufferTier2Max,
+		count:    0,
+		mu:       sync.Mutex{},
+	}
+
+	bufferTier3Pool = &limitedPool{
+		pool: sync.Pool{
+			New: func() interface{} {
+				return make([]byte, 0, SequentialBufferTier3Cap)
+			},
+		},
+		maxCount: SequentialBufferTier3Max,
+		count:    0,
+		mu:       sync.Mutex{},
+	}
+
+	// Object pool for SequentialWriteBuffer (without buffer, buffer comes from tiered pools)
+	sequentialBufferPool = sync.Pool{
+		New: func() interface{} {
+			return &SequentialWriteBuffer{}
+		},
+	}
+
 	// Zero slice for efficient zero-filling (reused to avoid allocations)
 	zeroSlice = make([]byte, ZeroSliceSize) // 64KB zero slice
 
@@ -100,6 +160,42 @@ var (
 	// atomic.Value cannot store nil, so we use this marker instead
 	clearedChunkedWriterMarker = &ChunkedFileWriter{}
 )
+
+// limitedPool is a sync.Pool wrapper with capacity limit
+type limitedPool struct {
+	pool     sync.Pool
+	maxCount int
+	count    int
+	mu       sync.Mutex
+}
+
+// Get gets an object from the pool if available and under capacity limit
+func (p *limitedPool) Get() interface{} {
+	p.mu.Lock()
+	if p.count > 0 {
+		p.count--
+		p.mu.Unlock()
+		return p.pool.Get()
+	}
+	p.mu.Unlock()
+	return nil
+}
+
+// Put puts an object back to the pool if under capacity limit
+func (p *limitedPool) Put(x interface{}) {
+	if x == nil {
+		return
+	}
+	p.mu.Lock()
+	if p.count < p.maxCount {
+		p.count++
+		p.mu.Unlock()
+		p.pool.Put(x)
+	} else {
+		p.mu.Unlock()
+		// Pool is full, discard the object (let GC handle it)
+	}
+}
 
 func allocChunkData(size int) []byte {
 	if size <= 0 {
@@ -157,25 +253,24 @@ var (
 	// TTL is short (5 seconds) but will be refreshed on access (LRU behavior)
 	statfsCache = ecache2.NewLRUCache[int64](uint16(CacheShardCount/4), uint16(StatfsCacheSize), StatfsCacheTTL)
 
-	// singleflight group: prevent duplicate concurrent requests for the same directory
-	// key: "<dirID>", ensures only one request per directory at a time
-	dirListSingleFlight singleflight.Group
+	// ecache cache: global cache for chunks (plain or decompressed/decrypted)
+	// key: [2]int64{dataID, sn}, value: []byte
+	// Global limit controls total memory usage for cached chunks
+	globalChunkCache = ecache2.NewLRUCache[[2]int64](uint16(CacheShardCount), uint16(GlobalChunkCacheSize), ChunkCacheTTL)
 
-	// singleflight group: prevent duplicate concurrent chunk reads
-	// key: "chunk_<dataID>_<sn>", ensures only one read per chunk at a time
-	chunkReadSingleFlight singleflight.Group
+	// ecache cache: global cache for decoded file data (for packaged files)
+	// key: dataID (int64), value: []byte
+	globalDecodedFileCache = ecache2.NewLRUCache[int64](uint16(CacheShardCount/4), uint16(DecodedFileCacheSize), ChunkCacheTTL)
 
-	// singleflight group: prevent duplicate concurrent chunk flushes
-	// key: "flush_<dataID>_<sn>", ensures only one flush per chunk at a time
-	chunkFlushSingleFlight singleflight.Group
-
-	// singleflight group: prevent duplicate concurrent package file decoding
-	// key: "decode_pkg_<dataID>", ensures only one decode per package file at a time
-	packageDecodeSingleFlight singleflight.Group
-
-	// singleflight group: prevent duplicate concurrent DataInfo updates for sequential writes
-	// key: "update_datainfo_<dataID>", ensures only one update per DataID at a time
-	seqDataInfoUpdateSingleFlight singleflight.Group
+	// singleflight group: prevent duplicate concurrent operations globally.
+	//
+	// Key prefixes MUST remain unique per operation type to avoid cross-talk:
+	// - dir list: "<dirID>"
+	// - chunk read: "chunk_<dataID>_<sn>"
+	// - chunk flush: "flush_<dataID>_<sn>"
+	// - package decode: "decode_pkg_<dataID>"
+	// - seq datainfo update: "update_datainfo_<dataID>"
+	globalSingleFlight singleflight.Group
 
 	tempFlushMgr     *delayedFlushManager
 	tempFlushMgrOnce sync.Once
@@ -184,6 +279,46 @@ var (
 	periodicSyncMgr     *periodicSyncManager
 	periodicSyncMgrOnce sync.Once
 )
+
+var (
+	// ORCAS_CACHE_EVICT_TO_POOL=0 disables returning evicted cached []byte to tier pools.
+	// Default is ON.
+	cacheEvictToPool atomic.Bool
+)
+
+func init() {
+	// Default ON; allow emergency disable.
+	cacheEvictToPool.Store(true)
+	if os.Getenv("ORCAS_CACHE_EVICT_TO_POOL") == "0" {
+		cacheEvictToPool.Store(false)
+	}
+
+	// Attach low-overhead probes to memory-heavy caches.
+	// NOTE: ecache2 signals eviction by calling inspector with action=PUT, status=-1,
+	// passing the evicted item's key/value.
+	globalChunkCache.Inspect(func(action int, _ [2]int64, iface *interface{}, _ []byte, status int) {
+		if !cacheEvictToPool.Load() {
+			return
+		}
+		if action != ecache2.PUT || status != -1 || iface == nil || *iface == nil {
+			return
+		}
+		if b, ok := (*iface).([]byte); ok && len(b) > 0 {
+			putBufferToTier(b)
+		}
+	})
+	globalDecodedFileCache.Inspect(func(action int, _ int64, iface *interface{}, _ []byte, status int) {
+		if !cacheEvictToPool.Load() {
+			return
+		}
+		if action != ecache2.PUT || status != -1 || iface == nil || *iface == nil {
+			return
+		}
+		if b, ok := (*iface).([]byte); ok && len(b) > 0 {
+			putBufferToTier(b)
+		}
+	})
+}
 
 // isRandomWritePattern detects if the write pattern is random (non-sequential)
 func (ra *RandomAccessor) isRandomWritePattern() bool {
@@ -834,7 +969,7 @@ func (cw *ChunkedFileWriter) Write(offset int64, data []byte) error {
 
 			// Wait for any ongoing flush to complete (non-blocking if no flush in progress)
 			// This ensures we don't create a buffer for a chunk that's being flushed
-			_, _, _ = chunkFlushSingleFlight.Do(flushKey, func() (interface{}, error) {
+			_, _, _ = globalSingleFlight.Do(flushKey, func() (interface{}, error) {
 				return nil, nil
 			})
 
@@ -946,7 +1081,7 @@ func (cw *ChunkedFileWriter) Write(offset int64, data []byte) error {
 			} else {
 				// Chunk doesn't exist on disk, might be flushing
 				// Wait for any ongoing flush to complete (non-blocking if no flush in progress)
-				_, _, _ = chunkFlushSingleFlight.Do(flushKey, func() (interface{}, error) {
+				_, _, _ = globalSingleFlight.Do(flushKey, func() (interface{}, error) {
 					// If flush is already in progress, this will wait for it to complete
 					// If flush is not in progress, this will return immediately
 					return nil, nil
@@ -1177,29 +1312,31 @@ func (cw *ChunkedFileWriter) Write(offset int64, data []byte) error {
 			delete(cw.chunks, sn) // Remove immediately to prevent concurrent writes
 			cw.mu.Unlock()
 
-			// MEMORY LEAK FIX: Explicitly clear chunk buffer data to help GC
-			// This prevents 10MB buffers from accumulating in memory during continuous uploads
-			if bufToDelete != nil {
-				bufToDelete.mu.Lock()
-				if cap(bufToDelete.data) > 0 {
-					// Clear the entire underlying array to allow GC to reclaim memory
-					// Set to nil instead of just clearing to ensure immediate release
-					bufToDelete.data = nil
-				}
-				bufToDelete.ranges = nil
-				bufToDelete.mu.Unlock()
-			}
-
 			// Use singleflight to ensure only one flush per chunk at a time
 			// Key format: "flush_<dataID>_<sn>"
 			flushKey := fmt.Sprintf("flush_%d_%d", cw.dataID, sn)
 
 			// Flush synchronously (using singleflight to prevent duplicate flushes)
-			_, err, _ := chunkFlushSingleFlight.Do(flushKey, func() (interface{}, error) {
+			_, err, _ := globalSingleFlight.Do(flushKey, func() (interface{}, error) {
 				// Flush the chunk using the buffer (no copy needed for synchronous flush)
+				// IMPORTANT: Must flush BEFORE clearing buffer data
 				flushErr := cw.flushChunkWithBuffer(sn, buf)
 				if flushErr != nil {
 					return nil, flushErr
+				}
+
+				// MEMORY LEAK FIX: Explicitly clear chunk buffer data to help GC
+				// This prevents 10MB buffers from accumulating in memory during continuous uploads
+				// IMPORTANT: Clear buffer AFTER flush completes to ensure data is written
+				if bufToDelete != nil {
+					bufToDelete.mu.Lock()
+					if cap(bufToDelete.data) > 0 {
+						// Clear the entire underlying array to allow GC to reclaim memory
+						// Set to nil instead of just clearing to ensure immediate release
+						bufToDelete.data = nil
+					}
+					bufToDelete.ranges = nil
+					bufToDelete.mu.Unlock()
 				}
 
 				// CRITICAL: Only return chunk buffer to pool if chunk is completely written
@@ -1487,7 +1624,7 @@ func (cw *ChunkedFileWriter) flushChunkWithBuffer(sn int, buf *chunkBuffer) erro
 				// Async DataInfo update
 				go func() {
 					updateKey := fmt.Sprintf("update_datainfo_%d", dataID)
-					_, err, _ := seqDataInfoUpdateSingleFlight.Do(updateKey, func() (interface{}, error) {
+					_, err, _ := globalSingleFlight.Do(updateKey, func() (interface{}, error) {
 						_, updateErr := lh.PutDataInfo(ctx, bktID, []*core.DataInfo{&dataInfoSnapshot})
 						if updateErr != nil {
 							DebugLog("[VFS ChunkedFileWriter flushChunk] WARNING: Failed to update DataInfo: fileID=%d, dataID=%d, sn=%d, error=%v", fileID, dataID, currentSN, updateErr)
@@ -1780,7 +1917,7 @@ func (cw *ChunkedFileWriter) Flush(force bool) error {
 				// Key format: "flush_<dataID>_<sn>"
 				flushKey := fmt.Sprintf("flush_%d_%d", cw.dataID, chunkSN)
 
-				_, err, _ := chunkFlushSingleFlight.Do(flushKey, func() (interface{}, error) {
+				_, err, _ := globalSingleFlight.Do(flushKey, func() (interface{}, error) {
 					// Process chunk (compression/encryption) - reuse flushChunkWithBuffer logic
 					flushErr := cw.flushChunkWithBuffer(chunkSN, buf)
 					if flushErr != nil {
@@ -1915,7 +2052,37 @@ func (cw *ChunkedFileWriter) Flush(force bool) error {
 	}
 
 	// Update cache
+	// CRITICAL: Update both fileID key and fileObjKey to ensure cache consistency
+	// For sparse files, this is essential because Truncate may have set EmptyDataID
+	// but ChunkedFileWriter created the actual DataID, so we must update all cache entries
 	fileObjCache.Put(cw.fileID, obj)
+	// Also update RandomAccessor's fileObjKey cache and atomic value if available
+	// IMPORTANT: For sparse files, RandomAccessor may not be registered in raRegistry
+	// but we still need to update the cache using fileID as key
+	// CRITICAL: Update ra.fileObj atomic value FIRST before updating cache
+	// This ensures getFileObj() fast path returns the correct DataID
+	// Also try to use cw.ra if available (set during ChunkedFileWriter creation)
+	if cw.ra != nil {
+		// Update atomic value first (fast path in getFileObj)
+		cw.ra.fileObj.Store(obj)
+		// Then update cache (medium path in getFileObj)
+		fileObjCache.Put(cw.ra.fileObjKey, obj)
+		DebugLog("[VFS ChunkedFileWriter Flush] Updated RandomAccessor fileObj cache via cw.ra: fileID=%d, dataID=%d, size=%d", cw.fileID, obj.DataID, obj.Size)
+	} else {
+		// Try to get RandomAccessor from registry
+		ra := cw.fs.getRandomAccessorByFileID(cw.fileID)
+		if ra != nil {
+			// Update atomic value first (fast path in getFileObj)
+			ra.fileObj.Store(obj)
+			// Then update cache (medium path in getFileObj)
+			fileObjCache.Put(ra.fileObjKey, obj)
+			DebugLog("[VFS ChunkedFileWriter Flush] Updated RandomAccessor fileObj cache via registry: fileID=%d, dataID=%d, size=%d", cw.fileID, obj.DataID, obj.Size)
+		} else {
+			// RandomAccessor not found, but we still updated fileObjCache with fileID key
+			// This should be sufficient for getFileObj() to find the updated object via cache
+			DebugLog("[VFS ChunkedFileWriter Flush] RandomAccessor not found, updated fileObjCache with fileID key: fileID=%d, dataID=%d, size=%d", cw.fileID, obj.DataID, obj.Size)
+		}
+	}
 	dataInfoCache.Put(cw.dataID, dataInfo)
 
 	// After sync flush, append file to directory listing cache
@@ -1929,12 +2096,6 @@ func (cw *ChunkedFileWriter) Flush(force bool) error {
 		DebugLog("[VFS ChunkedFileWriter Flush] Appended file to directory listing cache after sync flush: fileID=%d, dirID=%d, name=%s", cw.fileID, obj.PID, obj.Name)
 	}
 
-	// Update RandomAccessor's fileObj cache if available
-	// This ensures that subsequent reads use the updated file size
-	if ra := cw.fs.getRandomAccessorByFileID(cw.fileID); ra != nil {
-		ra.fileObj.Store(obj)
-		fileObjCache.Put(ra.fileObjKey, obj)
-	}
 
 	// Calculate compression ratio if applicable
 	compressionRatio := 1.0
@@ -2054,15 +2215,13 @@ func (ra *RandomAccessor) Write(offset int64, data []byte) error {
 	if ra.isTmpFile != actualIsTmpFile {
 		// 文件名与 RA 创建时的 isTmpFile 状态不一致，说明发生了重命名
 		if ra.isTmpFile && !actualIsTmpFile {
-			// 从 .tmp 重命名为普通文件：
-			// 清理掉仍然挂在 RA 上的 TMP 类型 ChunkedFileWriter，避免后续误用
-			// IMPORTANT: 同时清除 sparseSize，因为重命名后的文件不应该再被当作sparse file
-			// 否则后续写入会被误判为sparse file，创建SPARSE类型的ChunkedFileWriter，导致大小不匹配错误
-			DebugLog("[VFS RandomAccessor Write] Detected .tmp rename for fileID=%d (oldName=%s), clearing TMP ChunkedFileWriter and sparseSize, switching to non-tmp mode", ra.fileID, fileObj.Name)
+			// 从 .tmp 重命名为普通文件：必须报错并要求重建 RandomAccessor
+			// 这是为了确保 TempFileWriter 的正确生命周期管理
+			DebugLog("[VFS RandomAccessor Write] File was renamed from .tmp, RandomAccessor must be recreated: fileID=%d, fileName=%s", ra.fileID, fileObj.Name)
+			// Clear ChunkedFileWriter before closing
 			ra.chunkedWriter.Store(clearedChunkedWriterMarker)
-			atomic.StoreInt64(&ra.sparseSize, 0) // 清除sparseSize，避免误判为sparse file
-			ra.isTmpFile = false
-			// 继续往下走，使用普通文件的顺写/随机写路径，不再直接拒绝
+			ra.Close()
+			return fmt.Errorf("file was renamed from .tmp, RandomAccessor must be recreated: fileID=%d, fileName=%s", ra.fileID, fileObj.Name)
 		} else if !ra.isTmpFile && actualIsTmpFile {
 			// 从普通文件重命名为 .tmp（极少见），当前 RA 没有 TMP 语义，安全起见仍然要求重建
 			DebugLog("[VFS RandomAccessor Write] File was renamed to .tmp, RandomAccessor must be recreated: fileID=%d, fileName=%s", ra.fileID, fileObj.Name)
@@ -2078,12 +2237,8 @@ func (ra *RandomAccessor) Write(offset int64, data []byte) error {
 		ra.updateWriteRange(offset, int64(len(data)))
 	}
 
-	// 如果当前存在顺序写缓冲（seqBuffer），但本次写入的位置已经不再是顺序追加（offset != seqOffset），
-	// 说明写入模式从「顺序写」切换为「随机写」：
-	// - 为了保证后续 journal 基于的 base 数据是完整的，需要先把 seqBuffer 中的数据 flush 到后端、
-	//   更新 fileObj.DataID / Size，然后再决定是否启用 journal。
-	// - 这样在 TestJournalRandomWrites 这类场景中，第一次从 offset=0 的顺序写会作为 base 数据落盘，
-	//   后续 offset=100/50 等随机写则通过 journal 叠加在 base 之上，Read 时才能同时看到两部分数据。
+	// PRIORITY 0: Check if we can continue using sequential buffer
+	// This must be checked BEFORE shouldUseJournal to ensure sequential writes don't use journal
 	if ra.seqBuffer != nil {
 		ra.seqBuffer.mu.Lock()
 		seqOffset := ra.seqBuffer.offset
@@ -2091,15 +2246,56 @@ func (ra *RandomAccessor) Write(offset int64, data []byte) error {
 		hasSeqData := ra.seqBuffer.hasData
 		ra.seqBuffer.mu.Unlock()
 
-		if hasSeqData && !seqClosed && offset != seqOffset {
-			if flushErr := ra.flushSequentialBuffer(); flushErr != nil {
-				DebugLog("[VFS RandomAccessor Write] ERROR: Failed to flush sequential buffer before switching to random/journal: fileID=%d, offset=%d, seqOffset=%d, size=%d, error=%v",
-					ra.fileID, offset, seqOffset, len(data), flushErr)
-				return flushErr
+		if !seqClosed && hasSeqData {
+			// Check if still sequential write (continue from current position)
+			if offset == seqOffset {
+				// Sequential write, use optimized path (this takes priority over journal)
+				return ra.writeSequential(offset, data)
+			} else if offset < seqOffset {
+				// Write backwards, switch to random write mode
+				// OPTIMIZATION: Only flush if buffer is full, otherwise defer to Release
+				ra.seqBuffer.mu.Lock()
+				bufferSize := int64(len(ra.seqBuffer.buffer))
+				chunkSize := ra.seqBuffer.chunkSize
+				ra.seqBuffer.mu.Unlock()
+
+				if bufferSize >= chunkSize {
+					// Buffer is full, flush it now
+					if flushErr := ra.flushSequentialBuffer(); flushErr != nil {
+						DebugLog("[VFS RandomAccessor Write] ERROR: Failed to flush sequential buffer (chunk full, backwards write): fileID=%d, offset=%d, seqOffset=%d, size=%d, error=%v", ra.fileID, offset, seqOffset, len(data), flushErr)
+						return flushErr
+					}
+				} else {
+					// Buffer is not full, defer flush to Release
+					DebugLog("[VFS RandomAccessor Write] Deferring sequential buffer flush (backwards write, buffer not full): fileID=%d, offset=%d, seqOffset=%d, bufferSize=%d, chunkSize=%d",
+						ra.fileID, offset, seqOffset, bufferSize, chunkSize)
+				}
+				ra.seqBuffer.mu.Lock()
+				ra.seqBuffer.closed = true
+				ra.seqBuffer.mu.Unlock()
+			} else {
+				// offset > seqOffset: skipped some positions, switch to random write mode
+				// OPTIMIZATION: Only flush if buffer is full, otherwise defer to Release
+				ra.seqBuffer.mu.Lock()
+				bufferSize := int64(len(ra.seqBuffer.buffer))
+				chunkSize := ra.seqBuffer.chunkSize
+				ra.seqBuffer.mu.Unlock()
+
+				if bufferSize >= chunkSize {
+					// Buffer is full, flush it now
+					if flushErr := ra.flushSequentialBuffer(); flushErr != nil {
+						DebugLog("[VFS RandomAccessor Write] ERROR: Failed to flush sequential buffer (chunk full, skipped positions): fileID=%d, offset=%d, seqOffset=%d, size=%d, error=%v", ra.fileID, offset, seqOffset, len(data), flushErr)
+						return flushErr
+					}
+				} else {
+					// Buffer is not full, defer flush to Release
+					DebugLog("[VFS RandomAccessor Write] Deferring sequential buffer flush (skipped positions, buffer not full): fileID=%d, offset=%d, seqOffset=%d, bufferSize=%d, chunkSize=%d",
+						ra.fileID, offset, seqOffset, bufferSize, chunkSize)
+				}
+				ra.seqBuffer.mu.Lock()
+				ra.seqBuffer.closed = true
+				ra.seqBuffer.mu.Unlock()
 			}
-			ra.seqBuffer.mu.Lock()
-			ra.seqBuffer.closed = true
-			ra.seqBuffer.mu.Unlock()
 		}
 	}
 
@@ -2114,6 +2310,13 @@ func (ra *RandomAccessor) Write(offset int64, data []byte) error {
 			if err := ra.migrateWriteBufferToJournal(); err != nil {
 				DebugLog("[VFS RandomAccessor Write] WARNING: Failed to migrate WriteBuffer to Journal: %v", err)
 				// Continue anyway, write to journal
+			}
+		}
+
+		// Migrate sequential buffer data to Journal (if any)
+		if ra.seqBuffer != nil {
+			if err := ra.migrateSeqBufferToJournal(); err != nil {
+				DebugLog("[VFS RandomAccessor Write] WARNING: Failed to migrate SeqBuffer to Journal: %v", err)
 			}
 		}
 
@@ -2307,22 +2510,44 @@ func (ra *RandomAccessor) Write(offset int64, data []byte) error {
 				return ra.writeSequential(offset, data)
 			} else if offset < seqOffset {
 				// Write backwards, switch to random write mode
-				if flushErr := ra.flushSequentialBuffer(); flushErr != nil {
-					DebugLog("[VFS RandomAccessor Write] ERROR: Failed to flush sequential buffer (backwards write): fileID=%d, offset=%d, seqOffset=%d, size=%d, error=%v", ra.fileID, offset, seqOffset, len(data), flushErr)
-					return flushErr
+				// OPTIMIZATION: Only flush if buffer is full, otherwise defer to Release
+				ra.seqBuffer.mu.Lock()
+				bufferSize := int64(len(ra.seqBuffer.buffer))
+				chunkSize := ra.seqBuffer.chunkSize
+				ra.seqBuffer.mu.Unlock()
+
+				if bufferSize >= chunkSize {
+					// Buffer is full, flush it now
+					if flushErr := ra.flushSequentialBuffer(); flushErr != nil {
+						DebugLog("[VFS RandomAccessor Write] ERROR: Failed to flush sequential buffer (chunk full, backwards write): fileID=%d, offset=%d, seqOffset=%d, size=%d, error=%v", ra.fileID, offset, seqOffset, len(data), flushErr)
+						return flushErr
+					}
+				} else {
+					// Buffer is not full, defer flush to Release
+					DebugLog("[VFS RandomAccessor Write] Deferring sequential buffer flush (backwards write, buffer not full): fileID=%d, offset=%d, seqOffset=%d, bufferSize=%d, chunkSize=%d",
+						ra.fileID, offset, seqOffset, bufferSize, chunkSize)
 				}
 				ra.seqBuffer.mu.Lock()
 				ra.seqBuffer.closed = true
 				ra.seqBuffer.mu.Unlock()
 			} else {
 				// Skipped some positions, switch to random write mode
-				// IMPORTANT: Before flushing sequential buffer, we need to ensure all data is written
-				// But since we're switching to random write mode, we should flush the sequential buffer
-				// to ensure the data written so far is persisted, then continue with random writes
-				// The subsequent random writes will be merged with the sequential data during flush
-				if flushErr := ra.flushSequentialBuffer(); flushErr != nil {
-					DebugLog("[VFS RandomAccessor Write] ERROR: Failed to flush sequential buffer (skipped positions): fileID=%d, offset=%d, seqOffset=%d, size=%d, error=%v", ra.fileID, offset, seqOffset, len(data), flushErr)
-					return flushErr
+				// OPTIMIZATION: Only flush if buffer is full, otherwise defer to Release
+				ra.seqBuffer.mu.Lock()
+				bufferSize := int64(len(ra.seqBuffer.buffer))
+				chunkSize := ra.seqBuffer.chunkSize
+				ra.seqBuffer.mu.Unlock()
+
+				if bufferSize >= chunkSize {
+					// Buffer is full, flush it now
+					if flushErr := ra.flushSequentialBuffer(); flushErr != nil {
+						DebugLog("[VFS RandomAccessor Write] ERROR: Failed to flush sequential buffer (chunk full, skipped positions): fileID=%d, offset=%d, seqOffset=%d, size=%d, error=%v", ra.fileID, offset, seqOffset, len(data), flushErr)
+						return flushErr
+					}
+				} else {
+					// Buffer is not full, defer flush to Release
+					DebugLog("[VFS RandomAccessor Write] Deferring sequential buffer flush (skipped positions, buffer not full): fileID=%d, offset=%d, seqOffset=%d, bufferSize=%d, chunkSize=%d",
+						ra.fileID, offset, seqOffset, bufferSize, chunkSize)
 				}
 				ra.seqBuffer.mu.Lock()
 				ra.seqBuffer.closed = true
@@ -2334,7 +2559,7 @@ func (ra *RandomAccessor) Write(offset int64, data []byte) error {
 	// Initialize sequential write buffer
 	// NOTE: This code should not execute for .tmp files or when ChunkedFileWriter exists (they should have returned above)
 	// But we keep the check here for safety in case fileObj cache is stale
-	if ra.seqBuffer == nil && len(data) > 0 {
+	if len(data) > 0 {
 		// Reuse cached fileObj (already loaded above)
 		if fileObj != nil {
 			// Re-check if ChunkedFileWriter exists (should have returned above, but check for safety)
@@ -2348,15 +2573,56 @@ func (ra *RandomAccessor) Write(offset int64, data []byte) error {
 				// Fall through to random write mode
 			} else {
 				// No ChunkedFileWriter, can proceed with sequential buffer initialization
-				if offset == 0 && (fileObj.DataID == 0 || fileObj.DataID == core.EmptyDataID) {
+				// OPTIMIZATION: Support sequential append after flush
+				// If offset == fileObj.Size, this is sequential append, should continue using sequential buffer
+				isSequentialAppend := offset == fileObj.Size && fileObj.DataID > 0 && fileObj.DataID != core.EmptyDataID
+				isNewFile := offset == 0 && (fileObj.DataID == 0 || fileObj.DataID == core.EmptyDataID)
+
+				var initErr error
+				if isNewFile {
 					// File has no data, can initialize sequential write buffer
-					var initErr error
 					if initErr = ra.initSequentialBuffer(false); initErr == nil {
 						// Initialization succeeded, use sequential write
 						return ra.writeSequential(offset, data)
 					}
 					// Initialization failed, fallback to random write
 					DebugLog("[VFS RandomAccessor Write] WARNING: Failed to initialize sequential buffer, falling back to random write: fileID=%d, offset=%d, size=%d, error=%v", ra.fileID, offset, len(data), initErr)
+				} else if isSequentialAppend {
+					// Sequential append after flush - reset or reinitialize sequential buffer
+					if ra.seqBuffer != nil {
+						ra.seqBuffer.mu.Lock()
+						if ra.seqBuffer.closed {
+							// Sequential buffer was closed after flush, reset it for continued sequential writes
+							DebugLog("[VFS RandomAccessor Write] Resetting sequential buffer for continued sequential append: fileID=%d, offset=%d, fileSize=%d", ra.fileID, offset, fileObj.Size)
+							ra.seqBuffer.closed = false
+							ra.seqBuffer.offset = fileObj.Size
+							ra.clearSeqBuffer() // Clear buffer and shrink capacity if needed
+							ra.seqBuffer.hasData = false
+							// Update dataID to current file's DataID for continued writes
+							ra.seqBuffer.dataID = fileObj.DataID
+							// Reset DataInfo for new chunk sequence
+							ra.seqBuffer.dataInfo.OrigSize = 0
+							ra.seqBuffer.dataInfo.Size = 0
+							ra.seqBuffer.sn = 0
+							ra.seqBuffer.mu.Unlock()
+							return ra.writeSequential(offset, data)
+						} else {
+							// Sequential buffer is still active, use it directly
+							ra.seqBuffer.mu.Unlock()
+							return ra.writeSequential(offset, data)
+						}
+					} else {
+						// No sequential buffer exists, but this is sequential append
+						// For files with existing data, we should use journal for safety
+						// But user wants sequential buffer, so we'll initialize it with existing DataID
+						DebugLog("[VFS RandomAccessor Write] Sequential append but no sequential buffer, initializing with existing DataID: fileID=%d, offset=%d, dataID=%d", ra.fileID, offset, fileObj.DataID)
+						initErr = ra.initSequentialBufferForAppend(fileObj)
+						if initErr == nil {
+							return ra.writeSequential(offset, data)
+						}
+						// Initialization failed, fallback to journal
+						DebugLog("[VFS RandomAccessor Write] WARNING: Failed to initialize sequential buffer for append, falling back to journal: fileID=%d, offset=%d, size=%d, error=%v", ra.fileID, offset, len(data), initErr)
+					}
 				}
 			}
 		}
@@ -2613,17 +2879,17 @@ func (ra *RandomAccessor) initSequentialBufferWithNewData() error {
 	}
 	DebugLog("[VFS initSequentialBufferWithNewData] Final DataInfo Kind: fileID=%d, Kind=0x%x", ra.fileID, dataInfo.Kind)
 
-	ra.seqBuffer = &SequentialWriteBuffer{
-		fileID:    ra.fileID,
-		dataID:    newDataID,
-		sn:        0,
-		chunkSize: chunkSize,
-		buffer:    make([]byte, 0, chunkSize), // Pre-allocate but length is 0
-		offset:    0,
-		hasData:   false,
-		closed:    false,
-		dataInfo:  dataInfo,
-	}
+	// Get SequentialWriteBuffer from pool to reduce allocations
+	// Buffer starts from tier 1 (128KB), will upgrade automatically as needed
+	ra.seqBuffer = getSequentialBuffer()
+	ra.seqBuffer.fileID = ra.fileID
+	ra.seqBuffer.dataID = newDataID
+	ra.seqBuffer.sn = 0
+	ra.seqBuffer.chunkSize = chunkSize
+	ra.seqBuffer.offset = 0
+	ra.seqBuffer.hasData = false
+	ra.seqBuffer.closed = false
+	ra.seqBuffer.dataInfo = dataInfo
 
 	// Update file object with new DataID immediately (but keep Size unchanged)
 	// This allows the DataID to be visible before Flush, while Size will be updated on Flush
@@ -2649,6 +2915,61 @@ func (ra *RandomAccessor) initSequentialBufferWithNewData() error {
 		}
 	}
 
+	return nil
+}
+
+// initSequentialBufferForAppend initializes sequential buffer for appending to existing file
+// This is used when flush happened but file is still open and we want to continue sequential writes
+func (ra *RandomAccessor) initSequentialBufferForAppend(fileObj *core.ObjectInfo) error {
+	if fileObj.DataID == 0 || fileObj.DataID == core.EmptyDataID {
+		return fmt.Errorf("file has no data, use initSequentialBuffer instead")
+	}
+
+	// Determine chunk size based on bucket configuration
+	chunkSize := ra.fs.chunkSize
+	if chunkSize <= 0 {
+		chunkSize = DefaultChunkSize // 10MB default
+	}
+
+	// Create new DataID for the appended chunks (they will be merged later)
+	newDataID := core.NewID()
+
+	// Initialize DataInfo for new chunks
+	dataInfo := &core.DataInfo{
+		ID:       newDataID,
+		OrigSize: 0,
+		Size:     0,
+		XXH3:     0,
+		SHA256_0: 0,
+		SHA256_1: 0,
+		SHA256_2: 0,
+		SHA256_3: 0,
+		Kind:     0,
+	}
+
+	// Set compression and encryption flags (if enabled)
+	cmprWay := getCmprWayForFS(ra.fs)
+	endecWay := getEndecWayForFS(ra.fs)
+	if cmprWay > 0 {
+		dataInfo.Kind |= cmprWay
+	}
+	if endecWay > 0 {
+		dataInfo.Kind |= endecWay
+	}
+
+	// Get SequentialWriteBuffer from pool to reduce allocations
+	// Buffer starts from tier 1 (128KB), will upgrade automatically as needed
+	ra.seqBuffer = getSequentialBuffer()
+	ra.seqBuffer.fileID = ra.fileID
+	ra.seqBuffer.dataID = newDataID // New DataID for appended chunks
+	ra.seqBuffer.sn = 0             // Start from chunk 0 for new chunks
+	ra.seqBuffer.chunkSize = chunkSize
+	ra.seqBuffer.offset = fileObj.Size // Start from current file size
+	ra.seqBuffer.hasData = false
+	ra.seqBuffer.closed = false
+	ra.seqBuffer.dataInfo = dataInfo
+
+	DebugLog("[VFS initSequentialBufferForAppend] Initialized sequential buffer for append: fileID=%d, offset=%d, newDataID=%d, baseDataID=%d", ra.fileID, fileObj.Size, newDataID, fileObj.DataID)
 	return nil
 }
 
@@ -2693,6 +3014,29 @@ func (ra *RandomAccessor) writeSequential(offset int64, data []byte) error {
 			writeSize = remainingInChunk
 		}
 
+		// Check if buffer needs upgrade before writing
+		currentTier := getBufferTier(cap(ra.seqBuffer.buffer))
+		neededCap := int64(len(ra.seqBuffer.buffer)) + writeSize
+
+		// Upgrade buffer if needed capacity exceeds current tier
+		if neededCap > int64(cap(ra.seqBuffer.buffer)) {
+			var targetTier int
+			if neededCap > SequentialBufferTier2Cap {
+				targetTier = 3 // Need tier 3 (10MB)
+			} else if neededCap > SequentialBufferTier1Cap {
+				targetTier = 2 // Need tier 2 (1MB)
+			} else {
+				targetTier = 1 // Stay at tier 1 (128KB)
+			}
+
+			if targetTier > currentTier {
+				// Upgrade buffer to larger tier
+				ra.seqBuffer.buffer = upgradeBuffer(ra.seqBuffer.buffer, targetTier)
+				DebugLog("[VFS writeSequential] Upgraded buffer: fileID=%d, dataID=%d, fromTier=%d, toTier=%d, neededCap=%d",
+					ra.fileID, ra.seqBuffer.dataID, currentTier, targetTier, neededCap)
+			}
+		}
+
 		// Write to current chunk buffer
 		ra.seqBuffer.buffer = append(ra.seqBuffer.buffer, dataLeft[:writeSize]...)
 		ra.seqBuffer.offset += writeSize
@@ -2713,6 +3057,208 @@ func (ra *RandomAccessor) writeSequential(offset int64, data []byte) error {
 	}
 
 	return nil
+}
+
+// getBufferFromTier gets a buffer from the appropriate tier pool
+// Returns buffer from tier 1 (128KB) by default
+func getBufferFromTier(tier int) []byte {
+	var pool *limitedPool
+	switch tier {
+	case 1:
+		pool = bufferTier1Pool
+	case 2:
+		pool = bufferTier2Pool
+	case 3:
+		pool = bufferTier3Pool
+	default:
+		pool = bufferTier1Pool
+	}
+
+	if buf := pool.Get(); buf != nil {
+		return buf.([]byte)[:0] // Reset length but keep capacity
+	}
+
+	// Pool is empty or at capacity, create new buffer
+	switch tier {
+	case 1:
+		return make([]byte, 0, SequentialBufferTier1Cap)
+	case 2:
+		return make([]byte, 0, SequentialBufferTier2Cap)
+	case 3:
+		return make([]byte, 0, SequentialBufferTier3Cap)
+	default:
+		return make([]byte, 0, SequentialBufferTier1Cap)
+	}
+}
+
+// putBufferToTier returns a buffer to the appropriate tier pool
+func putBufferToTier(buf []byte) {
+	if buf == nil {
+		return
+	}
+
+	cap := cap(buf)
+	buf = buf[:0] // Reset length but keep capacity
+
+	var pool *limitedPool
+	switch {
+	case cap <= SequentialBufferTier1Cap:
+		pool = bufferTier1Pool
+	case cap <= SequentialBufferTier2Cap:
+		pool = bufferTier2Pool
+	case cap <= SequentialBufferTier3Cap:
+		pool = bufferTier3Pool
+	default:
+		// Buffer is larger than tier 3, don't pool it (let GC handle it)
+		return
+	}
+
+	pool.Put(buf)
+}
+
+// upgradeBuffer upgrades buffer to a larger tier, copying data and returning old buffer
+func upgradeBuffer(oldBuf []byte, targetTier int) []byte {
+	if oldBuf == nil {
+		return getBufferFromTier(targetTier)
+	}
+
+	// Get new buffer from target tier
+	newBuf := getBufferFromTier(targetTier)
+
+	// Copy data if there's any
+	if len(oldBuf) > 0 {
+		// Ensure new buffer has enough capacity
+		if cap(newBuf) < len(oldBuf) {
+			// New buffer from pool is too small, create larger one
+			putBufferToTier(newBuf) // Return the small one
+			switch targetTier {
+			case 2:
+				newBuf = make([]byte, len(oldBuf), SequentialBufferTier2Cap)
+			case 3:
+				newBuf = make([]byte, len(oldBuf), SequentialBufferTier3Cap)
+			default:
+				newBuf = make([]byte, len(oldBuf), SequentialBufferTier1Cap)
+			}
+		}
+		copy(newBuf, oldBuf)
+		newBuf = newBuf[:len(oldBuf)]
+	}
+
+	// Return old buffer to its tier pool
+	putBufferToTier(oldBuf)
+
+	return newBuf
+}
+
+// downgradeBuffer downgrades buffer to a smaller tier, copying data and returning old buffer
+func downgradeBuffer(oldBuf []byte, targetTier int) []byte {
+	if oldBuf == nil {
+		return getBufferFromTier(targetTier)
+	}
+
+	// Get new buffer from target tier
+	newBuf := getBufferFromTier(targetTier)
+
+	// Copy data if it fits in the smaller buffer
+	if len(oldBuf) > 0 {
+		if len(oldBuf) <= cap(newBuf) {
+			copy(newBuf, oldBuf)
+			newBuf = newBuf[:len(oldBuf)]
+		} else {
+			// Data doesn't fit, keep old buffer (shouldn't happen in practice)
+			putBufferToTier(newBuf) // Return the small one
+			return oldBuf
+		}
+	}
+
+	// Return old buffer to its tier pool
+	putBufferToTier(oldBuf)
+
+	return newBuf
+}
+
+// getBufferTier determines which tier a buffer capacity belongs to
+func getBufferTier(cap int) int {
+	switch {
+	case cap <= SequentialBufferTier1Cap:
+		return 1
+	case cap <= SequentialBufferTier2Cap:
+		return 2
+	case cap <= SequentialBufferTier3Cap:
+		return 3
+	default:
+		return 3 // Larger than tier 3, treat as tier 3
+	}
+}
+
+// clearSeqBuffer clears the sequential buffer and releases large buffers back to pool
+// This reduces memory usage when many files are open simultaneously
+func (ra *RandomAccessor) clearSeqBuffer() {
+	if ra.seqBuffer == nil {
+		return
+	}
+
+	oldCap := cap(ra.seqBuffer.buffer)
+	currentTier := getBufferTier(oldCap)
+
+	// If buffer is tier 3 (10MB), return it to pool and reset to tier 1 (128KB).
+	// This avoids an extra copy (tier3->tier2) and keeps memory low when many files are open.
+	if currentTier == 3 {
+		putBufferToTier(ra.seqBuffer.buffer)
+		ra.seqBuffer.buffer = getBufferFromTier(1)
+		DebugLog("[VFS clearSeqBuffer] Released tier 3 buffer and reset to tier 1: fileID=%d, dataID=%d, oldCap=%d, newCap=%d",
+			ra.fileID, ra.seqBuffer.dataID, oldCap, cap(ra.seqBuffer.buffer))
+		return
+	}
+
+	// For tier 1/2, just clear and keep capacity for better throughput on continued sequential writes.
+	ra.seqBuffer.buffer = ra.seqBuffer.buffer[:0]
+}
+
+// getSequentialBuffer gets a SequentialWriteBuffer from pool or creates a new one
+// Buffer comes from tier 1 pool (128KB) initially
+func getSequentialBuffer() *SequentialWriteBuffer {
+	if pooled := sequentialBufferPool.Get(); pooled != nil {
+		sb := pooled.(*SequentialWriteBuffer)
+		// Reset fields
+		sb.fileID = 0
+		sb.dataID = 0
+		sb.sn = 0
+		sb.chunkSize = 0
+		sb.offset = 0
+		sb.hasData = false
+		sb.closed = false
+		sb.dataInfo = nil
+		sb.xxh3Hash = nil
+		sb.sha256Hash = nil
+
+		// Return old buffer to appropriate tier pool and get tier 1 buffer
+		if sb.buffer != nil {
+			putBufferToTier(sb.buffer) // Return old buffer to pool
+		}
+		sb.buffer = getBufferFromTier(1) // Get tier 1 buffer (128KB)
+		return sb
+	}
+
+	// Create new SequentialWriteBuffer with tier 1 buffer
+	return &SequentialWriteBuffer{
+		buffer: getBufferFromTier(1),
+	}
+}
+
+// putSequentialBuffer returns a SequentialWriteBuffer to pool for reuse
+// Buffer is returned to appropriate tier pool based on its capacity
+func putSequentialBuffer(sb *SequentialWriteBuffer) {
+	if sb == nil {
+		return
+	}
+
+	// Return buffer to appropriate tier pool
+	putBufferToTier(sb.buffer)
+	sb.buffer = nil // Clear reference
+
+	// Return SequentialWriteBuffer object to pool (without buffer)
+	sequentialBufferPool.Put(sb)
 }
 
 // flushSequentialChunk flushes current sequential write chunk (writes a complete chunk)
@@ -2788,6 +3334,11 @@ func (ra *RandomAccessor) flushSequentialChunkLocked() error {
 		DebugLog("[VFS flushSequentialChunk] ProcessData failed: fileID=%d, dataID=%d, sn=%d, error=%v", ra.fileID, ra.seqBuffer.dataID, ra.seqBuffer.sn, err)
 		encodedChunk = chunkData
 	}
+	if len(encodedChunk) == 0 && len(chunkData) > 0 {
+		DebugLog("[VFS flushSequentialChunk] ERROR: ProcessData returned empty chunk but original has data: fileID=%d, dataID=%d, sn=%d, originalSize=%d",
+			ra.fileID, ra.seqBuffer.dataID, ra.seqBuffer.sn, len(chunkData))
+		return fmt.Errorf("ProcessData returned empty chunk for fileID=%d, dataID=%d, sn=%d", ra.fileID, ra.seqBuffer.dataID, ra.seqBuffer.sn)
+	}
 
 	// Update size (if compressed or encrypted)
 	originalChunkSize := len(chunkData)
@@ -2804,7 +3355,13 @@ func (ra *RandomAccessor) flushSequentialChunkLocked() error {
 		ra.seqBuffer.dataInfo.Kind&core.DATA_ENDEC_MASK != 0)
 
 	// Write data block
-	DebugLog("[VFS flushSequentialChunk] Writing chunk: fileID=%d, dataID=%d, sn=%d, size=%d", ra.fileID, ra.seqBuffer.dataID, ra.seqBuffer.sn, len(encodedChunk))
+	DebugLog("[VFS flushSequentialChunk] Writing chunk: fileID=%d, dataID=%d, sn=%d, originalSize=%d, encodedSize=%d",
+		ra.fileID, ra.seqBuffer.dataID, ra.seqBuffer.sn, len(chunkData), len(encodedChunk))
+	if len(encodedChunk) == 0 {
+		DebugLog("[VFS flushSequentialChunk] ERROR: encodedChunk is empty: fileID=%d, dataID=%d, sn=%d, originalSize=%d",
+			ra.fileID, ra.seqBuffer.dataID, ra.seqBuffer.sn, len(chunkData))
+		return fmt.Errorf("encodedChunk is empty for fileID=%d, dataID=%d, sn=%d", ra.fileID, ra.seqBuffer.dataID, ra.seqBuffer.sn)
+	}
 	if _, err := ra.fs.h.PutData(ra.fs.c, ra.fs.bktID, ra.seqBuffer.dataID, ra.seqBuffer.sn, encodedChunk); err != nil {
 		DebugLog("[VFS flushSequentialChunk] ERROR: Failed to put data for fileID=%d, dataID=%d, sn=%d, size=%d: %v", ra.fileID, ra.seqBuffer.dataID, ra.seqBuffer.sn, len(encodedChunk), err)
 		if err == core.ERR_QUOTA_EXCEED {
@@ -2812,10 +3369,16 @@ func (ra *RandomAccessor) flushSequentialChunkLocked() error {
 		}
 		return err
 	}
-	DebugLog("[VFS flushSequentialChunk] Successfully wrote chunk: fileID=%d, dataID=%d, sn=%d, size=%d", ra.fileID, ra.seqBuffer.dataID, ra.seqBuffer.sn, len(encodedChunk))
+	DebugLog("[VFS flushSequentialChunk] Successfully wrote chunk: fileID=%d, dataID=%d, sn=%d, encodedSize=%d, OrigSize=%d, Size=%d",
+		ra.fileID, ra.seqBuffer.dataID, ra.seqBuffer.sn, len(encodedChunk), ra.seqBuffer.dataInfo.OrigSize, ra.seqBuffer.dataInfo.Size)
 
 	ra.seqBuffer.sn++
-	ra.seqBuffer.buffer = ra.seqBuffer.buffer[:0] // Clear buffer but keep capacity
+	ra.clearSeqBuffer()         // Clear buffer and shrink capacity if needed
+	ra.seqBuffer.hasData = true // Mark that data has been written (OrigSize > 0)
+
+	DebugLog("[VFS flushSequentialChunk] After flush: fileID=%d, dataID=%d, sn=%d, bufferLen=%d, hasData=%v, OrigSize=%d, Size=%d",
+		ra.fileID, ra.seqBuffer.dataID, ra.seqBuffer.sn, len(ra.seqBuffer.buffer), ra.seqBuffer.hasData,
+		ra.seqBuffer.dataInfo.OrigSize, ra.seqBuffer.dataInfo.Size)
 
 	// For continuous sequential writes (large files), periodically update DataInfo and file object
 	// This ensures progress is visible even when file is not closed yet
@@ -2871,7 +3434,7 @@ func (ra *RandomAccessor) flushSequentialChunkLocked() error {
 				go func() {
 					// Use singleflight to ensure only one update per DataID at a time
 					// This prevents duplicate updates and ensures consistency
-					_, err, _ := seqDataInfoUpdateSingleFlight.Do(updateKey, func() (interface{}, error) {
+					_, err, _ := globalSingleFlight.Do(updateKey, func() (interface{}, error) {
 						// Create a copy of DataInfo snapshot for update
 						dataInfoCopy := dataInfoSnapshot
 
@@ -2954,8 +3517,13 @@ func (ra *RandomAccessor) flushSequentialBuffer() error {
 	ra.seqBuffer.mu.Lock()
 	defer ra.seqBuffer.mu.Unlock()
 
+	DebugLog("[VFS flushSequentialBuffer] Entry: fileID=%d, hasData=%v, bufferLen=%d, sn=%d, OrigSize=%d, Size=%d, dataID=%d",
+		ra.fileID, ra.seqBuffer.hasData, len(ra.seqBuffer.buffer), ra.seqBuffer.sn,
+		ra.seqBuffer.dataInfo.OrigSize, ra.seqBuffer.dataInfo.Size, ra.seqBuffer.dataID)
+
 	// If no data, return directly
 	if !ra.seqBuffer.hasData {
+		DebugLog("[VFS flushSequentialBuffer] Early return: hasData=false, fileID=%d", ra.fileID)
 		return nil
 	}
 
@@ -3006,7 +3574,7 @@ func (ra *RandomAccessor) flushSequentialBuffer() error {
 							}
 							// Clear sequential buffer
 							ra.seqBuffer.hasData = false
-							ra.seqBuffer.buffer = ra.seqBuffer.buffer[:0]
+							ra.clearSeqBuffer() // Clear buffer and shrink capacity if needed
 							return nil
 						}
 					}
@@ -3018,10 +3586,16 @@ func (ra *RandomAccessor) flushSequentialBuffer() error {
 
 	// Write last chunk (if there's still data)
 	if len(ra.seqBuffer.buffer) > 0 {
+		DebugLog("[VFS flushSequentialBuffer] Flushing remaining buffer: fileID=%d, bufferSize=%d, sn=%d", ra.fileID, len(ra.seqBuffer.buffer), ra.seqBuffer.sn)
 		if err := ra.flushSequentialChunkLocked(); err != nil {
 			DebugLog("[VFS RandomAccessor flushSequentialBuffer] ERROR: Failed to flush last sequential chunk: fileID=%d, bufferSize=%d, error=%v", ra.fileID, len(ra.seqBuffer.buffer), err)
 			return err
 		}
+		DebugLog("[VFS flushSequentialBuffer] After flushing remaining buffer: fileID=%d, sn=%d, OrigSize=%d, Size=%d",
+			ra.fileID, ra.seqBuffer.sn, ra.seqBuffer.dataInfo.OrigSize, ra.seqBuffer.dataInfo.Size)
+	} else {
+		DebugLog("[VFS flushSequentialBuffer] No remaining buffer to flush: fileID=%d, sn=%d, OrigSize=%d, Size=%d",
+			ra.fileID, ra.seqBuffer.sn, ra.seqBuffer.dataInfo.OrigSize, ra.seqBuffer.dataInfo.Size)
 	}
 
 	// Update final size of DataInfo
@@ -3269,6 +3843,9 @@ func (ra *RandomAccessor) flushSequentialBuffer() error {
 	// The offset might not reflect the actual file size if sequential write was interrupted
 	fileObj.Size = newSize
 
+	DebugLog("[VFS flushSequentialBuffer] New file sequential flush: fileID=%d, dataID=%d, newSize=%d, OrigSize=%d, Size=%d, sn=%d",
+		ra.fileID, fileObj.DataID, newSize, ra.seqBuffer.dataInfo.OrigSize, ra.seqBuffer.dataInfo.Size, ra.seqBuffer.sn)
+
 	// Create version object for new file sequential write
 	lh, ok := ra.fs.h.(*core.LocalHandler)
 	if !ok {
@@ -3295,16 +3872,27 @@ func (ra *RandomAccessor) flushSequentialBuffer() error {
 	// Update file object MTime
 	fileObj.MTime = mTime
 
+	// CRITICAL: Ensure DataInfo.ID is set to dataID before writing
+	// This is important because DataInfo.ID must match the dataID used in PutData calls
+	if ra.seqBuffer.dataInfo.ID != ra.seqBuffer.dataID {
+		DebugLog("[VFS flushSequentialBuffer] WARNING: DataInfo.ID mismatch, fixing: fileID=%d, DataInfo.ID=%d, dataID=%d",
+			ra.fileID, ra.seqBuffer.dataInfo.ID, ra.seqBuffer.dataID)
+		ra.seqBuffer.dataInfo.ID = ra.seqBuffer.dataID
+	}
+
 	// Optimization: Use PutDataInfoAndObj to write DataInfo, version object, and file object update together
 	// This reduces database round trips and improves performance
 	objectsToPut := []*core.ObjectInfo{newVersion, fileObj}
-	DebugLog("[VFS flushSequentialBuffer] Writing DataInfo, version object, and file object to disk: fileID=%d, dataID=%d, size=%d, versionID=%d, chunkSize=%d", ra.fileID, ra.seqBuffer.dataID, fileObj.Size, versionID, ra.seqBuffer.chunkSize)
+	DebugLog("[VFS flushSequentialBuffer] Writing DataInfo, version object, and file object to disk: fileID=%d, dataID=%d, DataInfo.ID=%d, size=%d, versionID=%d, chunkSize=%d, OrigSize=%d, DataInfo.Size=%d",
+		ra.fileID, ra.seqBuffer.dataID, ra.seqBuffer.dataInfo.ID, fileObj.Size, versionID, ra.seqBuffer.chunkSize,
+		ra.seqBuffer.dataInfo.OrigSize, ra.seqBuffer.dataInfo.Size)
 	err = lh.PutDataInfoAndObj(ra.fs.c, ra.fs.bktID, []*core.DataInfo{ra.seqBuffer.dataInfo}, objectsToPut)
 	if err != nil {
 		DebugLog("[VFS flushSequentialBuffer] ERROR: Failed to write DataInfo and ObjectInfo to disk: fileID=%d, dataID=%d, error=%v", ra.fileID, ra.seqBuffer.dataID, err)
 		return err
 	}
-	DebugLog("[VFS flushSequentialBuffer] Successfully wrote DataInfo, version object, and file object to disk: fileID=%d, dataID=%d, size=%d, versionID=%d", ra.fileID, ra.seqBuffer.dataID, fileObj.Size, versionID)
+	DebugLog("[VFS flushSequentialBuffer] Successfully wrote DataInfo, version object, and file object to disk: fileID=%d, dataID=%d, size=%d, versionID=%d, OrigSize=%d, DataInfo.Size=%d",
+		ra.fileID, ra.seqBuffer.dataID, fileObj.Size, versionID, ra.seqBuffer.dataInfo.OrigSize, ra.seqBuffer.dataInfo.Size)
 
 	// Update caches
 	dataInfoCache.Put(ra.seqBuffer.dataID, ra.seqBuffer.dataInfo)
@@ -3439,26 +4027,29 @@ func (ra *RandomAccessor) Read(offset int64, size int) ([]byte, error) {
 			if int64(size) > journalSize-offset {
 				size = int(journalSize - offset)
 			}
-		}
 
-		DebugLog("[VFS Read] Reading from journal: fileID=%d, offset=%d, size=%d, isSparse=%v", ra.fileID, offset, size, journalIsSparse)
-		data, err := ra.readFromJournal(offset, int64(size))
-		if err != nil {
-			DebugLog("[VFS Read] ERROR: Failed to read from journal: %v", err)
-			// Fall back to regular read
-		} else {
-			return data, nil
+			DebugLog("[VFS Read] Reading from journal: fileID=%d, offset=%d, size=%d, isSparse=%v", ra.fileID, offset, size, journalIsSparse)
+			data, err := ra.readFromJournal(offset, int64(size))
+			if err != nil {
+				DebugLog("[VFS Read] ERROR: Failed to read from journal: %v", err)
+				// Fall back to regular read
+			} else {
+				return data, nil
+			}
 		}
 	}
 
 	// Optimization: use atomic operation to read fileObj, lock-free concurrent read
 	fileObj, err := ra.getFileObj()
 	if err != nil {
+		DebugLog("[VFS Read] ERROR: Failed to get file object: fileID=%d, error=%v", ra.fileID, err)
 		return nil, err
 	}
+	DebugLog("[VFS Read] Got fileObj from cache/DB: fileID=%d, fileObj.Size=%d, fileObj.DataID=%d", ra.fileID, fileObj.Size, fileObj.DataID)
 
 	// Use fileObj.Size as the authoritative source for file size
 	var actualFileSize int64 = fileObj.Size
+	DebugLog("[VFS Read] Initial actualFileSize from fileObj.Size: fileID=%d, actualFileSize=%d", ra.fileID, actualFileSize)
 
 	// Check for ChunkedFileWriter: if it exists and has data, use its size
 	// This is important when writes are in progress and fileObj.Size hasn't been updated yet
@@ -3549,11 +4140,19 @@ func (ra *RandomAccessor) Read(offset int64, size int) ([]byte, error) {
 
 	// Limit reading size to file size (only if we have a valid size)
 	DebugLog("[VFS Read] Before size limit: fileID=%d, offset=%d, requestedSize=%d, actualFileSize=%d", ra.fileID, offset, size, actualFileSize)
-	// IMPORTANT: If actualFileSize is 0 and not a sparse file, file is empty (truncated to 0 or newly created), return empty data
-	// For sparse files, actualFileSize should be > 0 (from sparseSize)
+	// IMPORTANT: If actualFileSize is 0 and file has DataID, try to read from DataInfo
+	// This handles the case where chunk was auto-flushed but fileObj.Size hasn't been updated yet
+	// For files with DataID, DataInfo.OrigSize may contain the actual data size
 	if actualFileSize == 0 {
-		DebugLog("[VFS Read] File is empty (actualFileSize=0), returning empty: fileID=%d", ra.fileID)
-		return []byte{}, nil
+		// If file has DataID, don't return empty immediately - try to read from DataInfo
+		// This is important for auto-flushed chunks where fileObj.Size may not be updated yet
+		if fileObj.DataID == 0 || fileObj.DataID == core.EmptyDataID {
+			DebugLog("[VFS Read] File is empty (actualFileSize=0, no DataID), returning empty: fileID=%d", ra.fileID)
+			return []byte{}, nil
+		}
+		// File has DataID but Size is 0, continue to read from DataInfo
+		// DataInfo.OrigSize will be used to determine actual file size
+		DebugLog("[VFS Read] File Size is 0 but has DataID, will read from DataInfo: fileID=%d, DataID=%d", ra.fileID, fileObj.DataID)
 	}
 	if actualFileSize > 0 {
 		if offset >= actualFileSize {
@@ -3607,49 +4206,78 @@ func (ra *RandomAccessor) Read(offset int64, size int) ([]byte, error) {
 
 	// If no data ID, read from buffer only
 	if fileObj.DataID == 0 || fileObj.DataID == core.EmptyDataID {
+		DebugLog("[VFS Read] No DataID, reading from buffer only: fileID=%d, offset=%d, size=%d, actualFileSize=%d", ra.fileID, offset, size, actualFileSize)
+		// CRITICAL: If file size is 0 (truncated to 0), return empty data immediately
+		// Don't read from buffer as it may contain old data
+		if actualFileSize == 0 {
+			DebugLog("[VFS Read] File is empty (truncated to 0), returning empty: fileID=%d", ra.fileID)
+			return []byte{}, nil
+		}
 		return ra.readFromBuffer(offset, size), nil
 	}
 
 	// File has DataID, read from database
 	// Get DataInfo
 	dataInfoCacheKey := fileObj.DataID
+	DebugLog("[VFS Read] File has DataID, getting DataInfo: fileID=%d, DataID=%d, fileObj.Size=%d, offset=%d, size=%d",
+		ra.fileID, fileObj.DataID, fileObj.Size, offset, size)
 	var dataInfo *core.DataInfo
 	if cached, ok := dataInfoCache.Get(dataInfoCacheKey); ok {
 		if info, ok := cached.(*core.DataInfo); ok && info != nil {
 			// Verify cached DataInfo matches file size (for files that may have been updated)
 			// If file size changed, invalidate cache and re-fetch
+			DebugLog("[VFS Read] Found cached DataInfo: fileID=%d, DataID=%d, cached.OrigSize=%d, cached.Size=%d, fileObj.Size=%d",
+				ra.fileID, fileObj.DataID, info.OrigSize, info.Size, fileObj.Size)
 			if info.OrigSize != fileObj.Size {
 				// DataInfo cache is stale, invalidate it
+				DebugLog("[VFS Read] DataInfo cache mismatch, invalidating: fileID=%d, DataID=%d, cached.OrigSize=%d, fileObj.Size=%d",
+					ra.fileID, fileObj.DataID, info.OrigSize, fileObj.Size)
 				dataInfoCache.Del(dataInfoCacheKey)
 				// Also invalidate decodingReaderCache to ensure chunkReader uses fresh DataInfo
 				decodingReaderCache.Del(dataInfoCacheKey)
 				dataInfo = nil
 			} else {
 				dataInfo = info
+				DebugLog("[VFS Read] Using cached DataInfo (OrigSize matches fileObj.Size): fileID=%d, DataID=%d, OrigSize=%d, Size=%d",
+					ra.fileID, fileObj.DataID, dataInfo.OrigSize, dataInfo.Size)
 			}
 		}
+	} else {
+		DebugLog("[VFS Read] DataInfo cache miss: fileID=%d, DataID=%d", ra.fileID, fileObj.DataID)
 	}
 
 	// If cache miss, get from database
 	if dataInfo == nil {
+		DebugLog("[VFS Read] DataInfo cache miss, fetching from database: fileID=%d, DataID=%d", ra.fileID, fileObj.DataID)
 		var err error
 		dataInfo, err = ra.fs.h.GetDataInfo(ra.fs.c, ra.fs.bktID, fileObj.DataID)
 		if err != nil {
+			DebugLog("[VFS Read] ERROR: Failed to get DataInfo from database: fileID=%d, DataID=%d, error=%v", ra.fileID, fileObj.DataID, err)
 			// If getting DataInfo fails, try direct read (may be old data format)
 			data, readErr := ra.fs.h.GetData(ra.fs.c, ra.fs.bktID, fileObj.DataID, 0)
 			if readErr == nil && len(data) > 0 {
+				DebugLog("[VFS Read] Fallback to direct GetData: fileID=%d, DataID=%d, dataLen=%d", ra.fileID, fileObj.DataID, len(data))
 				return ra.readFromDataAndBuffer(data, offset, size), nil
 			}
+			DebugLog("[VFS Read] Fallback to readFromBuffer: fileID=%d, DataID=%d", ra.fileID, fileObj.DataID)
 			return ra.readFromBuffer(offset, size), nil
 		}
-		// Update cache
-		dataInfoCache.Put(dataInfoCacheKey, dataInfo)
+		DebugLog("[VFS Read] Fetched DataInfo from database: fileID=%d, DataID=%d, OrigSize=%d, Size=%d, fileObj.Size=%d",
+			ra.fileID, fileObj.DataID, dataInfo.OrigSize, dataInfo.Size, fileObj.Size)
+		// Only cache DataInfo if OrigSize matches fileObj.Size
+		if dataInfo.OrigSize == fileObj.Size {
+			dataInfoCache.Put(dataInfoCacheKey, dataInfo)
+			DebugLog("[VFS Read] Cached DataInfo (OrigSize matches fileObj.Size): fileID=%d, DataID=%d", ra.fileID, fileObj.DataID)
+		} else {
+			DebugLog("[VFS Read] NOT caching DataInfo (OrigSize mismatch): fileID=%d, DataID=%d, DataInfo.OrigSize=%d, fileObj.Size=%d",
+				ra.fileID, fileObj.DataID, dataInfo.OrigSize, fileObj.Size)
+		}
 	}
 
 	// Debug: Log DataInfo details
 	// Verify DataInfo OrigSize matches file size (critical for correct reading)
-	DebugLog("[VFS Read] DataInfo check: fileID=%d, DataID=%d, DataInfo.OrigSize=%d, fileObj.Size=%d",
-		ra.fileID, dataInfo.ID, dataInfo.OrigSize, fileObj.Size)
+	DebugLog("[VFS Read] DataInfo check: fileID=%d, DataID=%d, DataInfo.OrigSize=%d, DataInfo.Size=%d, fileObj.Size=%d, offset=%d, requestedSize=%d",
+		ra.fileID, dataInfo.ID, dataInfo.OrigSize, dataInfo.Size, fileObj.Size, offset, size)
 	if dataInfo.OrigSize != fileObj.Size {
 		// DataInfo OrigSize doesn't match file size, this is a problem
 		DebugLog("[VFS Read] WARNING: DataInfo OrigSize mismatch, re-fetching: fileID=%d, DataID=%d, DataInfo.OrigSize=%d, fileObj.Size=%d",
@@ -3657,6 +4285,7 @@ func (ra *RandomAccessor) Read(offset int64, size int) ([]byte, error) {
 		// Invalidate cache and re-fetch DataInfo
 		dataInfoCache.Del(dataInfoCacheKey)
 		decodingReaderCache.Del(dataInfoCacheKey)
+		DebugLog("[VFS Read] Cleared caches, re-fetching DataInfo from database: fileID=%d, DataID=%d", ra.fileID, fileObj.DataID)
 		// Re-fetch DataInfo from database
 		dataInfo, err = ra.fs.h.GetDataInfo(ra.fs.c, ra.fs.bktID, fileObj.DataID)
 		if err != nil {
@@ -3664,16 +4293,24 @@ func (ra *RandomAccessor) Read(offset int64, size int) ([]byte, error) {
 			return nil, fmt.Errorf("failed to re-fetch DataInfo after size mismatch: %w", err)
 		}
 		if dataInfo != nil {
-			DebugLog("[VFS Read] Re-fetched DataInfo: fileID=%d, DataID=%d, OrigSize=%d, Size=%d",
-				ra.fileID, dataInfo.ID, dataInfo.OrigSize, dataInfo.Size)
+			DebugLog("[VFS Read] Re-fetched DataInfo from database: fileID=%d, DataID=%d, OrigSize=%d, Size=%d, fileObj.Size=%d",
+				ra.fileID, dataInfo.ID, dataInfo.OrigSize, dataInfo.Size, fileObj.Size)
 			// If re-fetched DataInfo still doesn't match fileObj.Size, use fileObj.Size
 			// This can happen if DataInfo hasn't been updated yet after truncate
 			if dataInfo.OrigSize != fileObj.Size {
 				DebugLog("[VFS Read] WARNING: Re-fetched DataInfo OrigSize still doesn't match fileObj.Size, will use fileObj.Size: fileID=%d, DataID=%d, DataInfo.OrigSize=%d, fileObj.Size=%d",
 					ra.fileID, dataInfo.ID, dataInfo.OrigSize, fileObj.Size)
+				// CRITICAL: Don't cache DataInfo if OrigSize doesn't match fileObj.Size
+				// This ensures we always re-fetch from database until it's updated
+				// Don't update cache here - let subsequent reads fetch from database
+			} else {
+				// Only cache DataInfo if OrigSize matches fileObj.Size
+				dataInfoCache.Put(dataInfoCacheKey, dataInfo)
+				DebugLog("[VFS Read] Cached re-fetched DataInfo (OrigSize matches fileObj.Size): fileID=%d, DataID=%d", ra.fileID, fileObj.DataID)
 			}
-			dataInfoCache.Put(dataInfoCacheKey, dataInfo)
 		}
+	} else {
+		DebugLog("[VFS Read] DataInfo OrigSize matches fileObj.Size: fileID=%d, DataID=%d, OrigSize=%d", ra.fileID, dataInfo.ID, dataInfo.OrigSize)
 	}
 	DebugLog("[VFS Read] DataInfo: fileID=%d, DataID=%d, OrigSize=%d, Size=%d, Kind=0x%x, PkgID=%d, PkgOffset=%d",
 		ra.fileID, dataInfo.ID, dataInfo.OrigSize, dataInfo.Size, dataInfo.Kind, dataInfo.PkgID, dataInfo.PkgOffset)
@@ -3701,19 +4338,32 @@ func (ra *RandomAccessor) Read(offset int64, size int) ([]byte, error) {
 	// Create data reader (abstract read interface, unified handling of uncompressed and compressed/encrypted data)
 	// Always create a new chunkReader to ensure it uses the latest DataInfo
 	// (don't reuse cached reader as it may have stale origSize)
-	reader := newChunkReader(ra.fs.c, ra.fs.h, ra.fs.bktID, dataInfo, endecKey, chunkSize)
+	cr := newChunkReader(ra.fs.c, ra.fs.h, ra.fs.bktID, dataInfo, endecKey, chunkSize)
+	var reader dataReader = cr
 	// Ensure reader.origSize matches fileObj.Size (critical for truncated files)
 	// If DataInfo.OrigSize doesn't match fileObj.Size, use fileObj.Size to limit reads
 	// This is important because after truncate, DataInfo.OrigSize may not be updated immediately
-	if reader.origSize != actualFileSize {
-		// Always use fileObj.Size if it doesn't match DataInfo.OrigSize
+	// EXCEPTION: If fileObj.Size is 0 but DataInfo.OrigSize > 0, use DataInfo.OrigSize
+	// This handles the case where chunk was auto-flushed but fileObj.Size hasn't been updated yet
+	if actualFileSize == 0 && cr.origSize > 0 {
+		// File size is 0 but DataInfo has data, use DataInfo.OrigSize
+		// This is important for auto-flushed chunks where fileObj.Size may not be updated yet
+		DebugLog("[VFS Read] File Size is 0 but DataInfo has data, using DataInfo.OrigSize: fileID=%d, DataInfo.OrigSize=%d",
+			ra.fileID, cr.origSize)
+		actualFileSize = cr.origSize
+	} else if cr.origSize != actualFileSize && actualFileSize > 0 {
+		// Always use fileObj.Size if it doesn't match DataInfo.OrigSize (and fileObj.Size > 0)
 		// This ensures truncated files are read correctly
 		DebugLog("[VFS Read] WARNING: chunkReader origSize mismatch, using fileObj.Size: fileID=%d, DataInfo.OrigSize=%d, fileObj.Size=%d",
-			ra.fileID, reader.origSize, actualFileSize)
-		reader.origSize = actualFileSize
+			ra.fileID, cr.origSize, actualFileSize)
+		// CRITICAL: Update cr.origSize to match actualFileSize
+		// This ensures chunkReader.ReadAt() uses the correct size limit
+		oldOrigSize := cr.origSize
+		cr.origSize = actualFileSize
+		DebugLog("[VFS Read] Updated chunkReader.origSize to match fileObj.Size: fileID=%d, oldOrigSize=%d, newOrigSize=%d", ra.fileID, oldOrigSize, actualFileSize)
 	}
 	DebugLog("[VFS Read] Created chunkReader: fileID=%d, dataID=%d, origSize=%d, chunkSize=%d, kind=0x%x, endecKey length=%d",
-		ra.fileID, reader.dataID, reader.origSize, reader.chunkSize, reader.kind, len(reader.endecKey))
+		ra.fileID, cr.dataID, cr.origSize, cr.chunkSize, cr.kind, len(cr.endecKey))
 
 	// Unified read logic (includes merging write operations)
 	// IMPORTANT: Ensure read size is limited to actualFileSize to prevent reading beyond truncated size
@@ -3725,16 +4375,28 @@ func (ra *RandomAccessor) Read(offset int64, size int) ([]byte, error) {
 		}
 	}
 	DebugLog("[VFS Read] Starting readWithWrites: fileID=%d, offset=%d, size=%d, origSize=%d, actualFileSize=%d",
-		ra.fileID, offset, size, reader.origSize, actualFileSize)
+		ra.fileID, offset, size, cr.origSize, actualFileSize)
 	fileData, operationsHandled := ra.readWithWrites(reader, offset, size, actualFileSize)
 	if operationsHandled {
 		DebugLog("[VFS Read] readWithWrites completed: fileID=%d, readSize=%d, requested=%d, actualFileSize=%d, reader.origSize=%d",
-			ra.fileID, len(fileData), size, actualFileSize, reader.origSize)
+			ra.fileID, len(fileData), size, actualFileSize, cr.origSize)
 		// IMPORTANT: Ensure we don't return more data than actualFileSize
-		if int64(len(fileData)) > actualFileSize-offset {
+		// CRITICAL: Check that actualFileSize-offset > 0 before slicing to avoid panic
+		if actualFileSize > offset && int64(len(fileData)) > actualFileSize-offset {
 			oldLen := len(fileData)
-			fileData = fileData[:actualFileSize-offset]
-			DebugLog("[VFS Read] WARNING: Truncated read data: fileID=%d, oldLen=%d, newLen=%d, actualFileSize=%d, offset=%d", ra.fileID, oldLen, len(fileData), actualFileSize, offset)
+			maxLen := actualFileSize - offset
+			if maxLen > 0 {
+				fileData = fileData[:maxLen]
+				DebugLog("[VFS Read] WARNING: Truncated read data: fileID=%d, oldLen=%d, newLen=%d, actualFileSize=%d, offset=%d", ra.fileID, oldLen, len(fileData), actualFileSize, offset)
+			} else {
+				// offset >= actualFileSize, return empty data
+				fileData = []byte{}
+				DebugLog("[VFS Read] WARNING: offset >= actualFileSize, returning empty data: fileID=%d, offset=%d, actualFileSize=%d", ra.fileID, offset, actualFileSize)
+			}
+		} else if offset >= actualFileSize {
+			// offset is beyond file size, return empty data
+			fileData = []byte{}
+			DebugLog("[VFS Read] offset >= actualFileSize, returning empty data: fileID=%d, offset=%d, actualFileSize=%d", ra.fileID, offset, actualFileSize)
 		}
 		return fileData, nil
 	}
@@ -4005,7 +4667,11 @@ func (ra *RandomAccessor) flushInternal(force bool) (int64, error) {
 		}
 	}
 
-	// If sequential write buffer has data, flush it first
+	// OPTIMIZATION: For regular files, only flush sequential buffer if:
+	// 1. force=true (ForceFlush/Release) - always flush
+	// 2. buffer is full (>= chunkSize) - flush to avoid memory bloat
+	// 3. For regular Flush (force=false), skip if buffer is not full
+	// This reduces disk I/O and improves performance by batching writes
 	if ra.seqBuffer != nil {
 		ra.seqBuffer.mu.Lock()
 		seqHasData := ra.seqBuffer.hasData
@@ -4013,38 +4679,55 @@ func (ra *RandomAccessor) flushInternal(force bool) (int64, error) {
 		seqDataID := ra.seqBuffer.dataID
 		seqSn := ra.seqBuffer.sn
 		seqBufferSize := len(ra.seqBuffer.buffer)
+		seqChunkSize := ra.seqBuffer.chunkSize
 		ra.seqBuffer.mu.Unlock()
 
 		if seqHasData && !seqClosed {
-			DebugLog("[VFS RandomAccessor Flush] Flushing sequential buffer: fileID=%d, dataID=%d, sn=%d, bufferSize=%d", ra.fileID, seqDataID, seqSn, seqBufferSize)
-			if err := ra.flushSequentialBuffer(); err != nil {
-				DebugLog("[VFS RandomAccessor Flush] ERROR: Failed to flush sequential buffer: fileID=%d, error=%v", ra.fileID, err)
-				return 0, err
-			}
-			// After sequential write completes, close sequential buffer
-			ra.seqBuffer.mu.Lock()
-			ra.seqBuffer.closed = true
-			ra.seqBuffer.mu.Unlock()
-			// After sequential write completes, return new version ID (actually the version corresponding to current DataID)
-			fileObj, err := ra.getFileObj()
-			if err != nil {
-				DebugLog("[VFS RandomAccessor Flush] ERROR: Failed to get file object after sequential flush: fileID=%d, error=%v", ra.fileID, err)
-				return 0, err
-			}
-			DebugLog("[VFS RandomAccessor Flush] Sequential flush completed: fileID=%d, dataID=%d, size=%d", ra.fileID, fileObj.DataID, fileObj.Size)
+			// Flush whenever Flush/ForceFlush is explicitly called and there is data:
+			// - force=true: always flush (Release/ForceFlush / Close)
+			// - force=false: still flush to honor explicit Flush() semantics for small files
+			//   (otherwise small files < chunkSize would never update Size/DataID before Close)
+			shouldFlush := force || seqHasData
 
-			// IMPORTANT: flushSequentialBuffer already updated the cache, don't re-read from database
-			// Just verify the cache is correct to avoid WAL dirty read
-			if cachedObj := ra.fileObj.Load(); cachedObj != nil {
-				if obj, ok := cachedObj.(*core.ObjectInfo); ok && obj != nil {
-					DebugLog("[VFS RandomAccessor Flush] Verified file object cache after sequential flush: fileID=%d, size=%d, dataID=%d, mtime=%d",
-						obj.ID, obj.Size, obj.DataID, obj.MTime)
-					fileObj = obj
+			DebugLog("[VFS RandomAccessor Flush] Sequential buffer state: fileID=%d, hasData=%v, closed=%v, bufferSize=%d, chunkSize=%d, sn=%d, force=%v, shouldFlush=%v",
+				ra.fileID, seqHasData, seqClosed, seqBufferSize, seqChunkSize, seqSn, force, shouldFlush)
+
+			if shouldFlush {
+				DebugLog("[VFS RandomAccessor Flush] Flushing sequential buffer: fileID=%d, dataID=%d, sn=%d, bufferSize=%d, chunkSize=%d, force=%v",
+					ra.fileID, seqDataID, seqSn, seqBufferSize, seqChunkSize, force)
+				if err := ra.flushSequentialBuffer(); err != nil {
+					DebugLog("[VFS RandomAccessor Flush] ERROR: Failed to flush sequential buffer: fileID=%d, error=%v", ra.fileID, err)
+					return 0, err
 				}
-			}
+				DebugLog("[VFS RandomAccessor Flush] Sequential buffer flushed successfully: fileID=%d", ra.fileID)
+				// After sequential write completes, close sequential buffer only if force=true
+				// For regular flush, keep buffer open for continued writes
+				if force {
+					ra.seqBuffer.mu.Lock()
+					ra.seqBuffer.closed = true
+					ra.seqBuffer.mu.Unlock()
+				}
+				// After sequential write completes, return new version ID (actually the version corresponding to current DataID)
+				fileObj, err := ra.getFileObj()
+				if err != nil {
+					DebugLog("[VFS RandomAccessor Flush] ERROR: Failed to get file object after sequential flush: fileID=%d, error=%v", ra.fileID, err)
+					return 0, err
+				}
+				DebugLog("[VFS RandomAccessor Flush] Sequential flush completed: fileID=%d, dataID=%d, size=%d", ra.fileID, fileObj.DataID, fileObj.Size)
 
-			if fileObj.DataID > 0 {
-				return core.NewID(), nil // Return new version ID
+				// IMPORTANT: flushSequentialBuffer already updated the cache, don't re-read from database
+				// Just verify the cache is correct to avoid WAL dirty read
+				if cachedObj := ra.fileObj.Load(); cachedObj != nil {
+					if obj, ok := cachedObj.(*core.ObjectInfo); ok && obj != nil {
+						DebugLog("[VFS RandomAccessor Flush] Verified file object cache after sequential flush: fileID=%d, size=%d, dataID=%d, mtime=%d",
+							obj.ID, obj.Size, obj.DataID, obj.MTime)
+						fileObj = obj
+					}
+				}
+
+				if fileObj.DataID > 0 {
+					return core.NewID(), nil // Return new version ID
+				}
 			}
 		}
 	}
@@ -5415,8 +6098,10 @@ func (ra *RandomAccessor) readWithWrites(reader dataReader, offset int64, size i
 	}
 
 	// Read required data range directly from offset
+	DebugLog("[VFS readWithWrites] Before reader.Read: fileID=%d, readStart=%d, readSize=%d, actualFileSize=%d", ra.fileID, readStart, readSize, actualFileSize)
 	readData := make([]byte, readSize)
 	n, err := reader.Read(readData, readStart)
+	DebugLog("[VFS readWithWrites] After reader.Read: fileID=%d, readStart=%d, readSize=%d, n=%d, err=%v, actualFileSize=%d", ra.fileID, readStart, readSize, n, err, actualFileSize)
 	// If read fails or read data is less than requested size, only return read data
 	if err != nil {
 		// io.EOF means all available data has been read
@@ -5538,15 +6223,13 @@ type chunkReader struct {
 	h                 core.Handler
 	bktID             int64
 	dataID            int64
-	kind              uint32                // Compression/encryption kind (0 for plain)
-	endecKey          string                // Encryption key (empty for plain)
-	origSize          int64                 // Original data size (decompressed size)
-	compressedSize    int64                 // Compressed/encrypted data size (for packaged files)
-	chunkSize         int64                 // Chunk size for original data
-	chunkCache        *ecache2.Cache[int64] // Cache for chunks: key sn (int64), value []byte
-	decodedFileCache  *ecache2.Cache[int64] // Cache for decoded file data (for packaged files): key dataID (int64), value []byte
-	prefetchThreshold float64               // Threshold percentage to trigger prefetch (default: 0.8 = 80%)
-	pkgOffset         uint32                // Package offset (for packaged files, 0 for non-packaged files)
+	kind              uint32  // Compression/encryption kind (0 for plain)
+	endecKey          string  // Encryption key (empty for plain)
+	origSize          int64   // Original data size (decompressed size)
+	compressedSize    int64   // Compressed/encrypted data size (for packaged files)
+	chunkSize         int64   // Chunk size for original data
+	prefetchThreshold float64 // Threshold percentage to trigger prefetch (default: 0.8 = 80%)
+	pkgOffset         uint32  // Package offset (for packaged files, 0 for non-packaged files)
 }
 
 // newChunkReader creates a unified chunk reader for both plain and compressed/encrypted data
@@ -5560,9 +6243,7 @@ func newChunkReader(c core.Ctx, h core.Handler, bktID int64, dataInfo *core.Data
 		h:                 h,
 		bktID:             bktID,
 		chunkSize:         chunkSize,
-		chunkCache:        ecache2.NewLRUCache[int64](4, 64, 5*time.Minute),
-		decodedFileCache:  ecache2.NewLRUCache[int64](1, 1, 5*time.Minute), // Cache decoded file data for packaged files
-		prefetchThreshold: 0.8,                                             // 80% threshold
+		prefetchThreshold: 0.8, // 80% threshold
 	}
 
 	if dataInfo != nil {
@@ -5602,12 +6283,17 @@ func (cr *chunkReader) ReadAt(buf []byte, offset int64) (int, error) {
 
 	// Limit read size to available data
 	readSize := int64(len(buf))
+	DebugLog("[VFS chunkReader ReadAt] Before size limit: dataID=%d, offset=%d, bufSize=%d, origSize=%d", cr.dataID, offset, len(buf), cr.origSize)
 	if offset+readSize > cr.origSize {
+		oldReadSize := readSize
 		readSize = cr.origSize - offset
+		DebugLog("[VFS chunkReader ReadAt] Limited read size: dataID=%d, offset=%d, oldReadSize=%d, newReadSize=%d, origSize=%d", cr.dataID, offset, oldReadSize, readSize, cr.origSize)
 	}
 	if readSize <= 0 {
+		DebugLog("[VFS chunkReader ReadAt] Read size <= 0, returning EOF: dataID=%d, offset=%d, readSize=%d, origSize=%d", cr.dataID, offset, readSize, cr.origSize)
 		return 0, io.EOF
 	}
+	DebugLog("[VFS chunkReader ReadAt] Final read size: dataID=%d, offset=%d, readSize=%d, origSize=%d", cr.dataID, offset, readSize, cr.origSize)
 
 	// ChunkSize must be set
 	if cr.chunkSize <= 0 {
@@ -5619,14 +6305,14 @@ func (cr *chunkReader) ReadAt(buf []byte, offset int64) (int, error) {
 	if cr.pkgOffset > 0 {
 		// This is a packaged file, read entire package (sn=0)
 		// Check cache first for decoded file data
-		if cached, ok := cr.decodedFileCache.Get(cr.dataID); ok {
+		if cached, ok := globalDecodedFileCache.Get(cr.dataID); ok {
 			if decoded, ok := cached.([]byte); ok && len(decoded) > 0 {
 				// Truncate cached data to origSize (important for truncated files)
 				// Cached data may be from before truncate operation
 				if int64(len(decoded)) > cr.origSize {
 					decoded = decoded[:cr.origSize]
 					// Update cache with truncated data
-					cr.decodedFileCache.Put(cr.dataID, decoded)
+					globalDecodedFileCache.Put(cr.dataID, decoded)
 					DebugLog("[VFS chunkReader ReadAt] Truncated cached decoded file data to origSize: dataID=%d, cachedLen=%d, origSize=%d", cr.dataID, len(decoded), cr.origSize)
 				}
 				fileData = decoded
@@ -5639,10 +6325,10 @@ func (cr *chunkReader) ReadAt(buf []byte, offset int64) (int, error) {
 			// Key format: "decode_pkg_<dataID>" to uniquely identify each package file
 			sfKey := fmt.Sprintf("decode_pkg_%d", cr.dataID)
 
-			result, err, _ := packageDecodeSingleFlight.Do(sfKey, func() (interface{}, error) {
+			result, err, _ := globalSingleFlight.Do(sfKey, func() (interface{}, error) {
 				// Double-check cache after acquiring singleflight lock
 				// Another goroutine might have already decoded it
-				if cached, ok := cr.decodedFileCache.Get(cr.dataID); ok {
+				if cached, ok := globalDecodedFileCache.Get(cr.dataID); ok {
 					if decoded, ok := cached.([]byte); ok && len(decoded) > 0 {
 						return decoded, nil
 					}
@@ -5683,7 +6369,7 @@ func (cr *chunkReader) ReadAt(buf []byte, offset int64) (int, error) {
 				}
 
 				// Cache decoded file data for future reads
-				cr.decodedFileCache.Put(cr.dataID, decodedFileData)
+				globalDecodedFileCache.Put(cr.dataID, decodedFileData)
 				// DebugLog("[VFS chunkReader ReadAt] Decoded file data: dataID=%d, decodedFileDataLen=%d, origSize=%d", cr.dataID, len(decodedFileData), cr.origSize)
 				return decodedFileData, nil
 			})
@@ -6121,7 +6807,9 @@ func (cr *chunkReader) ReadAt(buf []byte, offset int64) (int, error) {
 					capturedNextSn := nextSn
 					go func() {
 						// Check if not already cached before prefetching
-						if _, ok := cr.chunkCache.Get(int64(capturedNextSn)); !ok {
+						// Check global cache
+						cacheKey := [2]int64{cr.dataID, int64(capturedNextSn)}
+						if _, ok := globalChunkCache.Get(cacheKey); !ok {
 							// Prefetch next chunk (ignore errors)
 							_, _ = cr.getChunk(capturedNextSn)
 						}
@@ -6157,7 +6845,8 @@ func (cr *chunkReader) getChunk(sn int) ([]byte, error) {
 	}
 
 	// Check cache first (fast path)
-	if cached, ok := cr.chunkCache.Get(int64(sn)); ok {
+	cacheKey := [2]int64{cr.dataID, int64(sn)}
+	if cached, ok := globalChunkCache.Get(cacheKey); ok {
 		if chunkData, ok := cached.([]byte); ok && len(chunkData) > 0 {
 			return chunkData, nil
 		}
@@ -6167,10 +6856,10 @@ func (cr *chunkReader) getChunk(sn int) ([]byte, error) {
 	// Key format: "chunk_<dataID>_<sn>" to uniquely identify each chunk globally
 	sfKey := fmt.Sprintf("chunk_%d_%d", cr.dataID, sn)
 
-	result, err, _ := chunkReadSingleFlight.Do(sfKey, func() (interface{}, error) {
+	result, err, _ := globalSingleFlight.Do(sfKey, func() (interface{}, error) {
 		// Double-check cache after acquiring singleflight lock
 		// Another goroutine might have already loaded it
-		if cached, ok := cr.chunkCache.Get(int64(sn)); ok {
+		if cached, ok := globalChunkCache.Get(cacheKey); ok {
 			if chunkData, ok := cached.([]byte); ok && len(chunkData) > 0 {
 				return chunkData, nil
 			}
@@ -6201,7 +6890,7 @@ func (cr *chunkReader) getChunk(sn int) ([]byte, error) {
 		}
 
 		// Cache the processed chunk before returning
-		cr.chunkCache.Put(int64(sn), finalChunk)
+		globalChunkCache.Put(cacheKey, finalChunk)
 
 		return finalChunk, nil
 	})
@@ -6282,6 +6971,19 @@ func (ra *RandomAccessor) Truncate(newSize int64) (int64, error) {
 		// IMPORTANT: Always create a new version when truncating to 0, even if oldSize is 0
 		// This ensures consistency and allows tracking of truncate operations
 		DebugLog("[VFS Truncate] Truncating to 0: fileID=%d, oldSize=%d, fileObj.Size=%d", ra.fileID, oldSize, fileObj.Size)
+
+		// CRITICAL: Clear journal and buffer before truncating to 0
+		// This ensures Read() won't use old journal data after truncate
+		ra.fs.journalMgr.Remove(ra.fileID)
+		atomic.StoreInt64(&ra.buffer.writeIndex, 0)
+		atomic.StoreInt64(&ra.buffer.totalSize, 0)
+		atomic.StoreInt64(&ra.lastOffset, -1)
+		if ra.seqBuffer != nil {
+			putSequentialBuffer(ra.seqBuffer)
+			ra.seqBuffer = nil
+		}
+		DebugLog("[VFS Truncate] Cleared journal and buffer for truncate to 0: fileID=%d", ra.fileID)
+
 		newDataID = core.EmptyDataID
 		newDataInfo = &core.DataInfo{
 			ID:        newDataID,
@@ -6374,16 +7076,27 @@ func (ra *RandomAccessor) Truncate(newSize int64) (int64, error) {
 							MTime:  mTime,
 						}
 
-						// Batch write version and update file object
-						objectsToPut := []*core.ObjectInfo{newVersion, updateFileObj}
-						_, err = lh.Put(ra.fs.c, ra.fs.bktID, objectsToPut)
+						// Create version object first
+						_, err = lh.Put(ra.fs.c, ra.fs.bktID, []*core.ObjectInfo{newVersion})
 						if err != nil {
-							return 0, fmt.Errorf("failed to update file object: %v", err)
+							return 0, fmt.Errorf("failed to create version: %v", err)
 						}
 
-						// Update cache
-						fileObjCache.Put(ra.fileObjKey, updateFileObj)
-						ra.fileObj.Store(updateFileObj)
+						// Update file object using SetObj to ensure Size field is updated
+						// Put uses InsertIgnore which won't update existing objects
+						DebugLog("[VFS Truncate] Updating file object using SetObj: fileID=%d, newSize=%d, newDataID=%d", ra.fileID, newSize, updateFileObj.DataID)
+						err = lh.MetadataAdapter().SetObj(ra.fs.c, ra.fs.bktID, []string{"did", "s", "m"}, updateFileObj)
+						if err != nil {
+							DebugLog("[VFS Truncate] ERROR: Failed to update file object: %v", err)
+							return 0, fmt.Errorf("failed to update file object: %v", err)
+						}
+						DebugLog("[VFS Truncate] Successfully updated file object in database: fileID=%d, newSize=%d, newDataID=%d", ra.fileID, newSize, updateFileObj.DataID)
+
+						// CRITICAL: Clear cache immediately after updating database to force fresh reads
+						// Don't update cache here - let subsequent reads fetch from database to ensure consistency
+						fileObjCache.Del(ra.fileObjKey)
+						ra.fileObj.Store((*core.ObjectInfo)(nil))
+						DebugLog("[VFS Truncate] Cleared fileObj cache after database update: fileID=%d", ra.fileID)
 
 						return versionID, nil
 					} else if newSize == int64(oldDataInfo.OrigSize) {
@@ -6427,6 +7140,7 @@ func (ra *RandomAccessor) Truncate(newSize int64) (int64, error) {
 						atomic.StoreInt64(&ra.buffer.totalSize, 0)
 						atomic.StoreInt64(&ra.lastOffset, -1)
 						if ra.seqBuffer != nil {
+							putSequentialBuffer(ra.seqBuffer) // Return to pool for reuse
 							ra.seqBuffer = nil
 						}
 
@@ -6453,10 +7167,16 @@ func (ra *RandomAccessor) Truncate(newSize int64) (int64, error) {
 							return 0, fmt.Errorf("failed to flush truncated data: %v", flushErr)
 						}
 
-						// CRITICAL: Clear fileObj cache to force re-fetch from database
-						// This ensures we get the latest fileObj with correct size after flush
+						// CRITICAL: Clear fileObj cache and journal immediately after flush
+						// This ensures subsequent reads get the correct fileObj.Size and don't use stale journal
 						fileObjCache.Del(ra.fileObjKey)
 						ra.fileObj.Store((*core.ObjectInfo)(nil))
+						// CRITICAL: Remove journal after flush to ensure subsequent reads don't use stale journal data
+						ra.fs.journalMgr.Remove(ra.fileID)
+						ra.journalMu.Lock()
+						ra.journal = nil
+						ra.journalMu.Unlock()
+						DebugLog("[VFS Truncate] Cleared journal after flush truncated data: fileID=%d", ra.fileID)
 
 						// Get updated fileObj to get new DataID
 						updatedFileObj, err := ra.getFileObj()
@@ -6499,36 +7219,53 @@ func (ra *RandomAccessor) Truncate(newSize int64) (int64, error) {
 							MTime:  mTime,
 						}
 
-						// Batch write version and update file object
-						objectsToPut := []*core.ObjectInfo{newVersion, updateFileObj}
-						_, err = lh.Put(ra.fs.c, ra.fs.bktID, objectsToPut)
-						if err != nil {
-							return 0, fmt.Errorf("failed to update file object: %v", err)
-						}
-
-						// Update cache
-						fileObjCache.Put(ra.fileObjKey, updateFileObj)
-						ra.fileObj.Store(updateFileObj)
-
-						// CRITICAL: Ensure DataInfo.OrigSize matches newSize
+						// CRITICAL: Ensure DataInfo.OrigSize matches newSize BEFORE updating file object
 						// This is essential for correct reading after truncate
+						// Update DataInfo first to ensure it's available when file object is updated
 						if updateFileObj.DataID > 0 && updateFileObj.DataID != core.EmptyDataID {
 							dataInfo, err := ra.fs.h.GetDataInfo(ra.fs.c, ra.fs.bktID, updateFileObj.DataID)
 							if err == nil && dataInfo != nil {
 								if dataInfo.OrigSize != newSize {
 									DebugLog("[VFS Truncate] Fixing DataInfo.OrigSize mismatch: fileID=%d, dataID=%d, oldOrigSize=%d, newSize=%d", ra.fileID, updateFileObj.DataID, dataInfo.OrigSize, newSize)
 									dataInfo.OrigSize = newSize
-									// Update DataInfo in database
+									// Update DataInfo in database FIRST
 									_, err = ra.fs.h.PutDataInfo(ra.fs.c, ra.fs.bktID, []*core.DataInfo{dataInfo})
 									if err != nil {
 										DebugLog("[VFS Truncate] WARNING: Failed to update DataInfo.OrigSize: %v", err)
-									} else {
-										// Update cache with corrected DataInfo
-										dataInfoCache.Put(updateFileObj.DataID, dataInfo)
 									}
+									// Always clear cache after updating DataInfo to ensure fresh reads
+									// Don't update cache here - let subsequent reads fetch from database
+									dataInfoCache.Del(updateFileObj.DataID)
+									decodingReaderCache.Del(updateFileObj.DataID)
+								} else {
+									// DataInfo.OrigSize already matches, but clear cache to ensure fresh reads
+									dataInfoCache.Del(updateFileObj.DataID)
+									decodingReaderCache.Del(updateFileObj.DataID)
 								}
 							}
 						}
+
+						// Create version object first
+						_, err = lh.Put(ra.fs.c, ra.fs.bktID, []*core.ObjectInfo{newVersion})
+						if err != nil {
+							return 0, fmt.Errorf("failed to create version: %v", err)
+						}
+
+						// Update file object using SetObj to ensure Size field is updated
+						// Put uses InsertIgnore which won't update existing objects
+						DebugLog("[VFS Truncate] Updating file object using SetObj: fileID=%d, newSize=%d, newDataID=%d", ra.fileID, newSize, updateFileObj.DataID)
+						err = lh.MetadataAdapter().SetObj(ra.fs.c, ra.fs.bktID, []string{"did", "s", "m"}, updateFileObj)
+						if err != nil {
+							DebugLog("[VFS Truncate] ERROR: Failed to update file object: %v", err)
+							return 0, fmt.Errorf("failed to update file object: %v", err)
+						}
+						DebugLog("[VFS Truncate] Successfully updated file object in database: fileID=%d, newSize=%d, newDataID=%d", ra.fileID, newSize, updateFileObj.DataID)
+
+						// CRITICAL: Clear cache immediately after updating database to force fresh reads
+						// Don't update cache here - let subsequent reads fetch from database to ensure consistency
+						fileObjCache.Del(ra.fileObjKey)
+						ra.fileObj.Store((*core.ObjectInfo)(nil))
+						DebugLog("[VFS Truncate] Cleared fileObj cache after database update: fileID=%d", ra.fileID)
 
 						// Invalidate DataInfo cache to ensure fresh reads after truncate
 						// This is critical for compressed files where DataInfo.OrigSize must match fileObj.Size
@@ -6633,16 +7370,27 @@ func (ra *RandomAccessor) Truncate(newSize int64) (int64, error) {
 							MTime:  mTime,
 						}
 
-						// Batch write version and update file object
-						objectsToPut := []*core.ObjectInfo{newVersion, updateFileObj}
-						_, err = lh.Put(ra.fs.c, ra.fs.bktID, objectsToPut)
+						// Create version object first
+						_, err = lh.Put(ra.fs.c, ra.fs.bktID, []*core.ObjectInfo{newVersion})
 						if err != nil {
-							return 0, fmt.Errorf("failed to update file object: %v", err)
+							return 0, fmt.Errorf("failed to create version: %v", err)
 						}
 
-						// Update cache
-						fileObjCache.Put(ra.fileObjKey, updateFileObj)
-						ra.fileObj.Store(updateFileObj)
+						// Update file object using SetObj to ensure Size field is updated
+						// Put uses InsertIgnore which won't update existing objects
+						DebugLog("[VFS Truncate] Updating file object using SetObj: fileID=%d, newSize=%d, newDataID=%d", ra.fileID, newSize, updateFileObj.DataID)
+						err = lh.MetadataAdapter().SetObj(ra.fs.c, ra.fs.bktID, []string{"did", "s", "m"}, updateFileObj)
+						if err != nil {
+							DebugLog("[VFS Truncate] ERROR: Failed to update file object: %v", err)
+							return 0, fmt.Errorf("failed to update file object: %v", err)
+						}
+						DebugLog("[VFS Truncate] Successfully updated file object in database: fileID=%d, newSize=%d, newDataID=%d", ra.fileID, newSize, updateFileObj.DataID)
+
+						// CRITICAL: Clear cache immediately after updating database to force fresh reads
+						// Don't update cache here - let subsequent reads fetch from database to ensure consistency
+						fileObjCache.Del(ra.fileObjKey)
+						ra.fileObj.Store((*core.ObjectInfo)(nil))
+						DebugLog("[VFS Truncate] Cleared fileObj cache after database update: fileID=%d", ra.fileID)
 
 						// Invalidate DataInfo cache to ensure fresh reads after truncate/extend
 						// This is critical for compressed files where DataInfo.OrigSize must match fileObj.Size
@@ -6696,6 +7444,7 @@ func (ra *RandomAccessor) Truncate(newSize int64) (int64, error) {
 						atomic.StoreInt64(&ra.buffer.totalSize, 0)
 						atomic.StoreInt64(&ra.lastOffset, -1)
 						if ra.seqBuffer != nil {
+							putSequentialBuffer(ra.seqBuffer) // Return to pool for reuse
 							ra.seqBuffer = nil
 						}
 
@@ -6722,10 +7471,16 @@ func (ra *RandomAccessor) Truncate(newSize int64) (int64, error) {
 							return 0, fmt.Errorf("failed to flush truncated data: %v", flushErr)
 						}
 
-						// CRITICAL: Clear fileObj cache to force re-fetch from database
-						// This ensures we get the latest fileObj with correct size after flush
+						// CRITICAL: Clear fileObj cache and journal immediately after flush
+						// This ensures subsequent reads get the correct fileObj.Size and don't use stale journal
 						fileObjCache.Del(ra.fileObjKey)
 						ra.fileObj.Store((*core.ObjectInfo)(nil))
+						// CRITICAL: Remove journal after flush to ensure subsequent reads don't use stale journal data
+						ra.fs.journalMgr.Remove(ra.fileID)
+						ra.journalMu.Lock()
+						ra.journal = nil
+						ra.journalMu.Unlock()
+						DebugLog("[VFS Truncate] Cleared journal after flush truncated data: fileID=%d", ra.fileID)
 
 						// Get updated fileObj to get new DataID
 						updatedFileObj, err := ra.getFileObj()
@@ -6768,26 +7523,16 @@ func (ra *RandomAccessor) Truncate(newSize int64) (int64, error) {
 							MTime:  mTime,
 						}
 
-						// Batch write version and update file object
-						objectsToPut := []*core.ObjectInfo{newVersion, updateFileObj}
-						_, err = lh.Put(ra.fs.c, ra.fs.bktID, objectsToPut)
-						if err != nil {
-							return 0, fmt.Errorf("failed to update file object: %v", err)
-						}
-
-						// Update cache
-						fileObjCache.Put(ra.fileObjKey, updateFileObj)
-						ra.fileObj.Store(updateFileObj)
-
-						// CRITICAL: Ensure DataInfo.OrigSize matches newSize
+						// CRITICAL: Ensure DataInfo.OrigSize matches newSize BEFORE updating file object
 						// This is essential for correct reading after truncate
+						// Update DataInfo first to ensure it's available when file object is updated
 						if updateFileObj.DataID > 0 && updateFileObj.DataID != core.EmptyDataID {
 							dataInfo, err := ra.fs.h.GetDataInfo(ra.fs.c, ra.fs.bktID, updateFileObj.DataID)
 							if err == nil && dataInfo != nil {
 								if dataInfo.OrigSize != newSize {
 									DebugLog("[VFS Truncate] Fixing DataInfo.OrigSize mismatch: fileID=%d, dataID=%d, oldOrigSize=%d, newSize=%d", ra.fileID, updateFileObj.DataID, dataInfo.OrigSize, newSize)
 									dataInfo.OrigSize = newSize
-									// Update DataInfo in database
+									// Update DataInfo in database FIRST
 									_, err = ra.fs.h.PutDataInfo(ra.fs.c, ra.fs.bktID, []*core.DataInfo{dataInfo})
 									if err != nil {
 										DebugLog("[VFS Truncate] WARNING: Failed to update DataInfo.OrigSize: %v", err)
@@ -6803,6 +7548,28 @@ func (ra *RandomAccessor) Truncate(newSize int64) (int64, error) {
 								}
 							}
 						}
+
+						// Create version object first
+						_, err = lh.Put(ra.fs.c, ra.fs.bktID, []*core.ObjectInfo{newVersion})
+						if err != nil {
+							return 0, fmt.Errorf("failed to create version: %v", err)
+						}
+
+						// Update file object using SetObj to ensure Size field is updated
+						// Put uses InsertIgnore which won't update existing objects
+						DebugLog("[VFS Truncate] Updating file object using SetObj: fileID=%d, newSize=%d, newDataID=%d", ra.fileID, newSize, updateFileObj.DataID)
+						err = lh.MetadataAdapter().SetObj(ra.fs.c, ra.fs.bktID, []string{"did", "s", "m"}, updateFileObj)
+						if err != nil {
+							DebugLog("[VFS Truncate] ERROR: Failed to update file object: %v", err)
+							return 0, fmt.Errorf("failed to update file object: %v", err)
+						}
+						DebugLog("[VFS Truncate] Successfully updated file object in database: fileID=%d, newSize=%d, newDataID=%d", ra.fileID, newSize, updateFileObj.DataID)
+
+						// CRITICAL: Clear cache immediately after updating database to force fresh reads
+						// Don't update cache here - let subsequent reads fetch from database to ensure consistency
+						fileObjCache.Del(ra.fileObjKey)
+						ra.fileObj.Store((*core.ObjectInfo)(nil))
+						DebugLog("[VFS Truncate] Cleared fileObj cache after database update: fileID=%d", ra.fileID)
 
 						// Invalidate DataInfo cache to ensure fresh reads after truncate
 						// This is critical for compressed files where DataInfo.OrigSize must match fileObj.Size
@@ -6842,15 +7609,31 @@ func (ra *RandomAccessor) Truncate(newSize int64) (int64, error) {
 				}
 			}
 		} else {
-			// No old data, create new empty data block
-			newDataID = core.EmptyDataID
-			newDataInfo = &core.DataInfo{
-				ID:        newDataID,
-				Size:      0,
-				OrigSize:  0,
-				Kind:      core.DATA_NORMAL,
-				PkgID:     0,
-				PkgOffset: 0,
+			// No old data
+			// CRITICAL: For sparse files (newSize > 0), don't set EmptyDataID
+			// Let subsequent writes create the actual DataID via ChunkedFileWriter
+			// This ensures sparse files can be written to correctly
+			if newSize > 0 {
+				// Sparse file: don't create DataID now, let writes create it
+				// Just mark as sparse file and return
+				atomic.StoreInt64(&ra.sparseSize, newSize)
+				DebugLog("[VFS Truncate] Marked as sparse file: fileID=%d, sparseSize=%d", ra.fileID, newSize)
+				// Don't create DataID or DataInfo - let subsequent writes handle it
+				// Use applyRandomWritesWithSDK to update file object with sparse size but no DataID
+				// This will be handled by the code below that calls applyRandomWritesWithSDK
+				newDataID = core.EmptyDataID
+				newDataInfo = nil // Don't create DataInfo for sparse files
+			} else {
+				// Empty file: use EmptyDataID
+				newDataID = core.EmptyDataID
+				newDataInfo = &core.DataInfo{
+					ID:        newDataID,
+					Size:      0,
+					OrigSize:  0,
+					Kind:      core.DATA_NORMAL,
+					PkgID:     0,
+					PkgOffset: 0,
+				}
 			}
 		}
 	}
@@ -6962,26 +7745,34 @@ func (ra *RandomAccessor) Truncate(newSize int64) (int64, error) {
 		DebugLog("[VFS applyRandomWritesWithSDK] Appended file to directory listing cache: fileID=%d, dirID=%d, name=%s", ra.fileID, updateFileObj.PID, updateFileObj.Name)
 	}
 
-	// Invalidate old DataInfo cache if DataID changed
+	// CRITICAL: Invalidate old DataInfo cache if DataID changed
+	// This is essential for truncate to 0 (EmptyDataID) to ensure Read() doesn't use old DataInfo
 	if fileObj.DataID > 0 && fileObj.DataID != core.EmptyDataID && fileObj.DataID != newDataID {
 		oldDataInfoCacheKey := fileObj.DataID
 		dataInfoCache.Del(oldDataInfoCacheKey)
+		decodingReaderCache.Del(oldDataInfoCacheKey)
+		DebugLog("[VFS Truncate] Cleared old DataInfo cache: fileID=%d, oldDataID=%d, newDataID=%d", ra.fileID, fileObj.DataID, newDataID)
 	}
 
-	// Reset buffer state after truncate to ensure subsequent writes work correctly
+	// CRITICAL: Reset buffer state after truncate to ensure subsequent reads/writes work correctly
 	// This is important because truncate changes the file size, and we need to reset
 	// the lastOffset and ensure buffer is ready for new writes
+	// For truncate to 0, this ensures Read() won't read from buffer
 	atomic.StoreInt64(&ra.lastOffset, -1)
 	atomic.StoreInt64(&ra.buffer.writeIndex, 0)
 	atomic.StoreInt64(&ra.buffer.totalSize, 0)
 	// Clear sequential buffer if it exists
 	if ra.seqBuffer != nil {
+		putSequentialBuffer(ra.seqBuffer) // Return to pool for reuse
 		ra.seqBuffer = nil
 	}
+	// CRITICAL: Clear journal to ensure Read() doesn't use old journal data
+	ra.fs.journalMgr.Remove(ra.fileID)
+	DebugLog("[VFS Truncate] Cleared journal after truncate: fileID=%d, newSize=%d", ra.fileID, newSize)
 
-	// Keep updated fileObj in cache (don't clear it) to ensure subsequent reads use correct size
-	// FileObj has been updated with newSize, so we should keep it in cache
-	// Also invalidate DataInfo cache to ensure fresh reads use correct OrigSize
+	// CRITICAL: Clear all caches to ensure fresh reads after truncate
+	// This is essential because truncate changes file size and DataID
+	// For EmptyDataID (truncate to 0), we need to clear old DataInfo cache
 	if fileObj.DataID > 0 && fileObj.DataID != core.EmptyDataID {
 		dataInfoCache.Del(fileObj.DataID)
 		decodingReaderCache.Del(fileObj.DataID)
@@ -6989,6 +7780,13 @@ func (ra *RandomAccessor) Truncate(newSize int64) (int64, error) {
 	if newDataID > 0 && newDataID != core.EmptyDataID {
 		dataInfoCache.Del(newDataID)
 		decodingReaderCache.Del(newDataID)
+	}
+	// CRITICAL: For truncate to 0 (EmptyDataID), also clear fileObj cache to force re-fetch
+	// This ensures that Read() will see DataID == EmptyDataID and return empty data
+	if newSize == 0 || newDataID == core.EmptyDataID {
+		fileObjCache.Del(ra.fileObjKey)
+		ra.fileObj.Store((*core.ObjectInfo)(nil))
+		DebugLog("[VFS Truncate] Cleared fileObj cache for truncate to 0: fileID=%d, newDataID=%d", ra.fileID, newDataID)
 	}
 
 	// CRITICAL: Set sparseSize for sparse file optimization
@@ -7004,6 +7802,7 @@ func (ra *RandomAccessor) Truncate(newSize int64) (int64, error) {
 }
 
 func (ra *RandomAccessor) Close() error {
+	DebugLog("[VFS RandomAccessor Close] Starting Close: fileID=%d", ra.fileID)
 	// Cancel any pending delayed flush so we can finish synchronously
 	ra.cancelDelayedFlush()
 
@@ -7063,19 +7862,66 @@ func (ra *RandomAccessor) Close() error {
 	// IMPORTANT: For sparse files, ChunkedFileWriter was already flushed above,
 	// so we need to ensure Flush() doesn't overwrite the dataID
 	// Save the dataID before Flush() to restore it if needed
+	// CRITICAL: Use ForceFlush() instead of Flush() to ensure all data is flushed on Close
+	// This is important for deferred flush optimization - buffer may not be full but should still be flushed
+	// MEMORY OPTIMIZATION: Check if there's any data to flush before calling ForceFlush
+	// This avoids unnecessary decryption operations when cleaning up inactive RandomAccessors
+	hasDataToFlush := false
+
+	// Check if there's data in buffer
+	writeIndex := atomic.LoadInt64(&ra.buffer.writeIndex)
+	totalSize := atomic.LoadInt64(&ra.buffer.totalSize)
+	if writeIndex > 0 || totalSize > 0 {
+		hasDataToFlush = true
+	}
+
+	// Check if there's data in sequential buffer
+	if !hasDataToFlush && ra.seqBuffer != nil {
+		ra.seqBuffer.mu.Lock()
+		hasSeqData := ra.seqBuffer.hasData || len(ra.seqBuffer.buffer) > 0
+		ra.seqBuffer.mu.Unlock()
+		if hasSeqData {
+			hasDataToFlush = true
+		}
+	}
+
+	// Check if there's a journal with data
+	if !hasDataToFlush {
+		ra.journalMu.RLock()
+		hasJournal := ra.journal != nil
+		ra.journalMu.RUnlock()
+		if hasJournal {
+			hasDataToFlush = true
+		}
+	}
+
 	var savedDataID int64 = 0
 	if sparseSize > 0 {
 		if cachedObj := ra.fileObj.Load(); cachedObj != nil {
 			if obj, ok := cachedObj.(*core.ObjectInfo); ok && obj != nil {
 				savedDataID = obj.DataID
-				DebugLog("[VFS RandomAccessor Close] Saved dataID before Flush(): fileID=%d, dataID=%d", ra.fileID, savedDataID)
+				DebugLog("[VFS RandomAccessor Close] Saved dataID before ForceFlush(): fileID=%d, dataID=%d", ra.fileID, savedDataID)
 			}
 		}
 	}
 
-	_, err := ra.Flush()
-	if err != nil {
-		return err
+	if hasDataToFlush {
+		DebugLog("[VFS RandomAccessor Close] Calling ForceFlush: fileID=%d", ra.fileID)
+		_, err := ra.ForceFlush()
+		if err != nil {
+			DebugLog("[VFS RandomAccessor Close] ERROR: ForceFlush failed: fileID=%d, error=%v", ra.fileID, err)
+			return err
+		}
+		DebugLog("[VFS RandomAccessor Close] ForceFlush completed: fileID=%d", ra.fileID)
+	} else {
+		DebugLog("[VFS RandomAccessor Close] Skipping ForceFlush (no data to flush): fileID=%d", ra.fileID)
+	}
+
+	// Log final file object state after flush
+	fileObjAfterFlush, err := ra.getFileObj()
+	if err == nil && fileObjAfterFlush != nil {
+		DebugLog("[VFS RandomAccessor Close] Final file object after flush: fileID=%d, DataID=%d, Size=%d",
+			ra.fileID, fileObjAfterFlush.DataID, fileObjAfterFlush.Size)
 	}
 
 	// IMPORTANT: After Flush(), verify that fileObj still has correct dataID
@@ -7084,7 +7930,7 @@ func (ra *RandomAccessor) Close() error {
 		if cachedObj := ra.fileObj.Load(); cachedObj != nil {
 			if obj, ok := cachedObj.(*core.ObjectInfo); ok && obj != nil {
 				if obj.DataID == 0 || obj.DataID == core.EmptyDataID {
-					DebugLog("[VFS RandomAccessor Close] WARNING: fileObj dataID was reset to 0 after Flush(), restoring from saved value: fileID=%d, savedDataID=%d", ra.fileID, savedDataID)
+					DebugLog("[VFS RandomAccessor Close] WARNING: fileObj dataID was reset to 0 after ForceFlush(), restoring from saved value: fileID=%d, savedDataID=%d", ra.fileID, savedDataID)
 					// Restore the saved dataID
 					obj.DataID = savedDataID
 					ra.fileObj.Store(obj)
@@ -7092,6 +7938,15 @@ func (ra *RandomAccessor) Close() error {
 					DebugLog("[VFS RandomAccessor Close] Restored fileObj dataID: fileID=%d, dataID=%d", ra.fileID, savedDataID)
 				}
 			}
+		}
+	}
+
+	// Clean up decoding reader cache to free memory
+	// This honors the request to release cache on file close
+	if fileObj, _ := ra.getFileObj(); fileObj != nil {
+		if fileObj.DataID > 0 {
+			decodingReaderCache.Del(fileObj.DataID)
+			DebugLog("[VFS RandomAccessor Close] Removed from decodingReaderCache: fileID=%d, dataID=%d", ra.fileID, fileObj.DataID)
 		}
 	}
 
@@ -7412,6 +8267,55 @@ func (ra *RandomAccessor) shouldUseJournal(fileObj *core.ObjectInfo, offset, len
 				DebugLog("[VFS shouldUseJournal] ChunkedFileWriter active (type=%d), not using journal: fileID=%d", cw.writerType, ra.fileID)
 				return false
 			}
+		}
+	}
+
+	// OPTIMIZATION: Check if this is a sequential append (offset == current file size)
+	// If there is an active sequential buffer, keep using it; otherwise, prefer journal for safety.
+	// This avoids complex re-init + append logic when a new RandomAccessor is created for an existing file,
+	// which has been a source of subtle bugs (e.g. append not being persisted).
+	// CRITICAL: Only use journal for append if file already has data (DataID > 0 and Size > 0)
+	// For new files (DataID == 0 or EmptyDataID, Size == 0), allow sequential buffer initialization
+	if offset == fileObj.Size {
+		// Check if this is a new file (no data yet)
+		isNewFile := (fileObj.DataID == 0 || fileObj.DataID == core.EmptyDataID) && fileObj.Size == 0
+		if isNewFile {
+			// New file, don't use journal - allow sequential buffer initialization
+			DebugLog("[VFS shouldUseJournal] New file sequential write (offset=%d == size=%d), not using journal: fileID=%d", offset, fileObj.Size, ra.fileID)
+			return false
+		}
+
+		// Sequential append from end of file - check if we can reuse sequential buffer
+		if ra.seqBuffer != nil {
+			ra.seqBuffer.mu.Lock()
+			seqClosed := ra.seqBuffer.closed
+			ra.seqBuffer.mu.Unlock()
+			if !seqClosed {
+				// Sequential buffer is still active, continue using it
+				DebugLog("[VFS shouldUseJournal] Sequential append from file end (offset=%d == size=%d), continuing with sequential buffer: fileID=%d", offset, fileObj.Size, ra.fileID)
+				return false
+			}
+		}
+
+		// No active sequential buffer (new RandomAccessor or buffer already closed) - use journal
+		// so that append writes are tracked via WAL and fully persisted on Flush/Close.
+		DebugLog("[VFS shouldUseJournal] Sequential append from file end with no active seq buffer, using journal: fileID=%d, offset=%d, size=%d",
+			ra.fileID, offset, fileObj.Size)
+		return true
+	}
+
+	// PRIORITY CHECK: If we are already using sequential buffer, continue using it
+	// This allows sequential writes (even non-zero offset) to bypass journal
+	// and continue using the efficient sequential buffer path
+	if ra.seqBuffer != nil {
+		ra.seqBuffer.mu.Lock()
+		seqOffset := ra.seqBuffer.offset
+		seqClosed := ra.seqBuffer.closed
+		ra.seqBuffer.mu.Unlock()
+
+		if !seqClosed && offset == seqOffset {
+			DebugLog("[VFS shouldUseJournal] Sequential write matching buffer offset, ensuring sequential buffer usage: fileID=%d, offset=%d", ra.fileID, offset)
+			return false
 		}
 	}
 
@@ -8443,4 +9347,40 @@ func (ra *RandomAccessor) getJournalSize() int64 {
 	}
 
 	return journal.GetSize()
+}
+
+// migrateSeqBufferToJournal migrates pending seqBuffer data to Journal
+func (ra *RandomAccessor) migrateSeqBufferToJournal() error {
+	ra.seqBuffer.mu.Lock()
+	defer ra.seqBuffer.mu.Unlock()
+
+	// Always mark as closed since we are moving data to journal
+	ra.seqBuffer.closed = true
+
+	if !ra.seqBuffer.hasData || len(ra.seqBuffer.buffer) == 0 {
+		return nil
+	}
+
+	// Calculate data range
+	// seqBuffer contains chunks. sn determines start offset.
+	chunkSize := ra.seqBuffer.chunkSize
+	startOffset := int64(ra.seqBuffer.sn) * chunkSize
+	bufferData := ra.seqBuffer.buffer
+
+	DebugLog("[VFS migrateSeqBufferToJournal] Migrating seqBuffer to Journal: fileID=%d, offset=%d, size=%d", ra.fileID, startOffset, len(bufferData))
+
+	journal, err := ra.getOrCreateJournal()
+	if err != nil {
+		return fmt.Errorf("failed to get or create journal: %w", err)
+	}
+
+	if err := journal.Write(startOffset, bufferData); err != nil {
+		return fmt.Errorf("failed to write seqBuffer data to journal: %w", err)
+	}
+
+	// Clear seqBuffer
+	ra.seqBuffer.hasData = false
+	ra.clearSeqBuffer() // Clear buffer and shrink capacity if needed
+
+	return nil
 }

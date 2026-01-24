@@ -9,20 +9,21 @@ import (
 	"testing"
 	"time"
 
+	"github.com/hanwen/go-fuse/v2/fuse"
+	"github.com/orca-zhang/idgen"
 	"github.com/orcastor/orcas/core"
-	b "github.com/orca-zhang/borm"
 )
 
 // MemoryStats records memory usage at different points
 type MemoryStats struct {
-	Timestamp         time.Time
-	HeapAlloc        uint64
-	HeapInUse        uint64
-	HeapObjects      uint64
-	RARegistrySize   int
-	JournalCount     int
-	TotalMemory      int64
-	Description      string
+	Timestamp      time.Time
+	HeapAlloc      uint64
+	HeapInUse      uint64
+	HeapObjects    uint64
+	RARegistrySize int
+	JournalCount   int
+	TotalMemory    int64
+	Description    string
 }
 
 // collectMemoryStats gathers current memory statistics
@@ -31,7 +32,7 @@ func collectMemoryStats(description string) MemoryStats {
 	runtime.ReadMemStats(&m)
 
 	return MemoryStats{
-		Timestamp:    time.Now(),
+		Timestamp:   time.Now(),
 		HeapAlloc:   m.HeapAlloc,
 		HeapInUse:   m.HeapInuse,
 		HeapObjects: m.HeapObjects,
@@ -73,10 +74,9 @@ func TestMemoryLeak_SingleLargeFile(t *testing.T) {
 
 	// Create a 100MB file
 	const fileSize = 100 * 1024 * 1024 // 100MB
-	chunkSize := int64(10 * 1024 * 1024) // 10MB chunks
 
 	// Create root node
-	ofs := NewOrcasFSWithConfig(h, c, bktID, &core.Config{ChunkSize: chunkSize})
+	ofs := NewOrcasFSWithConfig(h, c, bktID, &core.Config{})
 	ofs.Root().fs = ofs
 
 	// Create file node
@@ -88,9 +88,14 @@ func TestMemoryLeak_SingleLargeFile(t *testing.T) {
 	ctx := context.Background()
 
 	// Create file
-	fileObj, errno := fileNode.Create(ctx, "test_large_file.dat", 0o644, 0)
+	var out fuse.EntryOut
+	_, fileHandle, _, errno := fileNode.Create(ctx, "test_large_file.dat", 0, 0o644, &out)
 	if errno != 0 {
 		t.Fatalf("Failed to create file: %v", errno)
+	}
+	fileObj, ok := fileHandle.(*OrcasNode)
+	if !ok {
+		t.Fatalf("Failed to cast FileHandle to OrcasNode")
 	}
 
 	// Write file in chunks
@@ -106,7 +111,7 @@ func TestMemoryLeak_SingleLargeFile(t *testing.T) {
 			writeSize = fileSize - bytesWritten
 		}
 
-		n, errno := fileObj.Write(ctx, chunk[:writeSize], int64(bytesWritten))
+		n, errno := fileObj.Write(ctx, chunk[:writeSize], bytesWritten)
 		if errno != 0 {
 			t.Fatalf("Failed to write file: %v", errno)
 		}
@@ -127,7 +132,7 @@ func TestMemoryLeak_SingleLargeFile(t *testing.T) {
 	}
 
 	// Flush and close
-	fileObj.Release(ctx)
+	fileObj.Release(ctx, fileHandle)
 
 	// Final memory after close
 	runtime.GC()
@@ -167,12 +172,11 @@ func TestMemoryLeak_ConcurrentUploads(t *testing.T) {
 	printMemoryStats(stats[len(stats)-1])
 
 	const (
-		numFiles    = 10
-		fileSize    = 50 * 1024 * 1024 // 50MB per file
-		chunkSize   = 10 * 1024 * 1024  // 10MB chunks
+		numFiles = 10
+		fileSize = 50 * 1024 * 1024 // 50MB per file
 	)
 
-	ofs := NewOrcasFSWithConfig(h, c, bktID, &core.Config{ChunkSize: chunkSize})
+	ofs := NewOrcasFSWithConfig(h, c, bktID, &core.Config{})
 	defer ofs.Close()
 
 	ctx := context.Background()
@@ -197,13 +201,20 @@ func TestMemoryLeak_ConcurrentUploads(t *testing.T) {
 				objID: 0,
 			}
 
-			fileObj, errno := fileNode.Create(ctx, fmt.Sprintf("concurrent_file_%d.dat", fileNum), 0o644, 0)
+			var out fuse.EntryOut
+			_, fileHandle, _, errno := fileNode.Create(ctx, fmt.Sprintf("concurrent_file_%d.dat", fileNum), 0, 0o644, &out)
 			if errno != 0 {
 				uploadErrors.Add(1)
 				t.Errorf("Failed to create file %d: %v", fileNum, errno)
 				return
 			}
-			defer fileObj.Release(ctx)
+			fileObj, ok := fileHandle.(*OrcasNode)
+			if !ok {
+				uploadErrors.Add(1)
+				t.Errorf("Failed to cast FileHandle to OrcasNode for file %d", fileNum)
+				return
+			}
+			defer fileObj.Release(ctx, fileHandle)
 
 			// Write file
 			written := int64(0)
@@ -213,7 +224,7 @@ func TestMemoryLeak_ConcurrentUploads(t *testing.T) {
 					writeSize = fileSize - written
 				}
 
-				n, errno := fileObj.Write(ctx, chunk[:writeSize], int64(written))
+				n, errno := fileObj.Write(ctx, chunk[:writeSize], written)
 				if errno != 0 {
 					uploadErrors.Add(1)
 					t.Errorf("Failed to write file %d: %v", fileNum, errno)
@@ -294,11 +305,10 @@ func TestMemoryLeak_LongRunning(t *testing.T) {
 
 	const (
 		smallFileSize = 10 * 1024 * 1024 // 10MB
-		numIterations  = 50               // Create/delete 50 files
-		chunkSize     = 10 * 1024 * 1024
+		numIterations = 50               // Create/delete 50 files
 	)
 
-	ofs := NewOrcasFSWithConfig(h, c, bktID, &core.Config{ChunkSize: chunkSize})
+	ofs := NewOrcasFSWithConfig(h, c, bktID, &core.Config{})
 	defer ofs.Close()
 
 	ctx := context.Background()
@@ -324,22 +334,27 @@ func TestMemoryLeak_LongRunning(t *testing.T) {
 			objID: 0,
 		}
 
-		fileObj, errno := fileNode.Create(ctx, filename, 0o644, 0)
+		var out fuse.EntryOut
+		_, fileHandle, _, errno := fileNode.Create(ctx, filename, 0, 0o644, &out)
 		if errno != 0 {
 			t.Fatalf("Failed to create file %d: %v", iter, errno)
+		}
+		fileObj, ok := fileHandle.(*OrcasNode)
+		if !ok {
+			t.Fatalf("Failed to cast FileHandle to OrcasNode for file %d", iter)
 		}
 
 		// Write 10MB
 		written := int64(0)
 		for written < smallFileSize {
-			n, errno := fileObj.Write(ctx, chunk, int64(written))
+			n, errno := fileObj.Write(ctx, chunk, written)
 			if errno != 0 {
 				t.Fatalf("Failed to write file %d: %v", iter, errno)
 			}
 			written += int64(n)
 		}
 
-		fileObj.Release(ctx)
+		fileObj.Release(ctx, fileHandle)
 
 		// Delete file
 		fileNode.Unlink(ctx, filename)
@@ -479,29 +494,49 @@ func setupTestEnv(t *testing.T) (core.Handler, core.Ctx, int64, func()) {
 		t.Fatalf("Failed to create temp dir: %v", err)
 	}
 
-	// Initialize database
-	dbPath := "file:" + tempDir + "/orcas.db?cache=shared&_journal_mode=WAL"
-	db, err := b.Open(dbPath)
+	// Initialize database before login
+	err = core.InitDB(tempDir, "")
 	if err != nil {
 		os.RemoveAll(tempDir)
-		t.Fatalf("Failed to open database: %v", err)
+		t.Fatalf("Failed to init DB: %v", err)
 	}
 
 	// Create handler
-	h := core.NewLocalHandler(db)
-	c := core.NewCtx(context.Background(), h, nil, nil)
-
-	// Create test bucket
-	bktID, err := h.CreateBkt(c, "test_bucket", "")
+	h := core.NewLocalHandler(tempDir, tempDir)
+	ctx := context.Background()
+	ctx, _, _, err = h.Login(ctx, "orcas", "orcas")
 	if err != nil {
-		db.Close()
+		os.RemoveAll(tempDir)
+		t.Fatalf("Failed to login: %v", err)
+	}
+
+	ig := idgen.NewIDGen(nil, 0)
+	bktID, _ := ig.New()
+	err = core.InitBucketDB(tempDir, bktID)
+	if err != nil {
+		os.RemoveAll(tempDir)
+		t.Fatalf("Failed to init bucket DB: %v", err)
+	}
+
+	// Create bucket using admin
+	admin := core.NewLocalAdmin(tempDir, tempDir)
+	bkt := &core.BucketInfo{
+		ID:        bktID,
+		Name:      "test_bucket",
+		Type:      1,
+		Quota:     -1,
+		ChunkSize: 4 * 1024 * 1024, // 4MB chunk size
+	}
+	err = admin.PutBkt(ctx, []*core.BucketInfo{bkt})
+	if err != nil {
 		os.RemoveAll(tempDir)
 		t.Fatalf("Failed to create bucket: %v", err)
 	}
 
+	c := ctx
+
 	// Return cleanup function
 	cleanup := func() {
-		db.Close()
 		os.RemoveAll(tempDir)
 	}
 
