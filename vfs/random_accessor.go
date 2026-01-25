@@ -121,7 +121,6 @@ var (
 		},
 		maxCount: SequentialBufferTier1Max,
 		count:    0,
-		mu:       sync.Mutex{},
 	}
 
 	bufferTier2Pool = &limitedPool{
@@ -132,7 +131,6 @@ var (
 		},
 		maxCount: SequentialBufferTier2Max,
 		count:    0,
-		mu:       sync.Mutex{},
 	}
 
 	bufferTier3Pool = &limitedPool{
@@ -143,7 +141,6 @@ var (
 		},
 		maxCount: SequentialBufferTier3Max,
 		count:    0,
-		mu:       sync.Mutex{},
 	}
 
 	// Object pool for SequentialWriteBuffer (without buffer, buffer comes from tiered pools)
@@ -162,38 +159,45 @@ var (
 )
 
 // limitedPool is a sync.Pool wrapper with capacity limit
+// Optimized: uses atomic operations instead of mutex for better concurrency
 type limitedPool struct {
 	pool     sync.Pool
-	maxCount int
-	count    int
-	mu       sync.Mutex
+	maxCount int32
+	count    int32 // atomic counter
 }
 
 // Get gets an object from the pool if available and under capacity limit
+// Optimized: uses atomic CAS instead of mutex lock
 func (p *limitedPool) Get() interface{} {
-	p.mu.Lock()
-	if p.count > 0 {
-		p.count--
-		p.mu.Unlock()
-		return p.pool.Get()
+	for {
+		current := atomic.LoadInt32(&p.count)
+		if current <= 0 {
+			return nil
+		}
+		if atomic.CompareAndSwapInt32(&p.count, current, current-1) {
+			return p.pool.Get()
+		}
+		// CAS failed, retry
 	}
-	p.mu.Unlock()
-	return nil
 }
 
 // Put puts an object back to the pool if under capacity limit
+// Optimized: uses atomic CAS instead of mutex lock
 func (p *limitedPool) Put(x interface{}) {
 	if x == nil {
 		return
 	}
-	p.mu.Lock()
-	if p.count < p.maxCount {
-		p.count++
-		p.mu.Unlock()
-		p.pool.Put(x)
-	} else {
-		p.mu.Unlock()
-		// Pool is full, discard the object (let GC handle it)
+	for {
+		current := atomic.LoadInt32(&p.count)
+		if current >= p.maxCount {
+			// Pool is full, discard the object (let GC handle it)
+			return
+		}
+		if atomic.CompareAndSwapInt32(&p.count, current, current+1) {
+			p.pool.Put(x)
+			return
+		}
+		// CAS failed, retry
 	}
 }
 
@@ -619,49 +623,101 @@ type chunkBuffer struct {
 
 // addWriteRange adds a new write range and merges adjacent ranges
 // Ranges are kept sorted by start offset and non-overlapping
+// Optimized: reduces memory allocations by in-place operations
 func (buf *chunkBuffer) addWriteRange(start, end int64) {
 	if start >= end {
 		return // Invalid range
 	}
 
-	// Find insertion position (ranges are sorted by start)
-	insertPos := len(buf.ranges)
-	for i, r := range buf.ranges {
-		if r.start > start {
-			insertPos = i
-			break
+	n := len(buf.ranges)
+
+	// Fast path: empty ranges or append at end (most common case for sequential writes)
+	if n == 0 {
+		buf.ranges = append(buf.ranges, writeRange{start: start, end: end})
+		return
+	}
+
+	// Fast path: new range extends or merges with last range (sequential write pattern)
+	last := &buf.ranges[n-1]
+	if start >= last.start && start <= last.end {
+		// Overlaps with or extends last range
+		if end > last.end {
+			last.end = end
 		}
+		return
+	}
+	if start > last.end {
+		// Append after last range (no overlap)
+		buf.ranges = append(buf.ranges, writeRange{start: start, end: end})
+		return
 	}
 
-	// Insert new range
-	newRange := writeRange{start: start, end: end}
-	if insertPos == len(buf.ranges) {
-		buf.ranges = append(buf.ranges, newRange)
-	} else {
-		// Insert at position
-		buf.ranges = append(buf.ranges, writeRange{})
-		copy(buf.ranges[insertPos+1:], buf.ranges[insertPos:])
-		buf.ranges[insertPos] = newRange
-	}
-
-	// Merge adjacent or overlapping ranges
-	merged := buf.ranges[:0]
-	for _, r := range buf.ranges {
-		if len(merged) == 0 {
-			merged = append(merged, r)
+	// Slow path: need to find insertion position and merge
+	// Find insertion position using binary search for better performance
+	insertPos := n
+	lo, hi := 0, n
+	for lo < hi {
+		mid := (lo + hi) / 2
+		if buf.ranges[mid].start > start {
+			hi = mid
 		} else {
-			last := &merged[len(merged)-1]
-			// If current range connects with or overlaps last range, merge them
-			if r.start <= last.end {
-				if r.end > last.end {
-					last.end = r.end
-				}
-			} else {
-				merged = append(merged, r)
-			}
+			lo = mid + 1
 		}
 	}
-	buf.ranges = merged
+	insertPos = lo
+
+	// Check if we can merge with previous range
+	if insertPos > 0 {
+		prev := &buf.ranges[insertPos-1]
+		if start <= prev.end {
+			// Merge with previous range
+			if end > prev.end {
+				prev.end = end
+			}
+			// Check if we need to merge with next ranges
+			mergeEnd := insertPos
+			for mergeEnd < n && buf.ranges[mergeEnd].start <= prev.end {
+				if buf.ranges[mergeEnd].end > prev.end {
+					prev.end = buf.ranges[mergeEnd].end
+				}
+				mergeEnd++
+			}
+			if mergeEnd > insertPos {
+				// Remove merged ranges
+				copy(buf.ranges[insertPos:], buf.ranges[mergeEnd:])
+				buf.ranges = buf.ranges[:n-(mergeEnd-insertPos)]
+			}
+			return
+		}
+	}
+
+	// Check if we can merge with next range
+	if insertPos < n && end >= buf.ranges[insertPos].start {
+		// Merge with next range(s)
+		buf.ranges[insertPos].start = start
+		if end > buf.ranges[insertPos].end {
+			buf.ranges[insertPos].end = end
+		}
+		// Check if we need to merge with more ranges
+		mergeEnd := insertPos + 1
+		for mergeEnd < n && buf.ranges[mergeEnd].start <= buf.ranges[insertPos].end {
+			if buf.ranges[mergeEnd].end > buf.ranges[insertPos].end {
+				buf.ranges[insertPos].end = buf.ranges[mergeEnd].end
+			}
+			mergeEnd++
+		}
+		if mergeEnd > insertPos+1 {
+			// Remove merged ranges
+			copy(buf.ranges[insertPos+1:], buf.ranges[mergeEnd:])
+			buf.ranges = buf.ranges[:n-(mergeEnd-insertPos-1)]
+		}
+		return
+	}
+
+	// No merge possible, insert new range
+	buf.ranges = append(buf.ranges, writeRange{})
+	copy(buf.ranges[insertPos+1:], buf.ranges[insertPos:n])
+	buf.ranges[insertPos] = writeRange{start: start, end: end}
 }
 
 // isChunkComplete checks if chunk is complete (has exactly one range covering entire chunk)
@@ -2205,12 +2261,322 @@ func (ra *RandomAccessor) MarkSparseFile(size int64) {
 	atomic.StoreInt64(&ra.sparseSize, size)
 }
 
+// canUseSeqBuffer checks if we can directly use existing seqBuffer
+// This method only checks once to avoid redundant checks
+// Returns true only when offset exactly matches current seqBuffer offset
+func (ra *RandomAccessor) canUseSeqBuffer(offset int64) bool {
+	if ra.seqBuffer == nil {
+		return false
+	}
+
+	ra.seqBuffer.mu.Lock()
+	defer ra.seqBuffer.mu.Unlock()
+
+	if ra.seqBuffer.closed {
+		return false
+	}
+
+	// Only use seqBuffer when offset exactly matches
+	return offset == ra.seqBuffer.offset
+}
+
+// hasActiveChunkedWriter checks if there's an active ChunkedFileWriter
+func (ra *RandomAccessor) hasActiveChunkedWriter() bool {
+	val := ra.chunkedWriter.Load()
+	if val == nil || val == clearedChunkedWriterMarker {
+		return false
+	}
+	if cw, ok := val.(*ChunkedFileWriter); ok && cw != nil {
+		return true
+	}
+	return false
+}
+
+// tryInitSeqBuffer attempts to initialize seqBuffer for sequential writes
+// Returns true if seqBuffer can be used, false if other paths should be used
+func (ra *RandomAccessor) tryInitSeqBuffer(fileObj *core.ObjectInfo, offset int64, dataLen int) bool {
+	// 1. New file starting from offset 0
+	if offset == 0 && (fileObj.DataID == 0 || fileObj.DataID == core.EmptyDataID) {
+		// Check if this is a large file (should use ChunkedFileWriter instead)
+		chunkSize := ra.fs.chunkSize
+		if chunkSize <= 0 {
+			chunkSize = DefaultChunkSize
+		}
+		if int64(dataLen) >= chunkSize {
+			// Large file, should use ChunkedFileWriter (handled elsewhere)
+			return false
+		}
+
+		// Small file, initialize seqBuffer
+		if err := ra.initSequentialBuffer(false); err == nil {
+			DebugLog("[VFS tryInitSeqBuffer] Initialized seqBuffer for new file: fileID=%d", ra.fileID)
+			return true
+		}
+		DebugLog("[VFS tryInitSeqBuffer] Failed to initialize seqBuffer for new file: fileID=%d", ra.fileID)
+		return false
+	}
+
+	// 2. Sequential append to end of existing file
+	if offset == fileObj.Size && fileObj.DataID > 0 && fileObj.Size > 0 {
+		if ra.seqBuffer != nil {
+			// Reset existing seqBuffer for continued append
+			ra.seqBuffer.mu.Lock()
+			if ra.seqBuffer.closed {
+				DebugLog("[VFS tryInitSeqBuffer] Resetting seqBuffer for append: fileID=%d, offset=%d", ra.fileID, offset)
+				ra.seqBuffer.closed = false
+				ra.seqBuffer.offset = fileObj.Size
+				ra.clearSeqBuffer()
+				ra.seqBuffer.hasData = false
+				ra.seqBuffer.dataID = fileObj.DataID
+				ra.seqBuffer.dataInfo.OrigSize = 0
+				ra.seqBuffer.dataInfo.Size = 0
+				ra.seqBuffer.sn = 0
+				ra.seqBuffer.mu.Unlock()
+				return true
+			}
+			ra.seqBuffer.mu.Unlock()
+			return true
+		}
+		// Don't initialize new seqBuffer for append, let journal handle it (safer)
+		DebugLog("[VFS tryInitSeqBuffer] No seqBuffer for append, using journal: fileID=%d", ra.fileID)
+		return false
+	}
+
+	return false
+}
+
 // Write adds write operation to buffer
+// OPTIMIZED VERSION: Simplified write path with clear priority order
 // Optimization: sequential write optimization - if sequential write starting from 0, directly write to data block, avoid caching
 // Optimization: for sparse files (pre-allocated), use more aggressive delayed flush to reduce frequent flushes
 // For .tmp files, we don't know the final file size until rename (removing .tmp extension),
 // so we use random write mode first, and the decision will be made during Flush() based on final file size.
 func (ra *RandomAccessor) Write(offset int64, data []byte) error {
+	// Step 1: Get fileObj (cached)
+	var fileObj *core.ObjectInfo
+	fileObjValue := ra.fileObj.Load()
+	if fileObjValue != nil {
+		if obj, ok := fileObjValue.(*core.ObjectInfo); ok && obj != nil {
+			fileObj = obj
+		}
+	}
+
+	// If not in local cache, get from cache or database
+	var err error
+	if fileObj == nil {
+		fileObj, err = ra.getFileObj()
+		if err != nil {
+			DebugLog("[VFS RandomAccessor Write] ERROR: Failed to get file object: fileID=%d, offset=%d, size=%d, error=%v", ra.fileID, offset, len(data), err)
+			return err
+		}
+	}
+
+	// Step 2: Detect file rename
+	actualIsTmpFile := isTempFile(fileObj)
+	if ra.isTmpFile != actualIsTmpFile {
+		if ra.isTmpFile && !actualIsTmpFile {
+			// Renamed from .tmp to normal file: must recreate RandomAccessor
+			DebugLog("[VFS RandomAccessor Write] File was renamed from .tmp, RandomAccessor must be recreated: fileID=%d, fileName=%s", ra.fileID, fileObj.Name)
+			ra.chunkedWriter.Store(clearedChunkedWriterMarker)
+			ra.Close()
+			return fmt.Errorf("file was renamed from .tmp, RandomAccessor must be recreated: fileID=%d, fileName=%s", ra.fileID, fileObj.Name)
+		} else if !ra.isTmpFile && actualIsTmpFile {
+			// Renamed to .tmp (rare): must recreate RandomAccessor
+			DebugLog("[VFS RandomAccessor Write] File was renamed to .tmp, RandomAccessor must be recreated: fileID=%d, fileName=%s", ra.fileID, fileObj.Name)
+			ra.Close()
+			return fmt.Errorf("file was renamed to .tmp, RandomAccessor must be recreated: fileID=%d, fileName=%s", ra.fileID, fileObj.Name)
+		}
+	}
+
+	// Step 3: Update write range for sparse files
+	sparseSize := ra.getSparseSize()
+	if sparseSize > 0 {
+		ra.updateWriteRange(offset, int64(len(data)))
+	}
+
+	// ========== OPTIMIZED WRITE PATH DECISION TREE ==========
+
+	// PRIORITY 1: Check if we can use existing seqBuffer (fast path)
+	if ra.canUseSeqBuffer(offset) {
+		DebugLog("[VFS RandomAccessor Write] Using existing seqBuffer: fileID=%d, offset=%d", ra.fileID, offset)
+		return ra.writeSequential(offset, data)
+	}
+
+	// PRIORITY 2: .tmp files always use ChunkedFileWriter
+	if ra.isTmpFile {
+		atomic.StoreInt64(&ra.lastActivity, core.Now())
+		getDelayedFlushManager().schedule(ra, false)
+
+		cw, err := ra.getOrCreateChunkedWriter(WRITER_TYPE_TMP)
+		if err != nil {
+			DebugLog("[VFS RandomAccessor Write] ERROR: Failed to get ChunkedFileWriter for .tmp file: fileID=%d, error=%v", ra.fileID, err)
+			return fmt.Errorf("failed to get ChunkedFileWriter for .tmp file: %w", err)
+		}
+		DebugLog("[VFS RandomAccessor Write] Using ChunkedFileWriter for .tmp file: fileID=%d, offset=%d", ra.fileID, offset)
+		return cw.Write(offset, data)
+	}
+
+	// PRIORITY 3: Check if should use journal (for random writes on existing files)
+	if ra.shouldUseJournal(fileObj, offset, int64(len(data))) {
+		DebugLog("[VFS RandomAccessor Write] Using journal: fileID=%d, offset=%d, size=%d", ra.fileID, offset, len(data))
+
+		// Migrate existing WriteBuffer entries to Journal (if any)
+		if ra.buffer.writeIndex > 0 {
+			if err := ra.migrateWriteBufferToJournal(); err != nil {
+				DebugLog("[VFS RandomAccessor Write] WARNING: Failed to migrate WriteBuffer to Journal: %v", err)
+			}
+		}
+
+		// Migrate sequential buffer data to Journal (if any)
+		if ra.seqBuffer != nil {
+			ra.seqBuffer.mu.Lock()
+			hasSeqData := ra.seqBuffer.hasData && !ra.seqBuffer.closed
+			ra.seqBuffer.mu.Unlock()
+
+			if hasSeqData {
+				if err := ra.migrateSeqBufferToJournal(); err != nil {
+					DebugLog("[VFS RandomAccessor Write] WARNING: Failed to migrate SeqBuffer to Journal: %v", err)
+				}
+			}
+		}
+
+		return ra.writeToJournal(offset, data)
+	}
+
+	// PRIORITY 4: Large file sequential upload (new file, offset=0, data >= chunkSize)
+	if !ra.isTmpFile && (fileObj.DataID == 0 || fileObj.DataID == core.EmptyDataID) && fileObj.Size == 0 && offset == 0 {
+		chunkSize := ra.fs.chunkSize
+		if chunkSize <= 0 {
+			chunkSize = DefaultChunkSize
+		}
+		if int64(len(data)) >= chunkSize {
+			atomic.StoreInt64(&ra.lastActivity, core.Now())
+			getDelayedFlushManager().schedule(ra, false)
+
+			cw, err := ra.getOrCreateChunkedWriter(WRITER_TYPE_SEQ)
+			if err == nil && cw != nil {
+				DebugLog("[VFS RandomAccessor Write] Using WRITER_TYPE_SEQ ChunkedFileWriter: fileID=%d, offset=%d, size=%d", ra.fileID, offset, len(data))
+				return cw.Write(offset, data)
+			}
+			DebugLog("[VFS RandomAccessor Write] WARNING: Failed to create WRITER_TYPE_SEQ ChunkedFileWriter, fallback: fileID=%d, error=%v", ra.fileID, err)
+		}
+	}
+
+	// PRIORITY 5: Sparse file with ChunkedFileWriter
+	if sparseSize > 0 && !ra.isTmpFile {
+		chunkSize := ra.fs.chunkSize
+		if chunkSize <= 0 {
+			chunkSize = DefaultChunkSize
+		}
+		localRange := int64(LocalSequentialChunkCount) * chunkSize
+
+		writeRangeStart := atomic.LoadInt64(&ra.writeRangeStart)
+		writeRangeEnd := atomic.LoadInt64(&ra.writeRangeEnd)
+		currentWriteEnd := offset + int64(len(data))
+
+		// Check if within local sequential range
+		if writeRangeStart > 0 && writeRangeEnd > 0 {
+			newRangeStart := writeRangeStart
+			newRangeEnd := writeRangeEnd
+			if offset < writeRangeStart {
+				newRangeStart = offset
+			}
+			if currentWriteEnd > writeRangeEnd {
+				newRangeEnd = currentWriteEnd
+			}
+			newRangeSize := newRangeEnd - newRangeStart
+			if newRangeSize <= localRange {
+				cw, err := ra.getOrCreateChunkedWriter(WRITER_TYPE_SPARSE)
+				if err == nil && cw != nil {
+					DebugLog("[VFS RandomAccessor Write] Using ChunkedFileWriter for sparse file: fileID=%d, offset=%d", ra.fileID, offset)
+					return cw.Write(offset, data)
+				}
+			}
+		}
+	}
+
+	// PRIORITY 6: Try to initialize or use seqBuffer
+	if ra.tryInitSeqBuffer(fileObj, offset, len(data)) {
+		DebugLog("[VFS RandomAccessor Write] Initialized seqBuffer, using sequential write: fileID=%d, offset=%d", ra.fileID, offset)
+		return ra.writeSequential(offset, data)
+	}
+
+	// PRIORITY 7: Fallback to random write buffer
+	DebugLog("[VFS RandomAccessor Write] Using random write buffer: fileID=%d, offset=%d, size=%d", ra.fileID, offset, len(data))
+
+	// Double-check ChunkedFileWriter doesn't exist
+	if ra.hasActiveChunkedWriter() {
+		chunkedWriterVal := ra.chunkedWriter.Load()
+		if cw, ok := chunkedWriterVal.(*ChunkedFileWriter); ok && cw != nil {
+			if (ra.isTmpFile && cw.writerType == WRITER_TYPE_TMP) ||
+				(!ra.isTmpFile && (cw.writerType == WRITER_TYPE_SPARSE || cw.writerType == WRITER_TYPE_SEQ)) {
+				DebugLog("[VFS RandomAccessor Write] WARNING: ChunkedFileWriter exists, using it: fileID=%d, writerType=%d", ra.fileID, cw.writerType)
+				atomic.StoreInt64(&ra.lastActivity, core.Now())
+				getDelayedFlushManager().schedule(ra, false)
+				return cw.Write(offset, data)
+			}
+		}
+	}
+
+	// Use WriteBuffer for random writes
+	config := core.GetWriteBufferConfig()
+
+	// Check buffer size limit BEFORE reserving space
+	currentTotalSize := atomic.LoadInt64(&ra.buffer.totalSize)
+	if currentTotalSize+int64(len(data)) > config.MaxBufferSize {
+		// Buffer size would exceed limit, flush first
+		DebugLog("[VFS RandomAccessor Write] Buffer size would exceed limit, forcing flush: fileID=%d, current=%d, adding=%d, limit=%d",
+			ra.fileID, currentTotalSize, len(data), config.MaxBufferSize)
+		_, err := ra.Flush()
+		if err != nil {
+			DebugLog("[VFS RandomAccessor Write] ERROR: Failed to flush buffer: fileID=%d, error=%v", ra.fileID, err)
+			return err
+		}
+		// After flush, buffer should be empty, continue with write below
+	}
+
+	// Reserve space for this write operation
+	writeIndex := atomic.AddInt64(&ra.buffer.writeIndex, 1) - 1
+
+	// Check if we exceeded capacity
+	if writeIndex >= int64(len(ra.buffer.operations)) {
+		// Operations array is full, need to flush
+		atomic.AddInt64(&ra.buffer.writeIndex, -1)
+		DebugLog("[VFS RandomAccessor Write] Operations array full, forcing flush: fileID=%d", ra.fileID)
+		_, err := ra.Flush()
+		if err != nil {
+			DebugLog("[VFS RandomAccessor Write] ERROR: Failed to flush buffer: fileID=%d, error=%v", ra.fileID, err)
+			return err
+		}
+		// After flush, retry by reserving space again
+		writeIndex = atomic.AddInt64(&ra.buffer.writeIndex, 1) - 1
+		if writeIndex >= int64(len(ra.buffer.operations)) {
+			// Still full after flush, this shouldn't happen
+			atomic.AddInt64(&ra.buffer.writeIndex, -1)
+			return fmt.Errorf("operations array still full after flush: fileID=%d", ra.fileID)
+		}
+	}
+
+	// Add to total size
+	atomic.AddInt64(&ra.buffer.totalSize, int64(len(data)))
+
+	// Write to buffer
+	dataCopy := make([]byte, len(data))
+	copy(dataCopy, data)
+	ra.buffer.operations[writeIndex] = WriteOperation{
+		Offset: offset,
+		Data:   dataCopy,
+	}
+
+	// Update last offset for sequential write detection
+	atomic.StoreInt64(&ra.lastOffset, offset+int64(len(data)))
+
+	return nil
+}
+
+// WriteOld is the old complex version kept for reference
+// TODO: Remove after verifying new version works correctly
+func (ra *RandomAccessor) WriteOld(offset int64, data []byte) error {
 	// Optimization: cache fileObj to avoid repeated getFileObj calls
 	// Check local atomic value first (fast path)
 	var fileObj *core.ObjectInfo
@@ -4594,13 +4960,16 @@ func (ra *RandomAccessor) flushInternal(force bool) (int64, error) {
 		DebugLog("[VFS RandomAccessor Flush] ⚠️ Journal not flushed: fileID=%d, versionID=%d, will try other paths", ra.fileID, versionID)
 	}
 
+	// OPTIMIZATION: Get fileObj once at the beginning to reduce database queries
+	// This will be reused throughout the function unless explicitly refreshed after updates
+	fileObj, err := ra.getFileObj()
+	if err != nil {
+		return 0, fmt.Errorf("failed to get file object: %w", err)
+	}
+
 	// For .tmp files, check final file size before flushing ChunkedFileWriter
 	// Use the immutable isTmpFile flag (set at creation time)
 	if ra.isTmpFile {
-		fileObj, err := ra.getFileObj()
-		if err != nil {
-			return 0, fmt.Errorf("failed to get file object for .tmp file flush: %w", err)
-		}
 		// CRITICAL: For .tmp files, only flush when force=true (i.e., during rename)
 		// For .tmp files, flush should only occur in these scenarios:
 		// 1. chunk写满（range只有一个，而且是从0-10MB的范围写满）- handled in ChunkedFileWriter.Write
@@ -4652,12 +5021,6 @@ func (ra *RandomAccessor) flushInternal(force bool) (int64, error) {
 				DebugLog("[VFS RandomAccessor Flush] Got fileObj from cache after ChunkedFileWriter flush: fileID=%d, dataID=%d, size=%d", ra.fileID, fileObj.DataID, fileObj.Size)
 			}
 		}
-	}
-
-	// Get fileObj for non-.tmp files or after .tmp file flush
-	fileObj, err := ra.getFileObj()
-	if err != nil {
-		return 0, fmt.Errorf("failed to get file object: %w", err)
 	}
 
 	// For non-.tmp files, flush ChunkedFileWriter if exists
@@ -4737,7 +5100,8 @@ func (ra *RandomAccessor) flushInternal(force bool) (int64, error) {
 					ra.seqBuffer.mu.Unlock()
 				}
 				// After sequential write completes, return new version ID (actually the version corresponding to current DataID)
-				fileObj, err := ra.getFileObj()
+				// Refresh fileObj from cache after flush (flushSequentialBuffer updates cache)
+				fileObj, err = ra.getFileObj()
 				if err != nil {
 					DebugLog("[VFS RandomAccessor Flush] ERROR: Failed to get file object after sequential flush: fileID=%d, error=%v", ra.fileID, err)
 					return 0, err
@@ -8285,8 +8649,64 @@ func tryInstantUpload(fs *OrcasFS, data []byte, origSize int64, kind uint32) (in
 }
 
 // shouldUseJournal determines if journal should be used for this file
+// OPTIMIZED VERSION: Simplified logic assuming seqBuffer is already checked in Write()
 // offset and length are used for sparse file local sequential range detection
 func (ra *RandomAccessor) shouldUseJournal(fileObj *core.ObjectInfo, offset, length int64) bool {
+	// 1. Basic checks
+	if ra.fs.journalMgr == nil || !ra.fs.journalMgr.config.Enabled {
+		return false
+	}
+
+	// 2. Don't use journal for .tmp files (they use ChunkedFileWriter)
+	if ra.isTmpFile {
+		return false
+	}
+
+	// 3. Don't use journal if ChunkedFileWriter is active
+	if ra.hasActiveChunkedWriter() {
+		return false
+	}
+
+	// 4. OPTIMIZATION: For new files (no data yet), don't use journal
+	// Let sequential buffer or ChunkedFileWriter handle it
+	isNewFile := (fileObj.DataID == 0 || fileObj.DataID == core.EmptyDataID) && fileObj.Size == 0
+	if isNewFile {
+		DebugLog("[VFS shouldUseJournal] New file, not using journal: fileID=%d", ra.fileID)
+		return false
+	}
+
+	// 5. Core decision: Use journal for random writes (non-zero offset on existing files)
+	// This ensures reads can see modifications immediately
+	if offset != 0 && fileObj.DataID > 0 {
+		DebugLog("[VFS shouldUseJournal] Random write on existing file, using journal: fileID=%d, offset=%d", ra.fileID, offset)
+		return true
+	}
+
+	// 6. Sequential append to existing file: use journal for safety
+	// This ensures append writes are tracked via WAL and fully persisted
+	if offset == fileObj.Size && fileObj.DataID > 0 && fileObj.Size > 0 {
+		DebugLog("[VFS shouldUseJournal] Sequential append to existing file, using journal: fileID=%d, offset=%d, size=%d", ra.fileID, offset, fileObj.Size)
+		return true
+	}
+
+	// 7. For sparse files, check if we should use journal
+	sparseSize := ra.getSparseSize()
+	if sparseSize > 0 {
+		// For sparse files with existing data, prefer journal for safety
+		if fileObj.DataID > 0 && offset != 0 {
+			DebugLog("[VFS shouldUseJournal] Sparse file random write, using journal: fileID=%d, offset=%d", ra.fileID, offset)
+			return true
+		}
+	}
+
+	// 8. Default: don't use journal (let sequential buffer or other paths handle it)
+	DebugLog("[VFS shouldUseJournal] Default case, not using journal: fileID=%d, offset=%d", ra.fileID, offset)
+	return false
+}
+
+// shouldUseJournalOld is the old complex version kept for reference
+// TODO: Remove after verifying new version works correctly
+func (ra *RandomAccessor) shouldUseJournalOld(fileObj *core.ObjectInfo, offset, length int64) bool {
 	// Check if journal is enabled
 	if ra.fs.journalMgr == nil || !ra.fs.journalMgr.config.Enabled {
 		return false
