@@ -84,7 +84,6 @@ var (
 	DataCacheSize        = 512              // Number of data info objects to cache
 	DirCacheSize         = 512              // Number of directory listings to cache
 	ReaderCacheSize      = 64               // Number of decoding readers to cache
-	DecodedFileCacheSize = 16               // Number of decoded packaged file blobs to cache (memory-heavy)
 	StatfsCacheSize      = 16               // Number of statfs results to cache
 	CacheShardCount      = 16               // Number of cache shards for concurrency
 	CacheTTL             = 30 * time.Second // Cache time-to-live for file/data cache
@@ -262,10 +261,6 @@ var (
 	// Global limit controls total memory usage for cached chunks
 	globalChunkCache = ecache2.NewLRUCache[[2]int64](uint16(CacheShardCount), uint16(GlobalChunkCacheSize), ChunkCacheTTL)
 
-	// ecache cache: global cache for decoded file data (for packaged files)
-	// key: dataID (int64), value: []byte
-	globalDecodedFileCache = ecache2.NewLRUCache[int64](uint16(CacheShardCount/4), uint16(DecodedFileCacheSize), ChunkCacheTTL)
-
 	// singleflight group: prevent duplicate concurrent operations globally.
 	//
 	// Key prefixes MUST remain unique per operation type to avoid cross-talk:
@@ -301,17 +296,6 @@ func init() {
 	// NOTE: ecache2 signals eviction by calling inspector with action=PUT, status=-1,
 	// passing the evicted item's key/value.
 	globalChunkCache.Inspect(func(action int, _ [2]int64, iface *interface{}, _ []byte, status int) {
-		if !cacheEvictToPool.Load() {
-			return
-		}
-		if action != ecache2.PUT || status != -1 || iface == nil || *iface == nil {
-			return
-		}
-		if b, ok := (*iface).([]byte); ok && len(b) > 0 {
-			putBufferToTier(b)
-		}
-	})
-	globalDecodedFileCache.Inspect(func(action int, _ int64, iface *interface{}, _ []byte, status int) {
 		if !cacheEvictToPool.Load() {
 			return
 		}
@@ -2180,7 +2164,6 @@ func (cw *ChunkedFileWriter) Flush(force bool) error {
 		dirNode.invalidateDirListCache(obj.PID)
 		DebugLog("[VFS ChunkedFileWriter Flush] Appended file to directory listing cache after sync flush: fileID=%d, dirID=%d, name=%s", cw.fileID, obj.PID, obj.Name)
 	}
-
 
 	// Calculate compression ratio if applicable
 	compressionRatio := 1.0
@@ -4253,11 +4236,13 @@ func (ra *RandomAccessor) flushSequentialBuffer() error {
 		}
 
 		// CRITICAL OPTIMIZATION: Check if this is pure append (no overlap with existing data)
-		// Pure append means: writeOffset >= oldSize (new data starts at or after old file end)
+		// Pure append means: writeOffset >= oldSize AND there's actual data to append (len(writeData) > 0)
 		// For pure append, we can use SDK's AppendData to avoid reprocessing existing chunks
-		isPureAppend := writeOffset >= oldSize
+		// CRITICAL FIX: If writeOffset == oldSize but len(writeData) == 0, this is NOT an append
+		// (e.g., when Flush is called after all data has already been written)
+		isPureAppend := writeOffset >= oldSize && len(writeData) > 0
 		if isPureAppend {
-			DebugLog("[VFS flushSequentialBuffer] Pure append detected (writeOffset=%d >= oldSize=%d), using append mode to avoid reprocessing existing chunks: fileID=%d", writeOffset, oldSize, ra.fileID)
+			DebugLog("[VFS flushSequentialBuffer] Pure append detected (writeOffset=%d >= oldSize=%d, writeDataLen=%d), using append mode to avoid reprocessing existing chunks: fileID=%d", writeOffset, oldSize, len(writeData), ra.fileID)
 
 			// Use SDK's streaming append to add new chunks without reprocessing old ones
 			lh, ok := ra.fs.h.(*core.LocalHandler)
@@ -6837,108 +6822,68 @@ func (cr *chunkReader) ReadAt(buf []byte, offset int64) (int, error) {
 		return 0, fmt.Errorf("chunkSize not set")
 	}
 
-	// For packaged files, read entire package once and extract file data
-	var fileData []byte
+	// For packaged files, read package chunk and decode only the needed portion
+	// OPTIMIZATION: Don't cache entire decoded file (would cause memory explosion for large files)
+	// Instead, use globalChunkCache to cache the package chunk (sn=0), then decode only what's needed
+	// Use singleflight to prevent concurrent goroutines from decoding the same file simultaneously
 	if cr.pkgOffset > 0 {
-		// This is a packaged file, read entire package (sn=0)
-		// Check cache first for decoded file data
-		if cached, ok := globalDecodedFileCache.Get(cr.dataID); ok {
-			if decoded, ok := cached.([]byte); ok && len(decoded) > 0 {
-				// Truncate cached data to origSize (important for truncated files)
-				// Cached data may be from before truncate operation
-				if int64(len(decoded)) > cr.origSize {
-					decoded = decoded[:cr.origSize]
-					// Update cache with truncated data
-					globalDecodedFileCache.Put(cr.dataID, decoded)
-					DebugLog("[VFS chunkReader ReadAt] Truncated cached decoded file data to origSize: dataID=%d, cachedLen=%d, origSize=%d", cr.dataID, len(decoded), cr.origSize)
-				}
-				fileData = decoded
-				// DebugLog("[VFS chunkReader ReadAt] Using cached decoded file data: dataID=%d, decodedLen=%d", cr.dataID, len(fileData))
-			}
-		}
+		// This is a packaged file, use singleflight to ensure only one goroutine decodes at a time
+		// Key format: "decode_pkg_<dataID>" to uniquely identify each package file
+		sfKey := fmt.Sprintf("decode_pkg_%d", cr.dataID)
 
-		if fileData == nil {
-			// Use singleflight to ensure only one goroutine decodes this package file at a time
-			// Key format: "decode_pkg_<dataID>" to uniquely identify each package file
-			sfKey := fmt.Sprintf("decode_pkg_%d", cr.dataID)
-
-			result, err, _ := globalSingleFlight.Do(sfKey, func() (interface{}, error) {
-				// Double-check cache after acquiring singleflight lock
-				// Another goroutine might have already decoded it
-				if cached, ok := globalDecodedFileCache.Get(cr.dataID); ok {
-					if decoded, ok := cached.([]byte); ok && len(decoded) > 0 {
-						return decoded, nil
-					}
-				}
-
-				// DebugLog("[VFS chunkReader ReadAt] Reading packaged file: dataID=%d, pkgOffset=%d, origSize=%d, offset=%d, bufSize=%d",
-				//	cr.dataID, cr.pkgOffset, cr.origSize, offset, len(buf))
-				pkgData, err := cr.getChunk(0)
-				if err != nil {
-					// DebugLog("[VFS chunkReader ReadAt] ERROR: Failed to get package chunk: dataID=%d, error=%v", cr.dataID, err)
-					return nil, err
-				}
-				// DebugLog("[VFS chunkReader ReadAt] Got package data: dataID=%d, pkgDataLen=%d", cr.dataID, len(pkgData))
-				// Extract file data from package
-				// PkgOffset is the offset of compressed/encrypted file data in the package
-				// Use compressedSize (not origSize) to calculate the range
-				pkgStart := int64(cr.pkgOffset)
-				pkgEnd := pkgStart + cr.compressedSize
-				if int64(len(pkgData)) < pkgEnd {
-					// DebugLog("[VFS chunkReader ReadAt] ERROR: Package data incomplete: dataID=%d, pkgOffset=%d, compressedSize=%d, expected %d bytes, got %d",
-					//	cr.dataID, cr.pkgOffset, cr.compressedSize, pkgEnd, len(pkgData))
-					return nil, fmt.Errorf("package data incomplete: expected %d bytes, got %d", pkgEnd, len(pkgData))
-				}
-				encryptedFileData := pkgData[pkgStart:pkgEnd]
-				// DebugLog("[VFS chunkReader ReadAt] Extracted encrypted file data: dataID=%d, encryptedFileDataLen=%d", cr.dataID, len(encryptedFileData))
-
-				// Decrypt and decompress the file data using util.UnprocessData
-				decodedFileData, err := core.UnprocessData(encryptedFileData, cr.kind, cr.endecKey)
-				if err != nil {
-					return nil, fmt.Errorf("failed to unprocess file data: %v", err)
-				}
-
-				// Truncate decoded file data to origSize (important for truncated files)
-				// After truncate operation, origSize may be smaller than decoded data
-				if int64(len(decodedFileData)) > cr.origSize {
-					decodedFileData = decodedFileData[:cr.origSize]
-					DebugLog("[VFS chunkReader ReadAt] Truncated decoded file data to origSize: dataID=%d, decodedLen=%d, origSize=%d", cr.dataID, len(decodedFileData), cr.origSize)
-				}
-
-				// Cache decoded file data for future reads
-				globalDecodedFileCache.Put(cr.dataID, decodedFileData)
-				// DebugLog("[VFS chunkReader ReadAt] Decoded file data: dataID=%d, decodedFileDataLen=%d, origSize=%d", cr.dataID, len(decodedFileData), cr.origSize)
-				return decodedFileData, nil
-			})
-
+		result, err, _ := globalSingleFlight.Do(sfKey, func() (interface{}, error) {
+			// Read package chunk (sn=0) from cache
+			// Package chunk is cached by globalChunkCache, so we can reuse it efficiently
+			pkgData, err := cr.getChunk(0)
 			if err != nil {
-				return 0, err
+				return nil, err
 			}
 
-			if decoded, ok := result.([]byte); ok {
-				fileData = decoded
-			} else {
-				return 0, fmt.Errorf("invalid decoded file data type")
+			// Extract encrypted file data from package
+			// PkgOffset is the offset of compressed/encrypted file data in the package
+			pkgStart := int64(cr.pkgOffset)
+			pkgEnd := pkgStart + cr.compressedSize
+			if int64(len(pkgData)) < pkgEnd {
+				return nil, fmt.Errorf("package data incomplete: expected %d bytes, got %d", pkgEnd, len(pkgData))
 			}
+			encryptedFileData := pkgData[pkgStart:pkgEnd]
+
+			// Decrypt and decompress the file data
+			// NOTE: We decode the entire file data here (not just what's needed)
+			// This is because UnprocessData needs the complete encrypted data to decrypt properly
+			// However, we don't cache the decoded result to avoid memory explosion
+			decodedFileData, err := core.UnprocessData(encryptedFileData, cr.kind, cr.endecKey)
+			if err != nil {
+				return nil, fmt.Errorf("failed to unprocess file data: %v", err)
+			}
+
+			// Truncate decoded file data to origSize (important for truncated files)
+			if int64(len(decodedFileData)) > cr.origSize {
+				decodedFileData = decodedFileData[:cr.origSize]
+			}
+
+			return decodedFileData, nil
+		})
+
+		if err != nil {
+			return 0, err
 		}
 
-		// Now read from decoded fileData
-		// Use origSize to limit fileData size (important for truncated files)
-		// fileData may be longer than origSize if it was cached before truncate
-		effectiveFileSize := int64(len(fileData))
-		if effectiveFileSize > cr.origSize {
-			effectiveFileSize = cr.origSize
+		decodedFileData, ok := result.([]byte)
+		if !ok {
+			return 0, fmt.Errorf("invalid decoded file data type")
 		}
+
+		// Read from decoded file data
+		effectiveFileSize := int64(len(decodedFileData))
 		if offset >= effectiveFileSize {
-			// DebugLog("[VFS chunkReader ReadAt] Offset beyond file size: dataID=%d, offset=%d, effectiveFileSize=%d, fileDataLen=%d", cr.dataID, offset, effectiveFileSize, len(fileData))
 			return 0, io.EOF
 		}
 		readSize := int64(len(buf))
 		if offset+readSize > effectiveFileSize {
 			readSize = effectiveFileSize - offset
 		}
-		// DebugLog("[VFS chunkReader ReadAt] Reading from decoded file data: dataID=%d, offset=%d, readSize=%d, effectiveFileSize=%d", cr.dataID, offset, readSize, effectiveFileSize)
-		copy(buf[:readSize], fileData[offset:offset+readSize])
+		copy(buf[:readSize], decodedFileData[offset:offset+readSize])
 		return int(readSize), nil
 	}
 
@@ -7043,6 +6988,22 @@ func (cr *chunkReader) ReadAt(buf []byte, offset int64) (int, error) {
 				}
 				return 0, io.EOF
 			}
+			// CRITICAL FIX: Check if error is decryption failure for non-existent chunk
+			// If it's a decryption error, check if this chunk should exist based on origSize
+			// If chunk shouldn't exist (sn * chunkSize >= origSize), treat as EOF
+			if strings.Contains(err.Error(), "decryption") || strings.Contains(err.Error(), "authentication") || strings.Contains(err.Error(), "unprocess") {
+				// Check if this chunk should exist based on origSize
+				chunkStart := int64(currentSn) * cr.chunkSize
+				if chunkStart >= cr.origSize {
+					// Chunk shouldn't exist, treat as EOF
+					DebugLog("[VFS chunkReader ReadAt] Decryption error for non-existent chunk (chunkStart >= origSize), treating as EOF: dataID=%d, sn=%d, chunkStart=%d, origSize=%d",
+						cr.dataID, currentSn, chunkStart, cr.origSize)
+					if totalRead > 0 {
+						return totalRead, nil
+					}
+					return 0, io.EOF
+				}
+			}
 			// If chunk doesn't exist but we haven't reached origSize, it's an error
 			// But if we've read some data, return what we have (partial read)
 			if totalRead > 0 {
@@ -7065,18 +7026,11 @@ func (cr *chunkReader) ReadAt(buf []byte, offset int64) (int, error) {
 		// IMPORTANT: Always use len(chunkData) to determine if we've reached the end of this chunk's data
 		// The actual chunk end in file coordinates: for non-last chunks, use chunkSize; for last chunk, use actual data size
 		actualChunkDataSize := int64(len(chunkData))
-		// Calculate actual chunk end in file coordinates: for non-last chunks, use chunkSize; for last chunk, use actual data size
-		// This is used to determine where the next chunk starts in the file coordinate system
-		nextChunkStart := chunkStart + cr.chunkSize
-		var actualChunkEnd int64
-		if nextChunkStart >= cr.origSize {
-			// This is the last chunk, use actual data size
-			actualChunkEnd = chunkStart + actualChunkDataSize
-		} else {
-			// This is not the last chunk, use chunkSize for file coordinate system
-			// Even if len(chunkData) < chunkSize (compressed), the next chunk still starts at chunkStart + chunkSize
-			actualChunkEnd = nextChunkStart
-		}
+		// CRITICAL FIX: When chunk sizes are variable (e.g., when Flush is called before buffer is full),
+		// we should use the actual chunk data size to determine where the next chunk starts,
+		// not the theoretical chunkSize. This ensures correct reading of files with variable chunk sizes.
+		// For files with consistent chunk sizes, actualChunkDataSize == chunkSize (except for the last chunk).
+		actualChunkEnd := chunkStart + actualChunkDataSize
 
 		// Check if we've read all data from this chunk (use actual data size, not chunkSize)
 		if currentOffsetInChunk >= actualChunkDataSize {
@@ -7116,18 +7070,30 @@ func (cr *chunkReader) ReadAt(buf []byte, offset int64) (int, error) {
 						DebugLog("[VFS chunkReader ReadAt] Next chunk doesn't exist, reached end: dataID=%d, actualChunkEnd=%d, origSize=%d, currentOffset=%d", cr.dataID, actualChunkEnd, cr.origSize, currentOffset)
 						break
 					}
-					// If we've read some data, return it
-					if totalRead > 0 {
-						DebugLog("[VFS chunkReader ReadAt] Next chunk doesn't exist, returning partial read: dataID=%d, totalRead=%d, actualChunkEnd=%d, origSize=%d", cr.dataID, totalRead, actualChunkEnd, cr.origSize)
-						return totalRead, nil
-					}
-					// No data read yet, but check if error is decryption failure for non-existent chunk
-					// If it's a decryption error and we're at or beyond origSize, treat as EOF
-					if strings.Contains(nextErr.Error(), "decryption") || strings.Contains(nextErr.Error(), "authentication") {
+					// CRITICAL FIX: Check if error is decryption failure for non-existent chunk
+					// If it's a decryption error, check if this chunk should exist based on origSize
+					// If chunk shouldn't exist (nextSn * chunkSize >= origSize), treat as EOF
+					if strings.Contains(nextErr.Error(), "decryption") || strings.Contains(nextErr.Error(), "authentication") || strings.Contains(nextErr.Error(), "unprocess") {
+						nextChunkStart := int64(nextSn) * cr.chunkSize
+						if nextChunkStart >= cr.origSize {
+							// Chunk shouldn't exist, treat as EOF
+							DebugLog("[VFS chunkReader ReadAt] Decryption error for non-existent chunk (nextChunkStart >= origSize), treating as EOF: dataID=%d, nextSn=%d, nextChunkStart=%d, origSize=%d",
+								cr.dataID, nextSn, nextChunkStart, cr.origSize)
+							if totalRead > 0 {
+								return totalRead, nil
+							}
+							break
+						}
+						// If we're at or beyond origSize, treat as EOF
 						if currentOffset >= cr.origSize || actualChunkEnd >= cr.origSize {
 							DebugLog("[VFS chunkReader ReadAt] Decryption error for non-existent chunk, reached end: dataID=%d, currentOffset=%d, origSize=%d, error=%v", cr.dataID, currentOffset, cr.origSize, nextErr)
 							break
 						}
+					}
+					// If we've read some data, return it
+					if totalRead > 0 {
+						DebugLog("[VFS chunkReader ReadAt] Next chunk doesn't exist, returning partial read: dataID=%d, totalRead=%d, actualChunkEnd=%d, origSize=%d", cr.dataID, totalRead, actualChunkEnd, cr.origSize)
+						return totalRead, nil
 					}
 					// No data read yet, return error
 					return 0, nextErr
@@ -7231,6 +7197,21 @@ func (cr *chunkReader) ReadAt(buf []byte, offset int64) (int, error) {
 					DebugLog("[VFS chunkReader ReadAt] Next chunk doesn't exist, reached end: dataID=%d, actualChunkEnd=%d, origSize=%d",
 						cr.dataID, actualChunkEnd, cr.origSize)
 					break
+				}
+				// CRITICAL FIX: Check if error is decryption failure for non-existent chunk
+				// If it's a decryption error, check if this chunk should exist based on origSize
+				// If chunk shouldn't exist (nextSn * chunkSize >= origSize), treat as EOF
+				if strings.Contains(nextErr.Error(), "decryption") || strings.Contains(nextErr.Error(), "authentication") || strings.Contains(nextErr.Error(), "unprocess") {
+					nextChunkStart := int64(nextSn) * cr.chunkSize
+					if nextChunkStart >= cr.origSize {
+						// Chunk shouldn't exist, treat as EOF
+						DebugLog("[VFS chunkReader ReadAt] Decryption error for non-existent chunk (nextChunkStart >= origSize), treating as EOF: dataID=%d, nextSn=%d, nextChunkStart=%d, origSize=%d",
+							cr.dataID, nextSn, nextChunkStart, cr.origSize)
+						if totalRead > 0 {
+							return totalRead, nil
+						}
+						break
+					}
 				}
 				// If we've read some data, return it
 				if totalRead > 0 {

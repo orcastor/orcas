@@ -8129,3 +8129,162 @@ func TestChunkedFileWriterSizeMismatchFix(t *testing.T) {
 		So(err, ShouldBeNil)
 	})
 }
+
+// TestEncryptedMultiChunkWriteRead verifies that writing and reading encrypted data
+// across multiple chunks works correctly with random data
+func TestEncryptedMultiChunkWriteRead(t *testing.T) {
+	Convey("Encrypted multi-chunk write and read with random data", t, func() {
+		ig := idgen.NewIDGen(nil, 0)
+		testBktID, _ := ig.New()
+		err := core.InitBucketDB(".", testBktID)
+		So(err, ShouldBeNil)
+
+		dma := &core.DefaultMetadataAdapter{
+			DefaultBaseMetadataAdapter: &core.DefaultBaseMetadataAdapter{},
+			DefaultDataMetadataAdapter: &core.DefaultDataMetadataAdapter{},
+		}
+		dma.DefaultBaseMetadataAdapter.SetPath(".")
+		dma.DefaultDataMetadataAdapter.SetPath(".")
+		dda := &core.DefaultDataAdapter{}
+		dda.SetDataPath(".")
+
+		lh := core.NewLocalHandler("", "").(*core.LocalHandler)
+		lh.SetAdapter(dma, dda)
+
+		testCtx, userInfo, _, err := lh.Login(c, "orcas", "orcas")
+		So(err, ShouldBeNil)
+
+		bucket := &core.BucketInfo{
+			ID:       testBktID,
+			Name:     "test_bucket",
+			Type:     1,
+			Quota:    200000000, // 200MB - enough for large file tests
+			Used:     0,
+			RealUsed: 0,
+		}
+		So(dma.PutBkt(testCtx, []*core.BucketInfo{bucket}), ShouldBeNil)
+		err = dma.PutACL(testCtx, testBktID, userInfo.ID, core.ALL)
+		So(err, ShouldBeNil)
+
+		// Create file object
+		fileID, _ := ig.New()
+		fileObj := &core.ObjectInfo{
+			ID:    fileID,
+			PID:   testBktID,
+			Type:  core.OBJ_TYPE_FILE,
+			Name:  "encrypted_multi_chunk_test.bin",
+			Size:  0,
+			MTime: core.Now(),
+		}
+		_, err = dma.PutObj(testCtx, testBktID, []*core.ObjectInfo{fileObj})
+		So(err, ShouldBeNil)
+
+		// Create OrcasFS with encryption enabled
+		ofs := NewOrcasFS(lh, testCtx, testBktID)
+		ofs.EndecWay = core.DATA_ENDEC_AES256
+		ofs.EndecKey = "test-encryption-key-32-bytes-long!!"
+		ofs.chunkSize = 10 << 20 // 10MB chunk size
+
+		// Create RandomAccessor
+		ra, err := NewRandomAccessor(ofs, fileID)
+		So(err, ShouldBeNil)
+		defer ra.Close()
+
+		// Test with file size that spans multiple chunks (2.5 chunks = 25MB)
+		// This ensures we test chunk boundary handling
+		fileSize := int64(25 * 1024 * 1024) // 25MB - spans 2 full chunks + 5MB partial chunk
+
+		// Generate random test data
+		rand.Seed(time.Now().UnixNano())
+		originalData := make([]byte, fileSize)
+		rand.Read(originalData) // Fill with random bytes
+
+		t.Logf("Writing %d bytes (%d MB) of random encrypted data across %d chunks",
+			fileSize, fileSize/(1024*1024), (fileSize+ofs.chunkSize-1)/ofs.chunkSize)
+
+		// Write data
+		err = ra.Write(0, originalData)
+		So(err, ShouldBeNil)
+
+		// Flush to ensure data is persisted
+		_, err = ra.Flush()
+		So(err, ShouldBeNil)
+
+		// Verify file size after flush
+		fileObjAfterWrite, err := ra.getFileObj()
+		So(err, ShouldBeNil)
+		So(fileObjAfterWrite.Size, ShouldEqual, fileSize)
+		t.Logf("File size after write: %d bytes", fileObjAfterWrite.Size)
+
+		// Test 1: Read entire file and verify
+		t.Log("Test 1: Reading entire file and verifying data integrity")
+		readData, err := ra.Read(0, int(fileSize))
+		So(err, ShouldBeNil)
+		So(len(readData), ShouldEqual, int(fileSize))
+		So(bytes.Equal(readData, originalData), ShouldBeTrue)
+
+		// Test 2: Read from different chunks
+		t.Log("Test 2: Reading from different chunks")
+		chunkSize := ofs.chunkSize
+
+		// Read from first chunk (offset 0)
+		readChunk1, err := ra.Read(0, int(chunkSize))
+		So(err, ShouldBeNil)
+		So(len(readChunk1), ShouldEqual, int(chunkSize))
+		So(bytes.Equal(readChunk1, originalData[0:chunkSize]), ShouldBeTrue)
+
+		// Read from second chunk (offset chunkSize)
+		readChunk2, err := ra.Read(chunkSize, int(chunkSize))
+		So(err, ShouldBeNil)
+		So(len(readChunk2), ShouldEqual, int(chunkSize))
+		So(bytes.Equal(readChunk2, originalData[chunkSize:chunkSize*2]), ShouldBeTrue)
+
+		// Read from third chunk (partial, offset chunkSize*2)
+		remainingSize := fileSize - chunkSize*2
+		readChunk3, err := ra.Read(chunkSize*2, int(remainingSize))
+		So(err, ShouldBeNil)
+		So(len(readChunk3), ShouldEqual, int(remainingSize))
+		So(bytes.Equal(readChunk3, originalData[chunkSize*2:]), ShouldBeTrue)
+
+		// Test 3: Read across chunk boundaries
+		t.Log("Test 3: Reading across chunk boundaries")
+		// Read from end of first chunk to start of second chunk
+		boundaryOffset := chunkSize - 1024
+		boundarySize := 2048 // 2KB read spanning chunk boundary
+		readBoundary, err := ra.Read(boundaryOffset, boundarySize)
+		So(err, ShouldBeNil)
+		So(len(readBoundary), ShouldEqual, boundarySize)
+		So(bytes.Equal(readBoundary, originalData[boundaryOffset:boundaryOffset+int64(boundarySize)]), ShouldBeTrue)
+
+		// Test 4: Read random offsets within each chunk
+		t.Log("Test 4: Reading random offsets within chunks")
+		for i := 0; i < 10; i++ {
+			offset := rand.Int63n(fileSize - 1024)
+			size := 1024 // 1KB reads
+			if offset+int64(size) > fileSize {
+				size = int(fileSize - offset)
+			}
+			readRandom, err := ra.Read(offset, size)
+			So(err, ShouldBeNil)
+			So(len(readRandom), ShouldEqual, size)
+			So(bytes.Equal(readRandom, originalData[offset:offset+int64(size)]), ShouldBeTrue)
+		}
+
+		// Test 5: Read near end of file
+		t.Log("Test 5: Reading near end of file")
+		endOffset := fileSize - 1024
+		endRead, err := ra.Read(endOffset, 2048) // Try to read 2KB, but only 1KB available
+		So(err, ShouldBeNil)
+		So(len(endRead), ShouldEqual, 1024) // Should only read 1KB
+		So(bytes.Equal(endRead, originalData[endOffset:]), ShouldBeTrue)
+
+		// Test 6: Verify data integrity with hash
+		t.Log("Test 6: Verifying data integrity with hash")
+		originalHash := sha256.Sum256(originalData)
+		readHash := sha256.Sum256(readData)
+		So(bytes.Equal(originalHash[:], readHash[:]), ShouldBeTrue)
+
+		t.Logf("✅ All tests passed: Successfully wrote and read %d bytes of encrypted data across %d chunks",
+			fileSize, (fileSize+chunkSize-1)/chunkSize)
+	})
+}
