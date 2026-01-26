@@ -3784,6 +3784,11 @@ func (ra *RandomAccessor) flushSequentialChunkLocked() error {
 		// Processing failed, use original chunk
 		DebugLog("[VFS flushSequentialChunk] ProcessData failed: fileID=%d, dataID=%d, sn=%d, error=%v", ra.fileID, ra.seqBuffer.dataID, ra.seqBuffer.sn, err)
 		encodedChunk = chunkData
+		// CRITICAL: Clear compression and encryption flags since we're using unprocessed data
+		// This ensures that Read() won't try to decrypt/decompress data that wasn't encrypted/compressed
+		ra.seqBuffer.dataInfo.Kind &= ^core.DATA_CMPR_MASK
+		ra.seqBuffer.dataInfo.Kind &= ^core.DATA_ENDEC_MASK
+		DebugLog("[VFS flushSequentialChunk] Cleared compression/encryption flags after ProcessData failure: fileID=%d, Kind=0x%x", ra.fileID, ra.seqBuffer.dataInfo.Kind)
 	}
 	if len(encodedChunk) == 0 && len(chunkData) > 0 {
 		DebugLog("[VFS flushSequentialChunk] ERROR: ProcessData returned empty chunk but original has data: fileID=%d, dataID=%d, sn=%d, originalSize=%d",
@@ -4470,6 +4475,13 @@ func (ra *RandomAccessor) flushSequentialBuffer() error {
 	}
 
 	DebugLog("[VFS flushSequentialBuffer] Successfully flushed sequential buffer: fileID=%d, dataID=%d, size=%d, versionID=%d", ra.fileID, fileObj.DataID, fileObj.Size, versionID)
+
+	// CRITICAL: Clear sequential buffer after successful flush to prevent double-flush
+	// Mark as closed and clear hasData flag
+	ra.seqBuffer.closed = true
+	ra.seqBuffer.hasData = false
+	ra.clearSeqBuffer() // Clear buffer and shrink capacity if needed
+
 	return nil
 }
 
