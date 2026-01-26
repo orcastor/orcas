@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"hash"
@@ -2370,6 +2371,28 @@ func (ra *RandomAccessor) tryInitSeqBuffer(fileObj *core.ObjectInfo, offset int6
 // For .tmp files, we don't know the final file size until rename (removing .tmp extension),
 // so we use random write mode first, and the decision will be made during Flush() based on final file size.
 func (ra *RandomAccessor) Write(offset int64, data []byte) error {
+	// DEBUG: Print hex data for debugging
+	if len(data) > 0 {
+		sampleSize := 64 // Print first 64 bytes
+		if len(data) < sampleSize {
+			sampleSize = len(data)
+		}
+		hexData := hex.EncodeToString(data[:sampleSize])
+		DebugLog("[VFS RandomAccessor Write] Writing data (hex): fileID=%d, offset=%d, size=%d, first%dBytes=%s",
+			ra.fileID, offset, len(data), sampleSize, hexData)
+		// Check if all zeros
+		allZeros := true
+		for i := 0; i < len(data) && i < 1024; i++ {
+			if data[i] != 0 {
+				allZeros = false
+				break
+			}
+		}
+		if allZeros && len(data) >= 1024 {
+			DebugLog("[VFS RandomAccessor Write] WARNING: Writing all-zero data: fileID=%d, offset=%d, size=%d", ra.fileID, offset, len(data))
+		}
+	}
+
 	// Step 1: Get fileObj (cached)
 	var fileObj *core.ObjectInfo
 	fileObjValue := ra.fileObj.Load()
@@ -4534,6 +4557,16 @@ func (ra *RandomAccessor) Read(offset int64, size int) ([]byte, error) {
 				DebugLog("[VFS Read] ERROR: Failed to read from journal: %v", err)
 				// Fall back to regular read
 			} else {
+				// DEBUG: Print hex data for debugging
+				if len(data) > 0 {
+					sampleSize := 64
+					if len(data) < sampleSize {
+						sampleSize = len(data)
+					}
+					hexData := hex.EncodeToString(data[:sampleSize])
+					DebugLog("[VFS Read] Read from journal (hex): fileID=%d, offset=%d, size=%d, first%dBytes=%s",
+						ra.fileID, offset, len(data), sampleSize, hexData)
+				}
 				return data, nil
 			}
 		}
@@ -4757,7 +4790,18 @@ func (ra *RandomAccessor) Read(offset int64, size int) ([]byte, error) {
 			data, readErr := ra.fs.h.GetData(ra.fs.c, ra.fs.bktID, fileObj.DataID, 0)
 			if readErr == nil && len(data) > 0 {
 				DebugLog("[VFS Read] Fallback to direct GetData: fileID=%d, DataID=%d, dataLen=%d", ra.fileID, fileObj.DataID, len(data))
-				return ra.readFromDataAndBuffer(data, offset, size), nil
+				result := ra.readFromDataAndBuffer(data, offset, size)
+				// DEBUG: Print hex data for debugging
+				if len(result) > 0 {
+					sampleSize := 64
+					if len(result) < sampleSize {
+						sampleSize = len(result)
+					}
+					hexData := hex.EncodeToString(result[:sampleSize])
+					DebugLog("[VFS Read] Read from direct GetData (hex): fileID=%d, offset=%d, size=%d, first%dBytes=%s",
+						ra.fileID, offset, len(result), sampleSize, hexData)
+				}
+				return result, nil
 			}
 			DebugLog("[VFS Read] Fallback to readFromBuffer: fileID=%d, DataID=%d", ra.fileID, fileObj.DataID)
 			return ra.readFromBuffer(offset, size), nil
@@ -4898,6 +4942,29 @@ func (ra *RandomAccessor) Read(offset int64, size int) ([]byte, error) {
 			fileData = []byte{}
 			DebugLog("[VFS Read] offset >= actualFileSize, returning empty data: fileID=%d, offset=%d, actualFileSize=%d", ra.fileID, offset, actualFileSize)
 		}
+		
+		// DEBUG: Print hex data for debugging
+		if len(fileData) > 0 {
+			sampleSize := 64 // Print first 64 bytes
+			if len(fileData) < sampleSize {
+				sampleSize = len(fileData)
+			}
+			hexData := hex.EncodeToString(fileData[:sampleSize])
+			DebugLog("[VFS Read] Read data (hex): fileID=%d, offset=%d, size=%d, first%dBytes=%s",
+				ra.fileID, offset, len(fileData), sampleSize, hexData)
+			// Check if all zeros
+			allZeros := true
+			for i := 0; i < len(fileData) && i < 1024; i++ {
+				if fileData[i] != 0 {
+					allZeros = false
+					break
+				}
+			}
+			if allZeros && len(fileData) >= 1024 {
+				DebugLog("[VFS Read] WARNING: Read all-zero data: fileID=%d, offset=%d, size=%d", ra.fileID, offset, len(fileData))
+			}
+		}
+		
 		return fileData, nil
 	}
 	DebugLog("[VFS Read] readWithWrites returned false, trying fallback: fileID=%d", ra.fileID)
@@ -6884,6 +6951,18 @@ func (cr *chunkReader) ReadAt(buf []byte, offset int64) (int, error) {
 			readSize = effectiveFileSize - offset
 		}
 		copy(buf[:readSize], decodedFileData[offset:offset+readSize])
+		
+		// DEBUG: Print hex data for debugging
+		if readSize > 0 {
+			sampleSize := int64(64)
+			if readSize < sampleSize {
+				sampleSize = readSize
+			}
+			hexData := hex.EncodeToString(buf[:sampleSize])
+			DebugLog("[VFS chunkReader ReadAt] Read from packaged file (hex): dataID=%d, offset=%d, readSize=%d, first%dBytes=%s",
+				cr.dataID, offset, readSize, sampleSize, hexData)
+		}
+		
 		return int(readSize), nil
 	}
 
@@ -7033,6 +7112,9 @@ func (cr *chunkReader) ReadAt(buf []byte, offset int64) (int, error) {
 		actualChunkEnd := chunkStart + actualChunkDataSize
 
 		// Check if we've read all data from this chunk (use actual data size, not chunkSize)
+		// CRITICAL FIX: If currentOffsetInChunk >= actualChunkDataSize, we've exhausted this chunk's data
+		// We should immediately move to the next chunk, not check currentOffset >= actualChunkEnd
+		// This prevents reading zeros when offset is within chunkSize but beyond actual chunk data
 		if currentOffsetInChunk >= actualChunkDataSize {
 			// Current offset is beyond this chunk's data, move to next chunk
 			// CRITICAL: Check if we've reached the end of file FIRST before trying next chunk
@@ -7042,13 +7124,11 @@ func (cr *chunkReader) ReadAt(buf []byte, offset int64) (int, error) {
 				DebugLog("[VFS chunkReader ReadAt] Reached end of file: dataID=%d, actualChunkEnd=%d, origSize=%d, currentOffset=%d", cr.dataID, actualChunkEnd, cr.origSize, currentOffset)
 				break
 			}
-			// Move to next chunk
-			// If currentOffset is already at or beyond actualChunkEnd, we're already past this chunk
-			// This can happen when offset is beyond the chunk size (e.g., offset=49152 but chunk only has 32768 bytes)
-			// IMPORTANT: For compressed files, chunk actual size may be smaller than chunkSize
-			// So the next chunk starts at actualChunkEnd, not at nextChunkStart (which is based on chunkSize)
-			// For uncompressed files, actualChunkEnd should equal chunkStart + chunkSize (except last chunk)
-			if currentOffset >= actualChunkEnd {
+			// CRITICAL FIX: Always move to next chunk when currentOffsetInChunk >= actualChunkDataSize
+			// Don't check currentOffset >= actualChunkEnd, because actualChunkEnd may be based on chunkSize
+			// but actualChunkDataSize is the real data size, which may be smaller
+			// Move to next chunk immediately
+			{
 				// We're already past this chunk, try to read next chunk
 				// CRITICAL: Double-check if we've reached the end of file before trying next chunk
 				// This is important for files where chunk data size is smaller than expected
@@ -7127,6 +7207,20 @@ func (cr *chunkReader) ReadAt(buf []byte, offset int64) (int, error) {
 					toReadFromNext = nextAvailableInChunk
 				}
 				copy(buf[totalRead:totalRead+int(toReadFromNext)], nextChunkData[nextChunkOffsetInChunk:nextChunkOffsetInChunk+toReadFromNext])
+				
+				// DEBUG: Print hex data for debugging
+				if toReadFromNext > 0 && totalRead+int(toReadFromNext) <= len(buf) {
+					sampleSize := int64(64)
+					if toReadFromNext < sampleSize {
+						sampleSize = toReadFromNext
+					}
+					if totalRead+int(sampleSize) <= len(buf) {
+						hexData := hex.EncodeToString(buf[totalRead : totalRead+int(sampleSize)])
+						DebugLog("[VFS chunkReader ReadAt] Read from next chunk (hex): dataID=%d, currentSn=%d, nextSn=%d, toRead=%d, totalRead=%d, first%dBytes=%s",
+							cr.dataID, currentSn, nextSn, toReadFromNext, totalRead+int(toReadFromNext), sampleSize, hexData)
+					}
+				}
+				
 				DebugLog("[VFS chunkReader ReadAt] Read from next chunk: dataID=%d, currentSn=%d, nextSn=%d, toRead=%d, totalRead=%d",
 					cr.dataID, currentSn, nextSn, toReadFromNext, totalRead+int(toReadFromNext))
 				totalRead += int(toReadFromNext)
@@ -7250,6 +7344,20 @@ func (cr *chunkReader) ReadAt(buf []byte, offset int64) (int, error) {
 				toReadFromNext = nextAvailableInChunk
 			}
 			copy(buf[totalRead:totalRead+int(toReadFromNext)], nextChunkData[nextChunkOffsetInChunk:nextChunkOffsetInChunk+toReadFromNext])
+			
+			// DEBUG: Print hex data for debugging
+			if toReadFromNext > 0 && totalRead+int(toReadFromNext) <= len(buf) {
+				sampleSize := int64(64)
+				if toReadFromNext < sampleSize {
+					sampleSize = toReadFromNext
+				}
+				if totalRead+int(sampleSize) <= len(buf) {
+					hexData := hex.EncodeToString(buf[totalRead : totalRead+int(sampleSize)])
+					DebugLog("[VFS chunkReader ReadAt] Read from next chunk (hex): dataID=%d, currentSn=%d, nextSn=%d, toRead=%d, totalRead=%d, first%dBytes=%s",
+						cr.dataID, currentSn, nextSn, toReadFromNext, totalRead+int(toReadFromNext), sampleSize, hexData)
+				}
+			}
+			
 			DebugLog("[VFS chunkReader ReadAt] Read from next chunk: dataID=%d, currentSn=%d, nextSn=%d, toRead=%d, totalRead=%d",
 				cr.dataID, currentSn, nextSn, toReadFromNext, totalRead+int(toReadFromNext))
 			totalRead += int(toReadFromNext)
@@ -7281,11 +7389,90 @@ func (cr *chunkReader) ReadAt(buf []byte, offset int64) (int, error) {
 			toRead = availableInChunk
 		}
 
+		// CRITICAL: Double-check bounds before copying to prevent reading zeros or panic
+		// Ensure currentOffsetInChunk + toRead doesn't exceed chunkData length
+		if currentOffsetInChunk+toRead > int64(len(chunkData)) {
+			// Adjust toRead to fit within chunkData bounds
+			maxToRead := int64(len(chunkData)) - currentOffsetInChunk
+			if maxToRead <= 0 {
+				// No more data in this chunk, should have been caught by availableInChunk check
+				// But handle it gracefully anyway
+				DebugLog("[VFS chunkReader ReadAt] WARNING: currentOffsetInChunk >= len(chunkData), moving to next chunk: dataID=%d, sn=%d, offsetInChunk=%d, chunkLen=%d",
+					cr.dataID, currentSn, currentOffsetInChunk, len(chunkData))
+				// Move to next chunk
+				currentOffset = chunkStart + int64(len(chunkData))
+				currentSn = currentSn + 1
+				lastChunkSn = -1
+				lastChunkStart = -1
+				lastChunkEnd = -1
+				continue
+			}
+			toRead = maxToRead
+			DebugLog("[VFS chunkReader ReadAt] Adjusted toRead to fit within chunk bounds: dataID=%d, sn=%d, oldToRead=%d, newToRead=%d, chunkLen=%d",
+				cr.dataID, currentSn, toRead, maxToRead, len(chunkData))
+		}
+
 		// Copy data from chunk
+		// CRITICAL: Ensure we don't read beyond chunkData bounds
+		if currentOffsetInChunk >= int64(len(chunkData)) {
+			// Should have been caught above, but double-check
+			DebugLog("[VFS chunkReader ReadAt] ERROR: currentOffsetInChunk >= len(chunkData), skipping copy: dataID=%d, sn=%d, offsetInChunk=%d, chunkLen=%d",
+				cr.dataID, currentSn, currentOffsetInChunk, len(chunkData))
+			// Move to next chunk
+			currentOffset = chunkStart + int64(len(chunkData))
+			currentSn = currentSn + 1
+			lastChunkSn = -1
+			lastChunkStart = -1
+			lastChunkEnd = -1
+			continue
+		}
+		
+		// CRITICAL: Verify chunkData is not empty and contains actual data
+		// Log first few bytes to help debug if data is all zeros
+		if len(chunkData) > 0 && currentOffsetInChunk < int64(len(chunkData)) {
+			// Check if the data we're about to read is all zeros (for debugging)
+			readEnd := currentOffsetInChunk + toRead
+			if readEnd > int64(len(chunkData)) {
+				readEnd = int64(len(chunkData))
+			}
+			readStart := currentOffsetInChunk
+			if readStart < readEnd {
+				// Sample first 16 bytes to check if data is all zeros
+				sampleEnd := readStart + 16
+				if sampleEnd > readEnd {
+					sampleEnd = readEnd
+				}
+				allZeros := true
+				for i := readStart; i < sampleEnd; i++ {
+					if chunkData[i] != 0 {
+						allZeros = false
+						break
+					}
+				}
+				if allZeros && readEnd-readStart >= 16 {
+					DebugLog("[VFS chunkReader ReadAt] WARNING: Chunk data appears to be all zeros: dataID=%d, sn=%d, offsetInChunk=%d, chunkLen=%d, sampleLen=%d",
+						cr.dataID, currentSn, currentOffsetInChunk, len(chunkData), sampleEnd-readStart)
+				}
+			}
+		}
+		
 		copy(buf[totalRead:totalRead+int(toRead)], chunkData[currentOffsetInChunk:currentOffsetInChunk+toRead])
 
-		DebugLog("[VFS chunkReader ReadAt] Read from chunk: dataID=%d, sn=%d, chunkSize=%d, toRead=%d, totalRead=%d, remaining=%d",
-			cr.dataID, currentSn, len(chunkData), toRead, totalRead+int(toRead), remaining-toRead)
+		// DEBUG: Print hex data for debugging
+		if toRead > 0 && totalRead+int(toRead) <= len(buf) {
+			sampleSize := int64(64)
+			if toRead < sampleSize {
+				sampleSize = toRead
+			}
+			if totalRead+int(sampleSize) <= len(buf) {
+				hexData := hex.EncodeToString(buf[totalRead : totalRead+int(sampleSize)])
+				DebugLog("[VFS chunkReader ReadAt] Read from chunk (hex): dataID=%d, sn=%d, chunkSize=%d, toRead=%d, totalRead=%d, offsetInChunk=%d, first%dBytes=%s",
+					cr.dataID, currentSn, len(chunkData), toRead, totalRead+int(toRead), currentOffsetInChunk, sampleSize, hexData)
+			}
+		}
+
+		DebugLog("[VFS chunkReader ReadAt] Read from chunk: dataID=%d, sn=%d, chunkSize=%d, toRead=%d, totalRead=%d, remaining=%d, offsetInChunk=%d",
+			cr.dataID, currentSn, len(chunkData), toRead, totalRead+int(toRead), remaining-toRead, currentOffsetInChunk)
 
 		totalRead += int(toRead)
 		currentOffset += toRead
