@@ -2323,14 +2323,49 @@ func (ra *RandomAccessor) tryInitSeqBuffer(fileObj *core.ObjectInfo, offset int6
 			ra.seqBuffer.mu.Lock()
 			if ra.seqBuffer.closed {
 				DebugLog("[VFS tryInitSeqBuffer] Resetting seqBuffer for append: fileID=%d, offset=%d", ra.fileID, offset)
+
+				// CRITICAL FIX: When resetting seqBuffer for append, we need to:
+				// 1. Keep the same dataID (to append to existing data)
+				// 2. Calculate the correct sn based on existing file size
+				// 3. Set OrigSize and Size to existing values (from DataInfo)
+				// This ensures that new chunks are written with correct sn and the reader can find them
+
+				// Get existing DataInfo to restore OrigSize and Size
+				var existingOrigSize, existingSize int64
+				if cached, ok := dataInfoCache.Get(fileObj.DataID); ok {
+					if dataInfo, ok := cached.(*core.DataInfo); ok && dataInfo != nil {
+						existingOrigSize = dataInfo.OrigSize
+						existingSize = dataInfo.Size
+					} else {
+						// Fallback: use fileObj.Size as OrigSize
+						existingOrigSize = fileObj.Size
+						existingSize = fileObj.Size
+					}
+				} else {
+					// Fallback: use fileObj.Size as OrigSize
+					existingOrigSize = fileObj.Size
+					existingSize = fileObj.Size
+				}
+
+				// Calculate the correct sn: number of full chunks already written
+				// IMPORTANT: Use chunkSize to calculate sn, not actual chunk sizes
+				// This ensures consistency with how chunkReader calculates chunk positions
+				chunkSize := ra.seqBuffer.chunkSize
+				existingSn := int((existingOrigSize + chunkSize - 1) / chunkSize)
+
 				ra.seqBuffer.closed = false
 				ra.seqBuffer.offset = fileObj.Size
 				ra.clearSeqBuffer()
-				ra.seqBuffer.hasData = false
+				ra.seqBuffer.hasData = true // Mark as having data (existing data)
 				ra.seqBuffer.dataID = fileObj.DataID
-				ra.seqBuffer.dataInfo.OrigSize = 0
-				ra.seqBuffer.dataInfo.Size = 0
-				ra.seqBuffer.sn = 0
+				ra.seqBuffer.dataInfo.ID = fileObj.DataID
+				ra.seqBuffer.dataInfo.OrigSize = existingOrigSize
+				ra.seqBuffer.dataInfo.Size = existingSize
+				ra.seqBuffer.sn = existingSn
+
+				DebugLog("[VFS tryInitSeqBuffer] Reset seqBuffer for append: fileID=%d, dataID=%d, sn=%d, OrigSize=%d, Size=%d, offset=%d",
+					ra.fileID, fileObj.DataID, existingSn, existingOrigSize, existingSize, fileObj.Size)
+
 				ra.seqBuffer.mu.Unlock()
 				return true
 			}
@@ -4031,6 +4066,91 @@ func (ra *RandomAccessor) flushSequentialBuffer() error {
 		// NOTE: seqBuffer.mu is already locked by caller (flushSequentialBuffer at line 2491)
 		writeData := ra.seqBuffer.buffer // Direct reference to buffer
 		writeOffset := ra.seqBuffer.offset - int64(len(ra.seqBuffer.buffer))
+
+		// CRITICAL FIX: If buffer is empty and no new data to write, skip merge/append logic entirely
+		// This prevents unnecessary data copying and potential data corruption when Flush is called
+		// multiple times without new writes (e.g., Fsync followed by Flush)
+		if len(writeData) == 0 && newSize == oldSize {
+			DebugLog("[VFS flushSequentialBuffer] No new data to merge (buffer empty, newSize=%d == oldSize=%d), skipping merge: fileID=%d", newSize, oldSize, ra.fileID)
+			ra.seqBuffer.closed = true
+			return nil
+		}
+
+		// CRITICAL FIX: If new data was already written to the same DataID (via flushSequentialChunkLocked),
+		// we don't need to call applyAppendWithSDK. The data is already in the correct location.
+		// Just update the DataInfo and file object with the new size.
+		if ra.seqBuffer.dataID == oldDataID && len(writeData) == 0 && newSize > oldSize {
+			DebugLog("[VFS flushSequentialBuffer] Data already appended to same DataID (oldDataID=%d, oldSize=%d, newSize=%d), updating metadata only: fileID=%d",
+				oldDataID, oldSize, newSize, ra.fileID)
+
+			ra.seqBuffer.closed = true
+
+			// Update DataInfo with new size
+			lh, ok := ra.fs.h.(*core.LocalHandler)
+			if !ok {
+				DebugLog("[VFS flushSequentialBuffer] ERROR: Handler is not LocalHandler")
+				return fmt.Errorf("handler is not LocalHandler")
+			}
+
+			// Update DataInfo
+			_, err := lh.PutDataInfo(ra.fs.c, ra.fs.bktID, []*core.DataInfo{ra.seqBuffer.dataInfo})
+			if err != nil {
+				DebugLog("[VFS flushSequentialBuffer] ERROR: Failed to update DataInfo: fileID=%d, dataID=%d, error=%v", ra.fileID, ra.seqBuffer.dataID, err)
+				return err
+			}
+
+			// Create version object
+			versionID := core.NewID()
+			if versionID == 0 {
+				return fmt.Errorf("failed to generate version ID")
+			}
+
+			mTime := core.Now()
+			newVersion := &core.ObjectInfo{
+				ID:     versionID,
+				PID:    ra.fileID,
+				Type:   core.OBJ_TYPE_VERSION,
+				DataID: ra.seqBuffer.dataID,
+				Size:   newSize,
+				MTime:  mTime,
+			}
+
+			_, err = lh.Put(ra.fs.c, ra.fs.bktID, []*core.ObjectInfo{newVersion})
+			if err != nil {
+				DebugLog("[VFS flushSequentialBuffer] ERROR: Failed to create version: fileID=%d, error=%v", ra.fileID, err)
+				return err
+			}
+
+			// Update file object
+			fileObj.DataID = ra.seqBuffer.dataID
+			fileObj.Size = newSize
+			fileObj.MTime = mTime
+
+			err = lh.MetadataAdapter().SetObj(ra.fs.c, ra.fs.bktID, []string{"did", "s", "m"}, fileObj)
+			if err != nil {
+				DebugLog("[VFS flushSequentialBuffer] ERROR: Failed to update file object: fileID=%d, error=%v", ra.fileID, err)
+				return err
+			}
+
+			// Update caches
+			dataInfoCache.Put(ra.seqBuffer.dataID, ra.seqBuffer.dataInfo)
+			fileObjCache.Put(ra.fileObjKey, fileObj)
+			ra.fileObj.Store(fileObj)
+
+			// Invalidate directory listing cache
+			if fileObj.PID > 0 {
+				dirNode := &OrcasNode{
+					fs:    ra.fs,
+					objID: fileObj.PID,
+				}
+				dirNode.invalidateDirListCache(fileObj.PID)
+			}
+
+			DebugLog("[VFS flushSequentialBuffer] Successfully updated metadata for appended data: fileID=%d, dataID=%d, newSize=%d, versionID=%d",
+				ra.fileID, ra.seqBuffer.dataID, newSize, versionID)
+			return nil
+		}
+
 		ra.seqBuffer.buffer = nil  // Clear reference to prevent modification
 		ra.seqBuffer.closed = true // Mark as closed
 
@@ -5603,6 +5723,14 @@ func (ra *RandomAccessor) applyAppendWithSDK(lh *core.LocalHandler, fileObj *cor
 	DebugLog("[VFS applyAppendWithSDK] Starting append: fileID=%d, oldSize=%d, appendOffset=%d, appendSize=%d",
 		ra.fileID, fileObj.Size, appendOffset, len(appendData))
 
+	// CRITICAL FIX: If no data to append and offset equals file size, this is a no-op
+	// Return early to avoid unnecessary chunk copying which can cause data corruption
+	if len(appendData) == 0 && appendOffset == fileObj.Size {
+		DebugLog("[VFS applyAppendWithSDK] No data to append (appendSize=0, appendOffset=%d == fileSize=%d), returning early: fileID=%d",
+			appendOffset, fileObj.Size, ra.fileID)
+		return 0, nil
+	}
+
 	// Get old DataInfo
 	oldDataInfo, err := lh.GetDataInfo(ra.fs.c, ra.fs.bktID, fileObj.DataID)
 	if err != nil {
@@ -5690,7 +5818,22 @@ func (ra *RandomAccessor) applyAppendWithSDK(lh *core.LocalHandler, fileObj *cor
 			chunkIdx, chunkOffset, len(chunkData), len(processedChunk))
 	}
 
-	// 3. Calculate hashes for new file
+	// 3. Create temporary DataInfo so we can read chunks back for hash calculation
+	// This is critical: GetData needs DataInfo to exist before it can decrypt chunks
+	tempDataInfo := &core.DataInfo{
+		ID:       newDataID,
+		Kind:     oldDataInfo.Kind, // Inherit kind (encryption/compression flags)
+		OrigSize: newSize,
+	}
+	_, err = lh.PutDataInfo(ra.fs.c, ra.fs.bktID, []*core.DataInfo{tempDataInfo})
+	if err != nil {
+		DebugLog("[VFS applyAppendWithSDK] Failed to write temporary DataInfo: fileID=%d, error=%v", ra.fileID, err)
+		return 0, err
+	}
+	DebugLog("[VFS applyAppendWithSDK] Created temporary DataInfo for hash calculation: fileID=%d, dataID=%d, Kind=0x%x",
+		ra.fileID, newDataID, tempDataInfo.Kind)
+
+	// 4. Calculate hashes for new file
 	// Note: For append, we need to read all chunks to calculate hash
 	// But at least we avoid re-encrypting old chunks
 	finalData := make([]byte, newSize)
@@ -5724,7 +5867,7 @@ func (ra *RandomAccessor) applyAppendWithSDK(lh *core.LocalHandler, fileObj *cor
 	dataXXH3 := int64(xxh3.Hash(finalData))
 	dataSHA256 := sha256.Sum256(finalData)
 
-	// 4. Create DataInfo
+	// 5. Update DataInfo with complete hash information
 	newDataInfo := &core.DataInfo{
 		ID:       newDataID,
 		Kind:     oldDataInfo.Kind, // Inherit kind
@@ -5739,11 +5882,12 @@ func (ra *RandomAccessor) applyAppendWithSDK(lh *core.LocalHandler, fileObj *cor
 
 	_, err = lh.PutDataInfo(ra.fs.c, ra.fs.bktID, []*core.DataInfo{newDataInfo})
 	if err != nil {
-		DebugLog("[VFS applyAppendWithSDK] Failed to write DataInfo: fileID=%d, error=%v", ra.fileID, err)
+		DebugLog("[VFS applyAppendWithSDK] Failed to update DataInfo with hashes: fileID=%d, error=%v", ra.fileID, err)
 		return 0, err
 	}
+	DebugLog("[VFS applyAppendWithSDK] Updated DataInfo with complete hashes: fileID=%d, dataID=%d", ra.fileID, newDataID)
 
-	// 5. Create version and update file object
+	// 6. Create version and update file object
 	versionID := core.NewID()
 	if versionID == 0 {
 		return 0, fmt.Errorf("failed to generate version ID")
@@ -6958,16 +7102,11 @@ func (cr *chunkReader) ReadAt(buf []byte, offset int64) (int, error) {
 					DebugLog("[VFS chunkReader ReadAt] Reached end of file before next chunk: dataID=%d, actualChunkEnd=%d, origSize=%d, currentOffset=%d", cr.dataID, actualChunkEnd, cr.origSize, currentOffset)
 					break
 				}
-				// CRITICAL: Before attempting to read next chunk, verify it's within file bounds
-				// This prevents decryption errors when trying to read non-existent chunks
-				// Calculate next chunk start to verify it's within file bounds
+				// CRITICAL FIX: Don't use nextChunkStart to check if we've reached the end
+				// because chunk sizes may vary (e.g., when Flush is called before buffer is full).
+				// Instead, directly try to read the next chunk and handle the error if it doesn't exist.
 				nextSn := currentSn + 1
-				nextChunkStart := int64(nextSn) * cr.chunkSize
-				if nextChunkStart >= cr.origSize {
-					// Next chunk would be beyond file size, we've reached the end
-					DebugLog("[VFS chunkReader ReadAt] Next chunk beyond file size, reached end: dataID=%d, nextChunkStart=%d, origSize=%d, currentOffset=%d", cr.dataID, nextChunkStart, cr.origSize, currentOffset)
-					break
-				}
+
 				// Try to read next chunk (sn+1) to see if it exists
 
 				nextChunkData, nextErr := cr.getChunk(nextSn)
@@ -7223,19 +7362,15 @@ func (cr *chunkReader) ReadAt(buf []byte, offset int64) (int, error) {
 
 // getChunk gets a chunk (plain or decompressed/decrypted), using cache and singleflight
 func (cr *chunkReader) getChunk(sn int) ([]byte, error) {
-	// CRITICAL: Validate chunk number is within valid range based on file size
-	// This prevents reading garbage/stale data from old file versions when file was larger
-	// For example, if a file shrinks from 20MB (2 chunks) to 10MB (1 chunk), the old sn=1
-	// data may still exist in storage but should not be read
-	if cr.origSize > 0 && cr.chunkSize > 0 {
-		maxChunks := int((cr.origSize + cr.chunkSize - 1) / cr.chunkSize)
-		if sn >= maxChunks {
-			DebugLog("[VFS chunkReader getChunk] Chunk sn=%d is out of range: dataID=%d, maxChunks=%d, origSize=%d, chunkSize=%d",
-				sn, cr.dataID, maxChunks, cr.origSize, cr.chunkSize)
-			return nil, fmt.Errorf("chunk sn=%d is out of range (maxChunks=%d, origSize=%d, chunkSize=%d)",
-				sn, maxChunks, cr.origSize, cr.chunkSize)
-		}
-	}
+	// NOTE: We no longer validate chunk number based on origSize/chunkSize because
+	// chunk sizes can vary when Flush() is called before buffer is full.
+	// For example, a 1.5MB file might have 2 chunks (524KB + 1MB) instead of 1 chunk (1.5MB)
+	// if Flush() was called after writing the first 524KB.
+	// Instead, we directly try to read the chunk and handle the error if it doesn't exist.
+	//
+	// IMPORTANT: This is a design trade-off. Ideally, chunk sizes should be consistent
+	// within a bucket. However, when Flush() is called before buffer is full (e.g., for
+	// data durability), we need to support variable chunk sizes.
 
 	// Check cache first (fast path)
 	cacheKey := [2]int64{cr.dataID, int64(sn)}
