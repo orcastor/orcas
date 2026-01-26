@@ -148,6 +148,30 @@ func (jm *JournalManager) GetOrCreate(fileID, dataID, baseSize int64) *Journal {
 	jm.mu.RUnlock()
 
 	if exists {
+		// CRITICAL: Refresh journal base metadata for existing files.
+		// Journals can outlive multiple flushes and file growth; if we keep the original baseSize
+		// (or dataID) forever, later COW flushes may treat large valid regions as "beyond base",
+		// effectively zero-filling gaps not covered by entries.
+		//
+		// baseSize must never shrink unless an explicit truncate happens.
+		if dataID != 0 && dataID != core.EmptyDataID && j.dataID != dataID {
+			DebugLog("[Journal GetOrCreate] Updating existing journal dataID: fileID=%d, oldDataID=%d, newDataID=%d", fileID, j.dataID, dataID)
+			j.dataID = dataID
+		}
+		if baseSize > 0 && baseSize > j.baseSize {
+			DebugLog("[Journal GetOrCreate] Updating existing journal baseSize: fileID=%d, oldBaseSize=%d, newBaseSize=%d", fileID, j.baseSize, baseSize)
+			j.baseSize = baseSize
+			// Ensure currentSize is at least the base size.
+			for {
+				cur := atomic.LoadInt64(&j.currentSize)
+				if cur >= baseSize {
+					break
+				}
+				if atomic.CompareAndSwapInt64(&j.currentSize, cur, baseSize) {
+					break
+				}
+			}
+		}
 		return j
 	}
 
@@ -997,21 +1021,80 @@ func (j *Journal) Read(offset, length int64, baseReader func(offset, length int6
 	// Read base data first
 	baseData, err := baseReader(offset, length)
 	if err != nil && err != io.EOF {
+		DebugLog("[Journal Read] baseReader error: fileID=%d, offset=%d, length=%d, error=%v", j.fileID, offset, length, err)
 		return nil, err
 	}
 
-	// If no base data, create zero buffer
+	// If baseReader returned no data:
+	// - This is OK when reading beyond the base snapshot (offset >= baseSize). Journal entries
+	//   may extend the file and Journal.Read will synthesize the extension semantics.
+	// - This is NOT OK when reading inside the base snapshot (offset < baseSize) for non-sparse files.
 	if len(baseData) == 0 {
+		if length > 0 &&
+			!j.isSparse &&
+			j.dataID != 0 && j.dataID != core.EmptyDataID &&
+			offset < j.baseSize {
+			DebugLog("[Journal Read] ERROR: baseReader returned empty within base snapshot: fileID=%d, dataID=%d, baseSize=%d, currentSize=%d, offset=%d, length=%d, err=%v",
+				j.fileID, j.dataID, j.baseSize, currentSize, offset, length, err)
+			return nil, fmt.Errorf("journal baseReader returned empty within base snapshot: fileID=%d, dataID=%d, baseSize=%d, currentSize=%d, offset=%d, length=%d, err=%v",
+				j.fileID, j.dataID, j.baseSize, currentSize, offset, length, err)
+		}
+
+		DebugLog("[Journal Read] baseReader returned empty, filling with zeros: fileID=%d, offset=%d, length=%d, baseSize=%d, currentSize=%d, isSparse=%v",
+			j.fileID, offset, length, j.baseSize, currentSize, j.isSparse)
 		baseData = make([]byte, length)
 	} else if int64(len(baseData)) < length {
-		// Extend base data with zeros if needed
+		// Extend base data if needed
+		// CRITICAL: Check if gap is beyond baseSize before zero-filling
+		baseDataLen := int64(len(baseData))
+		gapStart := offset + baseDataLen
+		gapEnd := offset + length
+		
+		// Check if gap is beyond baseSize (file has grown)
+		if j.baseSize > 0 && gapStart >= j.baseSize {
+			// Gap is beyond baseSize, safe to fill with zeros (journal entries will overlay)
+			DebugLog("[Journal Read] baseReader returned partial data beyond baseSize, will extend with zeros: fileID=%d, offset=%d, requestedLength=%d, actualLength=%d, gapStart=%d, gapEnd=%d, baseSize=%d",
+				j.fileID, offset, length, len(baseData), gapStart, gapEnd, j.baseSize)
+		} else if j.isSparse {
+			// Sparse file, gaps are expected
+			DebugLog("[Journal Read] baseReader returned partial data in sparse file, will extend with zeros: fileID=%d, offset=%d, requestedLength=%d, actualLength=%d",
+				j.fileID, offset, length, len(baseData))
+		} else {
+			// Gap is within currentSize - check if journal entries cover it
+			// If not covered, this is an error (baseReader returned incomplete data)
+			DebugLog("[Journal Read] WARNING: baseReader returned partial data within currentSize: fileID=%d, offset=%d, requestedLength=%d, actualLength=%d, gapStart=%d, gapEnd=%d, currentSize=%d, baseSize=%d - checking journal entries",
+				j.fileID, offset, length, len(baseData), gapStart, gapEnd, currentSize, j.baseSize)
+		}
+		
+		// Create extended buffer for journal entries to overlay
 		extended := make([]byte, length)
 		copy(extended, baseData)
+		// Note: We always create extended buffer (initialized with zeros)
+		// Journal entries will overlay on top, filling any gaps
 		baseData = extended
+	} else {
+		// Check if baseData is all zeros (suspicious)
+		if len(baseData) > 100 {
+			allZeros := true
+			for i := 0; i < len(baseData) && i < 1024; i++ {
+				if baseData[i] != 0 {
+					allZeros = false
+					break
+				}
+			}
+			if allZeros && offset < j.baseSize-100 {
+				DebugLog("[Journal Read] WARNING: baseReader returned all-zero data within base range: fileID=%d, offset=%d, length=%d, baseSize=%d",
+					j.fileID, offset, length, j.baseSize)
+			}
+		}
 	}
 
 	// Apply journal entries on top of base data
 	readEnd := offset + length
+	
+	// Track which regions are covered by journal entries
+	coveredRanges := make([]struct{ start, end int64 }, 0, len(j.entries))
+	
 	for i := range j.entries {
 		entry := &j.entries[i]
 		entryEnd := entry.Offset + entry.Length
@@ -1037,7 +1120,59 @@ func (j *Journal) Read(offset, length int64, baseReader func(offset, length int6
 		dstOffset := overlapStart - offset
 		copyLength := overlapEnd - overlapStart
 
-		copy(baseData[dstOffset:dstOffset+copyLength], entry.Data[srcOffset:srcOffset+copyLength])
+		// Ensure dstOffset is within baseData bounds
+		if dstOffset < int64(len(baseData)) && dstOffset+copyLength <= int64(len(baseData)) {
+			copy(baseData[dstOffset:dstOffset+copyLength], entry.Data[srcOffset:srcOffset+copyLength])
+		} else if dstOffset >= int64(len(baseData)) {
+			// Journal entry extends beyond baseData - extend baseData
+			if int64(len(baseData)) < length {
+				extended := make([]byte, length)
+				copy(extended, baseData)
+				baseData = extended
+			}
+			if dstOffset+copyLength <= int64(len(baseData)) {
+				copy(baseData[dstOffset:dstOffset+copyLength], entry.Data[srcOffset:srcOffset+copyLength])
+			}
+		}
+
+		// Track covered range
+		coveredRanges = append(coveredRanges, struct{ start, end int64 }{overlapStart, overlapEnd})
+	}
+
+	// CRITICAL FIX: After applying journal entries, check if there are gaps not covered
+	// If gap is within baseSize and not covered by journal entries, this indicates
+	// baseReader returned incomplete data, which should not happen
+	if int64(len(baseData)) < length {
+		baseDataLen := int64(len(baseData))
+		gapStart := offset + baseDataLen
+		gapEnd := offset + length
+		
+		// Check if gap is covered by journal entries
+		gapCovered := false
+		for _, r := range coveredRanges {
+			if r.start <= gapStart && r.end >= gapEnd {
+				gapCovered = true
+				break
+			}
+		}
+		
+		if !gapCovered {
+			currentSize := atomic.LoadInt64(&j.currentSize)
+			if gapStart < currentSize && currentSize > 0 {
+				// Gap is within currentSize but not covered by journal entries
+				// This means baseReader returned incomplete data, which is an error
+				// Return error to prevent returning all-zero data
+				DebugLog("[Journal Read] ERROR: Gap within currentSize not covered by journal entries: fileID=%d, offset=%d, length=%d, baseDataLen=%d, gapStart=%d, gapEnd=%d, currentSize=%d, baseSize=%d",
+					j.fileID, offset, length, baseDataLen, gapStart, gapEnd, currentSize, j.baseSize)
+				return nil, fmt.Errorf("journal read gap not covered: fileID=%d, offset=%d, length=%d, baseDataLen=%d, gapStart=%d, gapEnd=%d, currentSize=%d, baseSize=%d - baseReader returned incomplete data within currentSize",
+					j.fileID, offset, length, baseDataLen, gapStart, gapEnd, currentSize, j.baseSize)
+			} else {
+				// Gap is beyond currentSize - this is OK, zeros are expected
+				// Journal entries should have covered it if there were writes
+				DebugLog("[Journal Read] Gap beyond currentSize not covered by journal entries (expected): fileID=%d, offset=%d, length=%d, baseDataLen=%d, gapStart=%d, gapEnd=%d, currentSize=%d, baseSize=%d",
+					j.fileID, offset, length, baseDataLen, gapStart, gapEnd, currentSize, j.baseSize)
+			}
+		}
 	}
 
 	return baseData, nil
@@ -1633,16 +1768,16 @@ func (j *Journal) flushLargeFileChunked(newSize int64) (int64, int64, error) {
 			// Read raw encrypted chunk data directly using DataAdapter
 			rawChunkData, err := da.Read(j.fs.c, j.fs.bktID, j.dataID, chunkIdx)
 			if err != nil {
-				// If can't read (sparse or missing), create zero data and process it
-				rawChunkData = make([]byte, chunkLength)
-				if needsCompress || needsEncrypt {
-					chunkKind := processKind
-					processedChunk, procErr := core.ProcessData(rawChunkData, &chunkKind, j.fs.CmprQlty, j.fs.EndecKey, false)
-					if procErr != nil {
-						return 0, 0, fmt.Errorf("failed to process zero chunk %d: %w", chunkIdx, procErr)
-					}
-					rawChunkData = processedChunk
-				}
+				// CRITICAL FIX:
+				// For unmodified chunks, we must not silently replace missing/unreadable base chunks
+				// with zeros for non-sparse files. Doing so corrupts data (and matches the observed
+				// behavior where a valid range becomes all-zero at offset 5.8MB).
+				//
+				// If we're within baseSize, this is an error. Only allow zero-fill when:
+				// - the chunk is beyond baseSize (shouldn't reach here due to chunkLength<=0 check), or
+				// - the file is sparse (handled by the j.isSparse branch below, not here).
+				return 0, 0, fmt.Errorf("failed to read unmodified base chunk %d from dataID=%d (fileID=%d, baseSize=%d, chunkOffset=%d, chunkLength=%d): %w",
+					chunkIdx, j.dataID, j.fileID, j.baseSize, chunkOffset, chunkLength, err)
 			} else {
 				// If original was encrypted with same settings, copy as-is
 				// Otherwise, decrypt and re-encrypt
@@ -1834,8 +1969,17 @@ func (j *Journal) generateChunkData(offset, length int64) ([]byte, error) {
 		if readLength > 0 {
 			baseData, err := j.readBaseData(offset, readLength)
 			if err != nil {
-				DebugLog("[Journal generateChunkData] Warning: Failed to read base data at offset %d: %v", offset, err)
-				// Continue with zeros
+				// CRITICAL FIX:
+				// For non-sparse files, failing to read base data for an unmodified region would
+				// silently turn existing data into zeros after overlay, corrupting the file.
+				// This is consistent with the observed TestReadDuringRandomWrites failure where a
+				// region not covered by any write becomes all-zero.
+				if !j.isSparse {
+					return nil, fmt.Errorf("generateChunkData: failed to read base data (fileID=%d, dataID=%d, baseSize=%d, offset=%d, length=%d): %w",
+						j.fileID, j.dataID, j.baseSize, offset, readLength, err)
+				}
+				DebugLog("[Journal generateChunkData] Sparse file: base read failed (keeping zeros): fileID=%d, offset=%d, length=%d, err=%v",
+					j.fileID, offset, readLength, err)
 			} else {
 				copy(chunkData, baseData)
 			}

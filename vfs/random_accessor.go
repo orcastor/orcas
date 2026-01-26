@@ -3575,9 +3575,12 @@ func upgradeBuffer(oldBuf []byte, targetTier int) []byte {
 			default:
 				newBuf = make([]byte, len(oldBuf), SequentialBufferTier1Cap)
 			}
+		} else {
+			// IMPORTANT: pooled buffers are returned with len=0; extend length before copying.
+			// Otherwise copy(newBuf, oldBuf) would copy 0 bytes and we'd lose data (becomes zeros).
+			newBuf = newBuf[:len(oldBuf)]
 		}
 		copy(newBuf, oldBuf)
-		newBuf = newBuf[:len(oldBuf)]
 	}
 
 	// Return old buffer to its tier pool
@@ -3598,8 +3601,9 @@ func downgradeBuffer(oldBuf []byte, targetTier int) []byte {
 	// Copy data if it fits in the smaller buffer
 	if len(oldBuf) > 0 {
 		if len(oldBuf) <= cap(newBuf) {
-			copy(newBuf, oldBuf)
+			// IMPORTANT: pooled buffers are returned with len=0; extend length before copying.
 			newBuf = newBuf[:len(oldBuf)]
+			copy(newBuf, oldBuf)
 		} else {
 			// Data doesn't fit, keep old buffer (shouldn't happen in practice)
 			putBufferToTier(newBuf) // Return the small one
@@ -3715,8 +3719,19 @@ func (ra *RandomAccessor) flushSequentialChunkLocked() error {
 		return nil
 	}
 
-	chunkData := ra.seqBuffer.buffer
+	// CRITICAL: Copy buffered chunk before processing/writing.
+	// The sequential buffer is backed by pooled memory and may be reused/cleared after flush.
+	// Using a dedicated copy here prevents any possibility of aliasing/pool reuse corrupting
+	// the persisted chunk (observed as reading back all-zeros for large sequential uploads).
+	chunkData := make([]byte, len(ra.seqBuffer.buffer))
+	copy(chunkData, ra.seqBuffer.buffer)
 	isFirstChunk := ra.seqBuffer.sn == 0
+
+	// Debug: log sample bytes of first chunk to detect unexpected zeros in buffered data.
+	if isFirstChunk && len(chunkData) >= 64 {
+		DebugLog("[VFS flushSequentialChunk] First chunk buffered sample (hex): fileID=%d, dataID=%d, sn=%d, first64Bytes=%s",
+			ra.fileID, ra.seqBuffer.dataID, ra.seqBuffer.sn, hex.EncodeToString(chunkData[:64]))
+	}
 
 	// Process first chunk: check file type and compression effect using ShouldCompressFile
 	if isFirstChunk {
@@ -3798,7 +3813,18 @@ func (ra *RandomAccessor) flushSequentialChunkLocked() error {
 			ra.fileID, ra.seqBuffer.dataID, ra.seqBuffer.sn, len(chunkData))
 		return fmt.Errorf("encodedChunk is empty for fileID=%d, dataID=%d, sn=%d", ra.fileID, ra.seqBuffer.dataID, ra.seqBuffer.sn)
 	}
-	if _, err := ra.fs.h.PutData(ra.fs.c, ra.fs.bktID, ra.seqBuffer.dataID, ra.seqBuffer.sn, encodedChunk); err != nil {
+
+	// CRITICAL: Copy before PutData.
+	// Some adapters/batch paths may retain the slice after this call, and the source slice
+	// can alias pooled buffers. Writing a dedicated copy prevents subtle corruption.
+	encodedChunkCopy := make([]byte, len(encodedChunk))
+	copy(encodedChunkCopy, encodedChunk)
+	if isFirstChunk && len(encodedChunkCopy) >= 64 {
+		DebugLog("[VFS flushSequentialChunk] First chunk encoded sample (hex): fileID=%d, dataID=%d, sn=%d, first64Bytes=%s",
+			ra.fileID, ra.seqBuffer.dataID, ra.seqBuffer.sn, hex.EncodeToString(encodedChunkCopy[:64]))
+	}
+
+	if _, err := ra.fs.h.PutData(ra.fs.c, ra.fs.bktID, ra.seqBuffer.dataID, ra.seqBuffer.sn, encodedChunkCopy); err != nil {
 		DebugLog("[VFS flushSequentialChunk] ERROR: Failed to put data for fileID=%d, dataID=%d, sn=%d, size=%d: %v", ra.fileID, ra.seqBuffer.dataID, ra.seqBuffer.sn, len(encodedChunk), err)
 		if err == core.ERR_QUOTA_EXCEED {
 			DebugLog("[VFS flushSequentialChunk] ERROR: Quota exceeded for fileID=%d", ra.fileID)
@@ -4523,6 +4549,17 @@ func (ra *RandomAccessor) updateFileObject(dataID, size int64) error {
 // Read reads data at specified position, merges writes in buffer
 // Optimization: use atomic pointer to read fileObj, lock-free concurrent read
 func (ra *RandomAccessor) Read(offset int64, size int) ([]byte, error) {
+	// READ CONSISTENCY POLICY (journal-first):
+	// If a journal exists, reads should observe "baseData + journal overlay".
+	// Therefore, do NOT flush the journal to disk here (that would clear entries and defeat overlay).
+	// Instead, if we have pending in-memory sequential buffer data, migrate it into the journal so
+	// Journal.Read can overlay it.
+	const debugTargetOffset int64 = 5800000
+	const debugTargetWindow int64 = 1 << 20 // 1MB around the failing offset
+	debugThisRead := IsDebugEnabled() &&
+		offset >= debugTargetOffset-debugTargetWindow &&
+		offset <= debugTargetOffset+debugTargetWindow
+
 	// PRIORITY 1: Check if journal is active
 	// If journal exists, use it for reading (applies journal entries on top of base data)
 	ra.journalMu.RLock()
@@ -4534,6 +4571,45 @@ func (ra *RandomAccessor) Read(offset int64, size int) ([]byte, error) {
 	ra.journalMu.RUnlock()
 
 	if hasJournal {
+		// If there is pending seqBuffer data, migrate it into journal so reads see it.
+		if ra.seqBuffer != nil {
+			ra.seqBuffer.mu.Lock()
+			seqHasPending := ra.seqBuffer.hasData && len(ra.seqBuffer.buffer) > 0
+			ra.seqBuffer.mu.Unlock()
+			if seqHasPending {
+				if debugThisRead {
+					DebugLog("[VFS Read DEBUG] migrating seqBuffer to journal before read: fileID=%d, offset=%d, size=%d", ra.fileID, offset, size)
+				}
+				if err := ra.migrateSeqBufferToJournal(); err != nil {
+					DebugLog("[VFS Read] WARNING: failed to migrate seqBuffer to journal before read: fileID=%d, err=%v", ra.fileID, err)
+				}
+			}
+		}
+
+		if debugThisRead {
+			ra.journalMu.RLock()
+			j := ra.journal
+			ra.journalMu.RUnlock()
+			jSize := ra.getJournalSize()
+			var jBaseSize int64
+			var jDataID int64
+			var jCurSize int64
+			var jDirty bool
+			var jEntries int
+			if j != nil {
+				jBaseSize = j.baseSize
+				jDataID = j.dataID
+				jCurSize = atomic.LoadInt64(&j.currentSize)
+				jDirty = j.IsDirty()
+				jEntries = len(j.entries)
+			}
+			fileObj0, _ := ra.getFileObj()
+			if fileObj0 != nil {
+				DebugLog("[VFS Read DEBUG] journal-read: fileID=%d, offset=%d, size=%d, fileObj(DataID=%d,Size=%d), journalSize=%d, journal(dataID=%d,baseSize=%d,currentSize=%d,dirty=%v,entries=%d)",
+					ra.fileID, offset, size, fileObj0.DataID, fileObj0.Size, jSize, jDataID, jBaseSize, jCurSize, jDirty, jEntries)
+			}
+		}
+
 		// Use journal size if available
 		journalSize := ra.getJournalSize()
 		if journalSize >= 0 {
@@ -4543,15 +4619,31 @@ func (ra *RandomAccessor) Read(offset int64, size int) ([]byte, error) {
 				DebugLog("[VFS Read] Using sparse journal virtual size: fileID=%d, virtualSize=%d", ra.fileID, journalSize)
 			}
 
-			// Limit read to journal size
-			if offset >= journalSize {
-				return []byte{}, nil
-			}
-			if int64(size) > journalSize-offset {
-				size = int(journalSize - offset)
+			// CRITICAL: Don't limit read to journalSize if offset is within fileObj.Size
+			// journalSize may be stale if file has grown, but fileObj.Size is always current
+			// Only limit if offset is beyond fileObj.Size
+			fileObj, err := ra.getFileObj()
+			if err == nil && fileObj != nil {
+				if offset < fileObj.Size {
+					// Offset is within file size, don't limit by journalSize
+					// Journal.Read will handle size limits based on currentSize
+					DebugLog("[VFS Read] Offset within fileSize, not limiting by journalSize: fileID=%d, offset=%d, journalSize=%d, fileSize=%d",
+						ra.fileID, offset, journalSize, fileObj.Size)
+				} else if offset >= journalSize {
+					// Offset is beyond both journalSize and fileSize, return empty
+					return []byte{}, nil
+				}
+			} else {
+				// Fallback: limit by journalSize if we can't get fileObj
+				if offset >= journalSize {
+					return []byte{}, nil
+				}
+				if int64(size) > journalSize-offset {
+					size = int(journalSize - offset)
+				}
 			}
 
-			DebugLog("[VFS Read] Reading from journal: fileID=%d, offset=%d, size=%d, isSparse=%v", ra.fileID, offset, size, journalIsSparse)
+			DebugLog("[VFS Read] Reading from journal: fileID=%d, offset=%d, size=%d, isSparse=%v, journalSize=%d", ra.fileID, offset, size, journalIsSparse, journalSize)
 			data, err := ra.readFromJournal(offset, int64(size))
 			if err != nil {
 				DebugLog("[VFS Read] ERROR: Failed to read from journal: %v", err)
@@ -4942,7 +5034,7 @@ func (ra *RandomAccessor) Read(offset int64, size int) ([]byte, error) {
 			fileData = []byte{}
 			DebugLog("[VFS Read] offset >= actualFileSize, returning empty data: fileID=%d, offset=%d, actualFileSize=%d", ra.fileID, offset, actualFileSize)
 		}
-		
+
 		// DEBUG: Print hex data for debugging
 		if len(fileData) > 0 {
 			sampleSize := 64 // Print first 64 bytes
@@ -4964,7 +5056,7 @@ func (ra *RandomAccessor) Read(offset int64, size int) ([]byte, error) {
 				DebugLog("[VFS Read] WARNING: Read all-zero data: fileID=%d, offset=%d, size=%d", ra.fileID, offset, len(fileData))
 			}
 		}
-		
+
 		return fileData, nil
 	}
 	DebugLog("[VFS Read] readWithWrites returned false, trying fallback: fileID=%d", ra.fileID)
@@ -5703,6 +5795,15 @@ func (ra *RandomAccessor) applyRandomWritesWithSDK(fileObj *core.ObjectInfo, wri
 				dirNode.invalidateDirListCache(updateFileObj.PID)
 				DebugLog("[VFS applyRandomWritesWithSDK] Appended file to directory listing cache: fileID=%d, dirID=%d, name=%s", ra.fileID, updateFileObj.PID, updateFileObj.Name)
 			}
+			// CRITICAL: Clear journal after successful flush to ensure subsequent reads use the new DataID
+			// Journal was created with old DataID/baseSize; after flush, data is in new DataID, so journal is stale
+			ra.journalMu.Lock()
+			if ra.journal != nil {
+				ra.fs.journalMgr.Remove(ra.fileID)
+				ra.journal = nil
+				DebugLog("[VFS applyRandomWritesWithSDK] Cleared journal after flush: fileID=%d, oldDataID=%d, newDataID=%d", ra.fileID, oldDataID, newDataID)
+			}
+			ra.journalMu.Unlock()
 		} else {
 			DebugLog("[VFS applyRandomWritesWithSDK] ERROR: Failed to update objects: fileID=%d, error=%v", ra.fileID, err)
 		}
@@ -5761,6 +5862,15 @@ func (ra *RandomAccessor) applyRandomWritesWithSDK(fileObj *core.ObjectInfo, wri
 			dirNode.invalidateDirListCache(updateFileObj.PID)
 			DebugLog("[VFS applyRandomWritesWithSDK] Appended file to directory listing cache: fileID=%d, dirID=%d, name=%s", ra.fileID, updateFileObj.PID, updateFileObj.Name)
 		}
+		// CRITICAL: Clear journal after successful flush to ensure subsequent reads use the new DataID
+		// Journal was created with old DataID/baseSize; after flush, data is in new DataID, so journal is stale
+		ra.journalMu.Lock()
+		if ra.journal != nil {
+			ra.fs.journalMgr.Remove(ra.fileID)
+			ra.journal = nil
+			DebugLog("[VFS applyRandomWritesWithSDK] Cleared journal after flush: fileID=%d, oldDataID=%d, newDataID=%d", ra.fileID, oldDataID, newDataID)
+		}
+		ra.journalMu.Unlock()
 	} else {
 		DebugLog("[VFS applyRandomWritesWithSDK] ERROR: Failed to update objects: fileID=%d, error=%v", ra.fileID, err)
 	}
@@ -6015,21 +6125,20 @@ func (ra *RandomAccessor) applyWritesStreamingCompressed(oldDataInfo *core.DataI
 
 	// Create a reader to read, decrypt, and decompress by chunk
 	// IMPORTANT: For compressed/encrypted data, we need to read from the old file
-	// Use the larger of oldDataInfo.OrigSize and newSize to ensure we can read all necessary data
+	// CRITICAL: Reader MUST reflect the committed old file size (oldDataInfo.OrigSize).
+	// We will still process up to processingSize (max(oldSize, newSize)) but reads beyond oldSize
+	// are treated as "no old data" (zeros), not as missing chunks inside the old file.
 	var dataInfoForReader *core.DataInfo
 	var processingSize int64 = newSize
 	if oldDataInfo != nil {
-		// Use original file size for reading if it's larger than newSize
-		// This ensures we can preserve data beyond the write regions
-		readerSize := newSize
-		if oldDataInfo.OrigSize > newSize {
-			readerSize = oldDataInfo.OrigSize
+		// Process up to max(oldSize,newSize) so we preserve tail beyond write regions.
+		// But reader size stays at oldDataInfo.OrigSize.
+		if oldDataInfo.OrigSize > processingSize {
 			processingSize = oldDataInfo.OrigSize
-			DebugLog("[VFS applyWritesStreamingCompressed] Using old file size for reading: fileID=%d, oldOrigSize=%d, newSize=%d", ra.fileID, oldDataInfo.OrigSize, newSize)
 		}
 		dataInfoForReader = &core.DataInfo{
 			ID:        oldDataInfo.ID,
-			OrigSize:  readerSize, // Use larger size to read all necessary data
+			OrigSize:  oldDataInfo.OrigSize,
 			Size:      oldDataInfo.Size,
 			Kind:      oldDataInfo.Kind,
 			PkgID:     oldDataInfo.PkgID,
@@ -6164,11 +6273,9 @@ func (ra *RandomAccessor) applyWritesStreamingUncompressed(fileObj *core.ObjectI
 		if oldDataInfo != nil && oldDataInfo.OrigSize > 0 {
 			oldFileSize = oldDataInfo.OrigSize
 		}
-		// Use the larger of oldFileSize and newSize to ensure we can read all remaining data
+		// CRITICAL: Reader represents committed old file only.
+		// Extension beyond oldFileSize is handled by zero-fill in streaming path.
 		readerSize := oldFileSize
-		if newSize > oldFileSize {
-			readerSize = newSize
-		}
 
 		if oldDataInfo != nil {
 			dataInfoForReader = &core.DataInfo{
@@ -6282,10 +6389,12 @@ func (ra *RandomAccessor) processWritesStreaming(
 	}
 	var oldDataID int64
 	var hasOldData bool
+	var oldOrigSize int64
 	if reader != nil {
 		if cr, ok := reader.(*chunkReader); ok {
 			oldDataID = cr.dataID
 			hasOldData = oldDataID > 0
+			oldOrigSize = cr.origSize
 		}
 	}
 
@@ -6386,12 +6495,18 @@ func (ra *RandomAccessor) processWritesStreaming(
 			// IMPORTANT: Read the full actualChunkSize to ensure we get all data from original file
 			n, err := reader.Read(chunkData, pos)
 			if err != nil && err != io.EOF {
-				// If chunk doesn't exist (e.g., file was extended), treat as zero-filled
-				// This is normal when writing to a new part of the file
+				// If chunk doesn't exist:
+				// - OK only when we're beyond the old committed file size (file extension).
+				// - NOT OK when we are still inside old file size (would silently corrupt data).
 				errStr := err.Error()
 				if strings.Contains(errStr, "not found") || strings.Contains(errStr, "cannot find") ||
 					strings.Contains(errStr, "no such file") || strings.Contains(errStr, "does not exist") {
-					DebugLog("[VFS processWritesStreaming] Chunk not found (expected for new data), zero-filling: fileID=%d, dataID=%d, chunkIdx=%d, sn=%d, pos=%d, error=%v", ra.fileID, dataInfo.ID, chunkIdx, sn, pos, err)
+					if hasOldData && oldOrigSize > 0 && pos < oldOrigSize {
+						// Missing old chunk within old size is a hard error.
+						return 0, fmt.Errorf("missing old chunk within old file size: oldDataID=%d, oldOrigSize=%d, pos=%d, chunkIdx=%d, err=%w",
+							oldDataID, oldOrigSize, pos, chunkIdx, err)
+					}
+					DebugLog("[VFS processWritesStreaming] Chunk not found (expected for extension), zero-filling: fileID=%d, dataID=%d, chunkIdx=%d, sn=%d, pos=%d, error=%v", ra.fileID, dataInfo.ID, chunkIdx, sn, pos, err)
 					// Zero-fill the entire chunk (it's new data)
 					for i := range chunkData {
 						chunkData[i] = 0
@@ -6402,13 +6517,15 @@ func (ra *RandomAccessor) processWritesStreaming(
 					return 0, fmt.Errorf("failed to read chunk: %w", err)
 				}
 			}
-			// If read data is less than chunk size, remaining part stays as 0 (new data)
-			// IMPORTANT: For chunks beyond original write size, we should have read all data
-			// If n < actualChunkSize, it means we're at the end of the file or there's an issue
+			// If read data is less than chunk size:
+			// - OK only if we've reached the end of the old committed file (extension case).
+			// - NOT OK if we're still within old file size (would silently corrupt data).
 			if n < actualChunkSize {
-				// Zero remaining part only if we're beyond the original file size
-				// Otherwise, this might indicate a problem
 				DebugLog("[VFS processWritesStreaming] Read less data than expected: fileID=%d, dataID=%d, chunkIdx=%d, pos=%d, n=%d, actualChunkSize=%d", ra.fileID, dataInfo.ID, chunkIdx, pos, n, actualChunkSize)
+				if hasOldData && oldOrigSize > 0 && (pos+int64(n) < oldOrigSize) {
+					return 0, fmt.Errorf("short read within old file size: oldDataID=%d, oldOrigSize=%d, pos=%d, n=%d, want=%d",
+						oldDataID, oldOrigSize, pos, n, actualChunkSize)
+				}
 				for i := n; i < actualChunkSize; i++ {
 					chunkData[i] = 0
 				}
@@ -6599,6 +6716,9 @@ func (ra *RandomAccessor) processWritesStreaming(
 	// Update cache
 	dataInfoCache.Put(dataInfo.ID, dataInfo)
 
+	// DEBUG: pinpoint when offset becomes all-zero after writing new DataID
+	ra.debugSampleOffset("after_streaming_write", dataInfo.ID, dataInfo.OrigSize, 5800000)
+
 	// Update fileObj with new DataID and size
 	// This ensures subsequent operations use the correct DataID
 	updateFileObj, err := ra.getFileObj()
@@ -6622,6 +6742,9 @@ func (ra *RandomAccessor) processWritesStreaming(
 		DebugLog("[VFS applyWritesStreamingCompressed] WARNING: Failed to get fileObj for update: fileID=%d, error=%v", ra.fileID, err)
 	}
 
+	// DEBUG: sample again after fileObj points to new DataID
+	ra.debugSampleOffset("after_streaming_fileobj_update", dataInfo.ID, dataInfo.OrigSize, 5800000)
+
 	newVersionID := core.NewID()
 	return newVersionID, nil
 }
@@ -6630,6 +6753,75 @@ func (ra *RandomAccessor) processWritesStreaming(
 // Read reads data starting from offset into buf, returns number of bytes read and error
 type dataReader interface {
 	Read(buf []byte, offset int64) (int, error)
+}
+
+// debugSampleOffset reads a small window from a committed DataID and logs whether it's all-zero.
+// This is used to pinpoint when a specific offset becomes zero during write/flush paths.
+func (ra *RandomAccessor) debugSampleOffset(tag string, dataID int64, origSize int64, offset int64) {
+	if os.Getenv("ORCAS_DEBUG") == "" {
+		return
+	}
+	if dataID == 0 || dataID == core.EmptyDataID {
+		return
+	}
+	if origSize <= 0 || offset < 0 || offset >= origSize {
+		return
+	}
+
+	lh, ok := ra.fs.h.(*core.LocalHandler)
+	if !ok || lh == nil {
+		return
+	}
+	di, err := lh.GetDataInfo(ra.fs.c, ra.fs.bktID, dataID)
+	if err != nil || di == nil {
+		DebugLog("[VFS DEBUG_SAMPLE] %s: fileID=%d, dataID=%d, origSize=%d, offset=%d, GetDataInfo err=%v",
+			tag, ra.fileID, dataID, origSize, offset, err)
+		return
+	}
+
+	chunkSize := ra.fs.chunkSize
+	if chunkSize <= 0 {
+		chunkSize = 10 << 20
+	}
+	sn := int(offset / chunkSize)
+	inChunk := offset - int64(sn)*chunkSize
+
+	raw, err := ra.fs.h.GetData(ra.fs.c, ra.fs.bktID, dataID, sn)
+	if err != nil || len(raw) == 0 {
+		DebugLog("[VFS DEBUG_SAMPLE] %s: fileID=%d, dataID=%d, sn=%d, offset=%d, GetData err=%v, rawLen=%d",
+			tag, ra.fileID, dataID, sn, offset, err, len(raw))
+		return
+	}
+	plain, err := core.UnprocessData(raw, di.Kind, ra.fs.EndecKey)
+	if err != nil || len(plain) == 0 {
+		DebugLog("[VFS DEBUG_SAMPLE] %s: fileID=%d, dataID=%d, sn=%d, offset=%d, Unprocess err=%v, plainLen=%d",
+			tag, ra.fileID, dataID, sn, offset, err, len(plain))
+		return
+	}
+
+	const win = 64
+	start := int(inChunk)
+	if start < 0 {
+		start = 0
+	}
+	end := start + win
+	if end > len(plain) {
+		end = len(plain)
+	}
+	sample := plain[start:end]
+	allZero := true
+	for _, b := range sample {
+		if b != 0 {
+			allZero = false
+			break
+		}
+	}
+	firstN := 16
+	if len(sample) < firstN {
+		firstN = len(sample)
+	}
+	DebugLog("[VFS DEBUG_SAMPLE] %s: fileID=%d, dataID=%d, origSize=%d, sn=%d, inChunk=%d, sampleLen=%d, allZero=%v, first16=%s",
+		tag, ra.fileID, dataID, origSize, sn, inChunk, len(sample), allZero, hex.EncodeToString(sample[:firstN]))
 }
 
 // readWithWrites unified handling of read logic: calculate read range, read data, apply write operations, extract result
@@ -6951,7 +7143,7 @@ func (cr *chunkReader) ReadAt(buf []byte, offset int64) (int, error) {
 			readSize = effectiveFileSize - offset
 		}
 		copy(buf[:readSize], decodedFileData[offset:offset+readSize])
-		
+
 		// DEBUG: Print hex data for debugging
 		if readSize > 0 {
 			sampleSize := int64(64)
@@ -6962,7 +7154,7 @@ func (cr *chunkReader) ReadAt(buf []byte, offset int64) (int, error) {
 			DebugLog("[VFS chunkReader ReadAt] Read from packaged file (hex): dataID=%d, offset=%d, readSize=%d, first%dBytes=%s",
 				cr.dataID, offset, readSize, sampleSize, hexData)
 		}
-		
+
 		return int(readSize), nil
 	}
 
@@ -7207,7 +7399,7 @@ func (cr *chunkReader) ReadAt(buf []byte, offset int64) (int, error) {
 					toReadFromNext = nextAvailableInChunk
 				}
 				copy(buf[totalRead:totalRead+int(toReadFromNext)], nextChunkData[nextChunkOffsetInChunk:nextChunkOffsetInChunk+toReadFromNext])
-				
+
 				// DEBUG: Print hex data for debugging
 				if toReadFromNext > 0 && totalRead+int(toReadFromNext) <= len(buf) {
 					sampleSize := int64(64)
@@ -7220,7 +7412,7 @@ func (cr *chunkReader) ReadAt(buf []byte, offset int64) (int, error) {
 							cr.dataID, currentSn, nextSn, toReadFromNext, totalRead+int(toReadFromNext), sampleSize, hexData)
 					}
 				}
-				
+
 				DebugLog("[VFS chunkReader ReadAt] Read from next chunk: dataID=%d, currentSn=%d, nextSn=%d, toRead=%d, totalRead=%d",
 					cr.dataID, currentSn, nextSn, toReadFromNext, totalRead+int(toReadFromNext))
 				totalRead += int(toReadFromNext)
@@ -7244,13 +7436,6 @@ func (cr *chunkReader) ReadAt(buf []byte, offset int64) (int, error) {
 				// Continue loop to read more if needed
 				continue
 			}
-			// Normal case: move to end of current chunk
-			currentOffset = actualChunkEnd
-			// Reset last chunk tracking since we're moving to chunk boundary
-			lastChunkSn = -1
-			lastChunkStart = -1
-			lastChunkEnd = -1
-			continue
 		}
 
 		availableInChunk := int64(len(chunkData)) - currentOffsetInChunk
@@ -7344,7 +7529,7 @@ func (cr *chunkReader) ReadAt(buf []byte, offset int64) (int, error) {
 				toReadFromNext = nextAvailableInChunk
 			}
 			copy(buf[totalRead:totalRead+int(toReadFromNext)], nextChunkData[nextChunkOffsetInChunk:nextChunkOffsetInChunk+toReadFromNext])
-			
+
 			// DEBUG: Print hex data for debugging
 			if toReadFromNext > 0 && totalRead+int(toReadFromNext) <= len(buf) {
 				sampleSize := int64(64)
@@ -7357,7 +7542,7 @@ func (cr *chunkReader) ReadAt(buf []byte, offset int64) (int, error) {
 						cr.dataID, currentSn, nextSn, toReadFromNext, totalRead+int(toReadFromNext), sampleSize, hexData)
 				}
 			}
-			
+
 			DebugLog("[VFS chunkReader ReadAt] Read from next chunk: dataID=%d, currentSn=%d, nextSn=%d, toRead=%d, totalRead=%d",
 				cr.dataID, currentSn, nextSn, toReadFromNext, totalRead+int(toReadFromNext))
 			totalRead += int(toReadFromNext)
@@ -7426,7 +7611,7 @@ func (cr *chunkReader) ReadAt(buf []byte, offset int64) (int, error) {
 			lastChunkEnd = -1
 			continue
 		}
-		
+
 		// CRITICAL: Verify chunkData is not empty and contains actual data
 		// Log first few bytes to help debug if data is all zeros
 		if len(chunkData) > 0 && currentOffsetInChunk < int64(len(chunkData)) {
@@ -7455,7 +7640,7 @@ func (cr *chunkReader) ReadAt(buf []byte, offset int64) (int, error) {
 				}
 			}
 		}
-		
+
 		copy(buf[totalRead:totalRead+int(toRead)], chunkData[currentOffsetInChunk:currentOffsetInChunk+toRead])
 
 		// DEBUG: Print hex data for debugging
@@ -9389,7 +9574,20 @@ func (ra *RandomAccessor) getOrCreateJournal() (*Journal, error) {
 
 	// Check if this is a sparse file
 	sparseSize := ra.getSparseSize()
+	// CRITICAL: Determine baseSize from committed DataInfo when available.
+	// fileObj.Size may be stale or may reflect last-flush "newSize" computed from journal
+	// entries (which can be smaller than the true committed file size if baseSize was stale).
+	// DataInfo.OrigSize is the authoritative logical size for the DataID.
 	baseSize := fileObj.Size
+	if fileObj.DataID != 0 && fileObj.DataID != core.EmptyDataID {
+		if lh, ok := ra.fs.h.(*core.LocalHandler); ok {
+			if di, diErr := lh.GetDataInfo(ra.fs.c, ra.fs.bktID, fileObj.DataID); diErr == nil && di != nil {
+				if di.OrigSize > baseSize {
+					baseSize = di.OrigSize
+				}
+			}
+		}
+	}
 	if sparseSize > 0 {
 		// Use sparse size as the base size
 		baseSize = sparseSize
@@ -9435,13 +9633,107 @@ func (ra *RandomAccessor) readFromJournal(offset, length int64) ([]byte, error) 
 		return ra.readBaseData(offset, length)
 	}
 
-	// Create base reader function
-	baseReader := func(off, len int64) ([]byte, error) {
-		return ra.readBaseData(off, len)
+	// CRITICAL:
+	// When reading with an active journal, base data MUST come from the journal's base snapshot
+	// (journal.dataID/baseSize), not from the current fileObj.DataID.
+	//
+	// fileObj.DataID can change (e.g. due to other flush paths) while a journal is active;
+	// using it as base breaks the "previous committed base + in-memory overlay" guarantee.
+	baseReader := func(off, reqLen int64) ([]byte, error) {
+		return ra.readBaseDataFromDataID(journal.dataID, journal.baseSize, off, reqLen)
 	}
 
 	// Read with journal overlay
 	return journal.Read(offset, length, baseReader)
+}
+
+// readBaseDataFromDataID reads base data from a specific committed DataID.
+// baseSize is the logical size of that base snapshot; reads beyond baseSize return empty data.
+func (ra *RandomAccessor) readBaseDataFromDataID(dataID int64, baseSize int64, offset, length int64) ([]byte, error) {
+	// If caller asks beyond base snapshot, return empty and let Journal.Read handle extension.
+	if baseSize > 0 && offset >= baseSize {
+		return []byte{}, nil
+	}
+	if baseSize > 0 && offset+length > baseSize {
+		length = baseSize - offset
+	}
+	if length <= 0 {
+		return []byte{}, nil
+	}
+
+	if dataID == 0 || dataID == core.EmptyDataID {
+		// No base data, return empty (not zeros) so Journal.Read can decide how to fill.
+		return []byte{}, nil
+	}
+
+	lh, ok := ra.fs.h.(*core.LocalHandler)
+	if !ok {
+		return nil, fmt.Errorf("handler is not LocalHandler")
+	}
+
+	dataInfo, err := lh.GetDataInfo(ra.fs.c, ra.fs.bktID, dataID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get data info for dataID=%d: %w", dataID, err)
+	}
+
+	chunkSize := ra.fs.chunkSize
+	if chunkSize <= 0 {
+		chunkSize = 10 << 20
+	}
+
+	startChunk := int(offset / chunkSize)
+	endChunk := int((offset + length - 1) / chunkSize)
+
+	result := make([]byte, 0, length)
+	for sn := startChunk; sn <= endChunk; sn++ {
+		rawChunk, err := ra.fs.h.GetData(ra.fs.c, ra.fs.bktID, dataID, sn)
+		if err != nil {
+			// Missing base chunk inside baseSize is not allowed for non-sparse files.
+			chunkStart := int64(sn) * chunkSize
+			if dataInfo.Kind&core.DATA_SPARSE != 0 || (baseSize > 0 && chunkStart >= baseSize) {
+				// Sparse or beyond base snapshot: treat as zeros for that region.
+				chunkEnd := chunkStart + chunkSize
+				readStart := offset
+				if readStart < chunkStart {
+					readStart = chunkStart
+				}
+				readEnd := offset + length
+				if readEnd > chunkEnd {
+					readEnd = chunkEnd
+				}
+				if readStart < readEnd {
+					zeroLen := readEnd - readStart
+					result = append(result, make([]byte, zeroLen)...)
+				}
+				continue
+			}
+			return nil, fmt.Errorf("failed to read base chunk %d for dataID=%d (offset=%d, baseSize=%d): %w", sn, dataID, offset, baseSize, err)
+		}
+
+		chunkData, err := core.UnprocessData(rawChunk, dataInfo.Kind, ra.fs.EndecKey)
+		if err != nil {
+			return nil, fmt.Errorf("failed to unprocess chunk %d: %w", sn, err)
+		}
+
+		chunkStart := int64(sn) * chunkSize
+		chunkEnd := chunkStart + int64(len(chunkData))
+
+		readStart := offset
+		if readStart < chunkStart {
+			readStart = chunkStart
+		}
+		readEnd := offset + length
+		if readEnd > chunkEnd {
+			readEnd = chunkEnd
+		}
+		if readStart < readEnd {
+			startInChunk := readStart - chunkStart
+			endInChunk := readEnd - chunkStart
+			result = append(result, chunkData[startInChunk:endInChunk]...)
+		}
+	}
+
+	return result, nil
 }
 
 // readBaseData reads data from the base DataID, applying all journal snapshots recursively
@@ -9450,29 +9742,27 @@ func (ra *RandomAccessor) readFromJournal(offset, length int64) ([]byte, error) 
 // CRITICAL: When reading during Journal flush, use Journal's baseDataID instead of fileObj.DataID
 // to avoid reading from the new dataID that hasn't been fully written yet
 func (ra *RandomAccessor) readBaseData(offset, length int64) ([]byte, error) {
-	// CRITICAL FIX: Check if Journal exists and use its baseDataID
-	// This prevents reading from a new dataID during flush that hasn't been fully written
-	ra.journalMu.RLock()
-	journal := ra.journal
-	var baseDataID int64 = 0
-	var baseSize int64 = 0
-	if journal != nil {
-		// Use Journal's baseDataID instead of fileObj.DataID
-		// This ensures we read from the correct base data during flush
-		baseDataID = journal.dataID
-		baseSize = journal.baseSize
-	}
-	ra.journalMu.RUnlock()
-
 	fileObj, err := ra.getFileObj()
 	if err != nil {
 		return nil, err
 	}
 
-	// Use Journal's baseDataID if available, otherwise use fileObj.DataID
-	dataIDToRead := baseDataID
-	if dataIDToRead == 0 || dataIDToRead == core.EmptyDataID {
-		dataIDToRead = fileObj.DataID
+	// CRITICAL: Always read base data from the *committed* fileObj.DataID.
+	//
+	// Using journal.dataID here is unsafe during concurrent Flush() because journal.dataID
+	// can temporarily point at a new DataID that isn't fully readable yet (depending on
+	// the underlying handler/storage semantics). That can lead to "valid length but all
+	// zeros" reads within the logical file range, which is exactly what
+	// TestReadDuringRandomWrites is catching.
+	dataIDToRead := fileObj.DataID
+	const debugTargetOffset int64 = 5800000
+	const debugTargetWindow int64 = 1 << 20 // 1MB around the failing offset
+	debugThisRead := IsDebugEnabled() &&
+		offset >= debugTargetOffset-debugTargetWindow &&
+		offset <= debugTargetOffset+debugTargetWindow
+	if debugThisRead {
+		DebugLog("[VFS readBaseData DEBUG] start: fileID=%d, offset=%d, length=%d, fileObj(DataID=%d,Size=%d), dataIDToRead=%d",
+			ra.fileID, offset, length, fileObj.DataID, fileObj.Size, dataIDToRead)
 	}
 
 	if dataIDToRead == 0 || dataIDToRead == core.EmptyDataID {
@@ -9486,6 +9776,9 @@ func (ra *RandomAccessor) readBaseData(offset, length int64) ([]byte, error) {
 		}
 		// Return zero-filled buffer of requested length
 		// Journal.Read will handle the actual size adjustment based on currentSize
+		if debugThisRead {
+			DebugLog("[VFS readBaseData DEBUG] no DataID, returning zeros: fileID=%d, offset=%d, length=%d", ra.fileID, offset, length)
+		}
 		return make([]byte, length), nil
 	}
 
@@ -9497,21 +9790,13 @@ func (ra *RandomAccessor) readBaseData(offset, length int64) ([]byte, error) {
 
 	dataInfo, err := lh.GetDataInfo(ra.fs.c, ra.fs.bktID, dataIDToRead)
 	if err != nil {
-		// If reading from baseDataID fails and we have a journal, log a warning
-		// but don't fail - this might be a transient issue during flush
-		if journal != nil {
-			DebugLog("[VFS readBaseData] WARNING: Failed to get DataInfo for baseDataID=%d, trying fileObj.DataID=%d: %v", baseDataID, fileObj.DataID, err)
-			// Fallback to fileObj.DataID if baseDataID read fails
-			if fileObj.DataID != 0 && fileObj.DataID != core.EmptyDataID && fileObj.DataID != baseDataID {
-				dataInfo, err = lh.GetDataInfo(ra.fs.c, ra.fs.bktID, fileObj.DataID)
-				if err == nil {
-					dataIDToRead = fileObj.DataID
-				}
-			}
-		}
-		if err != nil {
-			return nil, fmt.Errorf("failed to get data info: %w", err)
-		}
+		// We always read base data from committed fileObj.DataID; if DataInfo is missing,
+		// that's a hard error.
+		return nil, fmt.Errorf("failed to get data info for dataID=%d: %w", dataIDToRead, err)
+	}
+	if debugThisRead {
+		DebugLog("[VFS readBaseData DEBUG] DataInfo: fileID=%d, dataID=%d, origSize=%d, size=%d, kind=0x%x",
+			ra.fileID, dataIDToRead, dataInfo.OrigSize, dataInfo.Size, dataInfo.Kind)
 	}
 
 	// Calculate chunk size
@@ -9530,18 +9815,21 @@ func (ra *RandomAccessor) readBaseData(offset, length int64) ([]byte, error) {
 		// But don't limit here - let Journal.Read handle it
 		// This ensures we return zeros for unwritten regions
 	} else {
-		// For non-sparse files, limit based on baseSize or fileObj.Size
-		// Use baseSize if available (from Journal), otherwise use fileObj.Size
+		// For non-sparse files, limit based on fileObj.Size (not baseSize)
+		// CRITICAL: Use fileObj.Size as the authoritative source, not journal.baseSize
+		// journal.baseSize may be stale if file has grown, but fileObj.Size is always current
+		// This ensures we can read data that was written after journal creation
 		sizeLimit := fileObj.Size
-		if baseSize > 0 {
-			sizeLimit = baseSize
-		}
 		if offset+length > sizeLimit {
 			length = sizeLimit - offset
 		}
 		if length <= 0 {
+			DebugLog("[VFS readBaseData] Offset beyond file size: fileID=%d, offset=%d, fileSize=%d, baseSize=%d",
+				ra.fileID, offset, fileObj.Size, 0)
 			return []byte{}, nil
 		}
+		DebugLog("[VFS readBaseData] Adjusted length: fileID=%d, offset=%d, originalLength=%d, adjustedLength=%d, fileSize=%d, baseSize=%d",
+			ra.fileID, offset, length, length, fileObj.Size, 0)
 	}
 
 	// Calculate which chunks we need to read
@@ -9555,22 +9843,29 @@ func (ra *RandomAccessor) readBaseData(offset, length int64) ([]byte, error) {
 	// beyond base data range, we should return zeros for missing chunks instead of error
 	// This allows journal to fill in the data for those regions
 	result := make([]byte, 0, length)
-	for sn := startChunk; sn <= endChunk; sn++ {
+	currentOffset := offset
+	remainingLength := int64(length)
+	sn := startChunk
+	for sn <= endChunk && remainingLength > 0 {
 		rawChunk, err := ra.fs.h.GetData(ra.fs.c, ra.fs.bktID, dataIDToRead, sn)
 		if err != nil {
-			// If chunk doesn't exist, check if it's beyond base data size
-			// For sparse files, always fill with zeros
-			// For non-sparse files, if chunk is beyond baseSize, fill with zeros (journal will provide data)
+			// If chunk doesn't exist, check if it's beyond file size
+			// CRITICAL: Use fileObj.Size (not baseSize) to determine if chunk is beyond file size
+			// baseSize may be stale if file has grown, but fileObj.Size is always current
 			chunkStart := int64(sn) * chunkSize
-			isBeyondBaseSize := baseSize > 0 && chunkStart >= baseSize
-			if dataInfo.Kind&core.DATA_SPARSE != 0 || isBeyondBaseSize {
-				// For sparse files or chunks beyond base size, return zero-filled plain data (not encrypted)
+			fileSize := fileObj.Size
+			if sparseSize > 0 {
+				fileSize = sparseSize
+			}
+			isBeyondFileSize := fileSize > 0 && chunkStart >= fileSize
+			if dataInfo.Kind&core.DATA_SPARSE != 0 || isBeyondFileSize {
+				// For sparse files or chunks beyond file size, return zero-filled plain data (not encrypted)
 				chunkData := make([]byte, chunkSize)
-				readStart := offset
+				readStart := currentOffset
 				if readStart < chunkStart {
 					readStart = chunkStart
 				}
-				readEnd := offset + length
+				readEnd := currentOffset + remainingLength
 				chunkEnd := chunkStart + chunkSize
 				if readEnd > chunkEnd {
 					readEnd = chunkEnd
@@ -9578,14 +9873,20 @@ func (ra *RandomAccessor) readBaseData(offset, length int64) ([]byte, error) {
 				if readStart < readEnd {
 					startInChunk := readStart - chunkStart
 					endInChunk := readEnd - chunkStart
+					bytesRead := readEnd - readStart
 					result = append(result, chunkData[startInChunk:endInChunk]...)
+					currentOffset = readEnd
+					remainingLength -= bytesRead
 				}
-				DebugLog("[VFS readBaseData] Chunk %d doesn't exist (sparse=%v, beyondBaseSize=%v), filling with zeros: fileID=%d, chunkStart=%d, baseSize=%d",
-					sn, dataInfo.Kind&core.DATA_SPARSE != 0, isBeyondBaseSize, ra.fileID, chunkStart, baseSize)
+				DebugLog("[VFS readBaseData] Chunk %d doesn't exist (sparse=%v, beyondFileSize=%v), filling with zeros: fileID=%d, chunkStart=%d, fileSize=%d",
+					sn, dataInfo.Kind&core.DATA_SPARSE != 0, isBeyondFileSize, ra.fileID, chunkStart, fileSize)
+				sn++
 				continue
 			} else {
-				// For non-sparse files and chunk is within base size, this is an error
-				return nil, fmt.Errorf("failed to read chunk %d: %w", sn, err)
+				// For non-sparse files and chunk is within file size, this is an error
+				DebugLog("[VFS readBaseData] ERROR: Chunk %d doesn't exist but within fileSize: fileID=%d, chunkStart=%d, fileSize=%d, error=%v",
+					sn, ra.fileID, chunkStart, fileSize, err)
+				return nil, fmt.Errorf("failed to read chunk %d (within fileSize): %w", sn, err)
 			}
 		}
 
@@ -9595,18 +9896,36 @@ func (ra *RandomAccessor) readBaseData(offset, length int64) ([]byte, error) {
 		if err != nil {
 			return nil, fmt.Errorf("failed to unprocess chunk %d: %w", sn, err)
 		}
+		if debugThisRead && sn == int(offset/chunkSize) {
+			sampleN := 64
+			if len(chunkData) < sampleN {
+				sampleN = len(chunkData)
+			}
+			allZero := true
+			for i := 0; i < sampleN; i++ {
+				if chunkData[i] != 0 {
+					allZero = false
+					break
+				}
+			}
+			DebugLog("[VFS readBaseData DEBUG] chunk decoded: fileID=%d, dataID=%d, sn=%d, chunkDataLen=%d, sampleN=%d, sampleAllZero=%v",
+				ra.fileID, dataIDToRead, sn, len(chunkData), sampleN, allZero)
+		}
 
 		// Calculate the range within this chunk that we need
 		chunkStart := int64(sn) * chunkSize
 		chunkEnd := chunkStart + int64(len(chunkData))
 
-		// Calculate the overlap with our requested range
-		readStart := offset
+		DebugLog("[VFS readBaseData] Processing chunk: fileID=%d, sn=%d, chunkStart=%d, chunkEnd=%d, chunkDataLen=%d, chunkSize=%d, currentOffset=%d, remainingLength=%d, fileSize=%d",
+			ra.fileID, sn, chunkStart, chunkEnd, len(chunkData), chunkSize, currentOffset, remainingLength, fileObj.Size)
+
+		// Calculate the overlap with our requested range (using currentOffset, not original offset)
+		readStart := currentOffset
 		if readStart < chunkStart {
 			readStart = chunkStart
 		}
 
-		readEnd := offset + length
+		readEnd := currentOffset + int64(remainingLength)
 		if readEnd > chunkEnd {
 			readEnd = chunkEnd
 		}
@@ -9615,20 +9934,128 @@ func (ra *RandomAccessor) readBaseData(offset, length int64) ([]byte, error) {
 			// Extract the relevant portion from this chunk
 			startInChunk := readStart - chunkStart
 			endInChunk := readEnd - chunkStart
+			bytesRead := readEnd - readStart
+			if debugThisRead && sn == int(offset/chunkSize) {
+				// Check whether the *requested region* inside the chunk is all-zero.
+				sampleAllZero := true
+				sampleN := int64(64)
+				segLen := endInChunk - startInChunk
+				if segLen < sampleN {
+					sampleN = segLen
+				}
+				if sampleN < 0 {
+					sampleN = 0
+				}
+				for i := int64(0); i < sampleN; i++ {
+					if chunkData[startInChunk+i] != 0 {
+						sampleAllZero = false
+						break
+					}
+				}
+				DebugLog("[VFS readBaseData DEBUG] region sample: fileID=%d, dataID=%d, sn=%d, readStart=%d, readEnd=%d, startInChunk=%d, endInChunk=%d, sampleN=%d, regionSampleAllZero=%v",
+					ra.fileID, dataIDToRead, sn, readStart, readEnd, startInChunk, endInChunk, sampleN, sampleAllZero)
+			}
 			result = append(result, chunkData[startInChunk:endInChunk]...)
+
+			// Update currentOffset and remainingLength for next iteration
+			currentOffset = readEnd
+			remainingLength -= bytesRead
+		} else if readStart >= chunkEnd {
+			// CRITICAL FIX: currentOffset is beyond this chunk's actual data length
+			// This can happen when chunk data length < chunkSize (e.g., file was truncated or chunk incomplete)
+			// Move to next chunk's start and continue loop
+			nextChunkStart := chunkStart + chunkSize
+			if currentOffset < nextChunkStart {
+				// We're still in this chunk's range but beyond its data, move to next chunk
+				currentOffset = nextChunkStart
+				// Recalculate sn based on new currentOffset
+				sn = int(currentOffset / chunkSize)
+				DebugLog("[VFS readBaseData] Offset beyond chunk data, moving to next chunk: fileID=%d, oldChunk=%d, newChunk=%d, oldOffset=%d, newOffset=%d, chunkEnd=%d",
+					ra.fileID, int(chunkStart/chunkSize), sn, readStart, currentOffset, chunkEnd)
+				// Continue loop to read from next chunk
+				continue
+			}
+			// If currentOffset >= nextChunkStart, we've already moved to next chunk, continue loop
+		}
+		sn++ // Move to next chunk for next iteration
+	}
+
+	// CRITICAL FIX: After processing all chunks, check if we read any data
+	// If result is empty but offset is within fileSize, this is an error
+	currentResultLen := int64(len(result))
+	fileSize := fileObj.Size
+	if sparseSize > 0 {
+		fileSize = sparseSize
+	}
+
+	// CRITICAL: If we didn't read any data but offset is within fileSize, this indicates
+	// that chunks don't exist or are incomplete. For non-sparse files, this shouldn't happen.
+	// However, for journal reads, we should let Journal.Read check if journal entries cover the gap
+	// So don't return error here - let Journal.Read handle it
+	if currentResultLen == 0 && int64(length) > 0 && offset < fileSize && fileSize > 0 && sparseSize == 0 {
+		// We didn't read any data but offset is within fileSize - this is suspicious
+		// It means chunks don't exist or are incomplete, which shouldn't happen for non-sparse files
+		// But for journal reads, journal entries might cover the gap, so don't return error
+		DebugLog("[VFS readBaseData] WARNING: No data read but offset within fileSize: fileID=%d, offset=%d, requestedLength=%d, fileSize=%d, startChunk=%d, endChunk=%d - journal entries should cover gap",
+			ra.fileID, offset, length, fileSize, startChunk, endChunk)
+		// Don't return error - let Journal.Read check if journal entries cover the gap
+	}
+
+	// Check if we need to fill remaining gap
+	if currentResultLen < int64(length) {
+		gapStart := offset + currentResultLen
+		gapEnd := offset + int64(length)
+
+		if gapStart < gapEnd {
+			if fileSize > 0 && gapStart >= fileSize {
+				// Gap is beyond file size, fill with zeros (journal entries will overlay)
+				zeroLength := gapEnd - gapStart
+				zeroData := make([]byte, zeroLength)
+				result = append(result, zeroData...)
+				DebugLog("[VFS readBaseData] Filling remaining gap beyond fileSize: fileID=%d, offset=%d, requestedLength=%d, currentLength=%d, gapStart=%d, gapEnd=%d, fileSize=%d",
+					ra.fileID, offset, length, currentResultLen, gapStart, gapEnd, fileSize)
+			} else if sparseSize > 0 {
+				// Sparse file, gaps are expected
+				zeroLength := gapEnd - gapStart
+				zeroData := make([]byte, zeroLength)
+				result = append(result, zeroData...)
+				DebugLog("[VFS readBaseData] Filling remaining gap in sparse file: fileID=%d, offset=%d, requestedLength=%d, currentLength=%d, gapStart=%d, gapEnd=%d",
+					ra.fileID, offset, length, currentResultLen, gapStart, gapEnd)
+			} else {
+				// Gap is within fileSize - don't fill with zeros, let Journal.Read handle it
+				DebugLog("[VFS readBaseData] WARNING: Remaining gap within fileSize: fileID=%d, offset=%d, requestedLength=%d, currentLength=%d, gapStart=%d, gapEnd=%d, fileSize=%d - journal entries should cover gap",
+					ra.fileID, offset, length, currentResultLen, gapStart, gapEnd, fileSize)
+				// Don't extend - Journal.Read will check if journal entries cover the gap
+			}
 		}
 	}
 
-	// CRITICAL FIX: Load and apply all journal snapshots recursively
-	// Journal snapshots are stored as OBJ_TYPE_JOURNAL objects with baseVersionID chain
-	// We need to find all snapshots and apply them in order
-	appliedData, err := ra.applyJournalSnapshots(result, fileObj.DataID, offset, length)
-	if err != nil {
-		DebugLog("[VFS readBaseData] WARNING: Failed to apply journal snapshots: %v, using base data only", err)
-		return result, nil // Return base data if snapshot loading fails
+	// IMPORTANT:
+	// Do NOT apply historical journal snapshots on the hot read path.
+	//
+	// In practice, the file object's DataID already represents the committed merged state.
+	// Re-applying journal snapshots here can re-introduce stale data and, as observed in
+	// TestReadDuringRandomWrites, can overwrite valid base data with zeros.
+	if debugThisRead {
+		sampleN := 64
+		if len(result) < sampleN {
+			sampleN = len(result)
+		}
+		allZero := true
+		for i := 0; i < sampleN; i++ {
+			if result[i] != 0 {
+				allZero = false
+				break
+			}
+		}
+		DebugLog("[VFS readBaseData DEBUG] done(no-snapshots): fileID=%d, offset=%d, length=%d, resultLen=%d, resultSampleAllZero=%v",
+			ra.fileID, offset, length, len(result), allZero)
 	}
 
-	return appliedData, nil
+	DebugLog("[VFS readBaseData] Completed(no-snapshots): fileID=%d, offset=%d, requestedLength=%d, resultLength=%d",
+		ra.fileID, offset, length, len(result))
+
+	return result, nil
 }
 
 // applyJournalSnapshots loads and applies all journal snapshots recursively

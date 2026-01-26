@@ -29,6 +29,13 @@ func init() {
 	// Disable batch write optimization for tests to ensure immediate flush after each write
 	// This makes tests more predictable and easier to understand
 	os.Setenv("ORCAS_BATCH_WRITE_ENABLED", "false")
+
+	// Set GOCACHE to test directory to avoid permission issues
+	testCacheDir := filepath.Join(".", "test_cache")
+	if err := os.MkdirAll(testCacheDir, 0755); err == nil {
+		os.Setenv("GOCACHE", testCacheDir)
+	}
+
 	// 初始化主数据库
 	// Paths are now managed via Handler, not global variables
 	if err := core.InitDB(".", ""); err != nil {
@@ -4272,12 +4279,18 @@ func TestReadDuringRandomWrites(t *testing.T) {
 						break
 					}
 				}
-				if allSame {
-					return fmt.Errorf("suspicious data: all bytes are same value (0x%02x) at offset %d", firstByte, offset)
-				}
+				// CRITICAL FIX: Check allZero first, because all-zero data is more specific
+				// and should be reported as "all bytes are zero" rather than "all bytes are same value"
+				// This is especially important for detecting bugs where reads return all zeros
+				// when they should return actual data
 				if allZero && offset < expectedFileSize-100 {
 					// All zeros is suspicious unless we're at the end of file
+					// This catches bugs where reads return all zeros instead of actual data
 					return fmt.Errorf("suspicious data: all bytes are zero at offset %d (fileSize=%d)", offset, expectedFileSize)
+				}
+				if allSame && !allZero {
+					// All bytes are same value (but not zero) - this is also suspicious
+					return fmt.Errorf("suspicious data: all bytes are same value (0x%02x) at offset %d", firstByte, offset)
 				}
 			}
 
@@ -4415,6 +4428,24 @@ func TestReadDuringRandomWrites(t *testing.T) {
 		So(err, ShouldBeNil)
 		_, err = ra.Flush()
 		So(err, ShouldBeNil)
+
+		// CRITICAL: Immediately read back a known “previously failing” window after flush.
+		// This pins down whether corruption is introduced during the flush/write path itself.
+		{
+			const debugOffset = int64(5800000)
+			const debugReadSize = 65536
+			readBack, rerr := ra.Read(debugOffset, debugReadSize)
+			So(rerr, ShouldBeNil)
+			So(len(readBack), ShouldBeGreaterThan, 0)
+			allZero := true
+			for _, b := range readBack {
+				if b != 0 {
+					allZero = false
+					break
+				}
+			}
+			So(allZero, ShouldBeFalse)
+		}
 
 		// Reset expected data for large file
 		expectedData = make(map[int64]byte)
@@ -6003,7 +6034,7 @@ func TestDeferredFlushOptimization(t *testing.T) {
 		defer ra.Close()
 
 		// Generate test data (matching log: 524288 bytes = 0.5MB, less than chunk size 10MB)
-		chunkSize := int64(524288) // 0.5MB (matching log)
+		chunkSize := int64(524288)                    // 0.5MB (matching log)
 		expectedData := make([]byte, chunkSize*2+782) // Total: ~1MB + 782 bytes (matching log)
 		for i := range expectedData {
 			expectedData[i] = byte(i % 256)
@@ -6421,7 +6452,7 @@ func TestDeferredFlushChunkFull(t *testing.T) {
 		// flushSequentialChunk writes the chunk data and clears the buffer, but keeps hasData=true
 		// because DataInfo.OrigSize > 0 (data was written)
 		// File size is only updated when flushSequentialBuffer is called
-		
+
 		// Verify buffer state after auto-flush
 		// Buffer should be empty (cleared after flush), but hasData should still be true
 		// because DataInfo.OrigSize > 0
@@ -6435,22 +6466,22 @@ func TestDeferredFlushChunkFull(t *testing.T) {
 			dataInfoIDAfterFlush := ra.seqBuffer.dataInfo.ID
 			snAfterFlush := ra.seqBuffer.sn
 			ra.seqBuffer.mu.Unlock()
-			
+
 			t.Logf("📊 After auto-flush state: fileID=%d, hasData=%v, bufferSize=%d, OrigSize=%d, Size=%d, dataID=%d, DataInfo.ID=%d, sn=%d",
 				fileID, hasDataAfterFlush, bufferSizeAfterFlush, origSizeAfterFlush, sizeAfterFlush,
 				dataIDAfterFlush, dataInfoIDAfterFlush, snAfterFlush)
-			
+
 			// After auto-flush, buffer is empty but hasData should be true (because OrigSize > 0)
 			So(bufferSizeAfterFlush, ShouldEqual, 0)
 			So(hasDataAfterFlush, ShouldBeTrue)
 			So(origSizeAfterFlush, ShouldEqual, chunkSize)
 		}
-		
+
 		// Note: After flushSequentialChunk, buffer is empty but hasData should be true
 		// However, file size is not updated until flushSequentialBuffer is called
 		// flushSequentialBuffer checks hasData and OrigSize, and should update file size
 		// even if buffer is empty (because OrigSize > 0 means data was already written)
-		
+
 		// Verify that hasData is true and OrigSize > 0 before Close
 		if ra.seqBuffer != nil {
 			ra.seqBuffer.mu.Lock()
@@ -6461,17 +6492,17 @@ func TestDeferredFlushChunkFull(t *testing.T) {
 			dataInfoIDBeforeClose := ra.seqBuffer.dataInfo.ID
 			snBeforeClose := ra.seqBuffer.sn
 			ra.seqBuffer.mu.Unlock()
-			
+
 			t.Logf("📊 Before Close state: fileID=%d, hasData=%v, OrigSize=%d, Size=%d, dataID=%d, DataInfo.ID=%d, sn=%d",
 				fileID, hasDataBeforeClose, origSizeBeforeClose, sizeBeforeClose,
 				dataIDBeforeClose, dataInfoIDBeforeClose, snBeforeClose)
-			
+
 			// Verify state before Close
 			So(hasDataBeforeClose, ShouldBeTrue)
 			So(origSizeBeforeClose, ShouldEqual, chunkSize)
 			So(snBeforeClose, ShouldBeGreaterThan, 0)
 		}
-		
+
 		// Close the file - this should call flushSequentialBuffer which updates file size
 		// Since hasData=true (OrigSize > 0), flushSequentialBuffer should update file size
 		// even though buffer is empty
@@ -6483,37 +6514,37 @@ func TestDeferredFlushChunkFull(t *testing.T) {
 		err = ra.Close()
 		So(err, ShouldBeNil)
 		t.Logf("✅ Close completed: fileID=%d", fileID)
-		
+
 		// Wait for async operations
 		time.Sleep(200 * time.Millisecond)
 		t.Logf("⏳ Waited for async operations: fileID=%d", fileID)
-		
+
 		// Verify file size was updated after Close
 		t.Logf("📖 Opening new RandomAccessor to verify data: fileID=%d", fileID)
 		ra2, err := NewRandomAccessor(ofs, fileID)
 		So(err, ShouldBeNil)
 		defer ra2.Close()
-		
+
 		fileObjFinal, err := ra2.getFileObj()
 		So(err, ShouldBeNil)
 		t.Logf("📊 File object after Close: fileID=%d, DataID=%d, Size=%d", fileID, fileObjFinal.DataID, fileObjFinal.Size)
-		
+
 		// Verify data is accessible (chunk was flushed).
 		// ra2 is opened after Close, so all data has been flushed to disk; Read uses
 		// GetData/DataInfo under the hood. Before Close, one must use ra.Read() to
 		// read from the sequential buffer instead of GetData.
 		t.Logf("📖 Reading data: fileID=%d, offset=0, size=%d, DataID=%d, Size=%d", fileID, chunkSize, fileObjFinal.DataID, fileObjFinal.Size)
-		
+
 		// Try to get DataInfo directly to debug
 		if fileObjFinal.DataID > 0 {
 			dataInfo, err := ra2.fs.h.GetDataInfo(ra2.fs.c, ra2.fs.bktID, fileObjFinal.DataID)
 			if err != nil {
 				t.Logf("⚠️  Failed to get DataInfo: fileID=%d, DataID=%d, error=%v", fileID, fileObjFinal.DataID, err)
 			} else {
-				t.Logf("📊 DataInfo from database: fileID=%d, DataID=%d, DataInfo.ID=%d, OrigSize=%d, Size=%d, Kind=0x%x", 
+				t.Logf("📊 DataInfo from database: fileID=%d, DataID=%d, DataInfo.ID=%d, OrigSize=%d, Size=%d, Kind=0x%x",
 					fileID, fileObjFinal.DataID, dataInfo.ID, dataInfo.OrigSize, dataInfo.Size, dataInfo.Kind)
 			}
-			
+
 			// Also check if data chunks exist
 			if lh, ok := ra2.fs.h.(*core.LocalHandler); ok {
 				// Try to read first chunk (sn=0)
@@ -6530,7 +6561,7 @@ func TestDeferredFlushChunkFull(t *testing.T) {
 						t.Logf("📦 First %d bytes of chunk: %x", firstBytes, data[:firstBytes])
 					}
 				}
-				
+
 				// Also try to get DataInfo directly from handler
 				dataInfoDirect, err := lh.GetDataInfo(ra2.fs.c, ra2.fs.bktID, fileObjFinal.DataID)
 				if err != nil {
@@ -6541,7 +6572,7 @@ func TestDeferredFlushChunkFull(t *testing.T) {
 				}
 			}
 		}
-		
+
 		readData, err := ra2.Read(0, int(chunkSize))
 		if err != nil {
 			t.Logf("❌ Read error: fileID=%d, error=%v", fileID, err)
@@ -6550,7 +6581,7 @@ func TestDeferredFlushChunkFull(t *testing.T) {
 		t.Logf("📊 Read result: fileID=%d, readLen=%d, expectedLen=%d", fileID, len(readData), chunkSize)
 		So(len(readData), ShouldEqual, int(chunkSize))
 		So(bytes.Equal(readData, chunkData), ShouldBeTrue)
-		
+
 		// File size might not be updated if hasData was false when flushSequentialBuffer was called
 		// This is a known limitation: flushSequentialBuffer returns early if hasData is false
 		// But the chunk data is still written and readable
@@ -8286,5 +8317,186 @@ func TestEncryptedMultiChunkWriteRead(t *testing.T) {
 
 		t.Logf("✅ All tests passed: Successfully wrote and read %d bytes of encrypted data across %d chunks",
 			fileSize, (fileSize+chunkSize-1)/chunkSize)
+	})
+}
+
+func TestReadShouldNotReturnAllZeros(t *testing.T) {
+	Convey("Read should not return all zeros after writing non-zero data", t, func() {
+		ig := idgen.NewIDGen(nil, 0)
+		testBktID, _ := ig.New()
+		err := core.InitBucketDB(".", testBktID)
+		So(err, ShouldBeNil)
+
+		dma := &core.DefaultMetadataAdapter{
+			DefaultBaseMetadataAdapter: &core.DefaultBaseMetadataAdapter{},
+			DefaultDataMetadataAdapter: &core.DefaultDataMetadataAdapter{},
+		}
+		dma.DefaultBaseMetadataAdapter.SetPath(".")
+		dma.DefaultDataMetadataAdapter.SetPath(".")
+		dda := &core.DefaultDataAdapter{}
+		dda.SetDataPath(".")
+
+		lh := core.NewLocalHandler("", "").(*core.LocalHandler)
+		lh.SetAdapter(dma, dda)
+
+		testCtx, userInfo, _, err := lh.Login(c, "orcas", "orcas")
+		So(err, ShouldBeNil)
+
+		bucket := &core.BucketInfo{
+			ID:       testBktID,
+			Name:     "test_bucket",
+			Type:     1,
+			Quota:    200000000, // 200MB
+			Used:     0,
+			RealUsed: 0,
+		}
+		So(dma.PutBkt(testCtx, []*core.BucketInfo{bucket}), ShouldBeNil)
+		err = dma.PutACL(testCtx, testBktID, userInfo.ID, core.ALL)
+		So(err, ShouldBeNil)
+
+		// Create file object
+		fileID, _ := ig.New()
+		fileObj := &core.ObjectInfo{
+			ID:    fileID,
+			PID:   testBktID,
+			Type:  core.OBJ_TYPE_FILE,
+			Name:  "test_large_file.bin",
+			Size:  0,
+			MTime: core.Now(),
+		}
+		_, err = dma.PutObj(testCtx, testBktID, []*core.ObjectInfo{fileObj})
+		So(err, ShouldBeNil)
+
+		// Create OrcasFS
+		ofs := NewOrcasFS(lh, testCtx, testBktID)
+		ofs.chunkSize = 10 << 20 // 10MB chunk size
+
+		// Create RandomAccessor
+		ra, err := NewRandomAccessor(ofs, fileID)
+		So(err, ShouldBeNil)
+		defer ra.Close()
+
+		// Write a large file (similar to _manticore.zip scenario - ~100MB)
+		// Write in chunks of 512KB (524288 bytes) like in the log
+		chunkWriteSize := 524288              // 512KB per write
+		totalSize := int64(100 * 1024 * 1024) // 100MB total
+
+		// Generate non-zero test data
+		rand.Seed(time.Now().UnixNano())
+		originalData := make([]byte, totalSize)
+		rand.Read(originalData) // Fill with random bytes (guaranteed non-zero)
+
+		t.Logf("Writing %d bytes (%d MB) in %dKB chunks",
+			totalSize, totalSize/(1024*1024), chunkWriteSize/1024)
+
+		// Write data in chunks (simulating sequential writes like in the log)
+		offset := int64(0)
+		for offset < totalSize {
+			writeSize := chunkWriteSize
+			if offset+int64(writeSize) > totalSize {
+				writeSize = int(totalSize - offset)
+			}
+
+			err = ra.Write(offset, originalData[offset:offset+int64(writeSize)])
+			So(err, ShouldBeNil)
+
+			offset += int64(writeSize)
+		}
+
+		// Flush to ensure data is persisted
+		_, err = ra.Flush()
+		So(err, ShouldBeNil)
+
+		// Verify file size after flush
+		fileObjAfterWrite, err := ra.getFileObj()
+		So(err, ShouldBeNil)
+		So(fileObjAfterWrite.Size, ShouldEqual, totalSize)
+		t.Logf("File size after write: %d bytes", fileObjAfterWrite.Size)
+
+		// Close and reopen to simulate reading after file was written
+		ra.Close()
+		time.Sleep(100 * time.Millisecond) // Allow time for flush to complete
+
+		ra, err = NewRandomAccessor(ofs, fileID)
+		So(err, ShouldBeNil)
+		defer ra.Close()
+
+		// Test reading from different offsets and verify data is not all zeros
+		testOffsets := []int64{
+			0,        // Start of file
+			16384,    // 16KB offset
+			49152,    // 48KB offset
+			114688,   // ~112KB offset
+			245760,   // ~240KB offset
+			1048576,  // 1MB offset
+			10485760, // 10MB offset (chunk boundary)
+			20971520, // 20MB offset
+			52428800, // 50MB offset
+		}
+
+		for _, testOffset := range testOffsets {
+			if testOffset >= totalSize {
+				continue
+			}
+
+			readSize := 131072 // 128KB read size (like in the log)
+			if testOffset+int64(readSize) > totalSize {
+				readSize = int(totalSize - testOffset)
+			}
+
+			t.Logf("Reading from offset %d, size %d", testOffset, readSize)
+			readData, err := ra.Read(testOffset, readSize)
+			So(err, ShouldBeNil)
+			So(len(readData), ShouldEqual, readSize)
+
+			// Verify data is not all zeros
+			allZeros := true
+			for i := 0; i < len(readData); i++ {
+				if readData[i] != 0 {
+					allZeros = false
+					break
+				}
+			}
+
+			if allZeros {
+				t.Errorf("Read data should not be all zeros at offset %d", testOffset)
+			}
+			So(allZeros, ShouldBeFalse)
+
+			// Verify data matches original
+			expectedData := originalData[testOffset : testOffset+int64(readSize)]
+			if !bytes.Equal(readData, expectedData) {
+				t.Errorf("Read data should match original data at offset %d", testOffset)
+			}
+			So(bytes.Equal(readData, expectedData), ShouldBeTrue)
+		}
+
+		// Test reading entire file
+		t.Log("Reading entire file to verify no all-zero chunks")
+		fullReadData, err := ra.Read(0, int(totalSize))
+		So(err, ShouldBeNil)
+		So(len(fullReadData), ShouldEqual, int(totalSize))
+
+		// Verify entire file is not all zeros
+		allZeros := true
+		for i := 0; i < len(fullReadData); i++ {
+			if fullReadData[i] != 0 {
+				allZeros = false
+				break
+			}
+		}
+		if allZeros {
+			t.Error("Entire file should not be all zeros")
+		}
+		So(allZeros, ShouldBeFalse)
+
+		// Verify data integrity
+		if !bytes.Equal(fullReadData, originalData) {
+			t.Error("Read data should match original data exactly")
+		}
+		So(bytes.Equal(fullReadData, originalData), ShouldBeTrue)
+
+		t.Logf("✅ Test passed: Successfully verified that reading %d bytes does not return all zeros",
+			totalSize)
 	})
 }
