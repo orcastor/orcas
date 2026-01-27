@@ -4122,6 +4122,28 @@ func (ra *RandomAccessor) flushSequentialBuffer() error {
 				// 2. Subsequent Read operations may query DB directly, and if DB has stale data, read will fail
 				// 3. We must guarantee DB and cache are in sync after flush
 				if lh, ok := ra.fs.h.(*core.LocalHandler); ok {
+					// CRITICAL: Also persist DataInfo to DB in this path.
+					// When sequential buffer is flushed into chunks, ra.seqBuffer.buffer becomes empty,
+					// and if the file object's Size/DataID were already updated earlier (e.g. during
+					// initSequentialBufferWithNewData), we can land here with newSize == oldSize.
+					//
+					// If we return without writing DataInfo, GetDataInfo may return a zero/empty DataInfo,
+					// causing read-after-write to return EOF (0 bytes) even though chunk data exists.
+					if ra.seqBuffer.dataInfo != nil && ra.seqBuffer.dataID > 0 && ra.seqBuffer.dataID != core.EmptyDataID {
+						if ra.seqBuffer.dataInfo.ID != ra.seqBuffer.dataID {
+							ra.seqBuffer.dataInfo.ID = ra.seqBuffer.dataID
+						}
+						if _, diErr := lh.PutDataInfo(ra.fs.c, ra.fs.bktID, []*core.DataInfo{ra.seqBuffer.dataInfo}); diErr != nil {
+							DebugLog("[VFS flushSequentialBuffer] ❌ WARNING: Failed to sync DataInfo to DB (No new data to merge path): fileID=%d, dataID=%d, error=%v",
+								ra.fileID, ra.seqBuffer.dataID, diErr)
+						} else {
+							dataInfoCache.Put(ra.seqBuffer.dataID, ra.seqBuffer.dataInfo)
+							decodingReaderCache.Del(ra.seqBuffer.dataID)
+							DebugLog("[VFS flushSequentialBuffer] ✅ Successfully synced DataInfo to DB (No new data to merge path): fileID=%d, dataID=%d, OrigSize=%d, Size=%d, Kind=0x%x",
+								ra.fileID, ra.seqBuffer.dataID, ra.seqBuffer.dataInfo.OrigSize, ra.seqBuffer.dataInfo.Size, ra.seqBuffer.dataInfo.Kind)
+						}
+					}
+
 					// Update fileObj with latest values from seqBuffer
 					oldDataID := fileObj.DataID
 					oldSize := fileObj.Size

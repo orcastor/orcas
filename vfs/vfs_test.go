@@ -6422,6 +6422,78 @@ func TestVFSReadAfterDoubleFlush(t *testing.T) {
 	})
 }
 
+// TestVFSReadAfterSmallWriteDataInfoPersisted reproduces vfs/10.log:
+// write a tiny encrypted file (2 bytes) → Flush triggers flushSequentialChunk, then lands in
+// "No new data to merge" path because file object Size/DataID were updated earlier.
+// If DataInfo is not persisted in that path, subsequent reads can return EOF (0 bytes).
+func TestVFSReadAfterSmallWriteDataInfoPersisted(t *testing.T) {
+	Convey("Test small write persists DataInfo so read-after-write doesn't EOF", t, func() {
+		ensureTestUser(t)
+		handler := core.NewLocalHandler("", "")
+		ctx := context.Background()
+		ctx, _, _, err := handler.Login(ctx, "orcas", "orcas")
+		So(err, ShouldBeNil)
+
+		ig := idgen.NewIDGen(nil, 0)
+		testBktID, _ := ig.New()
+		err = core.InitBucketDB(".", testBktID)
+		So(err, ShouldBeNil)
+
+		admin := core.NewLocalAdmin(".", ".")
+		bkt := &core.BucketInfo{ID: testBktID, Name: "test-small-write-datainfo-bucket", Type: 1, Quota: -1, ChunkSize: 10 << 20}
+		So(admin.PutBkt(ctx, []*core.BucketInfo{bkt}), ShouldBeNil)
+
+		cfg := &core.Config{EndecWay: core.DATA_ENDEC_AES256, EndecKey: "test-key-32-bytes-long----------"}
+		ofs := NewOrcasFSWithConfig(handler, ctx, testBktID, cfg)
+
+		dirObj := &core.ObjectInfo{ID: core.NewID(), PID: testBktID, Type: core.OBJ_TYPE_DIR, Name: "dir", Size: 0, MTime: core.Now()}
+		_, err = handler.Put(ctx, testBktID, []*core.ObjectInfo{dirObj})
+		So(err, ShouldBeNil)
+
+		fileObj := &core.ObjectInfo{ID: core.NewID(), PID: dirObj.ID, Type: core.OBJ_TYPE_FILE, Name: "tiny.txt", Size: 0, MTime: core.Now()}
+		_, err = handler.Put(ctx, testBktID, []*core.ObjectInfo{fileObj})
+		So(err, ShouldBeNil)
+
+		ra, err := NewRandomAccessor(ofs, fileObj.ID)
+		So(err, ShouldBeNil)
+		ofs.registerRandomAccessor(fileObj.ID, ra)
+
+		payload := []byte("AA") // 2 bytes, matches 10.log pattern
+		So(ra.Write(0, payload), ShouldBeNil)
+		_, err = ra.Flush()
+		So(err, ShouldBeNil)
+
+		ofs.unregisterRandomAccessor(fileObj.ID, ra)
+		So(ra.Close(), ShouldBeNil)
+
+		// Verify file object and DataInfo are persisted (DB, not cache)
+		objs, err := handler.Get(ctx, testBktID, []int64{fileObj.ID})
+		So(err, ShouldBeNil)
+		So(len(objs), ShouldEqual, 1)
+		So(objs[0].Size, ShouldEqual, int64(len(payload)))
+		So(objs[0].DataID, ShouldNotEqual, 0)
+		So(objs[0].DataID, ShouldNotEqual, core.EmptyDataID)
+
+		dataInfo, err := handler.GetDataInfo(ctx, testBktID, objs[0].DataID)
+		So(err, ShouldBeNil)
+		So(dataInfo, ShouldNotBeNil)
+		So(dataInfo.OrigSize, ShouldEqual, int64(len(payload)))
+		So(dataInfo.Kind&core.DATA_ENDEC_MASK, ShouldNotEqual, 0)
+		So(dataInfo.Size, ShouldBeGreaterThan, dataInfo.OrigSize) // encrypted size should be larger
+
+		ra2, err := NewRandomAccessor(ofs, fileObj.ID)
+		So(err, ShouldBeNil)
+		ofs.registerRandomAccessor(fileObj.ID, ra2)
+		readBuf, err := ra2.Read(0, 4096)
+		ofs.unregisterRandomAccessor(fileObj.ID, ra2)
+		_ = ra2.Close()
+
+		So(err, ShouldBeNil)
+		So(len(readBuf), ShouldEqual, len(payload))
+		So(bytes.Equal(readBuf, payload), ShouldBeTrue)
+	})
+}
+
 // TestVFSSetObjUpdatesSizeAndMTime verifies that SetObj correctly updates Size and MTime
 // in the database without affecting other fields.
 func TestVFSSetObjUpdatesSizeAndMTime(t *testing.T) {
