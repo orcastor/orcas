@@ -1031,9 +1031,34 @@ func TestPermanentlyDelete(t *testing.T) {
 			So(PermanentlyDeleteObject(c, testBktID, dirID, lh, dma, dda), ShouldBeNil)
 
 			// 验证目录和子对象都被物理删除
-			objs, err := dma.GetObj(c, testBktID, []int64{dirID, fileID})
-			So(err, ShouldBeNil)
-			So(len(objs), ShouldEqual, 0)
+			// NOTE: 由于 SQLite WAL/读连接可见性等原因，物理删除在读路径上可能有延迟。
+			// 这里做最多 15s 的重试等待，避免偶发失败。
+			deadline := time.Now().Add(15 * time.Second)
+			for {
+				objs, err := dma.GetObj(c, testBktID, []int64{dirID, fileID})
+				So(err, ShouldBeNil)
+				if len(objs) == 0 {
+					break
+				}
+				if time.Now().After(deadline) {
+					// Print actual object details instead of pointers for easier diagnosis.
+					ids := make([]int64, 0, len(objs))
+					pids := make([]int64, 0, len(objs))
+					types := make([]int, 0, len(objs))
+					names := make([]string, 0, len(objs))
+					for _, o := range objs {
+						if o == nil {
+							continue
+						}
+						ids = append(ids, o.ID)
+						pids = append(pids, o.PID)
+						types = append(types, o.Type)
+						names = append(names, o.Name)
+					}
+					t.Fatalf("objects still exist after waiting: len=%d, expectedIds=[%d,%d], ids=%v, pids=%v, types=%v, names=%v", len(objs), dirID, fileID, ids, pids, types, names)
+				}
+				time.Sleep(200 * time.Millisecond)
+			}
 
 			// 验证数据文件也被删除
 			// 注意：由于数据写入可能是异步的，文件可能还存在

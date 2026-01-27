@@ -17,6 +17,7 @@ import (
 	"sync"
 	"time"
 
+	b "github.com/orca-zhang/borm"
 	"github.com/zeebo/xxh3"
 )
 
@@ -317,14 +318,21 @@ func PermanentlyDeleteObject(c Ctx, bktID, id int64, h Handler, ma MetadataAdapt
 	// Ensure lock is released after processing completes
 	defer release()
 
-	// Get object information
-	objs, err := ma.GetObj(c, bktID, []int64{id})
-	if err != nil || len(objs) == 0 {
+	// Get object information.
+	// Use a write-connection direct query to avoid WAL visibility issues where a pooled
+	// read connection might briefly not see very recent writes, causing silent no-ops.
+	obj, err := getObjDirectly(c, bktID, id, ma)
+	if err != nil {
 		return err
 	}
-	obj := objs[0]
+	if obj == nil {
+		return fmt.Errorf("object not found: bktID=%d objID=%d", bktID, id)
+	}
 
-	// If it's a directory, recursively delete all child objects concurrently
+	// If it's a directory, recursively delete all child objects.
+	// NOTE: We intentionally do this sequentially. Concurrent deletes can easily hit
+	// SQLite "database is locked"/busy errors and (historically) those errors were
+	// swallowed, leaving orphaned Obj rows behind.
 	if obj.Type == OBJ_TYPE_DIR {
 		// Get all child objects (including deleted ones)
 		children, err := listChildrenDirectly(c, bktID, id, ma)
@@ -340,44 +348,9 @@ func PermanentlyDeleteObject(c Ctx, bktID, id int64, h Handler, ma MetadataAdapt
 			}
 		}
 
-		if len(nonDeletedChildren) > 0 {
-			// Use concurrent deletion with limited concurrency to avoid overwhelming the system
-			// Limit concurrent deletions to 10 to balance performance and resource usage
-			const maxConcurrentDeletes = 10
-			sem := make(chan struct{}, maxConcurrentDeletes)
-			var wg sync.WaitGroup
-			var deleteErrors []error
-			var errorsMu sync.Mutex
-
-			// Concurrently delete child objects
-			for _, child := range nonDeletedChildren {
-				wg.Add(1)
-				go func(childID int64) {
-					defer wg.Done()
-
-					// Acquire semaphore
-					sem <- struct{}{}
-					defer func() { <-sem }()
-
-					// Recursively delete child object
-					if err := PermanentlyDeleteObject(c, bktID, childID, h, ma, da); err != nil {
-						errorsMu.Lock()
-						deleteErrors = append(deleteErrors, fmt.Errorf("failed to delete child object %d: %w", childID, err))
-						errorsMu.Unlock()
-					}
-				}(child.ID)
-			}
-
-			// Wait for all deletions to complete
-			wg.Wait()
-
-			// If there were errors, log them but don't fail the entire operation
-			// This allows partial deletion to succeed even if some child objects fail
-			if len(deleteErrors) > 0 {
-				// Log errors but continue with parent deletion
-				// In production, you might want to use a proper logger here
-				// For now, we'll just continue - the errors are recorded in deleteErrors
-				_ = deleteErrors // Suppress unused variable warning
+		for _, child := range nonDeletedChildren {
+			if err := PermanentlyDeleteObject(c, bktID, child.ID, h, ma, da); err != nil {
+				return fmt.Errorf("failed to delete child object %d: %w", child.ID, err)
 			}
 		}
 	}
@@ -425,32 +398,27 @@ func PermanentlyDeleteObject(c Ctx, bktID, id int64, h Handler, ma MetadataAdapt
 		// If refCount > 1, there are other objects referencing it, cannot delete data files
 		refCount := refCounts[obj.DataID]
 		if refCount == 1 {
-			// Only current object references it, check if it's packaged data
-			dataInfo, err := ma.GetData(c, bktID, obj.DataID)
-			if err == nil && dataInfo != nil && dataInfo.PkgID > 0 {
-				// It's packaged data, use idgen to generate new negative dataID, update DataInfo's ID to mark deletion
-				newDataID := NewID()
-				if newDataID > 0 {
-					negativeDataID := -newDataID
-					// Only update current DataInfo's ID to negative (mark deletion)
-					dataInfo.ID = negativeDataID
-					ma.PutData(c, bktID, []*DataInfo{dataInfo})
-				}
-				// Don't delete package file itself, don't decrease RealUsed
-				// Defragmentation will clean up data blocks with same pkgID and pkgOffset
+			// Only current object references it, safe to cleanup data (with care for packaged data).
+			dataPath := getDataPathFromAdapter(ma)
+			dataID := obj.DataID
+
+			// IMPORTANT: Delete DataInfo metadata as part of permanent delete.
+			// Historically, PermanentlyDeleteObject deleted chunk files but left DataInfo behind,
+			// which caused "data still referenced" / GC to treat the data as still alive.
+			dataInfo, diErr := ma.GetData(c, bktID, dataID)
+			if diErr == nil && dataInfo != nil && dataInfo.PkgID > 0 && dataInfo.PkgID != dataID {
+				// Packaged region (not the package file itself): delete metadata only.
+				_ = ma.DeleteData(c, bktID, []int64{dataID})
 			} else {
-				// Non-packaged data, calculate total data file size and decrease actual usage
-				dataPath := getDataPathFromAdapter(ma)
-				dataSize := calculateDataSize(dataPath, bktID, obj.DataID)
-				if dataSize > 0 {
-					// Decrease bucket's actual usage
-					if err := ma.DecBktRealUsed(c, bktID, dataSize); err != nil {
-						// If decreasing usage fails, still delete file (avoid data leak)
-						// But record error
+				// Non-packaged data OR package file itself:
+				// delete metadata first, then delete files to avoid leaving metadata pointing to missing files.
+				if err := ma.DeleteData(c, bktID, []int64{dataID}); err == nil {
+					dataSize := calculateDataSize(dataPath, bktID, dataID)
+					if dataSize > 0 {
+						_ = ma.DecBktRealUsed(c, bktID, dataSize)
 					}
+					deleteDataFiles(dataPath, bktID, dataID, ma, c)
 				}
-				// Delete data files
-				deleteDataFiles(dataPath, bktID, obj.DataID, ma, c)
 			}
 		}
 		// If refCount == 0, may be abnormal situation, for safety don't delete data files
@@ -661,8 +629,9 @@ func listChildrenDirectly(c Ctx, bktID, pid int64, ma MetadataAdapter) ([]*Objec
 	// Note: Don't close the connection, it's from the pool
 
 	var children []*ObjectInfo
-	// Directly query all child objects, don't exclude deleted ones
-	query := "SELECT * FROM obj WHERE pid = ?"
+	// Directly query all child objects, don't exclude deleted ones.
+	// Select explicit columns to avoid schema drift issues.
+	query := "SELECT id, pid, did, s, m, t, n, e FROM obj WHERE pid = ?"
 	rows, err := db.Query(query, pid)
 	if err != nil {
 		return nil, ERR_QUERY_DB
@@ -678,6 +647,27 @@ func listChildrenDirectly(c Ctx, bktID, pid int64, ma MetadataAdapter) ([]*Objec
 		children = append(children, &obj)
 	}
 	return children, nil
+}
+
+// getObjDirectly fetches an object row via a write connection for consistency.
+func getObjDirectly(c Ctx, bktID, id int64, ma MetadataAdapter) (*ObjectInfo, error) {
+	dataPath := getDataPathFromAdapter(ma)
+	bktDirPath := filepath.Join(dataPath, fmt.Sprint(bktID))
+
+	db, err := GetWriteDB(bktDirPath)
+	if err != nil {
+		return nil, ERR_OPEN_DB
+	}
+	// Note: Don't close the connection, it's from the pool
+
+	var objs []*ObjectInfo
+	if _, err := b.TableContext(c, db, OBJ_TBL).Select(&objs, b.Where(b.Eq("id", id))); err != nil {
+		return nil, fmt.Errorf("%w: getObjDirectly failed (bktID=%d, objID=%d): %v", ERR_QUERY_DB, bktID, id, err)
+	}
+	if len(objs) == 0 {
+		return nil, nil
+	}
+	return objs[0], nil
 }
 
 // deleteObjFromDB deletes object from database (physical deletion)
@@ -3004,7 +2994,7 @@ func processBucketsConcurrent(ctx context.Context, buckets []*BucketInfo, ma Met
 			mu.Lock()
 			result.Errors = append(result.Errors, "job cancelled by context")
 			mu.Unlock()
-			break
+			return result
 		default:
 		}
 
@@ -3013,7 +3003,7 @@ func processBucketsConcurrent(ctx context.Context, buckets []*BucketInfo, ma Met
 			mu.Lock()
 			result.Errors = append(result.Errors, fmt.Sprintf("max duration reached: %v", config.MaxDuration))
 			mu.Unlock()
-			break
+			return result
 		}
 
 		wg.Add(1)
