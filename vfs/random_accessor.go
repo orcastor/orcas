@@ -4104,13 +4104,51 @@ func (ra *RandomAccessor) flushSequentialBuffer() error {
 		writeData := ra.seqBuffer.buffer // Direct reference to buffer
 		writeOffset := ra.seqBuffer.offset - int64(len(ra.seqBuffer.buffer))
 
-		// CRITICAL FIX: If buffer is empty and no new data to write, skip merge/append logic entirely
-		// This prevents unnecessary data copying and potential data corruption when Flush is called
-		// multiple times without new writes (e.g., Fsync followed by Flush)
-		if len(writeData) == 0 && newSize == oldSize {
-			DebugLog("[VFS flushSequentialBuffer] No new data to merge (buffer empty, newSize=%d == oldSize=%d), skipping merge: fileID=%d", newSize, oldSize, ra.fileID)
-			ra.seqBuffer.closed = true
-			return nil
+		// CRITICAL FIX: If buffer is empty, skip merge/append logic entirely.
+		// We must still ensure the file object Size/DataID are persisted to DB (they may only be in
+		// cache from async periodic update in flushSequentialChunk), so read-after-write sees correct size.
+		// Note: We check buffer empty first, regardless of size change, because:
+		// 1. If buffer is empty, data was already written in previous flush
+		// 2. We need to ensure DB consistency even if size didn't change (double flush case)
+		// 3. If size changed, we still need to update DB (handled by subsequent branches)
+		if len(writeData) == 0 {
+			// If size didn't change, this is a double flush - just ensure DB consistency
+			if newSize == oldSize {
+				DebugLog("[VFS flushSequentialBuffer] No new data to merge (buffer empty, newSize=%d == oldSize=%d), skipping merge: fileID=%d", newSize, oldSize, ra.fileID)
+				ra.seqBuffer.closed = true
+				// CRITICAL: Always ensure DB has file object with final Size/DataID, even if cache already has correct values.
+				// This is essential because:
+				// 1. Cache may have correct values, but DB may not (due to async updates or WAL delay)
+				// 2. Subsequent Read operations may query DB directly, and if DB has stale data, read will fail
+				// 3. We must guarantee DB and cache are in sync after flush
+				if lh, ok := ra.fs.h.(*core.LocalHandler); ok {
+					// Update fileObj with latest values from seqBuffer
+					oldDataID := fileObj.DataID
+					oldSize := fileObj.Size
+					oldMTime := fileObj.MTime
+					fileObj.DataID = ra.seqBuffer.dataID
+					fileObj.Size = newSize
+					fileObj.MTime = core.Now()
+					DebugLog("[VFS flushSequentialBuffer] 🔄 Before SetObj: fileID=%d, oldDataID=%d, newDataID=%d, oldSize=%d, newSize=%d, oldMTime=%d, newMTime=%d",
+						ra.fileID, oldDataID, fileObj.DataID, oldSize, fileObj.Size, oldMTime, fileObj.MTime)
+					DebugLog("[VFS flushSequentialBuffer] Syncing file object to DB (ensuring DB consistency): fileID=%d, dataID=%d, size=%d, mtime=%d",
+						ra.fileID, fileObj.DataID, fileObj.Size, fileObj.MTime)
+					if err := lh.MetadataAdapter().SetObj(ra.fs.c, ra.fs.bktID, []string{"did", "s", "m"}, fileObj); err != nil {
+						DebugLog("[VFS flushSequentialBuffer] ❌ WARNING: Failed to sync file object to DB: fileID=%d, dataID=%d, size=%d, error=%v",
+							ra.fileID, fileObj.DataID, fileObj.Size, err)
+					} else {
+						DebugLog("[VFS flushSequentialBuffer] ✅ Successfully synced file object to DB: fileID=%d, dataID=%d, size=%d, mtime=%d",
+							ra.fileID, fileObj.DataID, fileObj.Size, fileObj.MTime)
+						// Update cache after successful DB write
+						fileObjCache.Put(ra.fileObjKey, fileObj)
+						ra.fileObj.Store(fileObj)
+						DebugLog("[VFS flushSequentialBuffer] Updated caches after SetObj: fileID=%d, cacheKey=%d", ra.fileID, ra.fileObjKey)
+					}
+				}
+				return nil
+			}
+			// If buffer is empty but size changed, fall through to handle size change
+			// (will be handled by subsequent branches: newSize > oldSize or merge logic)
 		}
 
 		// CRITICAL FIX: If new data was already written to the same DataID (via flushSequentialChunkLocked),
@@ -4159,15 +4197,22 @@ func (ra *RandomAccessor) flushSequentialBuffer() error {
 			}
 
 			// Update file object
+			oldDataID := fileObj.DataID
+			oldSize := fileObj.Size
+			oldMTime := fileObj.MTime
 			fileObj.DataID = ra.seqBuffer.dataID
 			fileObj.Size = newSize
 			fileObj.MTime = mTime
 
+			DebugLog("[VFS flushSequentialBuffer] 🔄 Before SetObj (appended data): fileID=%d, oldDataID=%d, newDataID=%d, oldSize=%d, newSize=%d, oldMTime=%d, newMTime=%d",
+				ra.fileID, oldDataID, fileObj.DataID, oldSize, fileObj.Size, oldMTime, fileObj.MTime)
 			err = lh.MetadataAdapter().SetObj(ra.fs.c, ra.fs.bktID, []string{"did", "s", "m"}, fileObj)
 			if err != nil {
-				DebugLog("[VFS flushSequentialBuffer] ERROR: Failed to update file object: fileID=%d, error=%v", ra.fileID, err)
+				DebugLog("[VFS flushSequentialBuffer] ❌ ERROR: Failed to update file object: fileID=%d, error=%v", ra.fileID, err)
 				return err
 			}
+			DebugLog("[VFS flushSequentialBuffer] ✅ Successfully updated file object (appended data): fileID=%d, dataID=%d, size=%d, mtime=%d",
+				ra.fileID, fileObj.DataID, fileObj.Size, fileObj.MTime)
 
 			// Update caches
 			dataInfoCache.Put(ra.seqBuffer.dataID, ra.seqBuffer.dataInfo)

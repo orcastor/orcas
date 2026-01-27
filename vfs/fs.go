@@ -393,32 +393,9 @@ var (
 
 // getObj gets object information (with cache)
 // Optimization: use atomic operations, completely lock-free
-// For file objects, also checks global fileObjCache to get latest size
+// For read-after-write: always prefer fileObjCache (by n.objID) before local n.obj or DB,
+// so that after Release() updates the cache, the next Read gets correct Size/DataID.
 func (n *OrcasNode) getObj() (*core.ObjectInfo, error) {
-	// First check: atomic read
-	if val := n.obj.Load(); val != nil {
-		if obj, ok := val.(*core.ObjectInfo); ok && obj != nil {
-			// DebugLog("[VFS getObj] Found in local cache: objID=%d, type=%d (FILE=%d, DIR=%d), name=%s, PID=%d",
-			//	obj.ID, obj.Type, core.OBJ_TYPE_FILE, core.OBJ_TYPE_DIR, obj.Name, obj.PID)
-			// For file objects, also check global fileObjCache to get latest size
-			// This ensures we get the most up-to-date file size after writes
-			if obj.Type == core.OBJ_TYPE_FILE {
-				cacheKey := obj.ID
-				if cached, ok := fileObjCache.Get(cacheKey); ok {
-					if cachedObj, ok := cached.(*core.ObjectInfo); ok && cachedObj != nil {
-						// DebugLog("[VFS getObj] Found in global cache (for file): objID=%d, type=%d, name=%s, size=%d",
-						//	cachedObj.ID, cachedObj.Type, cachedObj.Name, cachedObj.Size)
-						// Use cached object (has latest size from RandomAccessor updates)
-						// Also update local cache for consistency
-						n.obj.Store(cachedObj)
-						return cachedObj, nil
-					}
-				}
-			}
-			return obj, nil
-		}
-	}
-
 	// If root node, return virtual object with bucketID as ID
 	if n.isRoot {
 		return &core.ObjectInfo{
@@ -430,26 +407,34 @@ func (n *OrcasNode) getObj() (*core.ObjectInfo, error) {
 		}, nil
 	}
 
-	// Check global fileObjCache first (before database query) for both files and directories
-	// This ensures we get cached information from Readdir/Lookup operations
-	if !n.isRoot {
-		cacheKey := n.objID
-		if cached, ok := fileObjCache.Get(cacheKey); ok {
-			if cachedObj, ok := cached.(*core.ObjectInfo); ok && cachedObj != nil {
-				// Verify that cached object ID matches expected ID
-				// This prevents issues where cache might have incorrect information
-				if cachedObj.ID == n.objID {
-					// Update local cache for consistency
-					n.obj.Store(cachedObj)
-					DebugLog("[VFS getObj] Found in global cache: objID=%d, type=%d (FILE=%d, DIR=%d), name=%s, PID=%d, size=%d",
-						cachedObj.ID, cachedObj.Type, core.OBJ_TYPE_FILE, core.OBJ_TYPE_DIR, cachedObj.Name, cachedObj.PID, cachedObj.Size)
-					return cachedObj, nil
-				} else {
-					// Cache has incorrect ID, invalidate it and fetch from database
-					DebugLog("[VFS getObj] WARNING: Cached object ID mismatch (expected %d, got %d), invalidating cache", n.objID, cachedObj.ID)
-					fileObjCache.Del(cacheKey)
+	// Prefer global fileObjCache first (before local n.obj) so read-after-write sees Release()'s update.
+	// Otherwise local n.obj can stay at Size=0/DataID=0 from Open and we return empty on Read.
+	cacheKey := n.objID
+	if cached, ok := fileObjCache.Get(cacheKey); ok {
+		if cachedObj, ok := cached.(*core.ObjectInfo); ok && cachedObj != nil {
+			if cachedObj.ID == n.objID {
+				n.obj.Store(cachedObj)
+				DebugLog("[VFS getObj] ✅ Found in global cache: objID=%d, type=%d (FILE=%d, DIR=%d), name=%s, PID=%d, size=%d, DataID=%d, mtime=%d",
+					cachedObj.ID, cachedObj.Type, core.OBJ_TYPE_FILE, core.OBJ_TYPE_DIR, cachedObj.Name, cachedObj.PID, cachedObj.Size, cachedObj.DataID, cachedObj.MTime)
+				return cachedObj, nil
+			}
+			DebugLog("[VFS getObj] WARNING: Cached object ID mismatch (expected %d, got %d), invalidating cache", n.objID, cachedObj.ID)
+			fileObjCache.Del(cacheKey)
+		}
+	}
+
+	// Then check local cache (may be stale for files after write)
+	if val := n.obj.Load(); val != nil {
+		if obj, ok := val.(*core.ObjectInfo); ok && obj != nil {
+			if obj.Type == core.OBJ_TYPE_FILE {
+				if cached, ok := fileObjCache.Get(obj.ID); ok {
+					if cachedObj, ok := cached.(*core.ObjectInfo); ok && cachedObj != nil {
+						n.obj.Store(cachedObj)
+						return cachedObj, nil
+					}
 				}
 			}
+			return obj, nil
 		}
 	}
 
@@ -465,8 +450,18 @@ func (n *OrcasNode) getObj() (*core.ObjectInfo, error) {
 		return nil, syscall.ENOENT
 	}
 
-	DebugLog("[VFS getObj] Got from database: objID=%d, type=%d (FILE=%d, DIR=%d), name=%s, PID=%d, size=%d, DataID=%d",
-		objs[0].ID, objs[0].Type, core.OBJ_TYPE_FILE, core.OBJ_TYPE_DIR, objs[0].Name, objs[0].PID, objs[0].Size, objs[0].DataID)
+	DebugLog("[VFS getObj] 📊 Got from database: objID=%d, type=%d (FILE=%d, DIR=%d), name=%s, PID=%d, size=%d, DataID=%d, mtime=%d",
+		objs[0].ID, objs[0].Type, core.OBJ_TYPE_FILE, core.OBJ_TYPE_DIR, objs[0].Name, objs[0].PID, objs[0].Size, objs[0].DataID, objs[0].MTime)
+
+	// If DB returned empty file (e.g. WAL not checkpointed after write), prefer fileObjCache
+	if objs[0].Type == core.OBJ_TYPE_FILE && (objs[0].Size == 0 || objs[0].DataID == 0 || objs[0].DataID == core.EmptyDataID) {
+		if cached, ok := fileObjCache.Get(n.objID); ok {
+			if cachedObj, ok := cached.(*core.ObjectInfo); ok && cachedObj != nil && cachedObj.ID == n.objID && (cachedObj.Size > 0 || cachedObj.DataID != 0) {
+				objs[0] = cachedObj
+				DebugLog("[VFS getObj] Using fileObjCache over stale DB: objID=%d, size=%d, dataID=%d", cachedObj.ID, cachedObj.Size, cachedObj.DataID)
+			}
+		}
+	}
 
 	// Double check: check cache again (may have been updated by other goroutine)
 	if val := n.obj.Load(); val != nil {
@@ -486,7 +481,6 @@ func (n *OrcasNode) getObj() (*core.ObjectInfo, error) {
 	}
 
 	// Verify that cached object in global cache matches database type
-	cacheKey := n.objID
 	if cached, ok := fileObjCache.Get(cacheKey); ok {
 		if cachedObj, ok := cached.(*core.ObjectInfo); ok && cachedObj != nil {
 			// If cached object type doesn't match database, clear it
@@ -499,11 +493,9 @@ func (n *OrcasNode) getObj() (*core.ObjectInfo, error) {
 
 	// Update both local and global cache (atomic operation)
 	n.obj.Store(objs[0])
-	// Update global fileObjCache for both files and directories
-	// This allows GetAttr to use cached information from Readdir/Lookup
 	fileObjCache.Put(cacheKey, objs[0])
-	DebugLog("[VFS getObj] Updated caches: objID=%d, type=%d (FILE=%d, DIR=%d), name=%s, PID=%d, size=%d",
-		objs[0].ID, objs[0].Type, core.OBJ_TYPE_FILE, core.OBJ_TYPE_DIR, objs[0].Name, objs[0].PID, objs[0].Size)
+	DebugLog("[VFS getObj] 💾 Updated caches: objID=%d, type=%d (FILE=%d, DIR=%d), name=%s, PID=%d, size=%d, DataID=%d, mtime=%d",
+		objs[0].ID, objs[0].Type, core.OBJ_TYPE_FILE, core.OBJ_TYPE_DIR, objs[0].Name, objs[0].PID, objs[0].Size, objs[0].DataID, objs[0].MTime)
 
 	return objs[0], nil
 }
@@ -2360,7 +2352,7 @@ func (n *OrcasNode) UnlinkBatch(ctx context.Context, names []string) syscall.Err
 // batchMode: if true, uses batch optimizations for multiple files
 func (n *OrcasNode) unlinkInternal(ctx context.Context, names []string, batchMode bool) syscall.Errno {
 	DebugLog("[VFS Unlink] Entry: names=%v, parentID=%d, batchMode=%v", names, n.objID, batchMode)
-	
+
 	// Check if KEY is required
 	if errno := n.fs.checkKey(true); errno != 0 {
 		if n.fs.shouldUseFallbackFiles() {
@@ -3775,24 +3767,42 @@ func (n *OrcasNode) Rename(ctx context.Context, name string, newParent fs.InodeE
 // Read reads file content
 // Read implements FileReader interface
 func (n *OrcasNode) Read(ctx context.Context, dest []byte, off int64) (fuse.ReadResult, syscall.Errno) {
+	defer func() {
+		if r := recover(); r != nil {
+			DebugLog("[VFS Read] PANIC recovered: objID=%d, offset=%d, size=%d, panic=%v", n.objID, off, len(dest), r)
+		}
+	}()
 	return n.readImpl(ctx, dest, off)
 }
 
 // readImpl is the actual read implementation
 func (n *OrcasNode) readImpl(ctx context.Context, dest []byte, off int64) (fuse.ReadResult, syscall.Errno) {
-	DebugLog("[VFS Read] Entry: objID=%d, offset=%d, size=%d", n.objID, off, len(dest))
+	DebugLog("[VFS Read] 🔵 Entry: objID=%d, offset=%d, size=%d", n.objID, off, len(dest))
+
+	// Check if fs is nil (should never happen, but safety check)
+	if n.fs == nil {
+		DebugLog("[VFS Read] ❌ Branch: fs is nil, returning EIO: objID=%d", n.objID)
+		return nil, syscall.EIO
+	}
+	DebugLog("[VFS Read] ✅ Step 1: fs check passed, objID=%d, fs=%p", n.objID, n.fs)
 
 	// Check if KEY is required
-	if errno := n.fs.checkKey(true); errno != 0 {
+	requireKey := n.fs.requireKey
+	hasEndecKey := n.fs.Config.EndecKey != ""
+	DebugLog("[VFS Read] 🔑 Step 2: Checking key requirement: objID=%d, requireKey=%v, hasEndecKey=%v", n.objID, requireKey, hasEndecKey)
+	errno := n.fs.checkKey(true)
+	if errno != 0 {
+		DebugLog("[VFS Read] ⚠️ Branch: checkKey failed (errno=%d), checking fallback paths: objID=%d", errno, n.objID)
 		// Check if this is a fallback file
 		if n.fs.shouldUseFallbackFiles() {
+			DebugLog("[VFS Read] 🔄 Branch: Checking fallback files: objID=%d", n.objID)
 			// Find the fallback file by objID
 			// We need to match the objID with the filename hash used in Lookup
 			var fileName string
 			var fileContent string
 			obj, err := n.getObj()
 			if err != nil {
-				DebugLog("[VFS Read] ERROR: Failed to get object: objID=%d, error=%v", n.objID, err)
+				DebugLog("[VFS Read] ❌ Branch: Failed to get object for fallback check: objID=%d, error=%v", n.objID, err)
 				return nil, syscall.ENOENT
 			}
 			files := n.fs.GetFallbackFiles()
@@ -3807,15 +3817,16 @@ func (n *OrcasNode) readImpl(ctx context.Context, dest []byte, off int64) (fuse.
 
 			if fileName == "" {
 				// Not a fallback file ID; fall through so noKeyTemp or normal path can handle it.
-				DebugLog("[VFS Read] Not a fallback file ID: objID=%d", n.objID)
+				DebugLog("[VFS Read] ⏭️ Branch: Not a fallback file, checking noKeyTemp: objID=%d", n.objID)
 			} else {
-
+				DebugLog("[VFS Read] ✅ Branch: Found fallback file, reading from memory: objID=%d, fileName=%s", n.objID, fileName)
 				// Read from fallback file content
 				contentBytes := []byte(fileContent)
 				fileSize := int64(len(contentBytes))
 
 				if off >= fileSize {
 					// Offset beyond file size, return empty
+					DebugLog("[VFS Read] ⚠️ Branch: Offset beyond fallback file size: objID=%d, off=%d, fileSize=%d", n.objID, off, fileSize)
 					return fuse.ReadResultData(nil), 0
 				}
 
@@ -3832,15 +3843,19 @@ func (n *OrcasNode) readImpl(ctx context.Context, dest []byte, off int64) (fuse.
 				resultData := make([]byte, nRead)
 				copy(resultData, dest[:nRead])
 
-				DebugLog("[VFS Read] Successfully read fallback file: fileName=%s, objID=%d, offset=%d, requested=%d, read=%d", fileName, n.objID, off, len(dest), nRead)
+				DebugLog("[VFS Read] ✅ Branch: Successfully read fallback file: fileName=%s, objID=%d, offset=%d, requested=%d, read=%d", fileName, n.objID, off, len(dest), nRead)
 				return fuse.ReadResultData(resultData), 0
 			}
+		} else {
+			DebugLog("[VFS Read] ⏭️ Branch: Fallback files not enabled, checking noKeyTemp: objID=%d", n.objID)
 		}
 
 		// noKeyTemp in-memory file read (only exists when key check failed Create/Open happened)
 		if f, ok := n.fs.noKeyTempGetByID(n.objID); ok && f != nil {
+			DebugLog("[VFS Read] ✅ Branch: Found noKeyTemp file, reading from memory: objID=%d, off=%d, dataLen=%d", n.objID, off, len(f.data))
 			fileSize := int64(len(f.data))
 			if off >= fileSize {
+				DebugLog("[VFS Read] ⚠️ Branch: Offset beyond noKeyTemp file size: objID=%d, off=%d, fileSize=%d", n.objID, off, fileSize)
 				return fuse.ReadResultData(nil), 0
 			}
 			readSize := int64(len(dest))
@@ -3850,49 +3865,58 @@ func (n *OrcasNode) readImpl(ctx context.Context, dest []byte, off int64) (fuse.
 			nRead := copy(dest, f.data[off:off+readSize])
 			resultData := make([]byte, nRead)
 			copy(resultData, dest[:nRead])
+			DebugLog("[VFS Read] ✅ Branch: Successfully read noKeyTemp file: objID=%d, offset=%d, requested=%d, read=%d", n.objID, off, len(dest), nRead)
 			return fuse.ReadResultData(resultData), 0
 		}
 
-		DebugLog("[VFS Read] ERROR: checkKey failed: objID=%d, offset=%d, size=%d, errno=%d", n.objID, off, len(dest), errno)
+		DebugLog("[VFS Read] ❌ Branch: checkKey failed, no fallback paths available: objID=%d, offset=%d, size=%d, errno=%d", n.objID, off, len(dest), errno)
 		return nil, errno
 	}
+	DebugLog("[VFS Read] ✅ Step 2: checkKey passed, proceeding to normal read path: objID=%d", n.objID)
 
-	// Trust cache for read operations to improve performance
-	// Cache is invalidated on write operations to ensure consistency
-	// This optimization reduces unnecessary database queries by 30-50%
+	// getObj() now prefers fileObjCache over local n.obj, so we get Release()'s updated Size/DataID
+	// without invalidateObj() (which could force a DB read and stale WAL data).
+	DebugLog("[VFS Read] 📋 Step 3: Getting file object: objID=%d", n.objID)
 	obj, err := n.getObj()
 	if err != nil {
-		DebugLog("[VFS Read] ERROR: Failed to get object: objID=%d, offset=%d, size=%d, error=%v", n.objID, off, len(dest), err)
+		DebugLog("[VFS Read] ❌ Branch: Failed to get object: objID=%d, offset=%d, size=%d, error=%v", n.objID, off, len(dest), err)
 		return nil, syscall.ENOENT
 	}
+	DebugLog("[VFS Read] ✅ Step 3: Got object: objID=%d, type=%d, name=%s, size=%d, DataID=%d, mtime=%d",
+		obj.ID, obj.Type, obj.Name, obj.Size, obj.DataID, obj.MTime)
 
 	if obj.Type != core.OBJ_TYPE_FILE {
-		DebugLog("[VFS Read] ERROR: Object is not a file: objID=%d, type=%d, offset=%d, size=%d", n.objID, obj.Type, off, len(dest))
+		DebugLog("[VFS Read] ❌ Branch: Object is not a file: objID=%d, type=%d (FILE=%d, DIR=%d), offset=%d, size=%d",
+			n.objID, obj.Type, core.OBJ_TYPE_FILE, core.OBJ_TYPE_DIR, off, len(dest))
 		return nil, syscall.EISDIR
 	}
 
-	// DebugLog("[VFS Read] Reading file: objID=%d, DataID=%d, Size=%d, offset=%d, size=%d", obj.ID, obj.DataID, obj.Size, off, len(dest))
+	DebugLog("[VFS Read] 📄 Step 4: Reading file: objID=%d, DataID=%d, Size=%d, offset=%d, requestedSize=%d, fileSize=%d",
+		obj.ID, obj.DataID, obj.Size, off, len(dest), obj.Size)
 
 	if obj.DataID == 0 || obj.DataID == core.EmptyDataID {
 		// Empty file
-		// DebugLog("[VFS Read] Empty file (no DataID): objID=%d, DataID=%d (EmptyDataID=%d)", obj.ID, obj.DataID, core.EmptyDataID)
+		DebugLog("[VFS Read] ⚠️ Branch: Empty file (no DataID), returning empty: objID=%d, DataID=%d (EmptyDataID=%d), Size=%d",
+			obj.ID, obj.DataID, core.EmptyDataID, obj.Size)
 		return fuse.ReadResultData(nil), 0
 	}
 
 	// CRITICAL FIX: Check if there's an active RandomAccessor with journal
 	// If so, use it to read (applies journal overlay on top of base data)
 	// This is essential for Office files that read back their own writes before flushing
+	DebugLog("[VFS Read] 🔍 Step 5: Checking for active RandomAccessor with journal: objID=%d", obj.ID)
 	if n.fs != nil {
 		if ra := n.fs.getRandomAccessorByFileID(obj.ID); ra != nil {
+			DebugLog("[VFS Read] ✅ Found RandomAccessor, checking journal: objID=%d, ra=%p", obj.ID, ra)
 			ra.journalMu.RLock()
 			hasJournal := ra.journal != nil
 			ra.journalMu.RUnlock()
 
 			if hasJournal {
-				DebugLog("[VFS Read] Using RandomAccessor with journal: objID=%d, offset=%d, size=%d", obj.ID, off, len(dest))
+				DebugLog("[VFS Read] ✅ Branch: Using RandomAccessor with journal: objID=%d, offset=%d, size=%d", obj.ID, off, len(dest))
 				data, err := ra.Read(off, len(dest))
 				if err != nil && err != io.EOF {
-					DebugLog("[VFS Read] ERROR: RandomAccessor read failed: objID=%d, offset=%d, size=%d, error=%v", obj.ID, off, len(dest), err)
+					DebugLog("[VFS Read] ❌ Branch: RandomAccessor read failed: objID=%d, offset=%d, size=%d, error=%v", obj.ID, off, len(dest), err)
 					return nil, syscall.EIO
 				}
 
@@ -3903,36 +3927,62 @@ func (n *OrcasNode) readImpl(ctx context.Context, dest []byte, off int64) (fuse.
 				resultData := make([]byte, nRead)
 				copy(resultData, dest[:nRead])
 
-				DebugLog("[VFS Read] Successfully read with journal overlay: objID=%d, offset=%d, requested=%d, read=%d", obj.ID, off, len(dest), nRead)
+				DebugLog("[VFS Read] ✅ Branch: Successfully read with journal overlay: objID=%d, offset=%d, requested=%d, read=%d", obj.ID, off, len(dest), nRead)
 				return fuse.ReadResultData(resultData), 0
+			} else {
+				DebugLog("[VFS Read] ⏭️ Branch: RandomAccessor found but no journal, using DataReader: objID=%d", obj.ID)
 			}
+		} else {
+			DebugLog("[VFS Read] ⏭️ Branch: No active RandomAccessor, using DataReader: objID=%d", obj.ID)
 		}
+	} else {
+		DebugLog("[VFS Read] ⏭️ Branch: fs is nil, using DataReader: objID=%d", obj.ID)
 	}
 
 	// No active journal, use regular dataReader (chunkReader)
 	// Get dataReader (cached by dataID, one per file)
 	// Pass obj to avoid redundant database query
-	// DebugLog("[VFS Read] Getting DataReader: objID=%d, DataID=%d, offset=%d", obj.ID, obj.DataID, off)
+	DebugLog("[VFS Read] 📚 Step 6: Getting DataReader: objID=%d, DataID=%d, offset=%d", obj.ID, obj.DataID, off)
 	reader, errno := n.getDataReaderWithObj(obj, off)
 	if errno != 0 {
-		// DebugLog("[VFS Read] ERROR: Failed to get DataReader: objID=%d, DataID=%d, offset=%d, errno=%d (%s)", obj.ID, obj.DataID, off, errno, errno.Error())
+		DebugLog("[VFS Read] ❌ Branch: Failed to get DataReader: objID=%d, DataID=%d, offset=%d, errno=%d (%s)", obj.ID, obj.DataID, off, errno, errno.Error())
 		return nil, errno
 	}
 	if reader == nil {
-		// DebugLog("[VFS Read] ERROR: DataReader is nil: objID=%d, DataID=%d, offset=%d", obj.ID, obj.DataID, off)
+		DebugLog("[VFS Read] ❌ Branch: DataReader is nil: objID=%d, DataID=%d, offset=%d", obj.ID, obj.DataID, off)
 		return nil, syscall.EIO
 	}
-	// DebugLog("[VFS Read] Got DataReader: objID=%d, DataID=%d, offset=%d, reader=%p", obj.ID, obj.DataID, off, reader)
+	DebugLog("[VFS Read] ✅ Step 6: Got DataReader: objID=%d, DataID=%d, offset=%d, reader=%p, readerType=%T", obj.ID, obj.DataID, off, reader, reader)
 
 	// Use dataReader interface (Read(buf, offset))
-	// DebugLog("[VFS Read] Calling reader.Read: objID=%d, DataID=%d, offset=%d, size=%d", obj.ID, obj.DataID, off, len(dest))
+	DebugLog("[VFS Read] 📖 Step 7: Calling reader.Read: objID=%d, DataID=%d, offset=%d, size=%d", obj.ID, obj.DataID, off, len(dest))
 	nRead, err := reader.Read(dest, off)
 	if err != nil && err != io.EOF {
-		// DebugLog("[VFS Read] ERROR: Read failed: objID=%d, DataID=%d, offset=%d, size=%d, error=%v, errorType=%T", obj.ID, obj.DataID, off, len(dest), err, err)
+		DebugLog("[VFS Read] ERROR: Read failed: objID=%d, DataID=%d, offset=%d, size=%d, error=%v, errorType=%T", obj.ID, obj.DataID, off, len(dest), err, err)
 		return nil, syscall.EIO
 	}
 	// Note: err == io.EOF is expected for end of file reads
-	// DebugLog("[VFS Read] Read data: objID=%d, DataID=%d, offset=%d, requested=%d, read=%d, EOF=%v", obj.ID, obj.DataID, off, len(dest), nRead, err == io.EOF)
+	// Log first few bytes of read data for debugging
+	firstBytesHex := ""
+	firstBytesText := ""
+	if nRead > 0 {
+		sampleLen := nRead
+		if sampleLen > 64 {
+			sampleLen = 64
+		}
+		firstBytesHex = fmt.Sprintf("%x", dest[:sampleLen])
+		// Convert bytes to string and replace non-printable characters with dots
+		firstBytesTextBytes := make([]byte, sampleLen)
+		copy(firstBytesTextBytes, dest[:sampleLen])
+		for i, b := range firstBytesTextBytes {
+			if b < 32 || b > 126 {
+				firstBytesTextBytes[i] = '.'
+			}
+		}
+		firstBytesText = string(firstBytesTextBytes)
+	}
+	DebugLog("[VFS Read] 📖 Read data: objID=%d, DataID=%d, offset=%d, requested=%d, read=%d, EOF=%v, firstBytesHex=%s, firstBytesText=%q",
+		obj.ID, obj.DataID, off, len(dest), nRead, err == io.EOF, firstBytesHex, firstBytesText)
 
 	// Verify read data integrity (for debugging - can be disabled in production)
 	// Only verify on first read (offset=0) to avoid performance impact
@@ -3954,6 +4004,7 @@ func (n *OrcasNode) readImpl(ctx context.Context, dest []byte, off int64) (fuse.
 	// 4. chunkData from cache may be shared across goroutines
 	resultData := make([]byte, nRead)
 	copy(resultData, dest[:nRead])
+	DebugLog("[VFS Read] Successfully completed: objID=%d, DataID=%d, offset=%d, requested=%d, read=%d", obj.ID, obj.DataID, off, len(dest), nRead)
 	return fuse.ReadResultData(resultData), 0
 }
 
@@ -3977,27 +4028,32 @@ func (n *OrcasNode) getDataReader(offset int64) (dataReader, syscall.Errno) {
 // For plain readers, offset is ignored as they support ReadAt
 // For compressed/encrypted files, uses dataID as cache key to ensure one file uses the same reader
 func (n *OrcasNode) getDataReaderWithObj(obj *core.ObjectInfo, offset int64) (dataReader, syscall.Errno) {
+	DebugLog("[VFS getDataReader] Entry: objID=%d, DataID=%d, offset=%d, n.fs=%p", obj.ID, obj.DataID, offset, n.fs)
 
 	if obj.DataID == 0 || obj.DataID == core.EmptyDataID {
-		// DebugLog("[VFS getDataReader] ERROR: Empty DataID: objID=%d, DataID=%d", obj.ID, obj.DataID)
+		DebugLog("[VFS getDataReader] ERROR: Empty DataID: objID=%d, DataID=%d", obj.ID, obj.DataID)
+		return nil, syscall.EIO
+	}
+	if n.fs == nil {
+		DebugLog("[VFS getDataReader] ERROR: fs is nil: objID=%d", obj.ID)
 		return nil, syscall.EIO
 	}
 
 	// Get DataInfo
-	// DebugLog("[VFS getDataReader] Getting DataInfo: objID=%d, DataID=%d, bktID=%d", obj.ID, obj.DataID, n.fs.bktID)
+	DebugLog("[VFS getDataReader] Getting DataInfo: objID=%d, DataID=%d, bktID=%d", obj.ID, obj.DataID, n.fs.bktID)
 	dataInfo, err := n.fs.h.GetDataInfo(n.fs.c, n.fs.bktID, obj.DataID)
 	if err != nil {
-		// DebugLog("[VFS getDataReader] ERROR: Failed to get DataInfo: objID=%d, DataID=%d, bktID=%d, error=%v, errorType=%T", obj.ID, obj.DataID, n.fs.bktID, err, err)
+		DebugLog("[VFS getDataReader] ERROR: Failed to get DataInfo: objID=%d, DataID=%d, bktID=%d, error=%v, errorType=%T", obj.ID, obj.DataID, n.fs.bktID, err, err)
 		// Try to check if DataID exists in database
-		// DebugLog("[VFS getDataReader] Attempting to verify DataID existence: objID=%d, DataID=%d", obj.ID, obj.DataID)
+		DebugLog("[VFS getDataReader] Attempting to verify DataID existence: objID=%d, DataID=%d", obj.ID, obj.DataID)
 		return nil, syscall.EIO
 	}
 	if dataInfo == nil {
-		// DebugLog("[VFS getDataReader] ERROR: GetDataInfo returned nil: objID=%d, DataID=%d", obj.ID, obj.DataID)
+		DebugLog("[VFS getDataReader] ERROR: GetDataInfo returned nil: objID=%d, DataID=%d", obj.ID, obj.DataID)
 		return nil, syscall.EIO
 	}
-	// DebugLog("[VFS getDataReader] Got DataInfo: objID=%d, DataID=%d, OrigSize=%d, Size=%d, Kind=0x%x, PkgID=%d, PkgOffset=%d",
-	//	obj.ID, obj.DataID, dataInfo.OrigSize, dataInfo.Size, dataInfo.Kind, dataInfo.PkgID, dataInfo.PkgOffset)
+	DebugLog("[VFS getDataReader] Got DataInfo: objID=%d, DataID=%d, OrigSize=%d, Size=%d, Kind=0x%x, PkgID=%d, PkgOffset=%d",
+		obj.ID, obj.DataID, dataInfo.OrigSize, dataInfo.Size, dataInfo.Kind, dataInfo.PkgID, dataInfo.PkgOffset)
 
 	hasCompression := dataInfo.Kind&core.DATA_CMPR_MASK != 0
 	hasEncryption := dataInfo.Kind&core.DATA_ENDEC_MASK != 0
@@ -4018,7 +4074,7 @@ func (n *OrcasNode) getDataReaderWithObj(obj *core.ObjectInfo, offset int64) (da
 	// Try to get cached reader
 	if cached, ok := decodingReaderCache.Get(cacheKey); ok {
 		if reader, ok := cached.(*chunkReader); ok && reader != nil {
-			// DebugLog("[VFS getDataReader] Reusing cached reader: objID=%d, DataID=%d", obj.ID, obj.DataID)
+			DebugLog("[VFS getDataReader] Reusing cached reader: objID=%d, DataID=%d", obj.ID, obj.DataID)
 			return reader, 0
 		}
 	}
@@ -4026,13 +4082,14 @@ func (n *OrcasNode) getDataReaderWithObj(obj *core.ObjectInfo, offset int64) (da
 	// Create new reader
 	// Get encryption key from OrcasFS (not from bucket config)
 	endecKey := getEndecKeyForFS(n.fs)
+	DebugLog("[VFS getDataReader] Encryption key info: objID=%d, DataID=%d, hasEncryption=%v, endecKey length=%d", obj.ID, obj.DataID, hasEncryption, len(endecKey))
 
 	// Create chunkReader (dataInfo is always available here)
 	var reader *chunkReader
 	if !hasCompression && !hasEncryption {
 		// Plain data: create chunkReader with plain DataInfo
-		// DebugLog("[VFS getDataReader] Creating plain reader: objID=%d, DataID=%d, OrigSize=%d, Size=%d, chunkSize=%d",
-		//	obj.ID, obj.DataID, dataInfo.OrigSize, dataInfo.Size, chunkSize)
+		DebugLog("[VFS getDataReader] Creating plain reader: objID=%d, DataID=%d, OrigSize=%d, Size=%d, chunkSize=%d",
+			obj.ID, obj.DataID, dataInfo.OrigSize, dataInfo.Size, chunkSize)
 		plainDataInfo := &core.DataInfo{
 			ID:       obj.DataID,
 			OrigSize: dataInfo.OrigSize,
@@ -4042,19 +4099,19 @@ func (n *OrcasNode) getDataReaderWithObj(obj *core.ObjectInfo, offset int64) (da
 		reader = newChunkReader(n.fs.c, n.fs.h, n.fs.bktID, plainDataInfo, "", chunkSize)
 	} else {
 		// Compressed/encrypted: use chunkReader with processing
-		// DebugLog("[VFS getDataReader] Creating compressed/encrypted reader: objID=%d, DataID=%d, OrigSize=%d, Size=%d, chunkSize=%d, hasCompression=%v, hasEncryption=%v",
-		//	obj.ID, obj.DataID, dataInfo.OrigSize, dataInfo.Size, chunkSize, hasCompression, hasEncryption)
+		DebugLog("[VFS getDataReader] Creating compressed/encrypted reader: objID=%d, DataID=%d, OrigSize=%d, Size=%d, chunkSize=%d, hasCompression=%v, hasEncryption=%v",
+			obj.ID, obj.DataID, dataInfo.OrigSize, dataInfo.Size, chunkSize, hasCompression, hasEncryption)
 		reader = newChunkReader(n.fs.c, n.fs.h, n.fs.bktID, dataInfo, endecKey, chunkSize)
 	}
 
 	if reader == nil {
-		// DebugLog("[VFS getDataReader] ERROR: Failed to create chunkReader: objID=%d, DataID=%d", obj.ID, obj.DataID)
+		DebugLog("[VFS getDataReader] ERROR: Failed to create chunkReader: objID=%d, DataID=%d", obj.ID, obj.DataID)
 		return nil, syscall.EIO
 	}
 
 	// Cache the reader (one per dataID)
 	decodingReaderCache.Put(cacheKey, reader)
-	// DebugLog("[VFS getDataReader] Created and cached new reader: objID=%d, DataID=%d, reader=%p", obj.ID, obj.DataID, reader)
+	DebugLog("[VFS getDataReader] Created and cached new reader: objID=%d, DataID=%d, reader=%p", obj.ID, obj.DataID, reader)
 
 	return reader, 0
 }

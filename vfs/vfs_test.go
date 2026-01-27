@@ -6042,3 +6042,518 @@ func TestUnlinkPerformanceComparison(t *testing.T) {
 		})
 	}
 }
+
+// TestVFSKeyTxtWriteReadFailure reproduces the exact scenario from vfs/9.log:
+// Create key.txt → Setattr (Open with RA) → Write 241 bytes → Flush → Release,
+// then new Open → Read. Read can fail if object cache is stale (node's n.obj still
+// has DataID=0/size=0 from before write). readImpl now calls invalidateObj() before
+// getObj() to fix this (same as fs_win.go).
+func TestVFSKeyTxtWriteReadFailure(t *testing.T) {
+	Convey("Test VFS key.txt write then read (9.log scenario, cache-safe)", t, func() {
+		ensureTestUser(t)
+		handler := core.NewLocalHandler("", "")
+		ctx := context.Background()
+		ctx, _, _, err := handler.Login(ctx, "orcas", "orcas")
+		So(err, ShouldBeNil)
+
+		ig := idgen.NewIDGen(nil, 0)
+		testBktID, _ := ig.New()
+		err = core.InitBucketDB(".", testBktID)
+		So(err, ShouldBeNil)
+
+		// Get user info for bucket creation
+		_, _, _, err = handler.Login(ctx, "orcas", "orcas")
+		So(err, ShouldBeNil)
+
+		// Create bucket with encryption enabled
+		admin := core.NewLocalAdmin(".", ".")
+		encryptionKey := "test-encryption-key-12345678901234567890123456789012" // 32 bytes for AES256
+		bkt := &core.BucketInfo{
+			ID:        testBktID,
+			Name:      "test-key-txt-bucket",
+			Type:      1,
+			Quota:     -1,
+			ChunkSize: 10 * 1024 * 1024, // 10MB chunk size (same as log)
+		}
+		err = admin.PutBkt(ctx, []*core.BucketInfo{bkt})
+		So(err, ShouldBeNil)
+
+		// Create filesystem with encryption configuration (EndecWay=0x2 = DATA_ENDEC_AES256)
+		cfg := &core.Config{
+			EndecWay: core.DATA_ENDEC_AES256, // 0x2 as in log
+			EndecKey: encryptionKey,
+		}
+
+		// Create temporary mount point
+		mountPoint, err := os.MkdirTemp("", "orcas-vfs-keytxt-test-*")
+		So(err, ShouldBeNil)
+		defer os.RemoveAll(mountPoint)
+
+		// Create filesystem instance (needed for direct API calls)
+		ofs := NewOrcasFSWithConfig(handler, ctx, testBktID, cfg)
+
+		// Create directory "win" (same as log)
+		winDirObj := &core.ObjectInfo{
+			ID:    core.NewID(),
+			PID:   testBktID,
+			Type:  core.OBJ_TYPE_DIR,
+			Name:  "win",
+			Size:  0,
+			MTime: core.Now(),
+		}
+		_, err = handler.Put(ctx, testBktID, []*core.ObjectInfo{winDirObj})
+		So(err, ShouldBeNil)
+
+		// Create file key.txt with exact data from log (241 bytes)
+		// From log: first64Bytes=2d2d2d2d2d424547494e2050524956415445204b45592d2d2d2d2d0a4d494748416745414d424d4742797147534d34394167454743437147534d343941774548
+		// This is: "-----BEGIN PRIVATE KEY-----\nMIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEH"
+		testData := make([]byte, 241)
+		// Fill first part with the known data from log
+		header := []byte("-----BEGIN PRIVATE KEY-----\nMIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEH")
+		copy(testData, header)
+		// Fill the rest with test data to make it exactly 241 bytes
+		for i := len(header); i < 241; i++ {
+			testData[i] = byte(i % 256)
+		}
+
+		// Step 1: Strictly follow 9.log write path using RandomAccessor
+		// The log shows Create -> Setattr -> Write -> Setattr (multiple) -> Flush -> Release
+		// We'll use RandomAccessor which internally follows this path when used via FUSE
+		// But for testing without FUSE mount, we'll directly use RandomAccessor API
+		// which triggers the same internal operations
+
+		// Create file object key.txt (this simulates Create operation)
+		fileObj := &core.ObjectInfo{
+			ID:    core.NewID(),
+			PID:   winDirObj.ID, // Parent is win directory
+			Type:  core.OBJ_TYPE_FILE,
+			Name:  "key.txt",
+			Size:  0,
+			MTime: core.Now(),
+		}
+		_, err = handler.Put(ctx, testBktID, []*core.ObjectInfo{fileObj})
+		So(err, ShouldBeNil)
+
+		// Create RandomAccessor (this simulates Setattr with FileHandle that creates RandomAccessor)
+		ra, err := NewRandomAccessor(ofs, fileObj.ID)
+		So(err, ShouldBeNil)
+		So(ra, ShouldNotBeNil)
+
+		// Register RandomAccessor (same as log: RandomAccessor registered)
+		ofs.registerRandomAccessor(fileObj.ID, ra)
+
+		// Write data (same as log line 50-62: Write called with offset=0, size=241)
+		err = ra.Write(0, testData)
+		So(err, ShouldBeNil)
+
+		// Flush (same as log line 102-135: Flush called)
+		_, err = ra.Flush()
+		So(err, ShouldBeNil)
+
+		// Verify file size after flush (should be 241 as in log)
+		fileObjAfterWrite, err := ra.getFileObj()
+		So(err, ShouldBeNil)
+		So(fileObjAfterWrite.Size, ShouldEqual, int64(241))
+		So(fileObjAfterWrite.DataID, ShouldNotEqual, 0)
+		So(fileObjAfterWrite.DataID, ShouldNotEqual, core.EmptyDataID)
+
+		// Verify DataInfo has encryption flag (Kind=0x2 as in log)
+		dataInfo, err := handler.GetDataInfo(ctx, testBktID, fileObjAfterWrite.DataID)
+		So(err, ShouldBeNil)
+		So(dataInfo, ShouldNotBeNil)
+		So(dataInfo.Kind&core.DATA_ENDEC_MASK, ShouldNotEqual, 0)
+		So(dataInfo.OrigSize, ShouldEqual, int64(241))
+		So(dataInfo.Size, ShouldBeGreaterThan, int64(241)) // Encrypted size should be larger
+
+		// Release (same as log line 136-166: Release called)
+		// After this, file object cache has size=241, dataID=...; node's local cache
+		// would be stale without invalidateObj() in readImpl.
+		ofs.unregisterRandomAccessor(fileObj.ID, ra)
+		err = ra.Close()
+		So(err, ShouldBeNil)
+
+		// Step 2: First read (9.log: new Open → Read Entry offset=0 size=4096)
+		// New RandomAccessor simulates new Open; read path uses getObj() like FUSE readImpl.
+		ra2, err := NewRandomAccessor(ofs, fileObj.ID)
+		So(err, ShouldBeNil)
+		ofs.registerRandomAccessor(fileObj.ID, ra2)
+
+		readData, err := ra2.Read(0, 4096)
+		So(err, ShouldBeNil)
+		So(len(readData), ShouldEqual, 241)
+
+		ofs.unregisterRandomAccessor(fileObj.ID, ra2)
+		So(ra2.Close(), ShouldBeNil)
+
+		// Step 3: Second open + read (9.log shows repeated Open/Read/Flush/Release)
+		// Ensures cache stays correct across multiple read handles.
+		ra3, err := NewRandomAccessor(ofs, fileObj.ID)
+		So(err, ShouldBeNil)
+		ofs.registerRandomAccessor(fileObj.ID, ra3)
+
+		readData2, err := ra3.Read(0, 4096)
+		So(err, ShouldBeNil)
+		So(len(readData2), ShouldEqual, 241)
+		So(bytes.Equal(readData2, testData), ShouldBeTrue)
+
+		ofs.unregisterRandomAccessor(fileObj.ID, ra3)
+		So(ra3.Close(), ShouldBeNil)
+
+		// CRITICAL: Verify content is correct, not just the size
+		// Check if read data is all zeros (common failure mode)
+		allZeros := true
+		for i := 0; i < len(readData); i++ {
+			if readData[i] != 0 {
+				allZeros = false
+				break
+			}
+		}
+		if allZeros {
+			t.Errorf("❌ BUG: Read returned all zeros! Expected non-zero data. FileObjID=%d, DataID=%d, Size=%d",
+				fileObj.ID, fileObjAfterWrite.DataID, fileObjAfterWrite.Size)
+			// Print hex dump of first 64 bytes for debugging
+			dumpLen := 64
+			if len(readData) < dumpLen {
+				dumpLen = len(readData)
+			}
+			hexDump := fmt.Sprintf("%x", readData[:dumpLen])
+			t.Errorf("   First %d bytes (hex): %s", dumpLen, hexDump)
+		}
+		So(allZeros, ShouldBeFalse)
+
+		// Verify entire data matches byte-by-byte
+		if !bytes.Equal(readData, testData) {
+			// Find first mismatch
+			firstMismatch := -1
+			minLen := len(readData)
+			if len(testData) < minLen {
+				minLen = len(testData)
+			}
+			for i := 0; i < minLen; i++ {
+				if readData[i] != testData[i] {
+					firstMismatch = i
+					break
+				}
+			}
+			if firstMismatch >= 0 {
+				t.Errorf("❌ BUG: Read data mismatch at byte %d: expected 0x%02x, got 0x%02x",
+					firstMismatch, testData[firstMismatch], readData[firstMismatch])
+				// Print hex dump around mismatch
+				start := firstMismatch - 16
+				if start < 0 {
+					start = 0
+				}
+				end := firstMismatch + 16
+				if end > len(readData) {
+					end = len(readData)
+				}
+				if end > len(testData) {
+					end = len(testData)
+				}
+				t.Errorf("   Expected (hex): %x", testData[start:end])
+				t.Errorf("   Got      (hex): %x", readData[start:end])
+			} else {
+				t.Errorf("❌ BUG: Read data length mismatch: expected %d bytes, got %d bytes",
+					len(testData), len(readData))
+			}
+		}
+		So(bytes.Equal(readData, testData), ShouldBeTrue)
+
+		// Verify first bytes match the known header
+		if !bytes.Equal(readData[:len(header)], header) {
+			t.Errorf("❌ BUG: Header mismatch! Expected: %q, Got: %q",
+				string(header), string(readData[:len(header)]))
+			t.Errorf("   Expected (hex): %x", header)
+			t.Errorf("   Got      (hex): %x", readData[:len(header)])
+		}
+		So(bytes.Equal(readData[:len(header)], header), ShouldBeTrue)
+
+		// Verify last bytes match
+		lastBytesLen := 16
+		if len(testData) < lastBytesLen {
+			lastBytesLen = len(testData)
+		}
+		lastBytes := testData[len(testData)-lastBytesLen:]
+		readLastBytes := readData[len(readData)-lastBytesLen:]
+		if !bytes.Equal(readLastBytes, lastBytes) {
+			t.Errorf("❌ BUG: Last bytes mismatch! Expected (hex): %x, Got (hex): %x",
+				lastBytes, readLastBytes)
+		}
+		So(bytes.Equal(readLastBytes, lastBytes), ShouldBeTrue)
+
+		// Verify middle bytes match (check a few random positions)
+		checkPositions := []int{50, 100, 150, 200}
+		for _, pos := range checkPositions {
+			if pos < len(testData) && pos < len(readData) {
+				if readData[pos] != testData[pos] {
+					t.Errorf("❌ BUG: Byte mismatch at position %d: expected 0x%02x, got 0x%02x",
+						pos, testData[pos], readData[pos])
+				}
+				So(readData[pos], ShouldEqual, testData[pos])
+			}
+		}
+
+		// Print success message with content verification
+		dumpLen := 64
+		if len(readData) < dumpLen {
+			dumpLen = len(readData)
+		}
+		t.Logf("✅ Successfully verified key.txt write/read using FUSE API: wrote %d bytes, read %d bytes, content verified", len(testData), len(readData))
+		t.Logf("   First %d bytes (hex): %x", dumpLen, readData[:dumpLen])
+		t.Logf("   First %d bytes (text): %q", dumpLen, string(readData[:dumpLen]))
+	})
+}
+
+// TestVFSFileObjectSizeInDBAfterWrite ensures that after write+flush+release the file
+// object in the database has correct Size and DataID (fix for "size not updated in DB").
+func TestVFSFileObjectSizeInDBAfterWrite(t *testing.T) {
+	Convey("Test file object Size/DataID persisted to DB after write", t, func() {
+		ensureTestUser(t)
+		handler := core.NewLocalHandler("", "")
+		ctx := context.Background()
+		ctx, _, _, err := handler.Login(ctx, "orcas", "orcas")
+		So(err, ShouldBeNil)
+
+		ig := idgen.NewIDGen(nil, 0)
+		testBktID, _ := ig.New()
+		err = core.InitBucketDB(".", testBktID)
+		So(err, ShouldBeNil)
+
+		admin := core.NewLocalAdmin(".", ".")
+		bkt := &core.BucketInfo{ID: testBktID, Name: "test-db-size-bucket", Type: 1, Quota: -1, ChunkSize: 10 << 20}
+		So(admin.PutBkt(ctx, []*core.BucketInfo{bkt}), ShouldBeNil)
+
+		cfg := &core.Config{EndecWay: core.DATA_ENDEC_AES256, EndecKey: "test-key-32-bytes-long----------"}
+		ofs := NewOrcasFSWithConfig(handler, ctx, testBktID, cfg)
+
+		dirObj := &core.ObjectInfo{ID: core.NewID(), PID: testBktID, Type: core.OBJ_TYPE_DIR, Name: "dir", Size: 0, MTime: core.Now()}
+		_, err = handler.Put(ctx, testBktID, []*core.ObjectInfo{dirObj})
+		So(err, ShouldBeNil)
+
+		fileObj := &core.ObjectInfo{ID: core.NewID(), PID: dirObj.ID, Type: core.OBJ_TYPE_FILE, Name: "f.dat", Size: 0, MTime: core.Now()}
+		_, err = handler.Put(ctx, testBktID, []*core.ObjectInfo{fileObj})
+		So(err, ShouldBeNil)
+
+		ra, err := NewRandomAccessor(ofs, fileObj.ID)
+		So(err, ShouldBeNil)
+		ofs.registerRandomAccessor(fileObj.ID, ra)
+
+		data := []byte("hello world 12345")
+		So(ra.Write(0, data), ShouldBeNil)
+		_, err = ra.Flush()
+		So(err, ShouldBeNil)
+
+		ofs.unregisterRandomAccessor(fileObj.ID, ra)
+		So(ra.Close(), ShouldBeNil)
+
+		// Read file object from database (not cache) and assert Size/DataID
+		objs, err := handler.Get(ctx, testBktID, []int64{fileObj.ID})
+		So(err, ShouldBeNil)
+		So(len(objs), ShouldEqual, 1)
+		So(objs[0].Size, ShouldEqual, int64(len(data)))
+		So(objs[0].DataID, ShouldNotEqual, 0)
+		So(objs[0].DataID, ShouldNotEqual, core.EmptyDataID)
+	})
+}
+
+// TestVFSReadAfterDoubleFlush ensures that double Flush (triggers "No new data to merge")
+// still leaves Size persisted so read returns correct content.
+func TestVFSReadAfterDoubleFlush(t *testing.T) {
+	Convey("Test read after write + double flush (No new data to merge path)", t, func() {
+		ensureTestUser(t)
+		handler := core.NewLocalHandler("", "")
+		ctx := context.Background()
+		ctx, _, _, err := handler.Login(ctx, "orcas", "orcas")
+		So(err, ShouldBeNil)
+
+		ig := idgen.NewIDGen(nil, 0)
+		testBktID, _ := ig.New()
+		err = core.InitBucketDB(".", testBktID)
+		So(err, ShouldBeNil)
+
+		admin := core.NewLocalAdmin(".", ".")
+		bkt := &core.BucketInfo{ID: testBktID, Name: "test-double-flush-bucket", Type: 1, Quota: -1, ChunkSize: 10 << 20}
+		So(admin.PutBkt(ctx, []*core.BucketInfo{bkt}), ShouldBeNil)
+
+		cfg := &core.Config{EndecWay: core.DATA_ENDEC_AES256, EndecKey: "test-key-32-bytes-long----------"}
+		ofs := NewOrcasFSWithConfig(handler, ctx, testBktID, cfg)
+
+		dirObj := &core.ObjectInfo{ID: core.NewID(), PID: testBktID, Type: core.OBJ_TYPE_DIR, Name: "dir", Size: 0, MTime: core.Now()}
+		_, err = handler.Put(ctx, testBktID, []*core.ObjectInfo{dirObj})
+		So(err, ShouldBeNil)
+
+		fileObj := &core.ObjectInfo{ID: core.NewID(), PID: dirObj.ID, Type: core.OBJ_TYPE_FILE, Name: "x.txt", Size: 0, MTime: core.Now()}
+		_, err = handler.Put(ctx, testBktID, []*core.ObjectInfo{fileObj})
+		So(err, ShouldBeNil)
+
+		ra, err := NewRandomAccessor(ofs, fileObj.ID)
+		So(err, ShouldBeNil)
+		ofs.registerRandomAccessor(fileObj.ID, ra)
+
+		payload := []byte("double flush then read")
+		So(ra.Write(0, payload), ShouldBeNil)
+		_, err = ra.Flush()
+		So(err, ShouldBeNil)
+		_, err = ra.Flush() // second flush -> "No new data to merge" path must still persist Size
+		So(err, ShouldBeNil)
+
+		ofs.unregisterRandomAccessor(fileObj.ID, ra)
+		So(ra.Close(), ShouldBeNil)
+
+		// Verify file object in database has correct Size/DataID after double flush
+		// This ensures "No new data to merge" path still persists Size to DB
+		objs, err := handler.Get(ctx, testBktID, []int64{fileObj.ID})
+		So(err, ShouldBeNil)
+		So(len(objs), ShouldEqual, 1)
+		So(objs[0].Size, ShouldEqual, int64(len(payload)))
+		So(objs[0].DataID, ShouldNotEqual, 0)
+		So(objs[0].DataID, ShouldNotEqual, core.EmptyDataID)
+
+		ra2, err := NewRandomAccessor(ofs, fileObj.ID)
+		So(err, ShouldBeNil)
+		ofs.registerRandomAccessor(fileObj.ID, ra2)
+		readBuf, err := ra2.Read(0, 4096)
+		ofs.unregisterRandomAccessor(fileObj.ID, ra2)
+		_ = ra2.Close()
+
+		So(err, ShouldBeNil)
+		So(len(readBuf), ShouldEqual, len(payload))
+		So(bytes.Equal(readBuf, payload), ShouldBeTrue)
+	})
+}
+
+// TestVFSSetObjUpdatesSizeAndMTime verifies that SetObj correctly updates Size and MTime
+// in the database without affecting other fields.
+func TestVFSSetObjUpdatesSizeAndMTime(t *testing.T) {
+	Convey("Test SetObj updates Size and MTime correctly", t, func() {
+		ensureTestUser(t)
+		handler := core.NewLocalHandler("", "")
+		ctx := context.Background()
+		ctx, _, _, err := handler.Login(ctx, "orcas", "orcas")
+		So(err, ShouldBeNil)
+
+		ig := idgen.NewIDGen(nil, 0)
+		testBktID, _ := ig.New()
+		err = core.InitBucketDB(".", testBktID)
+		So(err, ShouldBeNil)
+
+		admin := core.NewLocalAdmin(".", ".")
+		bkt := &core.BucketInfo{ID: testBktID, Name: "test-setobj-bucket", Type: 1, Quota: -1, ChunkSize: 10 << 20}
+		So(admin.PutBkt(ctx, []*core.BucketInfo{bkt}), ShouldBeNil)
+
+		// Create a file object with initial values
+		initialMTime := core.Now()
+		fileObj := &core.ObjectInfo{
+			ID:     core.NewID(),
+			PID:    testBktID,
+			Type:   core.OBJ_TYPE_FILE,
+			Name:   "test.dat",
+			Size:   100,
+			DataID: core.NewID(),
+			MTime:  initialMTime,
+			Mode:   0644,
+		}
+		_, err = handler.Put(ctx, testBktID, []*core.ObjectInfo{fileObj})
+		So(err, ShouldBeNil)
+
+		// Read back to get the exact initial state
+		objs, err := handler.Get(ctx, testBktID, []int64{fileObj.ID})
+		So(err, ShouldBeNil)
+		So(len(objs), ShouldEqual, 1)
+		initialObj := objs[0]
+		initialSize := initialObj.Size
+		initialDataID := initialObj.DataID
+		initialName := initialObj.Name
+		initialMode := initialObj.Mode
+
+		// Wait a bit to ensure MTime will be different
+		time.Sleep(50 * time.Millisecond)
+
+		// Update Size and MTime using SetObj
+		newSize := int64(500)
+		newMTime := core.Now()
+		// Ensure newMTime is definitely after initialMTime
+		for newMTime <= initialMTime {
+			time.Sleep(10 * time.Millisecond)
+			newMTime = core.Now()
+		}
+		updateObj := &core.ObjectInfo{
+			ID:     fileObj.ID,
+			PID:    fileObj.PID,
+			Type:   fileObj.Type,
+			Name:   fileObj.Name,
+			Size:   newSize,
+			DataID: fileObj.DataID,
+			MTime:  newMTime,
+			Mode:   fileObj.Mode,
+		}
+
+		lh, ok := handler.(*core.LocalHandler)
+		So(ok, ShouldBeTrue)
+		err = lh.MetadataAdapter().SetObj(ctx, testBktID, []string{"s", "m"}, updateObj)
+		So(err, ShouldBeNil)
+
+		// Read back from database and verify updates
+		objs, err = handler.Get(ctx, testBktID, []int64{fileObj.ID})
+		So(err, ShouldBeNil)
+		So(len(objs), ShouldEqual, 1)
+		updatedObj := objs[0]
+
+		// Verify Size was updated
+		So(updatedObj.Size, ShouldEqual, newSize)
+		So(updatedObj.Size, ShouldNotEqual, initialSize)
+
+		// Verify MTime was updated (should be >= newMTime, allowing for small timing differences)
+		So(updatedObj.MTime, ShouldBeGreaterThanOrEqualTo, newMTime)
+		// MTime should be updated (may be equal if SetObj sets it to current time)
+		So(updatedObj.MTime, ShouldBeGreaterThanOrEqualTo, initialMTime)
+
+		// Verify other fields were NOT modified
+		So(updatedObj.DataID, ShouldEqual, initialDataID)
+		So(updatedObj.Name, ShouldEqual, initialName)
+		So(updatedObj.Mode, ShouldEqual, initialMode)
+		So(updatedObj.Type, ShouldEqual, initialObj.Type)
+		So(updatedObj.PID, ShouldEqual, initialObj.PID)
+
+		// Test updating with "did", "s", "m" together
+		time.Sleep(50 * time.Millisecond)
+		newDataID := core.NewID()
+		newSize2 := int64(1000)
+		newMTime2 := core.Now()
+		// Ensure newMTime2 is definitely after newMTime
+		for newMTime2 <= newMTime {
+			time.Sleep(10 * time.Millisecond)
+			newMTime2 = core.Now()
+		}
+
+		updateObj2 := &core.ObjectInfo{
+			ID:     fileObj.ID,
+			PID:    fileObj.PID,
+			Type:   fileObj.Type,
+			Name:   fileObj.Name,
+			Size:   newSize2,
+			DataID: newDataID,
+			MTime:  newMTime2,
+			Mode:   fileObj.Mode,
+		}
+
+		err = lh.MetadataAdapter().SetObj(ctx, testBktID, []string{"did", "s", "m"}, updateObj2)
+		So(err, ShouldBeNil)
+
+		// Read back and verify all three fields were updated
+		objs, err = handler.Get(ctx, testBktID, []int64{fileObj.ID})
+		So(err, ShouldBeNil)
+		So(len(objs), ShouldEqual, 1)
+		updatedObj2 := objs[0]
+
+		So(updatedObj2.Size, ShouldEqual, newSize2)
+		So(updatedObj2.DataID, ShouldEqual, newDataID)
+		So(updatedObj2.MTime, ShouldBeGreaterThanOrEqualTo, newMTime2)
+		// MTime should be updated (may be equal if SetObj sets it to current time)
+		So(updatedObj2.MTime, ShouldBeGreaterThanOrEqualTo, newMTime)
+
+		// Verify other fields still unchanged
+		So(updatedObj2.Name, ShouldEqual, initialName)
+		So(updatedObj2.Mode, ShouldEqual, initialMode)
+	})
+}
