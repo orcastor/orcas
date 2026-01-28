@@ -212,6 +212,97 @@ func TestListAllObjects_CountLEZero_FetchAllPages(t *testing.T) {
 	}
 }
 
+// This test reproduces the Windows/Office pattern:
+// 1) write to a .tmp file
+// 2) flush/release may NOT flush .tmp (by design)
+// 3) read back the .tmp for validation BEFORE rename
+//
+// Historically, VFS returned empty reads when DataID==0, causing Office to treat the file as corrupted.
+func TestTmpFileReadBeforeRename_IsConsistent(t *testing.T) {
+	Convey("tmp file read before rename should return written data", t, func() {
+		c := context.Background()
+		ig := idgen.NewIDGen(nil, 0)
+		testBktID, _ := ig.New()
+
+		So(core.InitBucketDB(".", testBktID), ShouldBeNil)
+
+		dma := &core.DefaultMetadataAdapter{
+			DefaultBaseMetadataAdapter: &core.DefaultBaseMetadataAdapter{},
+			DefaultDataMetadataAdapter: &core.DefaultDataMetadataAdapter{},
+		}
+		dma.DefaultBaseMetadataAdapter.SetPath(".")
+		dma.DefaultDataMetadataAdapter.SetPath(".")
+		dda := &core.DefaultDataAdapter{}
+
+		lh := core.NewLocalHandler("", "").(*core.LocalHandler)
+		lh.SetAdapter(dma, dda)
+
+		testCtx, _, _, err := lh.Login(c, "orcas", "orcas")
+		So(err, ShouldBeNil)
+
+		bucket := &core.BucketInfo{ID: testBktID, Name: "test_bucket", Type: 1, Quota: 500000000}
+		admin := core.NewLocalAdmin(".", ".")
+		So(admin.PutBkt(testCtx, []*core.BucketInfo{bucket}), ShouldBeNil)
+
+		cfg := &core.Config{
+			// Encryption on/off doesn't matter here; pre-rename reads should be plaintext from in-memory buffers.
+			EndecWay: core.DATA_ENDEC_AES256,
+			EndecKey: "this-is-a-test-encryption-key-that-is-long-enough-for-aes256-encryption-12345678901234567890",
+		}
+		ofs := NewOrcasFSWithConfig(lh, testCtx, testBktID, cfg)
+
+		// Create a .tmp file object with DataID=0 (expected pre-flush state)
+		fileID, _ := ig.New()
+		fileObj := &core.ObjectInfo{
+			ID:     fileID,
+			PID:    testBktID,
+			Type:   core.OBJ_TYPE_FILE,
+			Name:   "office-save.tmp",
+			Size:   0,
+			DataID: 0,
+			MTime:  core.Now(),
+		}
+		_, err = dma.PutObj(testCtx, testBktID, []*core.ObjectInfo{fileObj})
+		So(err, ShouldBeNil)
+
+		ra, err := NewRandomAccessor(ofs, fileID)
+		So(err, ShouldBeNil)
+		// NOTE: We intentionally do NOT call ra.Close() here.
+		// Close() may ForceFlush/cleanup and can be slow or block in certain environments,
+		// but this test's purpose is to validate read-after-write behavior BEFORE rename/flush.
+
+		// Write 1MiB sequentially (two 512KiB writes) to ensure we exercise the .tmp ChunkedFileWriter path.
+		total := 1 << 20
+		payload := make([]byte, total)
+		for i := range payload {
+			payload[i] = byte((i*31 + 7) & 0xff)
+		}
+		So(ra.Write(0, payload[:512<<10]), ShouldBeNil)
+		So(ra.Write(int64(512<<10), payload[512<<10:]), ShouldBeNil)
+
+		// Flush should be a no-op for .tmp files unless forced (rename path).
+		_, err = ra.Flush()
+		So(err, ShouldBeNil)
+
+		// Simulate the common state observed in logs: size is known, but DataID is still 0 before rename.
+		fileObjCache.Put(fileID, &core.ObjectInfo{
+			ID:     fileID,
+			PID:    testBktID,
+			Type:   core.OBJ_TYPE_FILE,
+			Name:   "office-save.tmp",
+			Size:   int64(total),
+			DataID: 0,
+			MTime:  core.Now(),
+			Mode:   0o644,
+		})
+
+		// RandomAccessor read must return written data (Office self-validate behavior).
+		got, err := ra.Read(0, 64)
+		So(err, ShouldBeNil)
+		So(bytes.Equal(got, payload[:64]), ShouldBeTrue)
+	})
+}
+
 // TestVFSWriteToFullPath tests WriteToFullPath function on mounted VFS
 // This test replicates the exact scenario where os.OpenFile is used to write files
 func TestVFSWriteToFullPath(t *testing.T) {
@@ -4837,6 +4928,70 @@ func TestXattrSetGetRemove(t *testing.T) {
 			errno3 := fileNode.Removexattr(ctx, attrName)
 			So(errno3, ShouldEqual, syscall.ENODATA)
 		})
+	})
+}
+
+func TestXattrDeleteIsDelayedUntilAtomicReplaceDeletion(t *testing.T) {
+	Convey("Unlink keeps xattr writable until delayed delete triggers", t, func() {
+		ensureTestUser(t)
+		handler := core.NewLocalHandler("", "")
+		ctx := context.Background()
+		ctx, userInfo, _, err := handler.Login(ctx, "orcas", "orcas")
+		So(err, ShouldBeNil)
+
+		ig := idgen.NewIDGen(nil, 0)
+		testBktID, _ := ig.New()
+		err = core.InitBucketDB(".", testBktID)
+		So(err, ShouldBeNil)
+
+		admin := core.NewLocalAdmin(".", ".")
+		bkt := &core.BucketInfo{ID: testBktID, Name: "test-xattr-delayed-delete-bucket", Type: 1, Quota: -1, ChunkSize: 10 << 20}
+		So(admin.PutBkt(ctx, []*core.BucketInfo{bkt}), ShouldBeNil)
+		// Ensure current user has permission to Delete (MDD) so delayed deletion can actually run.
+		if userInfo != nil && userInfo.ID > 0 {
+			So(admin.PutACL(ctx, testBktID, userInfo.ID, core.ALL), ShouldBeNil)
+		}
+
+		// Create filesystem (AtomicReplaceMgr default delay is 5s)
+		ofs := NewOrcasFS(handler, ctx, testBktID)
+
+		// Create directory + file
+		dirObj := &core.ObjectInfo{ID: core.NewID(), PID: testBktID, Type: core.OBJ_TYPE_DIR, Name: "dir", Size: 0, MTime: core.Now()}
+		_, err = handler.Put(ctx, testBktID, []*core.ObjectInfo{dirObj})
+		So(err, ShouldBeNil)
+
+		fileObj := &core.ObjectInfo{ID: core.NewID(), PID: dirObj.ID, Type: core.OBJ_TYPE_FILE, Name: "f.txt", Size: 0, MTime: core.Now()}
+		_, err = handler.Put(ctx, testBktID, []*core.ObjectInfo{fileObj})
+		So(err, ShouldBeNil)
+
+		dirNode := &OrcasNode{fs: ofs, objID: dirObj.ID}
+		dirNode.obj.Store(dirObj)
+		fileNode := &OrcasNode{fs: ofs, objID: fileObj.ID}
+		fileNode.obj.Store(fileObj)
+
+		// Set an xattr before unlink
+		attrName := "user.delayed.delete.test"
+		So(fileNode.Setxattr(ctx, attrName, []byte("v1"), 0), ShouldEqual, syscall.Errno(0))
+
+		// Unlink schedules delayed permanent deletion (5s) after recycle marking.
+		So(dirNode.Unlink(ctx, fileObj.Name), ShouldEqual, syscall.Errno(0))
+		So(ofs.atomicReplaceMgr.GetPendingCount(), ShouldBeGreaterThanOrEqualTo, 1)
+
+		// Immediately after unlink (before delayed delete triggers), xattr should still be writable/readable.
+		So(fileNode.Setxattr(ctx, attrName, []byte("v2"), 0), ShouldEqual, syscall.Errno(0))
+		buf := make([]byte, 32)
+		n, errno := fileNode.Getxattr(ctx, attrName, buf)
+		So(errno, ShouldEqual, syscall.Errno(0))
+		So(string(buf[:n]), ShouldEqual, "v2")
+
+		// After delayed deletion triggers (>5s), file should be permanently deleted.
+		// Invalidate node cache to avoid reading stale obj from in-memory cache.
+		time.Sleep(6 * time.Second)
+		// Allow worker tick to run executeDeletion.
+		time.Sleep(1500 * time.Millisecond)
+		fileNode.invalidateObj()
+		_, errno2 := fileNode.Getxattr(ctx, attrName, buf)
+		So(errno2, ShouldEqual, syscall.ENOENT)
 	})
 }
 

@@ -592,6 +592,116 @@ type ChunkedFileWriter struct {
 	ra              *RandomAccessor      // Reference to parent RandomAccessor for cache updates
 }
 
+// ReadAt reads plaintext file data from ChunkedFileWriter's in-memory buffers.
+//
+// This is critical for Windows/Office workflows where a .tmp file is written and then read back
+// for validation BEFORE the .tmp file is renamed (and thus before we force-flush chunks to disk).
+//
+// Behavior:
+// - Returns data from in-memory chunk buffers when present.
+// - If a chunk buffer is missing, it best-effort falls back to reading the chunk from disk.
+// - For bytes that cannot be satisfied from buffer or disk, it returns zeros (sparse semantics).
+func (cw *ChunkedFileWriter) ReadAt(offset int64, size int) ([]byte, error) {
+	if cw == nil || cw.fs == nil || size <= 0 || offset < 0 {
+		return []byte{}, nil
+	}
+
+	fileSize := atomic.LoadInt64(&cw.size)
+	if offset >= fileSize {
+		return []byte{}, nil
+	}
+
+	// Clamp read size to file size
+	readSize := int64(size)
+	if offset+readSize > fileSize {
+		readSize = fileSize - offset
+	}
+	if readSize <= 0 {
+		return []byte{}, nil
+	}
+
+	out := make([]byte, readSize) // zero-filled by default
+
+	chunkSize := cw.chunkSize
+	if chunkSize <= 0 {
+		chunkSize = DefaultChunkSize
+	}
+
+	// Helper to get a chunk buffer snapshot
+	getChunkSnapshot := func(sn int) (data []byte, ok bool) {
+		cw.mu.Lock()
+		buf := cw.chunks[sn]
+		cw.mu.Unlock()
+		if buf == nil {
+			return nil, false
+		}
+		buf.mu.Lock()
+		defer buf.mu.Unlock()
+		if len(buf.data) == 0 {
+			return nil, false
+		}
+		// Note: we copy only the requested region later; here we just expose backing slice safely
+		return buf.data, true
+	}
+
+	var pos int64
+	for pos < readSize {
+		absOff := offset + pos
+		sn := int(absOff / chunkSize)
+		offInChunk := absOff % chunkSize
+
+		remainInChunk := chunkSize - offInChunk
+		remainTotal := readSize - pos
+		toRead := remainInChunk
+		if remainTotal < toRead {
+			toRead = remainTotal
+		}
+
+		// 1) Try in-memory buffer
+		if bufData, ok := getChunkSnapshot(sn); ok && int64(len(bufData)) > offInChunk {
+			maxAvail := int64(len(bufData)) - offInChunk
+			n := toRead
+			if maxAvail < n {
+				n = maxAvail
+			}
+			if n > 0 {
+				copy(out[pos:pos+n], bufData[offInChunk:offInChunk+n])
+				pos += n
+				continue
+			}
+		}
+
+		// 2) Best-effort fallback: read from disk chunk
+		// Note: For tmp files pre-rename, chunk may not exist on disk yet. That's fine.
+		diskData, err := cw.fs.h.GetData(cw.fs.c, cw.fs.bktID, cw.dataID, sn)
+		if err == nil && len(diskData) > 0 {
+			// Decode if needed (encryption/compression) using DataInfo.Kind snapshot.
+			// For pre-flush tmp reads we typically want plaintext. If diskData is encoded,
+			// decodeChunkData will return plaintext; if it fails, we fall back to raw.
+			kind := uint32(0)
+			if cw.dataInfo != nil {
+				kind = cw.dataInfo.Kind
+			}
+			decoded := cw.decodeChunkData(diskData, kind)
+			if int64(len(decoded)) > offInChunk {
+				maxAvail := int64(len(decoded)) - offInChunk
+				n := toRead
+				if maxAvail < n {
+					n = maxAvail
+				}
+				if n > 0 {
+					copy(out[pos:pos+n], decoded[offInChunk:offInChunk+n])
+				}
+			}
+		}
+
+		// 3) Unfilled region remains zeros
+		pos += toRead
+	}
+
+	return out, nil
+}
+
 // writeRange represents a contiguous range of written data within a chunk
 type writeRange struct {
 	start int64 // Start offset (inclusive)
@@ -2371,28 +2481,6 @@ func (ra *RandomAccessor) tryInitSeqBuffer(fileObj *core.ObjectInfo, offset int6
 // For .tmp files, we don't know the final file size until rename (removing .tmp extension),
 // so we use random write mode first, and the decision will be made during Flush() based on final file size.
 func (ra *RandomAccessor) Write(offset int64, data []byte) error {
-	// DEBUG: Print hex data for debugging
-	if len(data) > 0 {
-		sampleSize := 64 // Print first 64 bytes
-		if len(data) < sampleSize {
-			sampleSize = len(data)
-		}
-		hexData := hex.EncodeToString(data[:sampleSize])
-		DebugLog("[VFS RandomAccessor Write] Writing data (hex): fileID=%d, offset=%d, size=%d, first%dBytes=%s",
-			ra.fileID, offset, len(data), sampleSize, hexData)
-		// Check if all zeros
-		allZeros := true
-		for i := 0; i < len(data) && i < 1024; i++ {
-			if data[i] != 0 {
-				allZeros = false
-				break
-			}
-		}
-		if allZeros && len(data) >= 1024 {
-			DebugLog("[VFS RandomAccessor Write] WARNING: Writing all-zero data: fileID=%d, offset=%d, size=%d", ra.fileID, offset, len(data))
-		}
-	}
-
 	// Step 1: Get fileObj (cached)
 	var fileObj *core.ObjectInfo
 	fileObjValue := ra.fileObj.Load()
@@ -3727,12 +3815,6 @@ func (ra *RandomAccessor) flushSequentialChunkLocked() error {
 	copy(chunkData, ra.seqBuffer.buffer)
 	isFirstChunk := ra.seqBuffer.sn == 0
 
-	// Debug: log sample bytes of first chunk to detect unexpected zeros in buffered data.
-	if isFirstChunk && len(chunkData) >= 64 {
-		DebugLog("[VFS flushSequentialChunk] First chunk buffered sample (hex): fileID=%d, dataID=%d, sn=%d, first64Bytes=%s",
-			ra.fileID, ra.seqBuffer.dataID, ra.seqBuffer.sn, hex.EncodeToString(chunkData[:64]))
-	}
-
 	// Process first chunk: check file type and compression effect using ShouldCompressFile
 	if isFirstChunk {
 		cmprWay := getCmprWayForFS(ra.fs)
@@ -4647,6 +4729,21 @@ func (ra *RandomAccessor) Read(offset int64, size int) ([]byte, error) {
 	if hasJournal {
 		journalIsSparse = ra.journal.isSparse
 	}
+
+	// PRIORITY 2: If there is no journal, but we have an active ChunkedFileWriter (e.g., .tmp file),
+	// read from the in-memory writer buffers so reads observe their own writes before rename/flush.
+	// This is essential for Office temp-file validation patterns.
+	if val := ra.chunkedWriter.Load(); val != nil && val != clearedChunkedWriterMarker {
+		if cw, ok := val.(*ChunkedFileWriter); ok && cw != nil {
+			// Only serve from writer for tmp/sparse/seq modes where it represents the latest data.
+			// For .tmp files, this is the core behavior we need.
+			data, err := cw.ReadAt(offset, size)
+			if err != nil {
+				return nil, err
+			}
+			return data, nil
+		}
+	}
 	ra.journalMu.RUnlock()
 
 	if hasJournal {
@@ -5112,28 +5209,6 @@ func (ra *RandomAccessor) Read(offset int64, size int) ([]byte, error) {
 			// offset is beyond file size, return empty data
 			fileData = []byte{}
 			DebugLog("[VFS Read] offset >= actualFileSize, returning empty data: fileID=%d, offset=%d, actualFileSize=%d", ra.fileID, offset, actualFileSize)
-		}
-
-		// DEBUG: Print hex data for debugging
-		if len(fileData) > 0 {
-			sampleSize := 64 // Print first 64 bytes
-			if len(fileData) < sampleSize {
-				sampleSize = len(fileData)
-			}
-			hexData := hex.EncodeToString(fileData[:sampleSize])
-			DebugLog("[VFS Read] Read data (hex): fileID=%d, offset=%d, size=%d, first%dBytes=%s",
-				ra.fileID, offset, len(fileData), sampleSize, hexData)
-			// Check if all zeros
-			allZeros := true
-			for i := 0; i < len(fileData) && i < 1024; i++ {
-				if fileData[i] != 0 {
-					allZeros = false
-					break
-				}
-			}
-			if allZeros && len(fileData) >= 1024 {
-				DebugLog("[VFS Read] WARNING: Read all-zero data: fileID=%d, offset=%d, size=%d", ra.fileID, offset, len(fileData))
-			}
 		}
 
 		return fileData, nil
@@ -7691,49 +7766,7 @@ func (cr *chunkReader) ReadAt(buf []byte, offset int64) (int, error) {
 			continue
 		}
 
-		// CRITICAL: Verify chunkData is not empty and contains actual data
-		// Log first few bytes to help debug if data is all zeros
-		if len(chunkData) > 0 && currentOffsetInChunk < int64(len(chunkData)) {
-			// Check if the data we're about to read is all zeros (for debugging)
-			readEnd := currentOffsetInChunk + toRead
-			if readEnd > int64(len(chunkData)) {
-				readEnd = int64(len(chunkData))
-			}
-			readStart := currentOffsetInChunk
-			if readStart < readEnd {
-				// Sample first 16 bytes to check if data is all zeros
-				sampleEnd := readStart + 16
-				if sampleEnd > readEnd {
-					sampleEnd = readEnd
-				}
-				allZeros := true
-				for i := readStart; i < sampleEnd; i++ {
-					if chunkData[i] != 0 {
-						allZeros = false
-						break
-					}
-				}
-				if allZeros && readEnd-readStart >= 16 {
-					DebugLog("[VFS chunkReader ReadAt] WARNING: Chunk data appears to be all zeros: dataID=%d, sn=%d, offsetInChunk=%d, chunkLen=%d, sampleLen=%d",
-						cr.dataID, currentSn, currentOffsetInChunk, len(chunkData), sampleEnd-readStart)
-				}
-			}
-		}
-
 		copy(buf[totalRead:totalRead+int(toRead)], chunkData[currentOffsetInChunk:currentOffsetInChunk+toRead])
-
-		// DEBUG: Print hex data for debugging
-		if toRead > 0 && totalRead+int(toRead) <= len(buf) {
-			sampleSize := int64(64)
-			if toRead < sampleSize {
-				sampleSize = toRead
-			}
-			if totalRead+int(sampleSize) <= len(buf) {
-				hexData := hex.EncodeToString(buf[totalRead : totalRead+int(sampleSize)])
-				DebugLog("[VFS chunkReader ReadAt] Read from chunk (hex): dataID=%d, sn=%d, chunkSize=%d, toRead=%d, totalRead=%d, offsetInChunk=%d, first%dBytes=%s",
-					cr.dataID, currentSn, len(chunkData), toRead, totalRead+int(toRead), currentOffsetInChunk, sampleSize, hexData)
-			}
-		}
 
 		DebugLog("[VFS chunkReader ReadAt] Read from chunk: dataID=%d, sn=%d, chunkSize=%d, toRead=%d, totalRead=%d, remaining=%d, offsetInChunk=%d",
 			cr.dataID, currentSn, len(chunkData), toRead, totalRead+int(toRead), remaining-toRead, currentOffsetInChunk)

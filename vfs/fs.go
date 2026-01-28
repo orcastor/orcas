@@ -3894,16 +3894,9 @@ func (n *OrcasNode) readImpl(ctx context.Context, dest []byte, off int64) (fuse.
 	DebugLog("[VFS Read] 📄 Step 4: Reading file: objID=%d, DataID=%d, Size=%d, offset=%d, requestedSize=%d, fileSize=%d",
 		obj.ID, obj.DataID, obj.Size, off, len(dest), obj.Size)
 
-	if obj.DataID == 0 || obj.DataID == core.EmptyDataID {
-		// Empty file
-		DebugLog("[VFS Read] ⚠️ Branch: Empty file (no DataID), returning empty: objID=%d, DataID=%d (EmptyDataID=%d), Size=%d",
-			obj.ID, obj.DataID, core.EmptyDataID, obj.Size)
-		return fuse.ReadResultData(nil), 0
-	}
-
-	// CRITICAL FIX: Check if there's an active RandomAccessor with journal
-	// If so, use it to read (applies journal overlay on top of base data)
-	// This is essential for Office files that read back their own writes before flushing
+	// CRITICAL: Check for an active RandomAccessor BEFORE treating DataID==0 as empty.
+	// Windows/Office commonly writes a .tmp file and reads it back for validation before rename/flush.
+	// In that window, the file's DataID may still be 0 (by design), but the RandomAccessor has the data.
 	DebugLog("[VFS Read] 🔍 Step 5: Checking for active RandomAccessor with journal: objID=%d", obj.ID)
 	if n.fs != nil {
 		if ra := n.fs.getRandomAccessorByFileID(obj.ID); ra != nil {
@@ -3929,14 +3922,33 @@ func (n *OrcasNode) readImpl(ctx context.Context, dest []byte, off int64) (fuse.
 
 				DebugLog("[VFS Read] ✅ Branch: Successfully read with journal overlay: objID=%d, offset=%d, requested=%d, read=%d", obj.ID, off, len(dest), nRead)
 				return fuse.ReadResultData(resultData), 0
-			} else {
-				DebugLog("[VFS Read] ⏭️ Branch: RandomAccessor found but no journal, using DataReader: objID=%d", obj.ID)
 			}
+
+			// No journal: still attempt to read via RandomAccessor.
+			// RandomAccessor may serve from ChunkedFileWriter buffers for .tmp files.
+			DebugLog("[VFS Read] ✅ Branch: Using RandomAccessor without journal: objID=%d, offset=%d, size=%d", obj.ID, off, len(dest))
+			data, err := ra.Read(off, len(dest))
+			if err != nil && err != io.EOF {
+				DebugLog("[VFS Read] ❌ Branch: RandomAccessor read failed (no journal): objID=%d, offset=%d, size=%d, error=%v", obj.ID, off, len(dest), err)
+				return nil, syscall.EIO
+			}
+			nRead := copy(dest, data)
+			resultData := make([]byte, nRead)
+			copy(resultData, dest[:nRead])
+			DebugLog("[VFS Read] ✅ Branch: Successfully read via RandomAccessor (no journal): objID=%d, offset=%d, requested=%d, read=%d", obj.ID, off, len(dest), nRead)
+			return fuse.ReadResultData(resultData), 0
 		} else {
 			DebugLog("[VFS Read] ⏭️ Branch: No active RandomAccessor, using DataReader: objID=%d", obj.ID)
 		}
 	} else {
 		DebugLog("[VFS Read] ⏭️ Branch: fs is nil, using DataReader: objID=%d", obj.ID)
+	}
+
+	if obj.DataID == 0 || obj.DataID == core.EmptyDataID {
+		// Empty file (no DataID and no active RandomAccessor to serve data)
+		DebugLog("[VFS Read] ⚠️ Branch: Empty file (no DataID), returning empty: objID=%d, DataID=%d (EmptyDataID=%d), Size=%d",
+			obj.ID, obj.DataID, core.EmptyDataID, obj.Size)
+		return fuse.ReadResultData(nil), 0
 	}
 
 	// No active journal, use regular dataReader (chunkReader)
@@ -4520,11 +4532,41 @@ func (n *OrcasNode) Setattr(ctx context.Context, f fs.FileHandle, in *fuse.SetAt
 
 	// Update object information to database if needed
 	if needUpdate {
-		// If mode or mtime changed, update through Handler
-		_, err := n.fs.h.Put(n.fs.c, n.fs.bktID, []*core.ObjectInfo{obj})
-		if err != nil {
-			DebugLog("[VFS Setattr] ERROR: Failed to update object: objID=%d, error=%v", n.objID, err)
-			return syscall.EIO
+		// CRITICAL: Use SetObj for updates.
+		// Handler.Put uses INSERT IGNORE semantics and may NOT update existing rows,
+		// which can manifest as "Setattr write failed" (changes appear to be ignored).
+		fields := make([]string, 0, 2)
+		if in.Valid&fuse.FATTR_MODE != 0 && obj.Mode != oldMode {
+			fields = append(fields, "md")
+		}
+		if in.Valid&fuse.FATTR_MTIME != 0 {
+			fields = append(fields, "m")
+		}
+
+		if lh, ok := n.fs.h.(*core.LocalHandler); ok && lh.MetadataAdapter() != nil && len(fields) > 0 {
+			updateObj := &core.ObjectInfo{
+				ID:     obj.ID,
+				PID:    obj.PID,
+				Type:   obj.Type,
+				Name:   obj.Name,
+				DataID: obj.DataID,
+				Size:   obj.Size,
+				MTime:  obj.MTime,
+				Mode:   obj.Mode,
+			}
+			if err := lh.MetadataAdapter().SetObj(n.fs.c, n.fs.bktID, fields, updateObj); err != nil {
+				DebugLog("[VFS Setattr] ERROR: Failed to update object via SetObj: objID=%d, fields=%v, error=%v", n.objID, fields, err)
+				return syscall.EIO
+			}
+			// Ensure obj reflects persisted values (and keep reference stable below)
+			obj = updateObj
+		} else {
+			// Fallback: keep old behavior for non-LocalHandler (best effort)
+			_, err := n.fs.h.Put(n.fs.c, n.fs.bktID, []*core.ObjectInfo{obj})
+			if err != nil {
+				DebugLog("[VFS Setattr] ERROR: Failed to update object (fallback Put): objID=%d, error=%v", n.objID, err)
+				return syscall.EIO
+			}
 		}
 		DebugLog("[VFS Setattr] Successfully updated object in database: objID=%d, mode=%d, mtime=%d", n.objID, obj.Mode, obj.MTime)
 
