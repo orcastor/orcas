@@ -137,6 +137,9 @@ func (m *mockHandler) Rename(core.Ctx, int64, int64, string) error  { panic("not
 func (m *mockHandler) MoveTo(core.Ctx, int64, int64, int64) error   { panic("not used") }
 func (m *mockHandler) Recycle(core.Ctx, int64, int64) error         { panic("not used") }
 func (m *mockHandler) Delete(core.Ctx, int64, int64) error          { panic("not used") }
+func (m *mockHandler) DeleteBatch(core.Ctx, int64, []int64) map[int64]error {
+	panic("not used")
+}
 func (m *mockHandler) CleanRecycleBin(core.Ctx, int64, int64) error { panic("not used") }
 func (m *mockHandler) ListRecycleBin(core.Ctx, int64, core.ListOptions) ([]*core.ObjectInfo, int64, string, error) {
 	panic("not used")
@@ -4115,6 +4118,121 @@ func TestTempFileWriterMemoryEfficiency(t *testing.T) {
 	})
 }
 
+// TestChunkedFileWriterMemoryLimit tests that ChunkedFileWriter respects MaxConcurrentChunks limit
+func TestChunkedFileWriterMemoryLimit(t *testing.T) {
+	Convey("Test ChunkedFileWriter memory limit with scattered writes", t, func() {
+		ig := idgen.NewIDGen(nil, 0)
+		testBktID, _ := ig.New()
+		err := core.InitBucketDB(".", testBktID)
+		So(err, ShouldBeNil)
+		defer os.Remove(fmt.Sprintf("./%d.db", testBktID))
+
+		dma := &core.DefaultMetadataAdapter{
+			DefaultBaseMetadataAdapter: &core.DefaultBaseMetadataAdapter{},
+			DefaultDataMetadataAdapter: &core.DefaultDataMetadataAdapter{},
+		}
+		dma.DefaultBaseMetadataAdapter.SetPath(".")
+		dma.DefaultDataMetadataAdapter.SetPath(".")
+		dda := &core.DefaultDataAdapter{}
+
+		lh := core.NewLocalHandler("", "").(*core.LocalHandler)
+		lh.SetAdapter(dma, dda)
+
+		testCtx, userInfo, _, err := lh.Login(context.Background(), "orcas", "orcas")
+		So(err, ShouldBeNil)
+
+		// Create bucket
+		bucket := &core.BucketInfo{
+			ID:        testBktID,
+			Name:      "test_bucket_memory_limit",
+			Type:      1,
+			Quota:     1000000000, // 1GB quota
+			Used:      0,
+			RealUsed:  0,
+			ChunkSize: 10 * 1024 * 1024, // 10MB chunk size
+		}
+		So(dma.PutBkt(testCtx, []*core.BucketInfo{bucket}), ShouldBeNil)
+		// Set ACL to allow access to the bucket
+		err = dma.PutACL(testCtx, testBktID, userInfo.ID, core.ALL)
+		So(err, ShouldBeNil)
+
+		// Create filesystem
+		ofs := NewOrcasFS(lh, testCtx, testBktID)
+
+		// Create test file
+		fileID, _ := ig.New()
+		fileObj := &core.ObjectInfo{
+			ID:    fileID,
+			PID:   testBktID,
+			Type:  core.OBJ_TYPE_FILE,
+			Name:  "memory_limit_test.tmp",
+			Size:  200 * 1024 * 1024, // 200MB sparse file
+			MTime: core.Now(),
+		}
+		_, err = dma.PutObj(testCtx, testBktID, []*core.ObjectInfo{fileObj})
+		So(err, ShouldBeNil)
+
+		// Create RandomAccessor
+		ra, err := NewRandomAccessor(ofs, fileID)
+		So(err, ShouldBeNil)
+		defer ra.Close()
+
+		// Memory monitoring
+		var memStatsBefore, memStatsPeak runtime.MemStats
+		runtime.GC()
+		runtime.ReadMemStats(&memStatsBefore)
+
+		// Write to scattered chunks (simulating random access pattern)
+		// This should trigger chunk eviction when MaxConcurrentChunks is exceeded
+		chunkSize := int64(10 * 1024 * 1024) // 10MB
+		writeSize := 512 * 1024              // 512KB per write
+		numChunks := 15                      // Write to 15 different chunks (exceeds MaxConcurrentChunks=10)
+
+		t.Logf("Writing to %d scattered chunks (MaxConcurrentChunks=%d)", numChunks, MaxConcurrentChunks)
+
+		for i := 0; i < numChunks; i++ {
+			// Write to different chunks in scattered order
+			chunkIndex := (i * 3) % numChunks // Scattered pattern
+			offset := int64(chunkIndex) * chunkSize
+			data := make([]byte, writeSize)
+			for j := range data {
+				data[j] = byte(chunkIndex)
+			}
+
+			err := ra.Write(offset, data)
+			So(err, ShouldBeNil)
+
+			// Monitor memory
+			var currentMem runtime.MemStats
+			runtime.ReadMemStats(&currentMem)
+			if currentMem.Alloc > memStatsPeak.Alloc {
+				memStatsPeak = currentMem
+			}
+
+			t.Logf("  Written chunk %d at offset %d, current memory: %.2f MB",
+				chunkIndex, offset, float64(currentMem.Alloc)/(1024*1024))
+		}
+
+		// Calculate memory usage
+		peakMemoryMB := float64(memStatsPeak.Alloc-memStatsBefore.Alloc) / (1024 * 1024)
+
+		t.Logf("Memory Statistics:")
+		t.Logf("  Memory before: %.2f MB", float64(memStatsBefore.Alloc)/(1024*1024))
+		t.Logf("  Memory peak: %.2f MB", float64(memStatsPeak.Alloc)/(1024*1024))
+		t.Logf("  Peak memory used: %.2f MB", peakMemoryMB)
+
+		// Memory should be bounded by MaxConcurrentChunks * chunkSize + overhead
+		// MaxConcurrentChunks=10, chunkSize=10MB, so max ~100MB + overhead
+		// Allow 150MB for overhead (buffers, metadata, etc.)
+		expectedMaxMemory := float64(MaxConcurrentChunks*10 + 50) // MB
+		t.Logf("  Expected max memory: %.2f MB (MaxConcurrentChunks=%d × 10MB + 50MB overhead)",
+			expectedMaxMemory, MaxConcurrentChunks)
+
+		So(peakMemoryMB, ShouldBeLessThan, expectedMaxMemory)
+		t.Logf("✅ Memory limit test passed: peak %.2f MB < expected max %.2f MB", peakMemoryMB, expectedMaxMemory)
+	})
+}
+
 // TestOnRootDeletedImmediateUnmount tests immediate unmount in OnRootDeleted callback
 func TestOnRootDeletedImmediateUnmount(t *testing.T) {
 	Convey("Test OnRootDeleted callback with immediate Unmount", t, func() {
@@ -6577,6 +6695,248 @@ func TestVFSReadAfterDoubleFlush(t *testing.T) {
 	})
 }
 
+// TestVFSCase11SparseWriteRead simulates the scenario from vfs/cases/11.log:
+// - File initially has size=0, DataID=0
+// - A single write happens at a non-zero offset (sparse write), final size = offset+len(data)
+// - After Flush + Close, a new RandomAccessor should be able to read back the written region correctly.
+func TestVFSCase11SparseWriteRead(t *testing.T) {
+	Convey("Sparse write at non-zero offset then read back (case 11.log reproduction)", t, func() {
+		ensureTestUser(t)
+		handler := core.NewLocalHandler("", "")
+		ctx := context.Background()
+		ctx, _, _, err := handler.Login(ctx, "orcas", "orcas")
+		So(err, ShouldBeNil)
+
+		ig := idgen.NewIDGen(nil, 0)
+		testBktID, _ := ig.New()
+		err = core.InitBucketDB(".", testBktID)
+		So(err, ShouldBeNil)
+
+		// Bucket with 10MB chunk size (matches production default for large files)
+		admin := core.NewLocalAdmin(".", ".")
+		bkt := &core.BucketInfo{
+			ID:        testBktID,
+			Name:      "test-case11-sparse-bucket",
+			Type:      1,
+			Quota:     -1,
+			ChunkSize: 10 << 20,
+		}
+		So(admin.PutBkt(ctx, []*core.BucketInfo{bkt}), ShouldBeNil)
+
+		// Enable AES256 so path goes through encrypted large-file pipeline
+		cfg := &core.Config{
+			EndecWay: core.DATA_ENDEC_AES256,
+			EndecKey: "test-key-32-bytes-long----------",
+		}
+		ofs := NewOrcasFSWithConfig(handler, ctx, testBktID, cfg)
+
+		// Create directory + file, name mirrors 11.log case
+		dirObj := &core.ObjectInfo{
+			ID:    core.NewID(),
+			PID:   testBktID,
+			Type:  core.OBJ_TYPE_DIR,
+			Name:  "dir",
+			Size:  0,
+			MTime: core.Now(),
+		}
+		_, err = handler.Put(ctx, testBktID, []*core.ObjectInfo{dirObj})
+		So(err, ShouldBeNil)
+
+		fileObj := &core.ObjectInfo{
+			ID:    core.NewID(),
+			PID:   dirObj.ID,
+			Type:  core.OBJ_TYPE_FILE,
+			Name:  "252a4291b9b4c0e4.jpg",
+			Size:  0,
+			MTime: core.Now(),
+		}
+		_, err = handler.Put(ctx, testBktID, []*core.ObjectInfo{fileObj})
+		So(err, ShouldBeNil)
+
+		// Case 11 pattern: single write at offset 393216, size 56996 -> final size 450212
+		const (
+			writeOffset = int64(393216) // 384KB
+			writeSize   = 56996
+		)
+		finalSize := writeOffset + writeSize
+
+		ra, err := NewRandomAccessor(ofs, fileObj.ID)
+		So(err, ShouldBeNil)
+		ofs.registerRandomAccessor(fileObj.ID, ra)
+
+		// Prepare deterministic payload
+		payload := make([]byte, writeSize)
+		for i := 0; i < writeSize; i++ {
+			payload[i] = byte(i % 251)
+		}
+
+		// Sparse write at non-zero offset
+		So(ra.Write(writeOffset, payload), ShouldBeNil)
+
+		// Flush and verify in RA's view
+		_, err = ra.Flush()
+		So(err, ShouldBeNil)
+
+		fileAfterFlush, err := ra.getFileObj()
+		So(err, ShouldBeNil)
+		So(fileAfterFlush.Size, ShouldEqual, finalSize)
+		So(fileAfterFlush.DataID, ShouldNotEqual, int64(0))
+		So(fileAfterFlush.DataID, ShouldNotEqual, core.EmptyDataID)
+
+		ofs.unregisterRandomAccessor(fileObj.ID, ra)
+		So(ra.Close(), ShouldBeNil)
+
+		// New RandomAccessor simulating a fresh Open after the write completed
+		ra2, err := NewRandomAccessor(ofs, fileObj.ID)
+		So(err, ShouldBeNil)
+		ofs.registerRandomAccessor(fileObj.ID, ra2)
+
+		// Read back exactly the written region
+		readBack, err := ra2.Read(writeOffset, writeSize)
+		So(err, ShouldBeNil)
+		So(len(readBack), ShouldEqual, writeSize)
+		So(bytes.Equal(readBack, payload), ShouldBeTrue)
+
+		// Also verify that reading the full file returns at least up to finalSize
+		fullRead, err := ra2.Read(0, int(finalSize))
+		So(err, ShouldBeNil)
+		So(len(fullRead), ShouldEqual, int(finalSize))
+		So(bytes.Equal(fullRead[writeOffset:writeOffset+writeSize], payload), ShouldBeTrue)
+
+		ofs.unregisterRandomAccessor(fileObj.ID, ra2)
+		So(ra2.Close(), ShouldBeNil)
+	})
+}
+
+// TestVFSCase11LargeFileWriteRead512KB simulates a large (~23MB) file written in 512KB segments.
+// This matches the "write every 512KB" behavior you described for the real-world case:
+// - Sequential writes from offset 0, step = 512KB
+// - Encrypted bucket (AES256) with 10MB chunk size
+// - After Flush + Close, a new RandomAccessor should read back the entire file correctly.
+func TestVFSCase11LargeFileWriteRead512KB(t *testing.T) {
+	Convey("Large encrypted file written in 512KB chunks then read back", t, func() {
+		ensureTestUser(t)
+		handler := core.NewLocalHandler("", "")
+		ctx := context.Background()
+		ctx, _, _, err := handler.Login(ctx, "orcas", "orcas")
+		So(err, ShouldBeNil)
+
+		ig := idgen.NewIDGen(nil, 0)
+		testBktID, _ := ig.New()
+		err = core.InitBucketDB(".", testBktID)
+		So(err, ShouldBeNil)
+
+		admin := core.NewLocalAdmin(".", ".")
+		bkt := &core.BucketInfo{
+			ID:        testBktID,
+			Name:      "test-case11-large-512k-bucket",
+			Type:      1,
+			Quota:     -1,
+			ChunkSize: 10 << 20, // 10MB
+		}
+		So(admin.PutBkt(ctx, []*core.BucketInfo{bkt}), ShouldBeNil)
+
+		cfg := &core.Config{
+			EndecWay: core.DATA_ENDEC_AES256,
+			EndecKey: "test-key-32-bytes-long----------",
+		}
+		ofs := NewOrcasFSWithConfig(handler, ctx, testBktID, cfg)
+
+		dirObj := &core.ObjectInfo{
+			ID:    core.NewID(),
+			PID:   testBktID,
+			Type:  core.OBJ_TYPE_DIR,
+			Name:  "dir",
+			Size:  0,
+			MTime: core.Now(),
+		}
+		_, err = handler.Put(ctx, testBktID, []*core.ObjectInfo{dirObj})
+		So(err, ShouldBeNil)
+
+		fileObj := &core.ObjectInfo{
+			ID:    core.NewID(),
+			PID:   dirObj.ID,
+			Type:  core.OBJ_TYPE_FILE,
+			Name:  "large-23mb.dat",
+			Size:  0,
+			MTime: core.Now(),
+		}
+		_, err = handler.Put(ctx, testBktID, []*core.ObjectInfo{fileObj})
+		So(err, ShouldBeNil)
+
+		ra, err := NewRandomAccessor(ofs, fileObj.ID)
+		So(err, ShouldBeNil)
+		ofs.registerRandomAccessor(fileObj.ID, ra)
+
+		const (
+			totalSize = int64(23 * 1024 * 1024)  // ~23MB
+			stepSize  = int64(512 * 1024)        // 512KB per write
+		)
+
+		// Generate expected data buffer
+		expected := make([]byte, totalSize)
+		for i := int64(0); i < totalSize; i++ {
+			expected[i] = byte((i * 31) % 251) // deterministic pattern
+		}
+
+		// Perform sequential writes in 512KB steps
+		for offset := int64(0); offset < totalSize; offset += stepSize {
+			chunkLen := stepSize
+			if offset+chunkLen > totalSize {
+				chunkLen = totalSize - offset
+			}
+			chunk := expected[offset : offset+chunkLen]
+			So(ra.Write(offset, chunk), ShouldBeNil)
+		}
+
+		// Flush and verify file object from RA's perspective
+		_, err = ra.Flush()
+		So(err, ShouldBeNil)
+
+		fileAfterFlush, err := ra.getFileObj()
+		So(err, ShouldBeNil)
+		So(fileAfterFlush.Size, ShouldEqual, totalSize)
+		So(fileAfterFlush.DataID, ShouldNotEqual, int64(0))
+		So(fileAfterFlush.DataID, ShouldNotEqual, core.EmptyDataID)
+
+		ofs.unregisterRandomAccessor(fileObj.ID, ra)
+		So(ra.Close(), ShouldBeNil)
+
+		// New RandomAccessor, full-file read verification
+		ra2, err := NewRandomAccessor(ofs, fileObj.ID)
+		So(err, ShouldBeNil)
+		ofs.registerRandomAccessor(fileObj.ID, ra2)
+
+		readBack, err := ra2.Read(0, int(totalSize))
+		So(err, ShouldBeNil)
+		So(len(readBack), ShouldEqual, int(totalSize))
+		So(bytes.Equal(readBack, expected), ShouldBeTrue)
+
+		// Also verify a few random windows within the file
+		windows := []struct {
+			offset int64
+			size   int
+		}{
+			{0, 256 * 1024},
+			{5 * 1024 * 1024, 512 * 1024},
+			{10 * 1024 * 1024, 512 * 1024},
+			{18 * 1024 * 1024, 256 * 1024},
+		}
+		for _, w := range windows {
+			if w.offset+int64(w.size) > totalSize {
+				continue
+			}
+			data, err := ra2.Read(w.offset, w.size)
+			So(err, ShouldBeNil)
+			So(len(data), ShouldEqual, w.size)
+			So(bytes.Equal(data, expected[w.offset:w.offset+int64(w.size)]), ShouldBeTrue)
+		}
+
+		ofs.unregisterRandomAccessor(fileObj.ID, ra2)
+		So(ra2.Close(), ShouldBeNil)
+	})
+}
+
 // TestVFSReadAfterSmallWriteDataInfoPersisted reproduces vfs/10.log:
 // write a tiny encrypted file (2 bytes) → Flush triggers flushSequentialChunk, then lands in
 // "No new data to merge" path because file object Size/DataID were updated earlier.
@@ -6782,5 +7142,160 @@ func TestVFSSetObjUpdatesSizeAndMTime(t *testing.T) {
 		// Verify other fields still unchanged
 		So(updatedObj2.Name, ShouldEqual, initialName)
 		So(updatedObj2.Mode, ShouldEqual, initialMode)
+	})
+}
+
+// TestVFSCase11OutOfOrderSparseWrite reproduces the bug from case 11.log where:
+// 1. A new file is created with DataID=0
+// 2. First write is at a non-zero offset (e.g., offset=393216)
+// 3. ChunkedFileWriter creates a new DataID
+// 4. ChunkedFileWriter tries to read chunk from disk but fails because the file doesn't exist yet
+// 5. Then a second write at offset=0 happens
+// 6. After flush, reading the file should return correct data
+//
+// The bug was that ChunkedFileWriter tried to read from disk even for newly created DataIDs,
+// which would always fail because no data file exists yet.
+func TestVFSCase11OutOfOrderSparseWrite(t *testing.T) {
+	Convey("Out-of-order sparse write: write at end first, then at beginning (case 11.log reproduction)", t, func() {
+		ensureTestUser(t)
+		handler := core.NewLocalHandler("", "")
+		ctx := context.Background()
+		ctx, _, _, err := handler.Login(ctx, "orcas", "orcas")
+		So(err, ShouldBeNil)
+
+		ig := idgen.NewIDGen(nil, 0)
+		testBktID, _ := ig.New()
+		err = core.InitBucketDB(".", testBktID)
+		So(err, ShouldBeNil)
+
+		admin := core.NewLocalAdmin(".", ".")
+		bkt := &core.BucketInfo{
+			ID:        testBktID,
+			Name:      "test-case11-ooo-sparse-bucket",
+			Type:      1,
+			Quota:     -1,
+			ChunkSize: 10 << 20, // 10MB
+		}
+		So(admin.PutBkt(ctx, []*core.BucketInfo{bkt}), ShouldBeNil)
+
+		// Enable AES256 encryption (matches production)
+		cfg := &core.Config{
+			EndecWay: core.DATA_ENDEC_AES256,
+			EndecKey: "test-key-32-bytes-long----------",
+		}
+		ofs := NewOrcasFSWithConfig(handler, ctx, testBktID, cfg)
+
+		dirObj := &core.ObjectInfo{
+			ID:    core.NewID(),
+			PID:   testBktID,
+			Type:  core.OBJ_TYPE_DIR,
+			Name:  "dir",
+			Size:  0,
+			MTime: core.Now(),
+		}
+		_, err = handler.Put(ctx, testBktID, []*core.ObjectInfo{dirObj})
+		So(err, ShouldBeNil)
+
+		// Create file with DataID=0 (no data yet)
+		fileObj := &core.ObjectInfo{
+			ID:     core.NewID(),
+			PID:    dirObj.ID,
+			Type:   core.OBJ_TYPE_FILE,
+			Name:   "252a4291b9b4c0e4.jpg",
+			Size:   0,
+			DataID: 0, // No data yet - this is the key condition
+			MTime:  core.Now(),
+		}
+		_, err = handler.Put(ctx, testBktID, []*core.ObjectInfo{fileObj})
+		So(err, ShouldBeNil)
+
+		// Verify file has no DataID
+		objs, err := handler.Get(ctx, testBktID, []int64{fileObj.ID})
+		So(err, ShouldBeNil)
+		So(len(objs), ShouldEqual, 1)
+		So(objs[0].DataID, ShouldEqual, int64(0))
+
+		ra, err := NewRandomAccessor(ofs, fileObj.ID)
+		So(err, ShouldBeNil)
+		ofs.registerRandomAccessor(fileObj.ID, ra)
+
+		// Case 11 pattern from log:
+		// Write 1: offset=393216, size=56996 (write at end first)
+		// Write 2: offset=0, size=131072 (then write at beginning)
+		const (
+			write1Offset = int64(393216) // 384KB
+			write1Size   = 56996
+			write2Offset = int64(0)
+			write2Size   = 131072 // 128KB
+		)
+		finalSize := write1Offset + int64(write1Size) // 450212
+
+		// Prepare deterministic payloads
+		payload1 := make([]byte, write1Size)
+		for i := 0; i < write1Size; i++ {
+			payload1[i] = byte((i + 100) % 251) // Pattern for write 1
+		}
+
+		payload2 := make([]byte, write2Size)
+		for i := 0; i < write2Size; i++ {
+			payload2[i] = byte((i + 200) % 251) // Pattern for write 2
+		}
+
+		// Write 1: at non-zero offset (this triggers new DataID creation)
+		// This is where the bug manifests - ChunkedFileWriter tries to read from disk
+		// but the file doesn't exist yet because DataID was just created
+		err = ra.Write(write1Offset, payload1)
+		So(err, ShouldBeNil)
+
+		// Write 2: at offset 0 (this should work correctly)
+		err = ra.Write(write2Offset, payload2)
+		So(err, ShouldBeNil)
+
+		// Flush
+		_, err = ra.Flush()
+		So(err, ShouldBeNil)
+
+		// Verify file size
+		fileAfterFlush, err := ra.getFileObj()
+		So(err, ShouldBeNil)
+		So(fileAfterFlush.Size, ShouldEqual, finalSize)
+		So(fileAfterFlush.DataID, ShouldNotEqual, int64(0))
+
+		ofs.unregisterRandomAccessor(fileObj.ID, ra)
+		So(ra.Close(), ShouldBeNil)
+
+		// Create new RandomAccessor to read back (simulates fresh open)
+		ra2, err := NewRandomAccessor(ofs, fileObj.ID)
+		So(err, ShouldBeNil)
+		ofs.registerRandomAccessor(fileObj.ID, ra2)
+
+		// Read back the entire file
+		fullRead, err := ra2.Read(0, int(finalSize))
+		So(err, ShouldBeNil)
+		So(len(fullRead), ShouldEqual, int(finalSize))
+
+		// Verify write 2 data (offset 0)
+		So(bytes.Equal(fullRead[write2Offset:write2Offset+int64(write2Size)], payload2), ShouldBeTrue)
+
+		// Verify write 1 data (offset 393216)
+		So(bytes.Equal(fullRead[write1Offset:write1Offset+int64(write1Size)], payload1), ShouldBeTrue)
+
+		// Verify the gap between write2 end and write1 start is zeros
+		gapStart := write2Offset + int64(write2Size)
+		gapEnd := write1Offset
+		if gapEnd > gapStart {
+			gapData := fullRead[gapStart:gapEnd]
+			allZeros := true
+			for _, b := range gapData {
+				if b != 0 {
+					allZeros = false
+					break
+				}
+			}
+			So(allZeros, ShouldBeTrue)
+		}
+
+		ofs.unregisterRandomAccessor(fileObj.ID, ra2)
+		So(ra2.Close(), ShouldBeNil)
 	})
 }

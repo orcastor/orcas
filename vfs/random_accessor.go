@@ -10,6 +10,7 @@ import (
 	"hash"
 	"io"
 	"os"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -61,6 +62,11 @@ const (
 	// Sparse file local sequential write detection
 	// If writes are within N chunks, treat as sequential even if out of order
 	LocalSequentialChunkCount = 2 // 1-2 chunks: treat as sequential write
+
+	// Memory optimization: maximum concurrent chunks in ChunkedFileWriter
+	// Limits memory usage during large file uploads with scattered writes
+	// When limit is reached, oldest incomplete chunks are force-flushed
+	MaxConcurrentChunks = 10 // 10 chunks × 10MB = 100MB max per file
 )
 
 // WriterType represents the type of chunked file writer
@@ -92,8 +98,8 @@ var (
 	StatfsCacheTTL       = 5 * time.Second  // Cache TTL for statfs results
 	ChunkCacheTTL        = 10 * time.Second // Cache TTL for chunks
 	ChunkCacheSize       = 8                // Number of chunks to cache per reader (reduced from hardcoded 64 to save memory)
-	GlobalChunkCacheSize = 32               // Total number of chunks to cache globally (approx 320MB at 10MB/chunk)
-	// Increased from 16 to 32 to reduce repeated AES decryption and temporary buffer allocations
+	GlobalChunkCacheSize = 16               // Total number of chunks to cache globally (approx 160MB at 10MB/chunk)
+	// Reduced from 32 to 16 to lower memory footprint during concurrent uploads
 )
 
 var (
@@ -284,6 +290,11 @@ var (
 	// ORCAS_CACHE_EVICT_TO_POOL=0 disables returning evicted cached []byte to tier pools.
 	// Default is ON.
 	cacheEvictToPool atomic.Bool
+
+	// Memory pressure monitoring
+	memoryPressureThreshold uint64 = 512 << 20 // 512MB - trigger cleanup when heap exceeds this
+	lastMemoryCheck         atomic.Int64       // Unix timestamp of last memory check
+	memoryCheckInterval     int64 = 5          // Check memory every 5 seconds
 )
 
 func init() {
@@ -307,6 +318,46 @@ func init() {
 			putBufferToTier(b)
 		}
 	})
+}
+
+// checkMemoryPressure checks if memory usage is high and triggers cleanup if needed
+// This is a lightweight check that runs periodically to prevent memory exhaustion
+// Returns true if memory pressure was detected and cleanup was triggered
+func checkMemoryPressure() bool {
+	// Rate limit memory checks to avoid overhead
+	now := time.Now().Unix()
+	lastCheck := lastMemoryCheck.Load()
+	if now-lastCheck < memoryCheckInterval {
+		return false
+	}
+	if !lastMemoryCheck.CompareAndSwap(lastCheck, now) {
+		return false // Another goroutine is checking
+	}
+
+	var m runtime.MemStats
+	runtime.ReadMemStats(&m)
+
+	if m.HeapAlloc > memoryPressureThreshold {
+		DebugLog("[VFS MemoryPressure] High memory detected: HeapAlloc=%dMB, threshold=%dMB, triggering cleanup",
+			m.HeapAlloc>>20, memoryPressureThreshold>>20)
+
+		// Clear tier 3 pool (10MB buffers) first as they consume most memory
+		// This is done by getting and discarding buffers
+		for i := 0; i < SequentialBufferTier3Max; i++ {
+			if buf := bufferTier3Pool.pool.Get(); buf != nil {
+				// Discard - don't put back
+			} else {
+				break
+			}
+		}
+
+		// Trigger GC to reclaim memory
+		runtime.GC()
+
+		DebugLog("[VFS MemoryPressure] Cleanup completed, triggered GC")
+		return true
+	}
+	return false
 }
 
 // isRandomWritePattern detects if the write pattern is random (non-sequential)
@@ -1066,6 +1117,10 @@ func (cw *ChunkedFileWriter) Write(offset int64, data []byte) error {
 		return nil
 	}
 
+	// MEMORY OPTIMIZATION: Periodically check memory pressure
+	// This helps prevent OOM during large file uploads
+	checkMemoryPressure()
+
 	// IMPORTANT: Allow writes during flush
 	// Flush will only process chunks that existed at flush start time
 	// New writes during flush will create/update chunks that will be flushed in next flush call
@@ -1082,6 +1137,17 @@ func (cw *ChunkedFileWriter) Write(offset int64, data []byte) error {
 
 	currentOffset := offset
 	dataPos := 0
+
+	// Cache DataInfo for the entire Write call to avoid repeated database queries
+	// This is safe because DataInfo.Kind doesn't change during a single write operation
+	var cachedDataInfo *core.DataInfo
+	var cachedDataInfoErr error
+	getDataInfoCached := func() (*core.DataInfo, error) {
+		if cachedDataInfo == nil && cachedDataInfoErr == nil {
+			cachedDataInfo, cachedDataInfoErr = cw.fs.h.GetDataInfo(cw.fs.c, cw.fs.bktID, cw.dataID)
+		}
+		return cachedDataInfo, cachedDataInfoErr
+	}
 
 	// Process data across chunks
 	for currentOffset < writeEnd {
@@ -1107,6 +1173,19 @@ func (cw *ChunkedFileWriter) Write(offset int64, data []byte) error {
 		cw.mu.Lock()
 		buf, exists := cw.chunks[sn]
 		if !exists {
+			// MEMORY OPTIMIZATION: Check if we need to evict old chunks before creating new one
+			// This prevents unbounded memory growth during large file uploads
+			chunkCount := len(cw.chunks)
+			cw.mu.Unlock()
+
+			if chunkCount >= MaxConcurrentChunks {
+				// Evict oldest chunks to make room for new one
+				// Keep MaxConcurrentChunks-1 to leave room for the new chunk
+				evicted := cw.evictOldestChunks(MaxConcurrentChunks - 1)
+				DebugLog("[VFS ChunkedFileWriter Write] Memory limit reached, evicted %d chunks: fileID=%d, dataID=%d, chunkCount=%d, maxChunks=%d",
+					evicted, cw.fileID, cw.dataID, chunkCount, MaxConcurrentChunks)
+			}
+
 			// Chunk buffer doesn't exist in memory
 			// For .tmp files with pure append writes, chunks are written sequentially:
 			// - If chunk is not in memory, it means it hasn't been created yet (for new chunks)
@@ -1116,7 +1195,7 @@ func (cw *ChunkedFileWriter) Write(offset int64, data []byte) error {
 
 			// Check if chunk might have been flushed (wait for flush to complete if in progress)
 			flushKey := fmt.Sprintf("flush_%d_%d", cw.dataID, sn)
-			cw.mu.Unlock()
+			// Note: mutex already unlocked above
 
 			// Wait for any ongoing flush to complete (non-blocking if no flush in progress)
 			// This ensures we don't create a buffer for a chunk that's being flushed
@@ -1152,7 +1231,7 @@ func (cw *ChunkedFileWriter) Write(offset int64, data []byte) error {
 					// Always use 10MB buffer from pool (capacity is 10MB, length will be set to chunk size)
 					DebugLog("[VFS ChunkedFileWriter Write] Getting DataInfo for chunk decode: fileID=%d, dataID=%d, sn=%d", cw.fileID, cw.dataID, sn)
 					var processedChunk []byte
-					dataInfoFromDB, dataInfoErr := cw.fs.h.GetDataInfo(cw.fs.c, cw.fs.bktID, cw.dataID)
+					dataInfoFromDB, dataInfoErr := getDataInfoCached()
 					if dataInfoErr == nil && dataInfoFromDB != nil {
 						DebugLog("[VFS ChunkedFileWriter Write] Got DataInfo, decoding chunk with Kind: fileID=%d, dataID=%d, sn=%d, kind=0x%x", cw.fileID, cw.dataID, sn, dataInfoFromDB.Kind)
 						processedChunk = cw.decodeChunkData(existingChunkData, dataInfoFromDB.Kind)
@@ -1257,7 +1336,7 @@ func (cw *ChunkedFileWriter) Write(offset int64, data []byte) error {
 					// Chunk now exists on disk after flush, create buffer and load it
 					// Always use 10MB buffer from pool
 					var processedChunk []byte
-					dataInfoFromDB, dataInfoErr := cw.fs.h.GetDataInfo(cw.fs.c, cw.fs.bktID, cw.dataID)
+					dataInfoFromDB, dataInfoErr := getDataInfoCached()
 					if dataInfoErr == nil && dataInfoFromDB != nil {
 						processedChunk = cw.decodeChunkData(existingChunkData2, dataInfoFromDB.Kind)
 					} else {
@@ -1554,6 +1633,81 @@ func (cw *ChunkedFileWriter) Write(offset int64, data []byte) error {
 	}
 
 	return nil
+}
+
+// evictOldestChunks force-flushes the oldest incomplete chunks when memory limit is reached
+// This prevents unbounded memory growth during large file uploads with scattered writes
+// Returns the number of chunks evicted
+func (cw *ChunkedFileWriter) evictOldestChunks(targetCount int) int {
+	cw.mu.Lock()
+	currentCount := len(cw.chunks)
+	if currentCount <= targetCount {
+		cw.mu.Unlock()
+		return 0
+	}
+
+	// Collect all chunk SNs and sort them (oldest = lowest SN for sequential writes)
+	chunksToEvict := make([]int, 0, currentCount-targetCount)
+	allSNs := make([]int, 0, currentCount)
+	for sn := range cw.chunks {
+		allSNs = append(allSNs, sn)
+	}
+	cw.mu.Unlock()
+
+	// Sort SNs to evict oldest first
+	sort.Ints(allSNs)
+
+	// Select chunks to evict (oldest first, up to the excess count)
+	evictCount := currentCount - targetCount
+	if evictCount > len(allSNs) {
+		evictCount = len(allSNs)
+	}
+	chunksToEvict = allSNs[:evictCount]
+
+	DebugLog("[VFS ChunkedFileWriter evictOldestChunks] Evicting %d oldest chunks to reduce memory: fileID=%d, dataID=%d, currentCount=%d, targetCount=%d, chunksToEvict=%v",
+		len(chunksToEvict), cw.fileID, cw.dataID, currentCount, targetCount, chunksToEvict)
+
+	evicted := 0
+	for _, sn := range chunksToEvict {
+		// Remove chunk from map and flush it
+		cw.mu.Lock()
+		buf, exists := cw.chunks[sn]
+		if !exists {
+			cw.mu.Unlock()
+			continue
+		}
+		delete(cw.chunks, sn)
+		cw.mu.Unlock()
+
+		// Flush the chunk
+		flushKey := fmt.Sprintf("flush_%d_%d", cw.dataID, sn)
+		_, err, _ := globalSingleFlight.Do(flushKey, func() (interface{}, error) {
+			flushErr := cw.flushChunkWithBuffer(sn, buf)
+			if flushErr != nil {
+				return nil, flushErr
+			}
+
+			// Clean up buffer
+			if buf != nil {
+				buf.mu.Lock()
+				buf.data = nil
+				buf.ranges = nil
+				buf.mu.Unlock()
+			}
+			return nil, nil
+		})
+
+		if err != nil {
+			DebugLog("[VFS ChunkedFileWriter evictOldestChunks] ERROR: Failed to evict chunk: fileID=%d, dataID=%d, sn=%d, error=%v",
+				cw.fileID, cw.dataID, sn, err)
+		} else {
+			evicted++
+		}
+	}
+
+	DebugLog("[VFS ChunkedFileWriter evictOldestChunks] Evicted %d chunks: fileID=%d, dataID=%d",
+		evicted, cw.fileID, cw.dataID)
+	return evicted
 }
 
 // flushChunk processes and writes a complete chunk
@@ -2391,6 +2545,27 @@ func (ra *RandomAccessor) hasActiveChunkedWriter() bool {
 func (ra *RandomAccessor) tryInitSeqBuffer(fileObj *core.ObjectInfo, offset int64, dataLen int) bool {
 	// 1. New file starting from offset 0
 	if offset == 0 && (fileObj.DataID == 0 || fileObj.DataID == core.EmptyDataID) {
+		// CRITICAL FIX: Check if there's already data in random write buffer
+		// If so, we should NOT initialize seqBuffer because:
+		// 1. The random write buffer may contain out-of-order writes (e.g., write at offset 393216 first)
+		// 2. If we initialize seqBuffer now, the data in random write buffer will be lost during Flush
+		// 3. Instead, we should use ChunkedFileWriter to handle all writes consistently
+		writeIndex := atomic.LoadInt64(&ra.buffer.writeIndex)
+		if writeIndex > 0 {
+			DebugLog("[VFS tryInitSeqBuffer] Random write buffer has data (writeIndex=%d), not initializing seqBuffer: fileID=%d", writeIndex, ra.fileID)
+			return false
+		}
+
+		// CRITICAL FIX: Check if ChunkedFileWriter already exists
+		// If so, we should NOT initialize seqBuffer because:
+		// 1. ChunkedFileWriter is already handling writes for this file (e.g., sparse file with out-of-order writes)
+		// 2. If we initialize seqBuffer now, data will be written to two different DataIDs
+		// 3. This would cause data loss when reading back
+		if ra.hasActiveChunkedWriter() {
+			DebugLog("[VFS tryInitSeqBuffer] ChunkedFileWriter already exists, not initializing seqBuffer: fileID=%d", ra.fileID)
+			return false
+		}
+
 		// Check if this is a large file (should use ChunkedFileWriter instead)
 		chunkSize := ra.fs.chunkSize
 		if chunkSize <= 0 {

@@ -428,6 +428,192 @@ func PermanentlyDeleteObject(c Ctx, bktID, id int64, h Handler, ma MetadataAdapt
 	return deleteObjFromDB(c, bktID, id, ma)
 }
 
+// PermanentlyDeleteObjectBatch permanently deletes multiple objects in batch for better performance
+// Returns a map of objID -> error for any failures (nil map means all succeeded)
+// This is optimized for bulk deletion by:
+// 1. Batching database queries (GetObj, CountDataRefs)
+// 2. Processing deletes concurrently with controlled parallelism
+// 3. Batching metadata deletions
+func PermanentlyDeleteObjectBatch(c Ctx, bktID int64, ids []int64, h Handler, ma MetadataAdapter, da DataAdapter) map[int64]error {
+	if len(ids) == 0 {
+		return nil
+	}
+
+	// For single ID, use the original function
+	if len(ids) == 1 {
+		if err := PermanentlyDeleteObject(c, bktID, ids[0], h, ma, da); err != nil {
+			return map[int64]error{ids[0]: err}
+		}
+		return nil
+	}
+
+	// Batch get all objects first to reduce database queries
+	objs, err := ma.GetObj(c, bktID, ids)
+	if err != nil {
+		// Return error for all IDs
+		result := make(map[int64]error, len(ids))
+		for _, id := range ids {
+			result[id] = err
+		}
+		return result
+	}
+
+	// Create a map for quick lookup
+	objMap := make(map[int64]*ObjectInfo, len(objs))
+	for _, obj := range objs {
+		if obj != nil {
+			objMap[obj.ID] = obj
+		}
+	}
+
+	// Collect all DataIDs for batch reference counting
+	dataIDs := make([]int64, 0, len(objs))
+	for _, obj := range objs {
+		if obj != nil && obj.DataID > 0 && obj.DataID != EmptyDataID {
+			dataIDs = append(dataIDs, obj.DataID)
+		}
+	}
+
+	// Batch count data references
+	var refCounts map[int64]int64
+	if len(dataIDs) > 0 {
+		refCounts, err = ma.CountDataRefs(c, bktID, dataIDs)
+		if err != nil {
+			refCounts = make(map[int64]int64)
+		}
+	} else {
+		refCounts = make(map[int64]int64)
+	}
+
+	// Process deletions with controlled concurrency
+	const maxConcurrent = 10
+	sem := make(chan struct{}, maxConcurrent)
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	errors := make(map[int64]error)
+
+	// Collect DataIDs and ObjIDs to delete in batch
+	dataIDsToDelete := make([]int64, 0)
+	objIDsToDelete := make([]int64, 0)
+	var dataDeleteMu sync.Mutex
+
+	dataPath := getDataPathFromAdapter(ma)
+
+	for _, id := range ids {
+		obj, exists := objMap[id]
+		if !exists || obj == nil {
+			mu.Lock()
+			errors[id] = fmt.Errorf("object not found: bktID=%d objID=%d", bktID, id)
+			mu.Unlock()
+			continue
+		}
+
+		// Handle directories recursively (must be sequential to avoid SQLite lock issues)
+		if obj.Type == OBJ_TYPE_DIR {
+			wg.Add(1)
+			go func(dirID int64, dirObj *ObjectInfo) {
+				defer wg.Done()
+				sem <- struct{}{}
+				defer func() { <-sem }()
+
+				if err := PermanentlyDeleteObject(c, bktID, dirID, h, ma, da); err != nil {
+					mu.Lock()
+					errors[dirID] = err
+					mu.Unlock()
+				}
+			}(id, obj)
+			continue
+		}
+
+		// Handle files
+		wg.Add(1)
+		go func(fileID int64, fileObj *ObjectInfo) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+
+			// Decrease logical usage
+			if fileObj.Size > 0 {
+				_ = ma.DecBktUsed(c, bktID, fileObj.Size)
+				_ = ma.DecBktLogicalUsed(c, bktID, fileObj.Size)
+
+				// Handle dedup savings
+				if fileObj.DataID > 0 && fileObj.DataID != EmptyDataID {
+					refCount := refCounts[fileObj.DataID]
+					if refCount > 1 {
+						_ = ma.DecBktDedupSavings(c, bktID, fileObj.Size)
+					}
+				}
+			}
+
+			// Handle data files
+			if fileObj.DataID > 0 && fileObj.DataID != EmptyDataID {
+				refCount := refCounts[fileObj.DataID]
+				if refCount == 1 {
+					// Only this object references the data, safe to delete
+					dataInfo, diErr := ma.GetData(c, bktID, fileObj.DataID)
+					if diErr == nil && dataInfo != nil && dataInfo.PkgID > 0 && dataInfo.PkgID != fileObj.DataID {
+						// Packaged region: delete metadata only
+						dataDeleteMu.Lock()
+						dataIDsToDelete = append(dataIDsToDelete, fileObj.DataID)
+						dataDeleteMu.Unlock()
+					} else {
+						// Non-packaged data: delete metadata and files
+						dataDeleteMu.Lock()
+						dataIDsToDelete = append(dataIDsToDelete, fileObj.DataID)
+						dataDeleteMu.Unlock()
+
+						dataSize := calculateDataSize(dataPath, bktID, fileObj.DataID)
+						if dataSize > 0 {
+							_ = ma.DecBktRealUsed(c, bktID, dataSize)
+						}
+						deleteDataFiles(dataPath, bktID, fileObj.DataID, ma, c)
+					}
+				}
+			}
+
+			// Mark object for batch deletion
+			dataDeleteMu.Lock()
+			objIDsToDelete = append(objIDsToDelete, fileID)
+			dataDeleteMu.Unlock()
+		}(id, obj)
+	}
+
+	wg.Wait()
+
+	// Batch delete DataInfo metadata
+	if len(dataIDsToDelete) > 0 {
+		_ = ma.DeleteData(c, bktID, dataIDsToDelete)
+	}
+
+	// Batch delete objects from database
+	if len(objIDsToDelete) > 0 {
+		if err := deleteObjsFromDB(c, bktID, objIDsToDelete, ma); err != nil {
+			// If batch delete fails, record error for all objects
+			for _, id := range objIDsToDelete {
+				mu.Lock()
+				if errors[id] == nil {
+					errors[id] = err
+				}
+				mu.Unlock()
+			}
+		}
+	}
+
+	if len(errors) == 0 {
+		return nil
+	}
+	return errors
+}
+
+// deleteObjsFromDB batch deletes objects from database
+func deleteObjsFromDB(c Ctx, bktID int64, ids []int64, ma MetadataAdapter) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	return deleteObjsFromDBBatch(c, bktID, ids, ma)
+}
+
 // CleanRecycleBin cleans up objects marked as deleted in recycle bin (physically delete unreferenced data files and metadata)
 // targetID of 0 means clean all eligible objects, otherwise only clean specified object
 // Ensure only one cleanup operation is executing for the same bktID at a time
@@ -691,6 +877,43 @@ func deleteObjFromDB(c Ctx, bktID, id int64, ma MetadataAdapter) error {
 
 	// Then delete the object itself
 	_, err = db.Exec("DELETE FROM obj WHERE id = ?", id)
+	return err
+}
+
+// deleteObjsFromDBBatch batch deletes objects from database (physical deletion)
+// This is more efficient than calling deleteObjFromDB in a loop
+func deleteObjsFromDBBatch(c Ctx, bktID int64, ids []int64, ma MetadataAdapter) error {
+	if len(ids) == 0 {
+		return nil
+	}
+
+	// Get dataPath from adapter
+	dataPath := getDataPathFromAdapter(ma)
+	// Use write connection for delete operation
+	bktDirPath := filepath.Join(dataPath, fmt.Sprint(bktID))
+	db, err := GetWriteDB(bktDirPath)
+	if err != nil {
+		return ERR_OPEN_DB
+	}
+	// Note: Don't close the connection, it's from the pool
+
+	// Build placeholders for IN clause
+	placeholders := make([]string, len(ids))
+	args := make([]interface{}, len(ids))
+	for i, id := range ids {
+		placeholders[i] = "?"
+		args[i] = id
+	}
+	inClause := strings.Join(placeholders, ",")
+
+	// Delete extended attributes first (foreign key constraint)
+	_, err = db.Exec(fmt.Sprintf("DELETE FROM attr WHERE id IN (%s)", inClause), args...)
+	if err != nil {
+		return err
+	}
+
+	// Then delete the objects
+	_, err = db.Exec(fmt.Sprintf("DELETE FROM obj WHERE id IN (%s)", inClause), args...)
 	return err
 }
 

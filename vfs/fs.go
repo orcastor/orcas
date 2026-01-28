@@ -2592,45 +2592,19 @@ func (n *OrcasNode) unlinkInternal(ctx context.Context, names []string, batchMod
 	} else {
 		// Fallback: Asynchronously delete and clean up (permanent deletion)
 		// This includes physical deletion of data files and metadata
-		// In batch mode, use concurrent deletion for better performance
-		if batchMode && len(targetIDs) > 1 {
-			// Use concurrent Delete for better performance
-			const maxConcurrentDelete = 10
-			sem := make(chan struct{}, maxConcurrentDelete)
-			var wg sync.WaitGroup
-
-			for _, targetID := range targetIDs {
-				wg.Add(1)
-				go func(id int64) {
-					defer wg.Done()
-					sem <- struct{}{}
-					defer func() { <-sem }()
-
-					// Use the original context to preserve authentication information
-					// Context is read-only and safe to use in goroutines
-					err := n.fs.h.Delete(n.fs.c, n.fs.bktID, id)
-					if err != nil {
+		// Use batch delete for better performance (reduces database round trips)
+		if len(targetIDs) > 0 {
+			go func(ids []int64) {
+				// Use batch delete for better performance
+				errors := n.fs.h.DeleteBatch(n.fs.c, n.fs.bktID, ids)
+				if errors != nil {
+					for id, err := range errors {
 						DebugLog("[VFS Unlink] ERROR: Failed to permanently delete file: fileID=%d, error=%v", id, err)
-					} else {
-						DebugLog("[VFS Unlink] Successfully permanently deleted file: fileID=%d", id)
 					}
-				}(targetID)
-			}
-			// Don't wait for deletion to complete, it's asynchronous
-		} else {
-			// Sequential Delete for single file
-			for _, targetID := range targetIDs {
-				go func(id int64) {
-					// Use the original context to preserve authentication information
-					// Context is read-only and safe to use in goroutines
-					err := n.fs.h.Delete(n.fs.c, n.fs.bktID, id)
-					if err != nil {
-						DebugLog("[VFS Unlink] ERROR: Failed to permanently delete file: fileID=%d, error=%v", id, err)
-					} else {
-						DebugLog("[VFS Unlink] Successfully permanently deleted file: fileID=%d", id)
-					}
-				}(targetID)
-			}
+				} else {
+					DebugLog("[VFS Unlink] Successfully batch deleted %d files", len(ids))
+				}
+			}(targetIDs)
 		}
 	}
 
@@ -2647,18 +2621,30 @@ func (n *OrcasNode) handleAtomicReplace(ctx context.Context, sourceID int64, sou
 	oldName := sourceObj.Name
 	oldParentID := sourceObj.PID
 
-	// Determine if newParentID is a recycle bin
+	// Batch query both parent directories in a single database call
+	// This reduces database round trips from 2 to 1
 	isNewParentRecycleBin := false
-	if newParentObj, err := n.fs.h.Get(n.fs.c, n.fs.bktID, []int64{newParentID}); err == nil && len(newParentObj) > 0 {
-		newParentName := strings.ToLower(newParentObj[0].Name)
-		isNewParentRecycleBin = (newParentName == ".recycle" || newParentName == ".trash")
+	isOldParentRecycleBin := false
+
+	parentIDs := []int64{newParentID}
+	if oldParentID != newParentID {
+		parentIDs = append(parentIDs, oldParentID)
 	}
 
-	// Determine if oldParentID is a recycle bin
-	isOldParentRecycleBin := false
-	if oldParentObj, err := n.fs.h.Get(n.fs.c, n.fs.bktID, []int64{oldParentID}); err == nil && len(oldParentObj) > 0 {
-		oldParentName := strings.ToLower(oldParentObj[0].Name)
-		isOldParentRecycleBin = (oldParentName == ".recycle" || oldParentName == ".trash")
+	if parentObjs, err := n.fs.h.Get(n.fs.c, n.fs.bktID, parentIDs); err == nil {
+		for _, obj := range parentObjs {
+			if obj == nil {
+				continue
+			}
+			parentName := strings.ToLower(obj.Name)
+			isRecycleBin := (parentName == ".recycle" || parentName == ".trash")
+			if obj.ID == newParentID {
+				isNewParentRecycleBin = isRecycleBin
+			}
+			if obj.ID == oldParentID {
+				isOldParentRecycleBin = isRecycleBin
+			}
+		}
 	}
 
 	// Decide whether to update parent directory

@@ -150,6 +150,9 @@ type Handler interface {
 	Recycle(c Ctx, bktID, id int64) error
 	// Delete permanently deletes object
 	Delete(c Ctx, bktID, id int64) error
+	// DeleteBatch permanently deletes multiple objects in batch for better performance
+	// Returns a map of objID -> error for any failures (nil map means all succeeded)
+	DeleteBatch(c Ctx, bktID int64, ids []int64) map[int64]error
 
 	// CleanRecycleBin physically deletes objects marked as deleted in recycle bin
 	CleanRecycleBin(c Ctx, bktID int64, targetID int64) error
@@ -888,6 +891,19 @@ func (lh *LocalHandler) Delete(c Ctx, bktID, id int64) error {
 	}
 	// Delete is permanent deletion, directly physically deletes object and data files
 	return PermanentlyDeleteObject(c, bktID, id, lh, lh.ma, lh.da)
+}
+
+func (lh *LocalHandler) DeleteBatch(c Ctx, bktID int64, ids []int64) map[int64]error {
+	if err := lh.acm.CheckPermission(c, MDD, bktID); err != nil {
+		// Return error for all IDs
+		result := make(map[int64]error, len(ids))
+		for _, id := range ids {
+			result[id] = err
+		}
+		return result
+	}
+	// Use batch delete for better performance
+	return PermanentlyDeleteObjectBatch(c, bktID, ids, lh, lh.ma, lh.da)
 }
 
 func (lh *LocalHandler) CleanRecycleBin(c Ctx, bktID int64, targetID int64) error {
