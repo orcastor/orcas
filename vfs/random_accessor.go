@@ -3808,6 +3808,21 @@ func putBufferToTier(buf []byte) {
 	}
 
 	cap := cap(buf)
+
+	// CRITICAL: Clear buffer data before returning to pool to prevent data corruption
+	// When buffer is reused, old data could leak into new writes if not cleared
+	if len(buf) > 0 {
+		// Clear the used portion of the buffer
+		for cleared := 0; cleared < len(buf); {
+			chunk := len(buf) - cleared
+			if chunk > len(zeroSlice) {
+				chunk = len(zeroSlice)
+			}
+			copy(buf[cleared:cleared+chunk], zeroSlice[:chunk])
+			cleared += chunk
+		}
+	}
+
 	buf = buf[:0] // Reset length but keep capacity
 
 	var pool *limitedPool
