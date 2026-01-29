@@ -2778,35 +2778,13 @@ func (ra *RandomAccessor) Write(offset int64, data []byte) error {
 	}
 
 	// PRIORITY 5: Sparse file with ChunkedFileWriter
+	// Windows SMB sparse files should ALWAYS use ChunkedFileWriter for consistent handling
+	// This ensures all writes go through the same path, avoiding data corruption
 	if sparseSize > 0 && !ra.isTmpFile {
-		chunkSize := ra.fs.chunkSize
-		if chunkSize <= 0 {
-			chunkSize = DefaultChunkSize
-		}
-		localRange := int64(LocalSequentialChunkCount) * chunkSize
-
-		writeRangeStart := atomic.LoadInt64(&ra.writeRangeStart)
-		writeRangeEnd := atomic.LoadInt64(&ra.writeRangeEnd)
-		currentWriteEnd := offset + int64(len(data))
-
-		// Check if within local sequential range
-		if writeRangeStart > 0 && writeRangeEnd > 0 {
-			newRangeStart := writeRangeStart
-			newRangeEnd := writeRangeEnd
-			if offset < writeRangeStart {
-				newRangeStart = offset
-			}
-			if currentWriteEnd > writeRangeEnd {
-				newRangeEnd = currentWriteEnd
-			}
-			newRangeSize := newRangeEnd - newRangeStart
-			if newRangeSize <= localRange {
-				cw, err := ra.getOrCreateChunkedWriter(WRITER_TYPE_SPARSE)
-				if err == nil && cw != nil {
-					DebugLog("[VFS RandomAccessor Write] Using ChunkedFileWriter for sparse file: fileID=%d, offset=%d", ra.fileID, offset)
-					return cw.Write(offset, data)
-				}
-			}
+		cw, err := ra.getOrCreateChunkedWriter(WRITER_TYPE_SPARSE)
+		if err == nil && cw != nil {
+			DebugLog("[VFS RandomAccessor Write] Using ChunkedFileWriter for sparse file: fileID=%d, offset=%d, sparseSize=%d", ra.fileID, offset, sparseSize)
+			return cw.Write(offset, data)
 		}
 	}
 
