@@ -5427,19 +5427,80 @@ func (ra *RandomAccessor) Read(offset int64, size int) ([]byte, error) {
 		// COW support: Apply journal snapshots if any exist
 		// This is critical for files that were modified using COW mechanism (journal snapshots)
 		// and then reopened - the base data needs to have journal entries applied
-		if len(fileData) > 0 && fileObj.DataID != 0 && fileObj.DataID != core.EmptyDataID {
-			DebugLog("[VFS Read] Applying journal snapshots: fileID=%d, dataID=%d, offset=%d, len=%d",
-				ra.fileID, fileObj.DataID, offset, len(fileData))
-			fileData, err = ra.applyJournalSnapshots(fileData, fileObj.DataID, offset, int64(len(fileData)))
-			if err != nil {
-				DebugLog("[VFS Read] WARNING: Failed to apply journal snapshots: fileID=%d, error=%v", ra.fileID, err)
-				// Continue with base data if journal application fails
+		if fileObj.DataID != 0 && fileObj.DataID != core.EmptyDataID {
+			// CRITICAL: If readWithWrites returned less data than requested (e.g., chunk doesn't exist),
+			// we need to extend the buffer to the full requested size before applying journal snapshots.
+			// This handles the case where file was extended via COW and new data is in journal snapshots.
+			expectedLen := size
+			if actualFileSize > offset && int64(size) > actualFileSize-offset {
+				expectedLen = int(actualFileSize - offset)
+			}
+			if len(fileData) < expectedLen {
+				DebugLog("[VFS Read] Extending fileData for COW: fileID=%d, currentLen=%d, expectedLen=%d",
+					ra.fileID, len(fileData), expectedLen)
+				// Extend with zeros - journal snapshots will fill in the actual data
+				extended := make([]byte, expectedLen)
+				copy(extended, fileData)
+				fileData = extended
+			}
+
+			if len(fileData) > 0 {
+				DebugLog("[VFS Read] Applying journal snapshots: fileID=%d, dataID=%d, offset=%d, len=%d",
+					ra.fileID, fileObj.DataID, offset, len(fileData))
+				fileData, err = ra.applyJournalSnapshots(fileData, fileObj.DataID, offset, int64(len(fileData)))
+				if err != nil {
+					DebugLog("[VFS Read] WARNING: Failed to apply journal snapshots: fileID=%d, error=%v", ra.fileID, err)
+					// Continue with base data if journal application fails
+				}
 			}
 		}
 
 		return fileData, nil
 	}
 	DebugLog("[VFS Read] readWithWrites returned false, trying fallback: fileID=%d", ra.fileID)
+
+	// COW fallback: If readWithWrites failed (e.g., chunk doesn't exist because data is in journal snapshots),
+	// try to read from journal snapshots directly. This handles the case where file was extended via COW
+	// and the new data is stored in journal snapshots, not in the base DataID's chunks.
+	if fileObj.DataID != 0 && fileObj.DataID != core.EmptyDataID {
+		DebugLog("[VFS Read] Trying COW fallback - reading from journal snapshots: fileID=%d, dataID=%d, offset=%d, size=%d",
+			ra.fileID, fileObj.DataID, offset, size)
+		// Create base data buffer (zeros for regions not covered by base data)
+		baseData := make([]byte, size)
+		// Try to read what we can from base data (may be partial or empty)
+		if dataInfo != nil && dataInfo.OrigSize > 0 && offset < dataInfo.OrigSize {
+			// Read available base data
+			availableSize := int(dataInfo.OrigSize - offset)
+			if availableSize > size {
+				availableSize = size
+			}
+			if availableSize > 0 {
+				partialData, partialErr := reader.Read(baseData[:availableSize], offset)
+				if partialErr == nil && partialData > 0 {
+					DebugLog("[VFS Read] COW fallback: read %d bytes of base data at offset %d", partialData, offset)
+				}
+			}
+		}
+		// Apply journal snapshots to fill in the rest
+		result, err := ra.applyJournalSnapshots(baseData, fileObj.DataID, offset, int64(size))
+		if err != nil {
+			DebugLog("[VFS Read] WARNING: COW fallback failed to apply journal snapshots: fileID=%d, error=%v", ra.fileID, err)
+		} else {
+			// Check if we got any non-zero data
+			hasData := false
+			for _, b := range result {
+				if b != 0 {
+					hasData = true
+					break
+				}
+			}
+			if hasData || offset < actualFileSize {
+				DebugLog("[VFS Read] COW fallback succeeded: fileID=%d, offset=%d, size=%d, resultLen=%d",
+					ra.fileID, offset, size, len(result))
+				return result, nil
+			}
+		}
+	}
 
 	// If read fails or write operations not handled, read from buffer
 	return ra.readFromBuffer(offset, size), nil
