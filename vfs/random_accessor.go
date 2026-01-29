@@ -361,8 +361,21 @@ func checkMemoryPressure() bool {
 	return false
 }
 
+// isWindowsSMBSparseFile checks if this is a Windows SMB sparse file (pre-allocated via SetAllocationSize)
+// Windows SMB sparse files have locally-ordered random writes that should use ChunkedFileWriter, not Journal
+func (ra *RandomAccessor) isWindowsSMBSparseFile() bool {
+	return atomic.LoadInt64(&ra.sparseSize) > 0
+}
+
 // isRandomWritePattern detects if the write pattern is random (non-sequential)
+// NOTE: This should NOT be used for Windows SMB sparse files, use isWindowsSMBSparseFile() instead
 func (ra *RandomAccessor) isRandomWritePattern() bool {
+	// Windows SMB sparse files are NOT considered random write pattern
+	// They have locally-ordered writes that should use ChunkedFileWriter
+	if ra.isWindowsSMBSparseFile() {
+		return false
+	}
+
 	if ra.buffer == nil {
 		return false
 	}
@@ -9845,16 +9858,9 @@ func (ra *RandomAccessor) shouldUseJournalOld(fileObj *core.ObjectInfo, offset, 
 			return true
 		}
 
-		// Check if this is random write pattern on sparse file
-		// For true random writes (like qBittorrent), use journal
-		if ra.isRandomWritePattern() {
-			DebugLog("[VFS shouldUseJournal] Using journal for sparse file with random writes: fileID=%d, sparseSize=%d",
-				ra.fileID, sparseSize)
-			return true
-		}
-
-		// Sequential pattern on NEW sparse file (no existing data) - use sequential buffer
-		DebugLog("[VFS shouldUseJournal] Sparse file appears sequential (new file), not using journal: fileID=%d, sparseSize=%d, lastOffset=%d, dataID=%d",
+		// Windows SMB sparse file: use ChunkedFileWriter path, not journal
+		// The Write method's PRIORITY 5 will handle this with ChunkedFileWriter
+		DebugLog("[VFS shouldUseJournal] Windows SMB sparse file, using ChunkedFileWriter path: fileID=%d, sparseSize=%d, lastOffset=%d, dataID=%d",
 			ra.fileID, sparseSize, lastOffset, fileObj.DataID)
 		return false
 	}
