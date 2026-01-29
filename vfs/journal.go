@@ -546,7 +546,19 @@ func (j *Journal) CreateJournalSnapshot() (versionID int64, err error) {
 	}
 
 	// Create version object
-	currentSize := atomic.LoadInt64(&j.currentSize)
+	// Calculate currentSize from entries to ensure file extension is captured
+	currentSize := j.baseSize
+	for i := range j.entries {
+		entryEnd := j.entries[i].Offset + j.entries[i].Length
+		if entryEnd > currentSize {
+			currentSize = entryEnd
+		}
+	}
+	// Also check atomic currentSize as fallback
+	atomicCurrentSize := atomic.LoadInt64(&j.currentSize)
+	if atomicCurrentSize > currentSize {
+		currentSize = atomicCurrentSize
+	}
 	mTime := core.Now()
 
 	// Journal should be under version object if baseVersionID exists, otherwise under file
@@ -618,6 +630,42 @@ func (j *Journal) CreateJournalSnapshot() (versionID int64, err error) {
 	DebugLog("[Journal CreateSnapshot] Snapshot created: versionID=%d, journalDataID=%d, entries=%d",
 		versionID, journalDataID, len(j.entries))
 
+	// COW optimization: Update file object's Size and MTime without changing DataID
+	// This ensures Getattr returns correct file size while keeping base DataID unchanged
+	// The actual data is reconstructed by applying journal entries on top of base data
+	fileObjs, err := j.fs.h.Get(j.fs.c, j.fs.bktID, []int64{j.fileID})
+	if err == nil && len(fileObjs) > 0 {
+		fileObj := fileObjs[0]
+		// For sparse files, use virtualSize instead of currentSize
+		fileSize := currentSize
+		if j.isSparse && j.virtualSize > 0 {
+			fileSize = j.virtualSize
+		}
+		// Only update if size actually changed
+		if fileObj.Size != fileSize || fileObj.MTime != mTime {
+			updateFileObj := &core.ObjectInfo{
+				ID:    j.fileID,
+				PID:   fileObj.PID,
+				Type:  fileObj.Type,
+				Name:  fileObj.Name,
+				Size:  fileSize,
+				MTime: mTime,
+			}
+			// Update only Size and MTime, keep DataID unchanged (COW)
+			if err := lh.MetadataAdapter().SetObj(j.fs.c, j.fs.bktID, []string{"s", "m"}, updateFileObj); err != nil {
+				DebugLog("[Journal CreateSnapshot] WARNING: Failed to update file object size: %v", err)
+				// Don't fail the whole operation
+			} else {
+				DebugLog("[Journal CreateSnapshot] Updated file object size: fileID=%d, size=%d, mtime=%d (COW: DataID unchanged)",
+					j.fileID, fileSize, mTime)
+				// Update cache
+				fileObj.Size = fileSize
+				fileObj.MTime = mTime
+				fileObjCache.Put(j.fileID, fileObj)
+			}
+		}
+	}
+
 	// Trigger version retention cleanup for this file
 	if j.fs.retentionMgr != nil {
 		go func() {
@@ -632,7 +680,16 @@ func (j *Journal) CreateJournalSnapshot() (versionID int64, err error) {
 }
 
 // SmartFlush performs intelligent flushing based on journal state
+// It decides between:
+// 1. Full flush (when modification ratio is high or too many snapshots)
+// 2. Journal snapshot (COW - when modification ratio is low)
+// 3. Force snapshot (when journal has data but doesn't meet snapshot thresholds)
 func (j *Journal) SmartFlush() (versionID int64, err error) {
+	// If not dirty, nothing to do
+	if !j.IsDirty() {
+		return 0, nil
+	}
+
 	if j.shouldFullFlush() {
 		DebugLog("[Journal SmartFlush] Performing full flush for fileID=%d", j.fileID)
 
@@ -733,6 +790,17 @@ func (j *Journal) SmartFlush() (versionID int64, err error) {
 
 	if j.shouldCreateSnapshot() {
 		DebugLog("[Journal SmartFlush] Creating journal snapshot for fileID=%d", j.fileID)
+		return j.CreateJournalSnapshot()
+	}
+
+	// If journal has entries but doesn't meet snapshot thresholds, still create snapshot
+	// This ensures data is persisted when file is closed
+	j.entriesMu.RLock()
+	hasEntries := len(j.entries) > 0
+	j.entriesMu.RUnlock()
+
+	if hasEntries {
+		DebugLog("[Journal SmartFlush] Force creating journal snapshot (has entries but below threshold): fileID=%d", j.fileID)
 		return j.CreateJournalSnapshot()
 	}
 
@@ -952,8 +1020,10 @@ func (j *Journal) mergeEntriesLocked() {
 		oldMemory += int64(len(j.entries[i].Data)) + 16
 	}
 
-	// Sort entries by offset
-	sort.Slice(j.entries, func(i, k int) bool {
+	// Sort entries by offset using stable sort to preserve write order
+	// This is critical: when two entries have the same offset, the later write
+	// (higher index) must come after the earlier write so it correctly overwrites
+	sort.SliceStable(j.entries, func(i, k int) bool {
 		return j.entries[i].Offset < j.entries[k].Offset
 	})
 

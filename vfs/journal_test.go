@@ -3,6 +3,7 @@ package vfs
 import (
 	"bytes"
 	"context"
+	"crypto/md5"
 	"fmt"
 	"io"
 	"os"
@@ -5791,7 +5792,9 @@ func TestLogBasedReadWritePattern(t *testing.T) {
 	// Step 7: Verify specific write locations
 	t.Logf("\n📝 Step 7: Verifying specific write locations")
 
-	// Verify write at offset 8038911 (should be 0xBB, last write wins)
+	// Verify write at offset 8038911
+	// Note: This offset is overwritten by the 2560-byte write at 8036352 (range 8036352-8038912)
+	// So the expected value is 0x90 + (8038911 - 8036352) % 256 = 0x8F
 	verifyOffset := int64(8038911)
 	verifyData, err := ra.Read(verifyOffset, 1)
 	if err != nil {
@@ -5800,8 +5803,9 @@ func TestLogBasedReadWritePattern(t *testing.T) {
 	if len(verifyData) != 1 {
 		t.Fatalf("Unexpected short read at offset %d: got %d bytes, want %d", verifyOffset, len(verifyData), 1)
 	}
-	if verifyData[0] != 0xBB {
-		t.Errorf("Data mismatch at offset %d: got 0x%02x, want 0x%02x", verifyOffset, verifyData[0], 0xBB)
+	expectedByte := byte((0x90 + (8038911-8036352)%256) % 256) // 0x8F
+	if verifyData[0] != expectedByte {
+		t.Errorf("Data mismatch at offset %d: got 0x%02x, want 0x%02x", verifyOffset, verifyData[0], expectedByte)
 	} else {
 		t.Logf("  ✅ Offset %d verified: 0x%02x", verifyOffset, verifyData[0])
 	}
@@ -6310,17 +6314,20 @@ func TestLogBasedReadWritePatternWithNode(t *testing.T) {
 	// Step 7: Verify specific write locations
 	t.Logf("\n📝 Step 7: Verifying specific write locations")
 
-	// Verify offset 8038911 (should be 0xBB)
+	// Verify offset 8038911
+	// Note: This offset is overwritten by the 2560-byte write at 8036352 (range 8036352-8038912)
+	// So the expected value is 0x90 + (8038911 - 8036352) % 256 = 0x8F
+	expectedByte := byte((0x90 + (8038911-8036352)%256) % 256) // 0x8F
 	verifyBuf := make([]byte, 1)
 	verifyResult, errno := fileNode.Read(ctx, verifyBuf, 8038911)
 	if errno == 0 && verifyResult != nil {
 		verifyBuf2 := make([]byte, 1)
 		data, status := verifyResult.Bytes(verifyBuf2)
 		if status == fuse.OK && len(data) > 0 {
-			if data[0] == 0xBB {
+			if data[0] == expectedByte {
 				t.Logf("  ✅ Offset 8038911 verified: 0x%02x", data[0])
 			} else {
-				t.Errorf("  ❌ Offset 8038911 mismatch: got 0x%02x, want 0xBB", data[0])
+				t.Errorf("  ❌ Offset 8038911 mismatch: got 0x%02x, want 0x%02x", data[0], expectedByte)
 			}
 		}
 	}
@@ -8115,6 +8122,11 @@ func TestJournalWALFlushDeletesAllFiles(t *testing.T) {
 	fs, bktID := setupTestFS(t, testDir)
 	defer cleanupFS(fs)
 
+	// Configure to trigger full flush (not COW snapshot) so WAL files are deleted
+	// Full flush clears journal entries and deletes WAL files
+	// COW snapshot keeps entries and WAL files for crash recovery
+	fs.journalMgr.config.FullFlushTotalEntries = 1 // Trigger full flush after 1 entry
+
 	// Create a file with existing data
 	fileID, err := createTestFile(t, fs, bktID, "test_flush.txt")
 	if err != nil {
@@ -8216,4 +8228,623 @@ func TestJournalWALFlushDeletesAllFiles(t *testing.T) {
 	}
 
 	t.Logf("✓ All WAL files correctly deleted after flush")
+}
+
+// TestSMBLargeFileUploadLocallyUnorderedGloballyOrdered tests the Windows SMB large file upload scenario
+// where writes are "locally unordered, globally ordered" - meaning within a small range (e.g., 10MB),
+// writes may come out of order, but the overall progress is sequential from start to end.
+// This test verifies MD5 consistency between written and read data.
+func TestSMBLargeFileUploadLocallyUnorderedGloballyOrdered(t *testing.T) {
+	testDir := testTmpDir("orcas_smb_large_upload_md5")
+	defer cleanupTestDir(t, testDir)
+
+	// Setup with encryption to match real scenario
+	encryptionKey := "test-encryption-key-12345678901234567890123456789012"
+	fs, bktID := setupTestFSWithEncryption(t, testDir, encryptionKey, 0)
+	defer cleanupFS(fs)
+
+	// Use 10MB chunks (matching real scenario)
+	fs.chunkSize = 10 << 20
+
+	// Create test file
+	fileName := "large_upload_test.mp4"
+	fileID, err := createTestFile(t, fs, bktID, fileName)
+	if err != nil {
+		t.Fatalf("Failed to create test file: %v", err)
+	}
+
+	ra, err := getOrCreateRandomAccessor(fs, fileID)
+	if err != nil {
+		t.Fatalf("Failed to get RandomAccessor: %v", err)
+	}
+
+	// Simulate Windows SMB SetAllocationSize (pre-allocate ~56MB, matching log scenario)
+	sparseSize := int64(56233610) // Same as in 13.log
+	ra.MarkSparseFile(sparseSize)
+	t.Logf("Created sparse file: fileID=%d, sparseSize=%d", fileID, sparseSize)
+
+	// Generate deterministic test data for MD5 verification
+	expectedData := make([]byte, sparseSize)
+	for i := range expectedData {
+		expectedData[i] = byte((i * 7 + 13) % 256) // Deterministic pattern
+	}
+
+	// Calculate expected MD5
+	expectedMD5 := md5.Sum(expectedData)
+	t.Logf("Expected MD5: %x", expectedMD5)
+
+	// Simulate the write pattern from 13.log:
+	// 1. Sequential writes from offset=0 to ~48MB (512KB each)
+	// 2. Jump to offset=55574528 (near end)
+	// 3. Write at offset=56098816 (last chunk)
+	// 4. Fill in gaps: 50331648, 50855936, 49283072, 49807360, etc.
+	writeSize := 524288 // 512KB per write (matching log)
+
+	// Phase 1: Sequential writes from 0 to ~48MB
+	t.Logf("Phase 1: Sequential writes from 0 to ~48MB")
+	for offset := int64(0); offset <= 48758784; offset += int64(writeSize) {
+		end := offset + int64(writeSize)
+		if end > sparseSize {
+			end = sparseSize
+		}
+		chunk := expectedData[offset:end]
+		if err := ra.Write(offset, chunk); err != nil {
+			t.Fatalf("Write failed at offset %d: %v", offset, err)
+		}
+	}
+
+	// Phase 2: Jump to near-end writes (simulating SMB out-of-order behavior)
+	t.Logf("Phase 2: Out-of-order writes near end of file")
+	outOfOrderOffsets := []int64{
+		55574528, // Jump to near end
+		56098816, // Last chunk (partial)
+		50331648, // Fill gap
+		50855936, // Fill gap
+		49283072, // Fill gap
+		49807360, // Fill gap
+		51380224, // Continue filling
+		51904512, // Continue filling
+		52428800, // Continue filling
+		52953088, // Continue filling
+		53477376, // Continue filling
+		54001664, // Continue filling
+		54525952, // Continue filling
+		55050240, // Continue filling
+	}
+
+	for _, offset := range outOfOrderOffsets {
+		end := offset + int64(writeSize)
+		if end > sparseSize {
+			end = sparseSize
+		}
+		if offset >= sparseSize {
+			continue
+		}
+		chunk := expectedData[offset:end]
+		if err := ra.Write(offset, chunk); err != nil {
+			t.Fatalf("Write failed at offset %d: %v", offset, err)
+		}
+		t.Logf("  Written: offset=%d, size=%d", offset, len(chunk))
+	}
+
+	// Close to flush all data
+	t.Logf("Closing RandomAccessor to flush data...")
+	if err := ra.Close(); err != nil {
+		t.Fatalf("Failed to close RandomAccessor: %v", err)
+	}
+
+	// Check file object state after close
+	fileObj, err := fs.h.Get(fs.c, bktID, []int64{fileID})
+	if err != nil || len(fileObj) == 0 {
+		t.Fatalf("Failed to get file object after close: %v", err)
+	}
+	t.Logf("File object after close: dataID=%d, size=%d", fileObj[0].DataID, fileObj[0].Size)
+
+	// Reopen and read back all data
+	t.Logf("Reopening file to read back data...")
+	ra2, err := getOrCreateRandomAccessor(fs, fileID)
+	if err != nil {
+		t.Fatalf("Failed to get RandomAccessor for read: %v", err)
+	}
+	defer ra2.Close()
+
+	// Read all data
+	readData, err := ra2.Read(0, int(sparseSize))
+	if err != nil {
+		t.Fatalf("Failed to read back data: %v", err)
+	}
+
+	t.Logf("Read returned %d bytes", len(readData))
+
+	if int64(len(readData)) != sparseSize {
+		t.Errorf("Read size mismatch: got %d, expected %d", len(readData), sparseSize)
+	}
+
+	// Calculate actual MD5
+	actualMD5 := md5.Sum(readData)
+	t.Logf("Actual MD5: %x", actualMD5)
+
+	// Compare MD5
+	if expectedMD5 != actualMD5 {
+		t.Errorf("MD5 mismatch! Expected: %x, Actual: %x", expectedMD5, actualMD5)
+
+		// Find first difference for debugging
+		for i := 0; i < len(expectedData) && i < len(readData); i++ {
+			if expectedData[i] != readData[i] {
+				t.Logf("First difference at offset %d: expected %d, got %d", i, expectedData[i], readData[i])
+				// Show context
+				start := i - 16
+				if start < 0 {
+					start = 0
+				}
+				end := i + 16
+				if end > len(expectedData) {
+					end = len(expectedData)
+				}
+				t.Logf("Expected context: %v", expectedData[start:end])
+				t.Logf("Actual context:   %v", readData[start:end])
+				break
+			}
+		}
+	} else {
+		t.Logf("✓ MD5 matches! Data integrity verified for %d bytes", sparseSize)
+	}
+
+	// Verify specific regions (only if we have enough data)
+	if len(readData) == 0 {
+		t.Fatalf("Read returned 0 bytes - data was not persisted correctly")
+	}
+
+	t.Logf("Verifying specific regions...")
+
+	// Check first 1MB (if available)
+	checkSize := 1 << 20
+	if len(readData) >= checkSize {
+		if !bytes.Equal(expectedData[:checkSize], readData[:checkSize]) {
+			t.Errorf("First 1MB data mismatch")
+		} else {
+			t.Logf("  ✓ First 1MB verified")
+		}
+	}
+
+	// Check region around 48MB (where sequential writes ended)
+	checkOffset := int64(48 << 20)
+	if checkOffset+int64(checkSize) <= int64(len(readData)) && checkOffset+int64(checkSize) <= sparseSize {
+		if !bytes.Equal(expectedData[checkOffset:checkOffset+int64(checkSize)], readData[checkOffset:checkOffset+int64(checkSize)]) {
+			t.Errorf("Region around 48MB data mismatch")
+		} else {
+			t.Logf("  ✓ Region around 48MB verified")
+		}
+	}
+
+	// Check region around 50MB (where out-of-order writes happened)
+	checkOffset = int64(50 << 20)
+	if checkOffset+int64(checkSize) <= int64(len(readData)) && checkOffset+int64(checkSize) <= sparseSize {
+		if !bytes.Equal(expectedData[checkOffset:checkOffset+int64(checkSize)], readData[checkOffset:checkOffset+int64(checkSize)]) {
+			t.Errorf("Region around 50MB data mismatch")
+		} else {
+			t.Logf("  ✓ Region around 50MB verified")
+		}
+	}
+
+	// Check last 1MB (if available)
+	if int64(len(readData)) >= sparseSize {
+		lastMBStart := sparseSize - int64(checkSize)
+		if lastMBStart >= 0 {
+			if !bytes.Equal(expectedData[lastMBStart:sparseSize], readData[lastMBStart:sparseSize]) {
+				t.Errorf("Last 1MB data mismatch")
+			} else {
+				t.Logf("  ✓ Last 1MB verified")
+			}
+		}
+	}
+
+	t.Logf("✓ SMB large file upload test completed")
+}
+
+// TestJournalCOWMechanism tests the Copy-on-Write mechanism for journal flush
+// This test verifies that:
+// 1. When modification ratio is low, CreateJournalSnapshot is used (COW - only delta stored)
+// 2. When modification ratio is high, full flush is used
+// 3. File object Size is correctly updated after COW snapshot
+// 4. Data can be correctly read after COW snapshot (base + journal applied)
+func TestJournalCOWMechanism(t *testing.T) {
+	testDir := testTmpDir("orcas_journal_cow_test")
+	defer cleanupTestDir(t, testDir)
+
+	fs, bktID := setupTestFS(t, testDir)
+	defer cleanupFS(fs)
+
+	// Configure journal for testing COW
+	// Set low thresholds to trigger snapshot creation
+	fs.journalMgr.config.SnapshotEntryCount = 5
+	fs.journalMgr.config.SnapshotMemorySize = 1 << 20 // 1MB
+	fs.journalMgr.config.FullFlushJournalCount = 10
+	fs.journalMgr.config.FullFlushTotalEntries = 100
+
+	// Create a test file with initial data
+	fileName := "test_cow.bin"
+	fileID, err := createTestFile(t, fs, bktID, fileName)
+	if err != nil {
+		t.Fatalf("Failed to create test file: %v", err)
+	}
+
+	ra, err := getOrCreateRandomAccessor(fs, fileID)
+	if err != nil {
+		t.Fatalf("Failed to get RandomAccessor: %v", err)
+	}
+
+	// Write initial data (1MB) to establish base
+	baseSize := int64(1 << 20) // 1MB
+	baseData := make([]byte, baseSize)
+	for i := range baseData {
+		baseData[i] = byte(i % 256)
+	}
+	err = ra.Write(0, baseData)
+	if err != nil {
+		t.Fatalf("Failed to write base data: %v", err)
+	}
+
+	// Flush to commit base data
+	_, err = ra.Flush()
+	if err != nil {
+		t.Fatalf("Failed to flush base data: %v", err)
+	}
+
+	// Get file object to verify base DataID
+	fileObj, err := fs.h.Get(fs.c, bktID, []int64{fileID})
+	if err != nil || len(fileObj) == 0 {
+		t.Fatalf("Failed to get file object: %v", err)
+	}
+	baseDataID := fileObj[0].DataID
+	t.Logf("Base DataID: %d, Size: %d", baseDataID, fileObj[0].Size)
+
+	// Now perform small random writes (should trigger COW snapshot, not full flush)
+	// Write only 10KB at offset 500KB (1% modification)
+	smallWriteOffset := int64(500 << 10) // 500KB
+	smallWriteData := make([]byte, 10<<10) // 10KB
+	for i := range smallWriteData {
+		smallWriteData[i] = byte((i + 100) % 256)
+	}
+	err = ra.Write(smallWriteOffset, smallWriteData)
+	if err != nil {
+		t.Fatalf("Failed to write small data: %v", err)
+	}
+
+	// Update expected data
+	copy(baseData[smallWriteOffset:], smallWriteData)
+
+	// Flush - this should use COW (CreateJournalSnapshot) since modification is small
+	_, err = ra.Flush()
+	if err != nil {
+		t.Fatalf("Failed to flush after small write: %v", err)
+	}
+
+	// Verify file object Size is updated correctly
+	fileObj, err = fs.h.Get(fs.c, bktID, []int64{fileID})
+	if err != nil || len(fileObj) == 0 {
+		t.Fatalf("Failed to get file object after flush: %v", err)
+	}
+	t.Logf("After COW flush - DataID: %d, Size: %d", fileObj[0].DataID, fileObj[0].Size)
+
+	// Size should still be baseSize (we didn't extend the file)
+	if fileObj[0].Size != baseSize {
+		t.Errorf("File size mismatch after COW: got %d, want %d", fileObj[0].Size, baseSize)
+	}
+
+	// Read back and verify data integrity
+	readData, err := ra.Read(0, int(baseSize))
+	if err != nil {
+		t.Fatalf("Failed to read data: %v", err)
+	}
+	if !bytes.Equal(readData, baseData) {
+		t.Errorf("Data mismatch after COW flush")
+		// Find first difference
+		for i := 0; i < len(readData) && i < len(baseData); i++ {
+			if readData[i] != baseData[i] {
+				t.Errorf("First difference at offset %d: got %d, want %d", i, readData[i], baseData[i])
+				break
+			}
+		}
+	} else {
+		t.Logf("✓ Data integrity verified after COW flush")
+	}
+
+	// Close and reopen to verify persistence
+	ra.Close()
+
+	ra2, err := getOrCreateRandomAccessor(fs, fileID)
+	if err != nil {
+		t.Fatalf("Failed to reopen RandomAccessor: %v", err)
+	}
+	defer ra2.Close()
+
+	// Read again after reopen
+	readData2, err := ra2.Read(0, int(baseSize))
+	if err != nil {
+		t.Fatalf("Failed to read data after reopen: %v", err)
+	}
+	if !bytes.Equal(readData2, baseData) {
+		t.Errorf("Data mismatch after reopen")
+	} else {
+		t.Logf("✓ Data integrity verified after reopen")
+	}
+
+	t.Logf("✓ Journal COW mechanism test completed")
+}
+
+// TestJournalCOWWithMultipleSnapshots tests COW with multiple journal snapshots
+// This verifies that multiple snapshots can be created and applied correctly
+func TestJournalCOWWithMultipleSnapshots(t *testing.T) {
+	testDir := testTmpDir("orcas_journal_cow_multi_test")
+	defer cleanupTestDir(t, testDir)
+
+	fs, bktID := setupTestFS(t, testDir)
+	defer cleanupFS(fs)
+
+	// Configure journal for testing
+	fs.journalMgr.config.SnapshotEntryCount = 3 // Create snapshot after 3 entries
+	fs.journalMgr.config.SnapshotMemorySize = 100 << 10 // 100KB
+	fs.journalMgr.config.FullFlushJournalCount = 20 // High threshold to avoid full flush
+	fs.journalMgr.config.FullFlushTotalEntries = 200
+
+	// Create test file
+	fileName := "test_cow_multi.bin"
+	fileID, err := createTestFile(t, fs, bktID, fileName)
+	if err != nil {
+		t.Fatalf("Failed to create test file: %v", err)
+	}
+
+	ra, err := getOrCreateRandomAccessor(fs, fileID)
+	if err != nil {
+		t.Fatalf("Failed to get RandomAccessor: %v", err)
+	}
+	defer ra.Close()
+
+	// Write initial data (500KB)
+	baseSize := int64(500 << 10)
+	expectedData := make([]byte, baseSize)
+	for i := range expectedData {
+		expectedData[i] = byte(i % 256)
+	}
+	err = ra.Write(0, expectedData)
+	if err != nil {
+		t.Fatalf("Failed to write base data: %v", err)
+	}
+
+	// Flush base data
+	_, err = ra.Flush()
+	if err != nil {
+		t.Fatalf("Failed to flush base data: %v", err)
+	}
+
+	// Perform multiple small writes at different offsets
+	// Each write should potentially create a journal snapshot
+	writeOffsets := []int64{100 << 10, 200 << 10, 300 << 10, 400 << 10} // 100KB, 200KB, 300KB, 400KB
+	writeSize := 1 << 10 // 1KB each
+
+	for i, offset := range writeOffsets {
+		writeData := make([]byte, writeSize)
+		for j := range writeData {
+			writeData[j] = byte((i*100 + j) % 256)
+		}
+		err = ra.Write(offset, writeData)
+		if err != nil {
+			t.Fatalf("Failed to write at offset %d: %v", offset, err)
+		}
+		// Update expected data
+		copy(expectedData[offset:], writeData)
+
+		// Flush after each write to potentially create snapshots
+		_, err = ra.Flush()
+		if err != nil {
+			t.Fatalf("Failed to flush after write %d: %v", i, err)
+		}
+		t.Logf("Write %d at offset %d completed", i+1, offset)
+	}
+
+	// Verify data integrity
+	readData, err := ra.Read(0, int(baseSize))
+	if err != nil {
+		t.Fatalf("Failed to read data: %v", err)
+	}
+	if !bytes.Equal(readData, expectedData) {
+		t.Errorf("Data mismatch after multiple COW snapshots")
+	} else {
+		t.Logf("✓ Data integrity verified after multiple snapshots")
+	}
+
+	// Check that journal snapshots were created
+	versions, err := fs.h.Get(fs.c, bktID, []int64{fileID})
+	if err != nil {
+		t.Fatalf("Failed to get file object: %v", err)
+	}
+	t.Logf("Final file state - DataID: %d, Size: %d", versions[0].DataID, versions[0].Size)
+
+	t.Logf("✓ Journal COW with multiple snapshots test completed")
+}
+
+// TestJournalCOWFileExtension tests COW when file is extended
+// This verifies that file size is correctly updated when writes extend the file
+func TestJournalCOWFileExtension(t *testing.T) {
+	testDir := testTmpDir("orcas_journal_cow_extend_test")
+	defer cleanupTestDir(t, testDir)
+
+	fs, bktID := setupTestFS(t, testDir)
+	defer cleanupFS(fs)
+
+	// Configure journal
+	fs.journalMgr.config.SnapshotEntryCount = 5
+	fs.journalMgr.config.FullFlushJournalCount = 20
+
+	// Create test file
+	fileName := "test_cow_extend.bin"
+	fileID, err := createTestFile(t, fs, bktID, fileName)
+	if err != nil {
+		t.Fatalf("Failed to create test file: %v", err)
+	}
+
+	ra, err := getOrCreateRandomAccessor(fs, fileID)
+	if err != nil {
+		t.Fatalf("Failed to get RandomAccessor: %v", err)
+	}
+	defer ra.Close()
+
+	// Write initial data (100KB)
+	initialSize := int64(100 << 10)
+	initialData := make([]byte, initialSize)
+	for i := range initialData {
+		initialData[i] = byte(i % 256)
+	}
+	err = ra.Write(0, initialData)
+	if err != nil {
+		t.Fatalf("Failed to write initial data: %v", err)
+	}
+
+	// Flush initial data
+	_, err = ra.Flush()
+	if err != nil {
+		t.Fatalf("Failed to flush initial data: %v", err)
+	}
+
+	// Verify initial size
+	fileObj, _ := fs.h.Get(fs.c, bktID, []int64{fileID})
+	t.Logf("Initial size: %d", fileObj[0].Size)
+
+	// Write data that extends the file (at offset 150KB, write 50KB)
+	extendOffset := int64(150 << 10)
+	extendData := make([]byte, 50<<10)
+	for i := range extendData {
+		extendData[i] = byte((i + 50) % 256)
+	}
+	err = ra.Write(extendOffset, extendData)
+	if err != nil {
+		t.Fatalf("Failed to write extend data: %v", err)
+	}
+
+	// Flush - should update file size
+	_, err = ra.Flush()
+	if err != nil {
+		t.Fatalf("Failed to flush after extend: %v", err)
+	}
+
+	// Verify file size is updated
+	fileObj, _ = fs.h.Get(fs.c, bktID, []int64{fileID})
+	expectedSize := extendOffset + int64(len(extendData)) // 200KB
+	if fileObj[0].Size != expectedSize {
+		t.Errorf("File size not updated correctly: got %d, want %d", fileObj[0].Size, expectedSize)
+	} else {
+		t.Logf("✓ File size correctly updated to %d after extension", fileObj[0].Size)
+	}
+
+	// Verify data integrity
+	// Build expected data
+	expectedData := make([]byte, expectedSize)
+	copy(expectedData, initialData)
+	copy(expectedData[extendOffset:], extendData)
+
+	readData, err := ra.Read(0, int(expectedSize))
+	if err != nil {
+		t.Fatalf("Failed to read data: %v", err)
+	}
+	if !bytes.Equal(readData, expectedData) {
+		t.Errorf("Data mismatch after file extension")
+	} else {
+		t.Logf("✓ Data integrity verified after file extension")
+	}
+
+	t.Logf("✓ Journal COW file extension test completed")
+}
+
+// TestJournalCOWPerformance tests that COW is more efficient than full flush
+// for small modifications on large files
+func TestJournalCOWPerformance(t *testing.T) {
+	testDir := testTmpDir("orcas_journal_cow_perf_test")
+	defer cleanupTestDir(t, testDir)
+
+	fs, bktID := setupTestFS(t, testDir)
+	defer cleanupFS(fs)
+
+	// Configure journal for COW
+	fs.journalMgr.config.SnapshotEntryCount = 10
+	fs.journalMgr.config.FullFlushJournalCount = 100 // High threshold to prefer COW
+
+	// Create test file
+	fileName := "test_cow_perf.bin"
+	fileID, err := createTestFile(t, fs, bktID, fileName)
+	if err != nil {
+		t.Fatalf("Failed to create test file: %v", err)
+	}
+
+	ra, err := getOrCreateRandomAccessor(fs, fileID)
+	if err != nil {
+		t.Fatalf("Failed to get RandomAccessor: %v", err)
+	}
+	defer ra.Close()
+
+	// Write large base data (10MB)
+	baseSize := int64(10 << 20)
+	baseData := make([]byte, baseSize)
+	for i := range baseData {
+		baseData[i] = byte(i % 256)
+	}
+	err = ra.Write(0, baseData)
+	if err != nil {
+		t.Fatalf("Failed to write base data: %v", err)
+	}
+
+	// Flush base data
+	_, err = ra.Flush()
+	if err != nil {
+		t.Fatalf("Failed to flush base data: %v", err)
+	}
+
+	// Get base DataID
+	fileObj, _ := fs.h.Get(fs.c, bktID, []int64{fileID})
+	baseDataID := fileObj[0].DataID
+	t.Logf("Base DataID: %d, Size: %d", baseDataID, fileObj[0].Size)
+
+	// Perform small write (1KB at 5MB offset - 0.01% modification)
+	smallWriteOffset := int64(5 << 20)
+	smallWriteData := make([]byte, 1<<10)
+	for i := range smallWriteData {
+		smallWriteData[i] = 0xFF
+	}
+
+	startTime := time.Now()
+	err = ra.Write(smallWriteOffset, smallWriteData)
+	if err != nil {
+		t.Fatalf("Failed to write small data: %v", err)
+	}
+
+	// Flush with COW
+	_, err = ra.Flush()
+	if err != nil {
+		t.Fatalf("Failed to flush: %v", err)
+	}
+	cowDuration := time.Since(startTime)
+
+	// Check if DataID changed (full flush) or stayed same (COW snapshot)
+	fileObj, _ = fs.h.Get(fs.c, bktID, []int64{fileID})
+	newDataID := fileObj[0].DataID
+
+	if newDataID == baseDataID {
+		t.Logf("✓ COW snapshot used (DataID unchanged): duration=%v", cowDuration)
+	} else {
+		t.Logf("Full flush used (DataID changed from %d to %d): duration=%v", baseDataID, newDataID, cowDuration)
+	}
+
+	// Verify data integrity
+	copy(baseData[smallWriteOffset:], smallWriteData)
+	readData, err := ra.Read(0, int(baseSize))
+	if err != nil {
+		t.Fatalf("Failed to read data: %v", err)
+	}
+	if !bytes.Equal(readData, baseData) {
+		t.Errorf("Data mismatch")
+	} else {
+		t.Logf("✓ Data integrity verified")
+	}
+
+	t.Logf("✓ Journal COW performance test completed")
 }

@@ -5311,6 +5311,35 @@ func (ra *RandomAccessor) Read(offset int64, size int) ([]byte, error) {
 	DebugLog("[VFS Read] DataInfo: fileID=%d, DataID=%d, OrigSize=%d, Size=%d, Kind=0x%x, PkgID=%d, PkgOffset=%d",
 		ra.fileID, dataInfo.ID, dataInfo.OrigSize, dataInfo.Size, dataInfo.Kind, dataInfo.PkgID, dataInfo.PkgOffset)
 
+	// COW support: If DataInfo is empty (OrigSize=0) but fileObj.Size > 0, this might be a COW file
+	// where data is stored in journal snapshots. Try to read from journal snapshots directly.
+	if dataInfo.OrigSize == 0 && fileObj.Size > 0 {
+		DebugLog("[VFS Read] DataInfo is empty but fileObj.Size > 0, trying journal snapshots: fileID=%d, DataID=%d, fileObj.Size=%d",
+			ra.fileID, fileObj.DataID, fileObj.Size)
+		// Create empty base data (all zeros) and apply journal snapshots
+		baseData := make([]byte, size)
+		result, err := ra.applyJournalSnapshots(baseData, fileObj.DataID, offset, int64(size))
+		if err != nil {
+			DebugLog("[VFS Read] WARNING: Failed to apply journal snapshots for COW file: fileID=%d, error=%v", ra.fileID, err)
+			// Fall through to regular read path
+		} else if len(result) > 0 {
+			// Check if result has any non-zero data (journal snapshots were applied)
+			hasData := false
+			for _, b := range result {
+				if b != 0 {
+					hasData = true
+					break
+				}
+			}
+			if hasData {
+				DebugLog("[VFS Read] Successfully read from journal snapshots: fileID=%d, offset=%d, size=%d, resultLen=%d",
+					ra.fileID, offset, size, len(result))
+				return result, nil
+			}
+			DebugLog("[VFS Read] Journal snapshots returned all zeros, falling through to regular read: fileID=%d", ra.fileID)
+		}
+	}
+
 	// Always use bucket's default chunk size (force unified chunkSize)
 	chunkSize := ra.fs.chunkSize
 	if chunkSize <= 0 {
@@ -5393,6 +5422,19 @@ func (ra *RandomAccessor) Read(offset int64, size int) ([]byte, error) {
 			// offset is beyond file size, return empty data
 			fileData = []byte{}
 			DebugLog("[VFS Read] offset >= actualFileSize, returning empty data: fileID=%d, offset=%d, actualFileSize=%d", ra.fileID, offset, actualFileSize)
+		}
+
+		// COW support: Apply journal snapshots if any exist
+		// This is critical for files that were modified using COW mechanism (journal snapshots)
+		// and then reopened - the base data needs to have journal entries applied
+		if len(fileData) > 0 && fileObj.DataID != 0 && fileObj.DataID != core.EmptyDataID {
+			DebugLog("[VFS Read] Applying journal snapshots: fileID=%d, dataID=%d, offset=%d, len=%d",
+				ra.fileID, fileObj.DataID, offset, len(fileData))
+			fileData, err = ra.applyJournalSnapshots(fileData, fileObj.DataID, offset, int64(len(fileData)))
+			if err != nil {
+				DebugLog("[VFS Read] WARNING: Failed to apply journal snapshots: fileID=%d, error=%v", ra.fileID, err)
+				// Continue with base data if journal application fails
+			}
 		}
 
 		return fileData, nil
@@ -9499,6 +9541,16 @@ func (ra *RandomAccessor) shouldUseJournal(fileObj *core.ObjectInfo, offset, len
 		return true
 	}
 
+	// 5b. If journal already exists for this file, use it for ALL writes (including offset=0)
+	// This ensures consistency - once journal is active, all writes go through it
+	ra.journalMu.RLock()
+	hasJournal := ra.journal != nil
+	ra.journalMu.RUnlock()
+	if hasJournal && fileObj.DataID > 0 {
+		DebugLog("[VFS shouldUseJournal] Journal already active, using journal for write at offset=%d: fileID=%d", offset, ra.fileID)
+		return true
+	}
+
 	// 6. Sequential append to existing file: use journal for safety
 	// This ensures append writes are tracked via WAL and fully persisted
 	if offset == fileObj.Size && fileObj.DataID > 0 && fileObj.Size > 0 {
@@ -9917,6 +9969,28 @@ func (ra *RandomAccessor) getOrCreateJournal() (*Journal, error) {
 			}
 		}
 	}
+	// CRITICAL FIX: If seqBuffer exists and has data, use seqBuffer's dataInfo.OrigSize as baseSize.
+	// This is essential because seqBuffer may have flushed chunks to disk but not yet updated
+	// the DataInfo in the database. The in-memory seqBuffer.dataInfo.OrigSize reflects the
+	// actual committed data size.
+	// NOTE: Use TryLock to avoid deadlock when called from migrateSeqBufferToJournal
+	// (which already holds seqBuffer.mu.Lock)
+	if ra.seqBuffer != nil {
+		if ra.seqBuffer.mu.TryLock() {
+			if ra.seqBuffer.hasData && ra.seqBuffer.dataInfo != nil && ra.seqBuffer.dataInfo.OrigSize > baseSize {
+				baseSize = ra.seqBuffer.dataInfo.OrigSize
+				DebugLog("[VFS getOrCreateJournal] Using seqBuffer.dataInfo.OrigSize as baseSize: fileID=%d, baseSize=%d", ra.fileID, baseSize)
+			}
+			ra.seqBuffer.mu.Unlock()
+		} else {
+			// Lock is already held (likely by migrateSeqBufferToJournal), access without lock
+			// This is safe because we're only reading and the caller already holds the lock
+			if ra.seqBuffer.hasData && ra.seqBuffer.dataInfo != nil && ra.seqBuffer.dataInfo.OrigSize > baseSize {
+				baseSize = ra.seqBuffer.dataInfo.OrigSize
+				DebugLog("[VFS getOrCreateJournal] Using seqBuffer.dataInfo.OrigSize as baseSize (lock held by caller): fileID=%d, baseSize=%d", ra.fileID, baseSize)
+			}
+		}
+	}
 	// CRITICAL FIX: For sparse files, do NOT use sparseSize as baseSize.
 	// sparseSize is the pre-allocated/expected final size, but baseSize must reflect
 	// the actual committed data size. Using sparseSize as baseSize causes Journal flush
@@ -9984,6 +10058,10 @@ func (ra *RandomAccessor) readFromJournal(offset, length int64) ([]byte, error) 
 // readBaseDataFromDataID reads base data from a specific committed DataID.
 // baseSize is the logical size of that base snapshot; reads beyond baseSize return empty data.
 func (ra *RandomAccessor) readBaseDataFromDataID(dataID int64, baseSize int64, offset, length int64) ([]byte, error) {
+	// If baseSize is 0, there's no base data to read (new file or no chunks flushed yet)
+	if baseSize == 0 {
+		return []byte{}, nil
+	}
 	// If caller asks beyond base snapshot, return empty and let Journal.Read handle extension.
 	if baseSize > 0 && offset >= baseSize {
 		return []byte{}, nil
@@ -10065,6 +10143,16 @@ func (ra *RandomAccessor) readBaseDataFromDataID(dataID int64, baseSize int64, o
 			endInChunk := readEnd - chunkStart
 			result = append(result, chunkData[startInChunk:endInChunk]...)
 		}
+	}
+
+	// COW optimization: Apply journal snapshots if they exist
+	// When using COW (CreateJournalSnapshot), the base DataID remains unchanged,
+	// and journal snapshots contain the incremental modifications.
+	// We need to apply these snapshots to get the correct data.
+	result, err = ra.applyJournalSnapshots(result, dataID, offset, int64(len(result)))
+	if err != nil {
+		DebugLog("[VFS readBaseDataFromDataID] WARNING: Failed to apply journal snapshots: %v", err)
+		// Don't fail - return base data without snapshots
 	}
 
 	return result, nil
@@ -10386,7 +10474,17 @@ func (ra *RandomAccessor) readBaseData(offset, length int64) ([]byte, error) {
 			ra.fileID, offset, length, len(result), allZero)
 	}
 
-	DebugLog("[VFS readBaseData] Completed(no-snapshots): fileID=%d, offset=%d, requestedLength=%d, resultLength=%d",
+	// COW optimization: Apply journal snapshots if they exist
+	// When using COW (CreateJournalSnapshot), fileObj.DataID remains unchanged (base DataID),
+	// and journal snapshots contain the incremental modifications.
+	// We need to apply these snapshots to get the correct data.
+	result, err = ra.applyJournalSnapshots(result, dataIDToRead, offset, int64(len(result)))
+	if err != nil {
+		DebugLog("[VFS readBaseData] WARNING: Failed to apply journal snapshots: %v", err)
+		// Don't fail - return base data without snapshots
+	}
+
+	DebugLog("[VFS readBaseData] Completed: fileID=%d, offset=%d, requestedLength=%d, resultLength=%d",
 		ra.fileID, offset, length, len(result))
 
 	return result, nil
@@ -10509,8 +10607,13 @@ func (ra *RandomAccessor) applyJournalSnapshots(baseData []byte, baseDataID int6
 
 	// Sort snapshots by MTime (oldest first) to apply in correct order
 	// Older snapshots should be applied first
+	// Use ID as secondary sort key for stable sorting when MTime is the same
 	sort.Slice(journalSnapshots, func(i, j int) bool {
-		return journalSnapshots[i].MTime < journalSnapshots[j].MTime
+		if journalSnapshots[i].MTime != journalSnapshots[j].MTime {
+			return journalSnapshots[i].MTime < journalSnapshots[j].MTime
+		}
+		// If MTime is the same, use ID as secondary sort key
+		return journalSnapshots[i].ID < journalSnapshots[j].ID
 	})
 
 	DebugLog("[VFS applyJournalSnapshots] Found %d journal snapshots for fileID=%d, baseDataID=%d",
@@ -10635,46 +10738,14 @@ func (ra *RandomAccessor) flushJournal() (int64, bool) {
 	}
 	DebugLog("[VFS flushJournal] Journal is dirty, proceeding to flush: fileID=%d, isSparse=%v, virtualSize=%d", ra.fileID, journal.isSparse, journal.virtualSize)
 
-	// Note: Don't call journal.GetEntryCount() here as it acquires entriesMu.RLock()
-	// which could block if another thread is in Flush() holding entriesMu.Lock()
-	DebugLog("[VFS flushJournal] Flushing journal: fileID=%d", ra.fileID)
-
-	// Get virtualSize before Flush (for sparse files, journal may be cleared after Flush)
-	virtualSize := int64(0)
-	isSparse := false
-	DebugLog("[VFS flushJournal] Checking journal sparse properties: fileID=%d, journal.isSparse=%v, journal.virtualSize=%d", ra.fileID, journal.isSparse, journal.virtualSize)
-	if journal.isSparse && journal.virtualSize > 0 {
-		virtualSize = journal.virtualSize
-		isSparse = true
-		DebugLog("[VFS flushJournal] Sparse file detected: fileID=%d, virtualSize=%d", ra.fileID, virtualSize)
-	} else {
-		// Also check sparseSize from RandomAccessor as fallback
-		sparseSize := ra.getSparseSize()
-		if sparseSize > 0 {
-			virtualSize = sparseSize
-			isSparse = true
-			DebugLog("[VFS flushJournal] Sparse file detected from RandomAccessor: fileID=%d, sparseSize=%d (journal.isSparse=%v, journal.virtualSize=%d)", ra.fileID, virtualSize, journal.isSparse, journal.virtualSize)
-		}
-	}
-
-	// Flush journal to create new data block
-	newDataID, newSize, err := journal.Flush()
-	if err != nil {
-		DebugLog("[VFS flushJournal] ERROR: Failed to flush journal: %v", err)
-		return 0, false
-	}
-
-	// Get file object
+	// Get file object for atomic replace check
 	fileObj, err := ra.getFileObj()
 	if err != nil {
 		DebugLog("[VFS flushJournal] ERROR: Failed to get file object: %v", err)
 		return 0, false
 	}
 
-	// Check for atomic replace scenario: if there's a pending deletion for this file,
-	// it means there's an atomic replace operation in progress. In this case, we should
-	// cancel the deletion and merge versions to ensure file integrity.
-	// This is important for sparse files with journal writes that may have non-sequential writes.
+	// Check for atomic replace scenario before flush
 	if ra.fs.atomicReplaceMgr != nil {
 		if pd, canceled := ra.fs.atomicReplaceMgr.CheckAndCancelDeletion(ra.fs.bktID, fileObj.PID, fileObj.Name); canceled {
 			DebugLog("[VFS flushJournal] Detected atomic replace during flush: fileID=%d, oldFileID=%d, versions=%d",
@@ -10682,21 +10753,16 @@ func (ra *RandomAccessor) flushJournal() (int64, bool) {
 
 			// Merge versions from old file to current file if needed
 			if len(pd.Versions) > 0 {
-				// Get all version objects
 				versions, err := ra.fs.h.Get(ra.fs.c, ra.fs.bktID, pd.Versions)
 				if err != nil {
 					DebugLog("[VFS flushJournal] WARNING: Failed to get versions during atomic replace: %v", err)
 				} else {
-					// Change PID from oldFileID to newFileID
 					for _, v := range versions {
 						v.PID = ra.fileID
 					}
-
-					// Update versions
 					_, err = ra.fs.h.Put(ra.fs.c, ra.fs.bktID, versions)
 					if err != nil {
 						DebugLog("[VFS flushJournal] WARNING: Failed to merge versions during atomic replace: %v", err)
-						// Continue anyway - flush should proceed
 					} else {
 						DebugLog("[VFS flushJournal] Merged %d versions from oldFileID=%d to fileID=%d",
 							len(versions), pd.FileID, ra.fileID)
@@ -10708,84 +10774,40 @@ func (ra *RandomAccessor) flushJournal() (int64, bool) {
 			if pd.FileID != ra.fileID {
 				if err := ra.fs.h.Delete(ra.fs.c, ra.fs.bktID, pd.FileID); err != nil {
 					DebugLog("[VFS flushJournal] WARNING: Failed to delete old file object: oldFileID=%d, error=%v", pd.FileID, err)
-					// Non-fatal - old file object can be cleaned up later
 				}
 			}
 		}
 	}
 
-	// Create new version
-	lh, ok := ra.fs.h.(*core.LocalHandler)
-	if !ok {
-		DebugLog("[VFS flushJournal] ERROR: Handler is not LocalHandler")
+	// COW optimization: Use SmartFlush to decide between snapshot (COW) and full flush
+	// - If modification ratio is low: create lightweight journal snapshot (only store delta)
+	// - If modification ratio is high or too many snapshots: do full flush (merge all data)
+	versionID, err := journal.SmartFlush()
+	if err != nil {
+		DebugLog("[VFS flushJournal] ERROR: SmartFlush failed: %v", err)
 		return 0, false
 	}
 
-	versionID := core.NewID()
+	// SmartFlush returns 0 if nothing needed to be done
 	if versionID == 0 {
-		DebugLog("[VFS flushJournal] ERROR: Failed to generate version ID")
+		DebugLog("[VFS flushJournal] SmartFlush returned 0, nothing to flush: fileID=%d", ra.fileID)
 		return 0, false
 	}
 
-	mTime := core.Now()
-
-	// For sparse files, use virtualSize instead of newSize for file object size
-	// newSize is the actual data size, but file object size should be virtualSize
-	fileSize := newSize
-	if isSparse && virtualSize > 0 {
-		fileSize = virtualSize
-		DebugLog("[VFS flushJournal] Using virtualSize for sparse file: fileID=%d, virtualSize=%d, newSize=%d", ra.fileID, fileSize, newSize)
+	// Refresh file object cache after flush
+	updatedFileObj, err := ra.fs.h.Get(ra.fs.c, ra.fs.bktID, []int64{ra.fileID})
+	if err == nil && len(updatedFileObj) > 0 {
+		fileObjCache.Put(ra.fileObjKey, updatedFileObj[0])
+		ra.fileObj.Store(updatedFileObj[0])
 	}
-
-	newVersion := &core.ObjectInfo{
-		ID:     versionID,
-		PID:    ra.fileID,
-		Type:   core.OBJ_TYPE_VERSION,
-		DataID: newDataID,
-		Size:   newSize,
-		MTime:  mTime,
-	}
-
-	// Update file object
-	updateFileObj := &core.ObjectInfo{
-		ID:     ra.fileID,
-		PID:    fileObj.PID,
-		Type:   fileObj.Type,
-		Name:   fileObj.Name,
-		DataID: newDataID,
-		Size:   fileSize,
-		MTime:  mTime,
-	}
-	DebugLog("[VFS flushJournal] 🔍 Prepared updateFileObj: fileID=%d, DataID=%d, Size=%d, isSparse=%v, virtualSize=%d, newSize=%d", ra.fileID, updateFileObj.DataID, updateFileObj.Size, isSparse, virtualSize, newSize)
-
-	// Create version object first
-	_, err = lh.Put(ra.fs.c, ra.fs.bktID, []*core.ObjectInfo{newVersion})
-	if err != nil {
-		DebugLog("[VFS flushJournal] ❌ ERROR: Failed to create version: %v", err)
-		return 0, false
-	}
-
-	// Update file object using SetObj to ensure Size field is updated
-	// Put uses InsertIgnore which won't update existing objects
-	DebugLog("[VFS flushJournal] 🔍 Calling SetObj to update file object: fileID=%d, DataID=%d, Size=%d, MTime=%d, isSparse=%v, virtualSize=%d", ra.fileID, updateFileObj.DataID, updateFileObj.Size, updateFileObj.MTime, isSparse, virtualSize)
-	err = lh.MetadataAdapter().SetObj(ra.fs.c, ra.fs.bktID, []string{"did", "s", "m"}, updateFileObj)
-	if err != nil {
-		DebugLog("[VFS flushJournal] ERROR: Failed to update file object: %v", err)
-		return 0, false
-	}
-	DebugLog("[VFS flushJournal] Updated file object using SetObj: fileID=%d, DataID=%d, Size=%d", ra.fileID, updateFileObj.DataID, updateFileObj.Size)
-
-	// Update cache
-	fileObjCache.Put(ra.fileObjKey, updateFileObj)
-	ra.fileObj.Store(updateFileObj)
 
 	// Register bucket for WAL checkpoint
 	if ra.fs.walCheckpointManager != nil {
 		ra.fs.walCheckpointManager.RegisterBucket(ra.fs.bktID)
 	}
 
-	DebugLog("[VFS flushJournal] Successfully flushed journal: fileID=%d, newDataID=%d, newSize=%d, versionID=%d",
-		ra.fileID, newDataID, newSize, versionID)
+	DebugLog("[VFS flushJournal] Successfully flushed journal with COW: fileID=%d, versionID=%d",
+		ra.fileID, versionID)
 
 	return versionID, true
 }
@@ -10801,15 +10823,29 @@ func (ra *RandomAccessor) closeJournal() error {
 		return nil
 	}
 
-	// If journal has uncommitted changes, flush them
+	// If journal has uncommitted changes, flush them using COW mechanism
+	// CRITICAL: We must use the local 'journal' variable directly, not ra.flushJournal(),
+	// because ra.journal has already been set to nil above.
 	if journal.IsDirty() {
-		DebugLog("[VFS closeJournal] Journal has uncommitted changes, flushing: fileID=%d", ra.fileID)
-		versionID, flushed := ra.flushJournal()
-		if !flushed {
-			DebugLog("[VFS closeJournal] WARNING: Failed to flush journal")
-			return fmt.Errorf("failed to flush journal")
+		DebugLog("[VFS closeJournal] Journal has uncommitted changes, flushing with COW: fileID=%d", ra.fileID)
+
+		// COW optimization: Use SmartFlush to decide between snapshot (COW) and full flush
+		versionID, err := journal.SmartFlush()
+		if err != nil {
+			DebugLog("[VFS closeJournal] ERROR: SmartFlush failed: %v", err)
+			return fmt.Errorf("failed to flush journal: %w", err)
 		}
-		DebugLog("[VFS closeJournal] Successfully flushed journal before close: fileID=%d, versionID=%d", ra.fileID, versionID)
+
+		// Refresh file object cache after flush
+		if versionID > 0 {
+			updatedFileObj, err := ra.fs.h.Get(ra.fs.c, ra.fs.bktID, []int64{ra.fileID})
+			if err == nil && len(updatedFileObj) > 0 {
+				fileObjCache.Put(ra.fileObjKey, updatedFileObj[0])
+				ra.fileObj.Store(updatedFileObj[0])
+			}
+		}
+
+		DebugLog("[VFS closeJournal] Successfully flushed journal with COW before close: fileID=%d, versionID=%d", ra.fileID, versionID)
 	}
 
 	// Remove journal from manager
@@ -10884,6 +10920,28 @@ func (ra *RandomAccessor) migrateSeqBufferToJournal() error {
 
 	if !ra.seqBuffer.hasData || len(ra.seqBuffer.buffer) == 0 {
 		return nil
+	}
+
+	// CRITICAL: Before creating journal, persist seqBuffer's DataInfo to database.
+	// This is essential because Journal.flushLargeFileChunked reads DataInfo from database
+	// to determine if base chunks are encrypted. If DataInfo is not persisted, the journal
+	// will incorrectly assume base chunks are not encrypted and will double-encrypt them,
+	// causing data corruption.
+	if ra.seqBuffer.dataInfo != nil && ra.seqBuffer.dataID > 0 && ra.seqBuffer.dataID != core.EmptyDataID {
+		if lh, ok := ra.fs.h.(*core.LocalHandler); ok {
+			// Ensure DataInfo ID matches dataID
+			if ra.seqBuffer.dataInfo.ID != ra.seqBuffer.dataID {
+				ra.seqBuffer.dataInfo.ID = ra.seqBuffer.dataID
+			}
+			if _, err := lh.PutDataInfo(ra.fs.c, ra.fs.bktID, []*core.DataInfo{ra.seqBuffer.dataInfo}); err != nil {
+				DebugLog("[VFS migrateSeqBufferToJournal] WARNING: Failed to persist DataInfo before migration: fileID=%d, dataID=%d, error=%v",
+					ra.fileID, ra.seqBuffer.dataID, err)
+				// Continue anyway - this is a best-effort optimization
+			} else {
+				DebugLog("[VFS migrateSeqBufferToJournal] Persisted DataInfo before migration: fileID=%d, dataID=%d, OrigSize=%d, Size=%d, Kind=0x%x",
+					ra.fileID, ra.seqBuffer.dataID, ra.seqBuffer.dataInfo.OrigSize, ra.seqBuffer.dataInfo.Size, ra.seqBuffer.dataInfo.Kind)
+			}
+		}
 	}
 
 	// Calculate data range
