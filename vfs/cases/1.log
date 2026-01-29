@@ -1,0 +1,214 @@
+Jan 08 10:43:05 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:05.557] [VFS DEBUG] [VFS Read] Entry: objID=441036656607232, offset=71794688, size=131072
+Jan 08 10:43:05 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:05.557] [VFS DEBUG] [VFS getObj] Found in global cache: objID=441036656607232, type=2 (FILE=2, DIR=1), name=甜橙0.7851.exe, PID=439606281502720, size=72027167
+Jan 08 10:43:05 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:05.557] [VFS DEBUG] [VFS Read] Entry: objID=441036656607232, offset=71925760, size=102400
+Jan 08 10:43:05 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:05.557] [VFS DEBUG] [VFS getObj] Found in global cache: objID=441036656607232, type=2 (FILE=2, DIR=1), name=甜橙0.7851.exe, PID=439606281502720, size=72027167
+Jan 08 10:43:05 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:05.557] [VFS DEBUG] [VFS chunkReader ReadAt] Reading chunk: dataID=441036719521792, sn=6, offset=71794688, offsetInChunk=8880128, remaining=131072, origSize=72027167, totalRead=0
+Jan 08 10:43:05 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:05.557] [VFS DEBUG] [VFS chunkReader ReadAt] Read from chunk: dataID=441036719521792, sn=6, chunkSize=9112607, toRead=131072, totalRead=131072, remaining=0
+Jan 08 10:43:05 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:05.557] [VFS DEBUG] [VFS chunkReader ReadAt] Reading chunk: dataID=441036719521792, sn=6, offset=71925760, offsetInChunk=9011200, remaining=101407, origSize=72027167, totalRead=0
+Jan 08 10:43:05 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:05.557] [VFS DEBUG] [VFS chunkReader ReadAt] Read from chunk: dataID=441036719521792, sn=6, chunkSize=9112607, toRead=101407, totalRead=101407, remaining=0
+Jan 08 10:43:05 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:05.557] [VFS DEBUG] [VFS chunkReader ReadAt] Completed read: dataID=441036719521792, totalRead=101407, requested=101407, origSize=72027167
+Jan 08 10:43:05 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:05.557] [VFS DEBUG] [VFS chunkReader ReadAt] Completed read: dataID=441036719521792, totalRead=131072, requested=131072, origSize=72027167
+Jan 08 10:43:05 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:05.741] [VFS DEBUG] [Journal flushLargeFileChunked] Wrote chunk 2: offset=20971520, length=10485788
+Jan 08 10:43:05 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:05.752] [VFS DEBUG] [Journal flushLargeFileChunked] Processed chunk 3: original=10485760, processed=10485788, kind=0x3
+Jan 08 10:43:06 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:06.025] [VFS DEBUG] [Journal flushLargeFileChunked] Wrote chunk 3: offset=31457280, length=10485788
+Jan 08 10:43:06 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:06.036] [VFS DEBUG] [Journal flushLargeFileChunked] Processed chunk 4: original=10485760, processed=10485788, kind=0x3
+Jan 08 10:43:06 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:06.300] [VFS DEBUG] [Journal flushLargeFileChunked] Wrote chunk 4: offset=41943040, length=10485788
+Jan 08 10:43:06 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:06.300] [VFS DEBUG] [Journal flushLargeFileChunked] Marking as sparse file: virtualSize=1105911484, actualSize=1105911484
+Jan 08 10:43:06 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:06.300] [VFS DEBUG] [Journal flushLargeFileChunked] DataInfo prepared: Kind=0x10003, needsCompress=false, needsEncrypt=true
+Jan 08 10:43:06 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:06.463] [VFS DEBUG] [Journal Flush] ERROR: Failed after 1.610552826s: fileID=441036799213568, error=failed to read back chunk 5 for hashing: open /media/Main-Storage1/.zima_encrypted_folders/439606281502720/744/EE3E15F90DB99744/441036874711040_5: no such file or directory
+Jan 08 10:43:06 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:06.463] [VFS DEBUG] [Journal Write] ERROR: Forced flush failed: failed to read back chunk 5 for hashing: open /media/Main-Storage1/.zima_encrypted_folders/439606281502720/744/EE3E15F90DB99744/441036874711040_5: no such file or directory
+Jan 08 10:43:06 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:06.463] [VFS DEBUG] [VFS Write] ERROR: Failed to write data: fileID=441036799213568, offset=55574528, size=524288, error=forced flush failed due to memory limit: failed to read back chunk 5 for hashing: open /media/Main-Storage1/.zima_encrypted_folders/439606281502720/744/EE3E15F90DB99744/441036874711040_5: no such file or directory
+Jan 08 10:43:06 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:06.464] [VFS DEBUG] [VFS Write] Write called: objID=441036799213568, offset=56623104, size=524288
+Jan 08 10:43:06 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:06.464] [VFS DEBUG] [VFS Write] Object info: objID=441036799213568, type=2 (FILE=2, DIR=1), name=zimaos_zimacube-1.4.1-beta2.img.xz, PID=439606281502720
+Jan 08 10:43:06 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:06.464] [VFS DEBUG] [VFS Write] Writing data: fileID=441036799213568, offset=56623104, size=524288
+Jan 08 10:43:06 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:06.464] [VFS DEBUG] [VFS shouldUseJournal] Using journal for sparse file: fileID=441036799213568, sparseSize=1105911484
+Jan 08 10:43:06 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:06.464] [VFS DEBUG] [VFS RandomAccessor Write] Using journal: fileID=441036799213568, offset=56623104, size=524288
+Jan 08 10:43:06 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:06.464] [VFS DEBUG] [Journal Write] Memory limit exceeded, forcing flush: fileID=441036799213568, current=51904528, adding=524288, limit=52428800
+Jan 08 10:43:06 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:06.464] [VFS DEBUG] [Journal Flush] Starting flush: fileID=441036799213568, entries=1, baseDataID=0, baseSize=1105911484
+Jan 08 10:43:06 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:06.464] [VFS DEBUG] [Journal flushLargeFile] fileID=441036799213568, baseSize=1105911484, modifiedBytes=51904512, ratio=4.69%
+Jan 08 10:43:06 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:06.464] [VFS DEBUG] [Journal flushLargeFile] Using chunked COW flush strategy
+Jan 08 10:43:06 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:06.464] [VFS DEBUG] [Journal flushLargeFileChunked] fileID=441036799213568, totalChunks=106, modifiedChunks=5 (4.7%)
+Jan 08 10:43:06 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:06.464] [VFS DEBUG] [Journal flushLargeFileChunked] Processing config: needsCompress=false, needsEncrypt=true, processKind=0x3, endecKey length=32
+Jan 08 10:43:06 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:06.474] [VFS DEBUG] [Journal flushLargeFileChunked] Processed chunk 3: original=10485760, processed=10485788, kind=0x3
+Jan 08 10:43:06 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:06.709] [VFS DEBUG] [Journal flushLargeFileChunked] Wrote chunk 3: offset=31457280, length=10485788
+Jan 08 10:43:06 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:06.723] [VFS DEBUG] [Journal flushLargeFileChunked] Processed chunk 4: original=10485760, processed=10485788, kind=0x3
+Jan 08 10:43:06 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:06.951] [VFS DEBUG] [Journal flushLargeFileChunked] Wrote chunk 4: offset=41943040, length=10485788
+Jan 08 10:43:06 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:06.962] [VFS DEBUG] [Journal flushLargeFileChunked] Processed chunk 0: original=10485760, processed=10485788, kind=0x3
+Jan 08 10:43:07 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:07.211] [VFS DEBUG] [Journal flushLargeFileChunked] Wrote chunk 0: offset=0, length=10485788
+Jan 08 10:43:07 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:07.223] [VFS DEBUG] [Journal flushLargeFileChunked] Processed chunk 1: original=10485760, processed=10485788, kind=0x3
+Jan 08 10:43:07 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:07.482] [VFS DEBUG] [Journal flushLargeFileChunked] Wrote chunk 1: offset=10485760, length=10485788
+Jan 08 10:43:07 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:07.493] [VFS DEBUG] [Journal flushLargeFileChunked] Processed chunk 2: original=10485760, processed=10485788, kind=0x3
+Jan 08 10:43:07 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:07.736] [VFS DEBUG] [Journal flushLargeFileChunked] Wrote chunk 2: offset=20971520, length=10485788
+Jan 08 10:43:07 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:07.736] [VFS DEBUG] [Journal flushLargeFileChunked] Marking as sparse file: virtualSize=1105911484, actualSize=1105911484
+Jan 08 10:43:07 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:07.736] [VFS DEBUG] [Journal flushLargeFileChunked] DataInfo prepared: Kind=0x10003, needsCompress=false, needsEncrypt=true
+Jan 08 10:43:07 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:07.933] [VFS DEBUG] [Journal Flush] ERROR: Failed after 1.468604828s: fileID=441036799213568, error=failed to read back chunk 5 for hashing: open /media/Main-Storage1/.zima_encrypted_folders/439606281502720/BB2/B8FD094AB3FDFBB2/441036883099648_5: no such file or directory
+Jan 08 10:43:07 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:07.933] [VFS DEBUG] [Journal Write] ERROR: Forced flush failed: failed to read back chunk 5 for hashing: open /media/Main-Storage1/.zima_encrypted_folders/439606281502720/BB2/B8FD094AB3FDFBB2/441036883099648_5: no such file or directory
+Jan 08 10:43:07 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:07.933] [VFS DEBUG] [VFS Write] ERROR: Failed to write data: fileID=441036799213568, offset=56623104, size=524288, error=forced flush failed due to memory limit: failed to read back chunk 5 for hashing: open /media/Main-Storage1/.zima_encrypted_folders/439606281502720/BB2/B8FD094AB3FDFBB2/441036883099648_5: no such file or directory
+Jan 08 10:43:07 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:07.933] [VFS DEBUG] [VFS Write] Write called: objID=441036799213568, offset=57671680, size=524288
+Jan 08 10:43:07 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:07.933] [VFS DEBUG] [VFS Write] Object info: objID=441036799213568, type=2 (FILE=2, DIR=1), name=zimaos_zimacube-1.4.1-beta2.img.xz, PID=439606281502720
+Jan 08 10:43:07 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:07.933] [VFS DEBUG] [VFS Write] Writing data: fileID=441036799213568, offset=57671680, size=524288
+Jan 08 10:43:07 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:07.933] [VFS DEBUG] [VFS shouldUseJournal] Using journal for sparse file: fileID=441036799213568, sparseSize=1105911484
+Jan 08 10:43:07 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:07.933] [VFS DEBUG] [VFS RandomAccessor Write] Using journal: fileID=441036799213568, offset=57671680, size=524288
+Jan 08 10:43:07 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:07.933] [VFS DEBUG] [Journal Write] Memory limit exceeded, forcing flush: fileID=441036799213568, current=51904528, adding=524288, limit=52428800
+Jan 08 10:43:07 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:07.933] [VFS DEBUG] [Journal Flush] Starting flush: fileID=441036799213568, entries=1, baseDataID=0, baseSize=1105911484
+Jan 08 10:43:07 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:07.933] [VFS DEBUG] [Journal flushLargeFile] fileID=441036799213568, baseSize=1105911484, modifiedBytes=51904512, ratio=4.69%
+Jan 08 10:43:07 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:07.933] [VFS DEBUG] [Journal flushLargeFile] Using chunked COW flush strategy
+Jan 08 10:43:07 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:07.933] [VFS DEBUG] [Journal flushLargeFileChunked] fileID=441036799213568, totalChunks=106, modifiedChunks=5 (4.7%)
+Jan 08 10:43:07 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:07.934] [VFS DEBUG] [Journal flushLargeFileChunked] Processing config: needsCompress=false, needsEncrypt=true, processKind=0x3, endecKey length=32
+Jan 08 10:43:07 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:07.943] [VFS DEBUG] [Journal flushLargeFileChunked] Processed chunk 0: original=10485760, processed=10485788, kind=0x3
+Jan 08 10:43:08 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:08.185] [VFS DEBUG] [Journal flushLargeFileChunked] Wrote chunk 0: offset=0, length=10485788
+Jan 08 10:43:08 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:08.199] [VFS DEBUG] [Journal flushLargeFileChunked] Processed chunk 1: original=10485760, processed=10485788, kind=0x3
+Jan 08 10:43:08 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:08.403] [VFS DEBUG] [Journal flushLargeFileChunked] Wrote chunk 1: offset=10485760, length=10485788
+Jan 08 10:43:08 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:08.413] [VFS DEBUG] [Journal flushLargeFileChunked] Processed chunk 2: original=10485760, processed=10485788, kind=0x3
+Jan 08 10:43:08 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:08.658] [VFS DEBUG] [Journal flushLargeFileChunked] Wrote chunk 2: offset=20971520, length=10485788
+Jan 08 10:43:08 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:08.668] [VFS DEBUG] [Journal flushLargeFileChunked] Processed chunk 3: original=10485760, processed=10485788, kind=0x3
+Jan 08 10:43:08 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:08.713] [VFS DEBUG] [VFS Flush] Entry: objID=441036656607232, FileHandle=i441036656607232 g0 (reg):
+Jan 08 10:43:08 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:08.713] [VFS DEBUG] [VFS flushImpl] Entry: objID=441036656607232
+Jan 08 10:43:08 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:08.713] [VFS DEBUG] [VFS Release] Entry: objID=441036656607232, FileHandle=i441036656607232 g0 (reg):
+Jan 08 10:43:08 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:08.713] [VFS DEBUG] [VFS releaseImpl] Entry: objID=441036656607232
+Jan 08 10:43:08 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:08.715] [VFS DEBUG] [VFS Flush] Entry: objID=441036656607232, FileHandle=i441036656607232 g0 (reg):
+Jan 08 10:43:08 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:08.715] [VFS DEBUG] [VFS flushImpl] Entry: objID=441036656607232
+Jan 08 10:43:08 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:08.715] [VFS DEBUG] [VFS Release] Entry: objID=441036656607232, FileHandle=i441036656607232 g0 (reg):
+Jan 08 10:43:08 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:08.715] [VFS DEBUG] [VFS releaseImpl] Entry: objID=441036656607232
+Jan 08 10:43:08 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:08.718] [VFS DEBUG] [VFS Flush] Entry: objID=441036656607232, FileHandle=i441036656607232 g0 (reg):
+Jan 08 10:43:08 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:08.718] [VFS DEBUG] [VFS flushImpl] Entry: objID=441036656607232
+Jan 08 10:43:08 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:08.718] [VFS DEBUG] [VFS Release] Entry: objID=441036656607232, FileHandle=i441036656607232 g0 (reg):
+Jan 08 10:43:08 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:08.718] [VFS DEBUG] [VFS releaseImpl] Entry: objID=441036656607232
+Jan 08 10:43:08 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:08.894] [VFS DEBUG] [Journal flushLargeFileChunked] Wrote chunk 3: offset=31457280, length=10485788
+Jan 08 10:43:08 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:08.904] [VFS DEBUG] [Journal flushLargeFileChunked] Processed chunk 4: original=10485760, processed=10485788, kind=0x3
+Jan 08 10:43:09 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:09.142] [VFS DEBUG] [Journal flushLargeFileChunked] Wrote chunk 4: offset=41943040, length=10485788
+Jan 08 10:43:09 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:09.143] [VFS DEBUG] [Journal flushLargeFileChunked] Marking as sparse file: virtualSize=1105911484, actualSize=1105911484
+Jan 08 10:43:09 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:09.143] [VFS DEBUG] [Journal flushLargeFileChunked] DataInfo prepared: Kind=0x10003, needsCompress=false, needsEncrypt=true
+Jan 08 10:43:09 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:09.315] [VFS DEBUG] [Journal Flush] ERROR: Failed after 1.381206174s: fileID=441036799213568, error=failed to read back chunk 5 for hashing: open /media/Main-Storage1/.zima_encrypted_folders/439606281502720/45C/9AB190FEF569345C/441036887293952_5: no such file or directory
+Jan 08 10:43:09 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:09.315] [VFS DEBUG] [Journal Write] ERROR: Forced flush failed: failed to read back chunk 5 for hashing: open /media/Main-Storage1/.zima_encrypted_folders/439606281502720/45C/9AB190FEF569345C/441036887293952_5: no such file or directory
+Jan 08 10:43:09 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:09.315] [VFS DEBUG] [VFS Write] ERROR: Failed to write data: fileID=441036799213568, offset=57671680, size=524288, error=forced flush failed due to memory limit: failed to read back chunk 5 for hashing: open /media/Main-Storage1/.zima_encrypted_folders/439606281502720/45C/9AB190FEF569345C/441036887293952_5: no such file or directory
+Jan 08 10:43:09 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:09.315] [VFS DEBUG] [VFS Write] Write called: objID=441036799213568, offset=58720256, size=524288
+Jan 08 10:43:09 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:09.315] [VFS DEBUG] [VFS Write] Object info: objID=441036799213568, type=2 (FILE=2, DIR=1), name=zimaos_zimacube-1.4.1-beta2.img.xz, PID=439606281502720
+Jan 08 10:43:09 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:09.315] [VFS DEBUG] [VFS Write] Writing data: fileID=441036799213568, offset=58720256, size=524288
+Jan 08 10:43:09 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:09.315] [VFS DEBUG] [VFS shouldUseJournal] Using journal for sparse file: fileID=441036799213568, sparseSize=1105911484
+Jan 08 10:43:09 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:09.315] [VFS DEBUG] [VFS RandomAccessor Write] Using journal: fileID=441036799213568, offset=58720256, size=524288
+Jan 08 10:43:09 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:09.315] [VFS DEBUG] [Journal Write] Memory limit exceeded, forcing flush: fileID=441036799213568, current=51904528, adding=524288, limit=52428800
+Jan 08 10:43:09 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:09.315] [VFS DEBUG] [Journal Flush] Starting flush: fileID=441036799213568, entries=1, baseDataID=0, baseSize=1105911484
+Jan 08 10:43:09 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:09.315] [VFS DEBUG] [Journal flushLargeFile] fileID=441036799213568, baseSize=1105911484, modifiedBytes=51904512, ratio=4.69%
+Jan 08 10:43:09 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:09.315] [VFS DEBUG] [Journal flushLargeFile] Using chunked COW flush strategy
+Jan 08 10:43:09 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:09.315] [VFS DEBUG] [Journal flushLargeFileChunked] fileID=441036799213568, totalChunks=106, modifiedChunks=5 (4.7%)
+Jan 08 10:43:09 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:09.316] [VFS DEBUG] [Journal flushLargeFileChunked] Processing config: needsCompress=false, needsEncrypt=true, processKind=0x3, endecKey length=32
+Jan 08 10:43:09 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:09.328] [VFS DEBUG] [Journal flushLargeFileChunked] Processed chunk 1: original=10485760, processed=10485788, kind=0x3
+Jan 08 10:43:09 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:09.535] [VFS DEBUG] [Journal flushLargeFileChunked] Wrote chunk 1: offset=10485760, length=10485788
+Jan 08 10:43:09 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:09.553] [VFS DEBUG] [Journal flushLargeFileChunked] Processed chunk 2: original=10485760, processed=10485788, kind=0x3
+Jan 08 10:43:09 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:09.802] [VFS DEBUG] [Journal flushLargeFileChunked] Wrote chunk 2: offset=20971520, length=10485788
+Jan 08 10:43:09 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:09.813] [VFS DEBUG] [Journal flushLargeFileChunked] Processed chunk 3: original=10485760, processed=10485788, kind=0x3
+Jan 08 10:43:10 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:10.060] [VFS DEBUG] [Journal flushLargeFileChunked] Wrote chunk 3: offset=31457280, length=10485788
+Jan 08 10:43:10 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:10.073] [VFS DEBUG] [Journal flushLargeFileChunked] Processed chunk 4: original=10485760, processed=10485788, kind=0x3
+Jan 08 10:43:10 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:10.352] [VFS DEBUG] [Journal flushLargeFileChunked] Wrote chunk 4: offset=41943040, length=10485788
+Jan 08 10:43:10 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:10.372] [VFS DEBUG] [Journal flushLargeFileChunked] Processed chunk 0: original=10485760, processed=10485788, kind=0x3
+Jan 08 10:43:10 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:10.611] [VFS DEBUG] [Journal flushLargeFileChunked] Wrote chunk 0: offset=0, length=10485788
+Jan 08 10:43:10 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:10.611] [VFS DEBUG] [Journal flushLargeFileChunked] Marking as sparse file: virtualSize=1105911484, actualSize=1105911484
+Jan 08 10:43:10 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:10.611] [VFS DEBUG] [Journal flushLargeFileChunked] DataInfo prepared: Kind=0x10003, needsCompress=false, needsEncrypt=true
+Jan 08 10:43:11 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:11.219] [VFS DEBUG] [Journal Flush] ERROR: Failed after 1.903518465s: fileID=441036799213568, error=failed to read back chunk 5 for hashing: open /media/Main-Storage1/.zima_encrypted_folders/439606281502720/09F/916552BDB9CBB09F/441036895682560_5: no such file or directory
+Jan 08 10:43:11 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:11.219] [VFS DEBUG] [Journal Write] ERROR: Forced flush failed: failed to read back chunk 5 for hashing: open /media/Main-Storage1/.zima_encrypted_folders/439606281502720/09F/916552BDB9CBB09F/441036895682560_5: no such file or directory
+Jan 08 10:43:11 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:11.219] [VFS DEBUG] [VFS Write] ERROR: Failed to write data: fileID=441036799213568, offset=58720256, size=524288, error=forced flush failed due to memory limit: failed to read back chunk 5 for hashing: open /media/Main-Storage1/.zima_encrypted_folders/439606281502720/09F/916552BDB9CBB09F/441036895682560_5: no such file or directory
+Jan 08 10:43:11 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:11.247] [VFS DEBUG] [VFS Rename] Entry: name=zimaos_zimacube-1.4.1-beta2.img.xz, newName=zimaos_zimacube-1.4.1-beta2.img.xz, parentID=439606281502720, flags=0x0
+Jan 08 10:43:11 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:11.284] [VFS DEBUG] [VFS Rename] Found source file from List (exact match, cached): sourceID=441036799213568, name=zimaos_zimacube-1.4.1-beta2.img.xz
+Jan 08 10:43:11 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:11.284] [VFS DEBUG] [VFS Rename] Found source file: sourceID=441036799213568, name=zimaos_zimacube-1.4.1-beta2.img.xz, type=2, PID=439606281502720
+Jan 08 10:43:11 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:11.284] [VFS DEBUG] [VFS Rename] New parent object: newParentID=439606411526146, newParentName=.recycle, sourceParentID=439606281502720
+Jan 08 10:43:11 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:11.284] [VFS DEBUG] [VFS Rename] Skipping atomic replace detection: target is recycle bin (normal delete operation)
+Jan 08 10:43:11 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:11.285] [VFS DEBUG] [VFS Rename] Checking merge condition: isRemovingTmp=false, existingTargetID=0, sourceID=441036799213568, sourceName=zimaos_zimacube-1.4.1-beta2.img.xz, targetName=zimaos_zimacube-1.4.1-beta2.img.xz
+Jan 08 10:43:11 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:11.285] [VFS DEBUG] [VFS Rename] Rename source file to target name: sourceID=441036799213568, targetID=0, targetName=zimaos_zimacube-1.4.1-beta2.img.xz
+Jan 08 10:43:11 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:11.285] [VFS DEBUG] [VFS Rename] Successfully renamed source file to target name: sourceID=441036799213568, targetID=0, targetName=zimaos_zimacube-1.4.1-beta2.img.xz
+Jan 08 10:43:11 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:11.285] [VFS DEBUG] [VFS invalidateDirListCache] Invalidated directory cache: dirID=439606281502720
+Jan 08 10:43:11 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:11.285] [VFS DEBUG] [VFS invalidateDirListCache] Invalidated directory cache: dirID=439606411526146
+Jan 08 10:43:11 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:11.286] [VFS DEBUG] [VFS Flush] Entry: objID=441036799213568, FileHandle=i441036799213568 g0 (reg):
+Jan 08 10:43:11 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:11.286] [VFS DEBUG] [VFS flushImpl] Entry: objID=441036799213568
+Jan 08 10:43:11 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:11.286] [VFS DEBUG] [VFS Flush] Flushing file: fileID=441036799213568, currentSize=1105911484
+Jan 08 10:43:11 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:11.286] [VFS DEBUG] [VFS RandomAccessor Flush] Starting flush: fileID=441036799213568, force=false
+Jan 08 10:43:11 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:11.286] [VFS DEBUG] [VFS RandomAccessor Flush] 🔍 Checking journal flush path: fileID=441036799213568, force=false
+Jan 08 10:43:11 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:11.286] [VFS DEBUG] [VFS flushJournal] Journal is dirty, proceeding to flush: fileID=441036799213568, isSparse=true, virtualSize=1105911484
+Jan 08 10:43:11 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:11.286] [VFS DEBUG] [VFS flushJournal] Flushing journal: fileID=441036799213568
+Jan 08 10:43:11 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:11.286] [VFS DEBUG] [VFS flushJournal] Checking journal sparse properties: fileID=441036799213568, journal.isSparse=true, journal.virtualSize=1105911484
+Jan 08 10:43:11 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:11.286] [VFS DEBUG] [VFS flushJournal] Sparse file detected: fileID=441036799213568, virtualSize=1105911484
+Jan 08 10:43:11 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:11.286] [VFS DEBUG] [Journal Flush] Starting flush: fileID=441036799213568, entries=1, baseDataID=0, baseSize=1105911484
+Jan 08 10:43:11 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:11.286] [VFS DEBUG] [Journal flushLargeFile] fileID=441036799213568, baseSize=1105911484, modifiedBytes=51904512, ratio=4.69%
+Jan 08 10:43:11 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:11.286] [VFS DEBUG] [Journal flushLargeFile] Using chunked COW flush strategy
+Jan 08 10:43:11 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:11.286] [VFS DEBUG] [Journal flushLargeFileChunked] fileID=441036799213568, totalChunks=106, modifiedChunks=5 (4.7%)
+Jan 08 10:43:11 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:11.287] [VFS DEBUG] [Journal flushLargeFileChunked] Processing config: needsCompress=false, needsEncrypt=true, processKind=0x3, endecKey length=32
+Jan 08 10:43:11 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:11.305] [VFS DEBUG] [Journal flushLargeFileChunked] Processed chunk 1: original=10485760, processed=10485788, kind=0x3
+Jan 08 10:43:11 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:11.636] [VFS DEBUG] [Journal flushLargeFileChunked] Wrote chunk 1: offset=10485760, length=10485788
+Jan 08 10:43:11 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:11.647] [VFS DEBUG] [Journal flushLargeFileChunked] Processed chunk 2: original=10485760, processed=10485788, kind=0x3
+Jan 08 10:43:11 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:11.895] [VFS DEBUG] [Journal flushLargeFileChunked] Wrote chunk 2: offset=20971520, length=10485788
+Jan 08 10:43:11 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:11.905] [VFS DEBUG] [Journal flushLargeFileChunked] Processed chunk 3: original=10485760, processed=10485788, kind=0x3
+Jan 08 10:43:12 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:12.195] [VFS DEBUG] [Journal flushLargeFileChunked] Wrote chunk 3: offset=31457280, length=10485788
+Jan 08 10:43:12 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:12.205] [VFS DEBUG] [Journal flushLargeFileChunked] Processed chunk 4: original=10485760, processed=10485788, kind=0x3
+Jan 08 10:43:12 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:12.454] [VFS DEBUG] [Journal flushLargeFileChunked] Wrote chunk 4: offset=41943040, length=10485788
+Jan 08 10:43:12 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:12.465] [VFS DEBUG] [Journal flushLargeFileChunked] Processed chunk 0: original=10485760, processed=10485788, kind=0x3
+Jan 08 10:43:12 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:12.681] [VFS DEBUG] [Journal flushLargeFileChunked] Wrote chunk 0: offset=0, length=10485788
+Jan 08 10:43:12 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:12.681] [VFS DEBUG] [Journal flushLargeFileChunked] Marking as sparse file: virtualSize=1105911484, actualSize=1105911484
+Jan 08 10:43:12 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:12.681] [VFS DEBUG] [Journal flushLargeFileChunked] DataInfo prepared: Kind=0x10003, needsCompress=false, needsEncrypt=true
+Jan 08 10:43:12 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:12.842] [VFS DEBUG] [Journal Flush] ERROR: Failed after 1.555186964s: fileID=441036799213568, error=failed to read back chunk 5 for hashing: open /media/Main-Storage1/.zima_encrypted_folders/439606281502720/675/BA5D2ED20AC4A675/441036904071168_5: no such file or directory
+Jan 08 10:43:12 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:12.842] [VFS DEBUG] [VFS flushJournal] ERROR: Failed to flush journal: failed to read back chunk 5 for hashing: open /media/Main-Storage1/.zima_encrypted_folders/439606281502720/675/BA5D2ED20AC4A675/441036904071168_5: no such file or directory
+Jan 08 10:43:12 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:12.842] [VFS DEBUG] [VFS RandomAccessor Flush] ⚠️ Journal not flushed: fileID=441036799213568, versionID=0, will try other paths
+Jan 08 10:43:12 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:12.842] [VFS DEBUG] [VFS RandomAccessor Flush] Got fileObj from cache after TempFileWriter flush (non-tmp): fileID=441036799213568, dataID=0, size=1105911484
+Jan 08 10:43:12 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:12.842] [VFS DEBUG] [VFS RandomAccessor Flush] Buffer stats: fileID=441036799213568, writeIndex=0, totalSize=0
+Jan 08 10:43:12 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:12.842] [VFS DEBUG] [VFS RandomAccessor Flush] No pending writes: fileID=441036799213568, writeIndex=0, totalSize=0
+Jan 08 10:43:12 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:12.842] [VFS DEBUG] [VFS Flush] Got updated object from RandomAccessor cache: fileID=441036799213568, size=1105911484, dataID=0, mtime=1767840167
+Jan 08 10:43:12 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:12.842] [VFS DEBUG] [VFS Flush] Updated file object cache: fileID=441036799213568, size=1105911484, dataID=0, mtime=1767840167
+Jan 08 10:43:12 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:12.842] [VFS DEBUG] [VFS invalidateDirListCache] Invalidated directory cache: dirID=439606411526146
+Jan 08 10:43:12 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:12.842] [VFS DEBUG] [VFS Flush] Updated directory listing cache after flush: fileID=441036799213568, dirID=439606411526146, name=zimaos_zimacube-1.4.1-beta2.img.xz, size=1105911484
+Jan 08 10:43:12 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:12.842] [VFS DEBUG] [VFS Flush] Successfully flushed file: fileID=441036799213568, versionID=0, finalSize=1105911484, dataID=0, mtime=1767840167
+Jan 08 10:43:12 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:12.842] [VFS DEBUG] [VFS Release] Entry: objID=441036799213568, FileHandle=i441036799213568 g0 (reg):
+Jan 08 10:43:12 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:12.842] [VFS DEBUG] [VFS releaseImpl] Entry: objID=441036799213568
+Jan 08 10:43:12 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:12.842] [VFS DEBUG] [VFS Release] Releasing file: fileID=441036799213568, currentSize=1105911484, isTmpFile=false
+Jan 08 10:43:12 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:12.842] [VFS DEBUG] [VFS RandomAccessor Flush] Starting flush: fileID=441036799213568, force=true
+Jan 08 10:43:12 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:12.842] [VFS DEBUG] [VFS RandomAccessor Flush] 🔍 Checking journal flush path: fileID=441036799213568, force=true
+Jan 08 10:43:12 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:12.842] [VFS DEBUG] [VFS flushJournal] Journal is dirty, proceeding to flush: fileID=441036799213568, isSparse=true, virtualSize=1105911484
+Jan 08 10:43:12 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:12.842] [VFS DEBUG] [VFS flushJournal] Flushing journal: fileID=441036799213568
+Jan 08 10:43:12 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:12.842] [VFS DEBUG] [VFS flushJournal] Checking journal sparse properties: fileID=441036799213568, journal.isSparse=true, journal.virtualSize=1105911484
+Jan 08 10:43:12 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:12.842] [VFS DEBUG] [VFS flushJournal] Sparse file detected: fileID=441036799213568, virtualSize=1105911484
+Jan 08 10:43:12 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:12.842] [VFS DEBUG] [Journal Flush] Starting flush: fileID=441036799213568, entries=1, baseDataID=0, baseSize=1105911484
+Jan 08 10:43:12 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:12.842] [VFS DEBUG] [Journal flushLargeFile] fileID=441036799213568, baseSize=1105911484, modifiedBytes=51904512, ratio=4.69%
+Jan 08 10:43:12 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:12.842] [VFS DEBUG] [Journal flushLargeFile] Using chunked COW flush strategy
+Jan 08 10:43:12 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:12.842] [VFS DEBUG] [Journal flushLargeFileChunked] fileID=441036799213568, totalChunks=106, modifiedChunks=5 (4.7%)
+Jan 08 10:43:12 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:12.842] [VFS DEBUG] [Journal flushLargeFileChunked] Processing config: needsCompress=false, needsEncrypt=true, processKind=0x3, endecKey length=32
+Jan 08 10:43:12 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:12.852] [VFS DEBUG] [Journal flushLargeFileChunked] Processed chunk 0: original=10485760, processed=10485788, kind=0x3
+Jan 08 10:43:13 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:13.073] [VFS DEBUG] [Journal flushLargeFileChunked] Wrote chunk 0: offset=0, length=10485788
+Jan 08 10:43:13 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:13.083] [VFS DEBUG] [Journal flushLargeFileChunked] Processed chunk 1: original=10485760, processed=10485788, kind=0x3
+Jan 08 10:43:13 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:13.335] [VFS DEBUG] [Journal flushLargeFileChunked] Wrote chunk 1: offset=10485760, length=10485788
+Jan 08 10:43:13 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:13.345] [VFS DEBUG] [Journal flushLargeFileChunked] Processed chunk 2: original=10485760, processed=10485788, kind=0x3
+Jan 08 10:43:13 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:13.535] [VFS DEBUG] [Journal flushLargeFileChunked] Wrote chunk 2: offset=20971520, length=10485788
+Jan 08 10:43:13 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:13.546] [VFS DEBUG] [Journal flushLargeFileChunked] Processed chunk 3: original=10485760, processed=10485788, kind=0x3
+Jan 08 10:43:13 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:13.735] [VFS DEBUG] [Journal flushLargeFileChunked] Wrote chunk 3: offset=31457280, length=10485788
+Jan 08 10:43:13 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:13.746] [VFS DEBUG] [Journal flushLargeFileChunked] Processed chunk 4: original=10485760, processed=10485788, kind=0x3
+Jan 08 10:43:13 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:13.951] [VFS DEBUG] [Journal flushLargeFileChunked] Wrote chunk 4: offset=41943040, length=10485788
+Jan 08 10:43:13 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:13.951] [VFS DEBUG] [Journal flushLargeFileChunked] Marking as sparse file: virtualSize=1105911484, actualSize=1105911484
+Jan 08 10:43:13 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:13.951] [VFS DEBUG] [Journal flushLargeFileChunked] DataInfo prepared: Kind=0x10003, needsCompress=false, needsEncrypt=true
+Jan 08 10:43:14 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:14.129] [VFS DEBUG] [Journal Flush] ERROR: Failed after 1.286851646s: fileID=441036799213568, error=failed to read back chunk 5 for hashing: open /media/Main-Storage1/.zima_encrypted_folders/439606281502720/8F1/0C538C847B50F8F1/441036908265472_5: no such file or directory
+Jan 08 10:43:14 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:14.129] [VFS DEBUG] [VFS flushJournal] ERROR: Failed to flush journal: failed to read back chunk 5 for hashing: open /media/Main-Storage1/.zima_encrypted_folders/439606281502720/8F1/0C538C847B50F8F1/441036908265472_5: no such file or directory
+Jan 08 10:43:14 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:14.129] [VFS DEBUG] [VFS RandomAccessor Flush] ⚠️ Journal not flushed: fileID=441036799213568, versionID=0, will try other paths
+Jan 08 10:43:14 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:14.129] [VFS DEBUG] [VFS RandomAccessor Flush] Got fileObj from cache after TempFileWriter flush (non-tmp): fileID=441036799213568, dataID=0, size=1105911484
+Jan 08 10:43:14 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:14.129] [VFS DEBUG] [VFS RandomAccessor Flush] Buffer stats: fileID=441036799213568, writeIndex=0, totalSize=0
+Jan 08 10:43:14 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:14.129] [VFS DEBUG] [VFS RandomAccessor Flush] No pending writes: fileID=441036799213568, writeIndex=0, totalSize=0
+Jan 08 10:43:14 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:14.129] [VFS DEBUG] [VFS Release] Flushed during release: fileID=441036799213568, versionID=0
+Jan 08 10:43:14 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:14.129] [VFS DEBUG] [VFS Release] Got updated object from RandomAccessor cache before close: fileID=441036799213568, size=1105911484, dataID=0, mtime=1767840167
+Jan 08 10:43:14 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:14.129] [VFS DEBUG] [VFS closeJournal] Journal has uncommitted changes, flushing: fileID=441036799213568
+Jan 08 10:43:14 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:14.129] [VFS DEBUG] [VFS flushJournal] No journal: fileID=441036799213568
+Jan 08 10:43:14 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:14.129] [VFS DEBUG] [VFS closeJournal] WARNING: Failed to flush journal
+Jan 08 10:43:14 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:14.129] [VFS DEBUG] [VFS RandomAccessor Close] WARNING: Failed to close journal: failed to flush journal
+Jan 08 10:43:14 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:14.129] [VFS DEBUG] [VFS RandomAccessor Flush] Starting flush: fileID=441036799213568, force=false
+Jan 08 10:43:14 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:14.129] [VFS DEBUG] [VFS RandomAccessor Flush] 🔍 Checking journal flush path: fileID=441036799213568, force=false
+Jan 08 10:43:14 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:14.129] [VFS DEBUG] [VFS flushJournal] No journal: fileID=441036799213568
+Jan 08 10:43:14 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:14.129] [VFS DEBUG] [VFS RandomAccessor Flush] ⚠️ Journal not flushed: fileID=441036799213568, versionID=0, will try other paths
+Jan 08 10:43:14 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:14.129] [VFS DEBUG] [VFS RandomAccessor Flush] Got fileObj from cache after TempFileWriter flush (non-tmp): fileID=441036799213568, dataID=0, size=1105911484
+Jan 08 10:43:14 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:14.129] [VFS DEBUG] [VFS RandomAccessor Flush] Buffer stats: fileID=441036799213568, writeIndex=0, totalSize=0
+Jan 08 10:43:14 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:14.129] [VFS DEBUG] [VFS RandomAccessor Flush] No pending writes: fileID=441036799213568, writeIndex=0, totalSize=0
+Jan 08 10:43:14 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:14.129] [VFS DEBUG] [VFS Release] Updated file object cache: fileID=441036799213568, size=1105911484, dataID=0, mtime=1767840167
+Jan 08 10:43:14 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:14.129] [VFS DEBUG] [VFS invalidateDirListCache] Invalidated directory cache: dirID=439606411526146
+Jan 08 10:43:14 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:14.129] [VFS DEBUG] [VFS Release] Updated directory listing cache after release: fileID=441036799213568, dirID=439606411526146, name=zimaos_zimacube-1.4.1-beta2.img.xz, size=1105911484
+Jan 08 10:43:14 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:14.129] [VFS DEBUG] [VFS Release] Successfully released file: fileID=441036799213568, finalSize=1105911484, dataID=0, mtime=1767840167
+Jan 08 10:43:19 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:19.467] [VFS DEBUG] [VFS Flush] Entry: objID=441036656607232, FileHandle=i441036656607232 g0 (reg):
+Jan 08 10:43:19 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:19.467] [VFS DEBUG] [VFS flushImpl] Entry: objID=441036656607232
+Jan 08 10:43:19 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:19.467] [VFS DEBUG] [VFS Release] Entry: objID=441036656607232, FileHandle=i441036656607232 g0 (reg):
+Jan 08 10:43:19 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:19.467] [VFS DEBUG] [VFS releaseImpl] Entry: objID=441036656607232
+Jan 08 10:43:19 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:19.470] [VFS DEBUG] [VFS Flush] Entry: objID=441036656607232, FileHandle=i441036656607232 g0 (reg):
+Jan 08 10:43:19 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:19.470] [VFS DEBUG] [VFS flushImpl] Entry: objID=441036656607232
+Jan 08 10:43:19 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:19.470] [VFS DEBUG] [VFS Release] Entry: objID=441036656607232, FileHandle=i441036656607232 g0 (reg):
+Jan 08 10:43:19 ZimaCubeOrca icewhale-files[6082]: [2026-01-08 10:43:19.470] [VFS DEBUG] [VFS releaseImpl] Entry: objID=441036656607232

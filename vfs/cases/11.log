@@ -1,0 +1,103 @@
+[17:58:04]
+316672, size=0, DataID=0, mtime=1769594274
+[17:58:04] 84306
+[17:58:04] 84307
+[17:58:04] 84308
+[17:58:04] 84309
+[17:58:04] 84310
+[17:58:04]
+Jan 28 19:57:54 ZaCubePro766 icewhale-files[406327]: [26926-01-28 19:54.528) [VFS DEBUG] [VFS NewRandomAccessbr] Created RandomAccessor: fileID=448394061414400, fileName=252a4291b9b4c0e4.jpg, isTmpFile=false
+Jan 28 19:57:54 ZaCubePro766 icewhale-files[406327]:[2026-01-28 19:54.528] [VFS DEBUG] [VFS getRandomAccessor] Registering RandomAccessor: fileID=448394061414409
+Jan 28 19:57:54 ZaCubePro766 icewhale-files[406327]:[2026-01-28 19:57:54.528] [VFS DEBUG] [VFS RA Registry] Registered RandomAccessor: fileID=448394061414400a, ra=0xc008174240
+Jan 28 19:57:54 ZaCubePro766 icewhale-files[406327]: [20926-01-28 19:54.529) [VFS DEBUG] [VFS Setattr] No objeect updated: objID=448394061414400
+Jan 28 19:57:54 ZaCubePro766 icewhale-files[406327]:[2026-01-28 19:54.529] [VFS DEBUG] [VFS get0bj]
+316672, size=450212, DataID=0, mtime=17695942774
+Found in global cache: objID=448394061414400, type=2 (FILE=2, DIR=1), name=252a4291b9b4c0e4.jpg, PID=448388684
+[17:58:04] 84311
+[17:58:04] 84312
+[17:58:04]
+Jan 28 19:57:54 ZaCubePro766 icewhale-files[406327]:[2026-01-28 19:54.529] [VFS DEBUG] [VFS Setattr]
+Jan 28 19:57:54 ZaCubePro766 icewhale-files[406327]:[2026-01-28 19:54.529] [VFS DEBUG] [VFS get0bj]
+316672, size=450212, DataID=0, mtime=1769594274
+Entry: objID=448394061414400, valid=0x30, FileHandle=<nil>
+Found in global cache: objID=448394061414400, type=2 (FILE=2, DIR=1), name=252a4291b9b4c0e4.jpg, PID=448388684
+[17:58:04] 84313
+[17:58:04] 84314
+[17:58:04] 84315
+[17:58:04] 84316
+[17:58:04] 84317
+[17:58:04] 84318
+[17:58:04] 84319
+[17:58:04] 84320
+[17:58:04] 84321
+[17:58:04]
+Jan 28 19:57:54 ZaCubePro766 icewhale-files[406327]:[2026-01-28 19:54.529] [VFS DEBUG] [VFS Setattr]Setting mtime: objID=448394061414400, oldMTime=1769594274, newMTime=1769594275
+Jan 28 19:57:54 ZaCubePro766 icewhale-files[406327]: [2026-01-28 19:54.529] [VFS DEBUG] [VFS Setatt:r] Setting atime: objID=448394061414400, atime=1769594274
+Jan 28 19:57:54 ZaCubePro766 icewhale-files[406327]:[2026-01-28 19:57:54.530] [VFS DEBUG] [VFS Setattr]Successfully updated object in database: objID=4483994061414400, mode=502, mtime=1769594275
+Jan 28 19:57:54 ZaCubePro766 icewhale-files[406327]:[2026-01-28 19:54.530] [VFS DEBUG] [VFS Setattr]Updated file object cache: objID=448394061414400
+Jan 28 19:57:54 ZaCubePro766 icewhale-files[406327]: [2026-01-28 19:54.530) [VFS DEBUG] [VFS Setattr] Updated local object cache: objID=448394061414400
+Jan 28 19:57:54 ZaCubePro766 icewhale-files[406327]:[2026-01-28 19:57:54.530] [VFS DEBUG]
+Jan 28 19:57:54 ZaCubePro766 icewhale-files[406327]: [2026-01-28 19:54.530] [VFS DEBUG]
+[VFS Setattr] Invalidated parent directory listiing cache: objID=448394061414400, parentID=448388684316672
+[VFS Setattr] Successfully completed: objID=4483940651414400, mode=0100766, size=450212, mtime=1769594275
+Jan 28 19:54 ZaCubePro766 icewhale-files[406327]: [2026-01-28 19:54.591] [VFS DEBUG] [VFS Wr:ite] Write called: objID=448394061414400, offset=3393216, size=56996
+Jan 28 19:57:54 ZaCubePro766 icewhale-files[406327]: [2026-01-28 19:57:54.591] [VFS DEBUG] [VFS getObj
+316672, size=450212, DataID=0, mtime=17695942775
+Found in global cache: objID=448394061414400, type=2 (FILE=2, DIR=1), name=252a4291b9b4c0e4.jpg, PID=448388684
+[17:58:04] 84322
+[17:58:04] 84323
+[17:58:04] 84324
+[17:58:04] 84325
+[17:58:04] 84326
+[17:58:04] 84327
+[17:58:04]
+Jan 28 19:57:54 ZaCubePro766 icewhale-files[406327]:[2026-01-28 19:54.591] [VFS DEBUG] [VFS Write] Oboject info: objID=448394061414400, type=2 (FILE=2, DIR=1), name=252a4291b9b4c0e4.jpg, PID=448388684316672
+Jan 28 19:57:54 ZaCubePro766 icewhale-files[406327]: [20926-01-28 19:57:54.591) [VFS DEBUG] [VFS Write] Writingdata: fileID=448394061414400, offset=393216, size=56996
+Jan 28 19:57:54 ZaCubePro766 icewhale-files[406327]: [20026-01-28 19:54.591) [VFS DEBUG] [VFS updateWriteRangee] Initialized write range: fileID=448394061414400, start=393216, end=450212
+Jan 28 19:57:54 ZaCubePro766 icewhale-files[406327]: [2026-01-28 19:57:54.591) [VFS DEBUG] [VFS shouldUse Journal) Default case, not using journal: fileID=448394061414400, offset393216
+Jan 28 19:57:54 ZaCubePro766 icewhale-files[406327]:[2026-01-28 19:57:54.591] [VFS DEBUG] [VFS ChunkedFileWriter Create] Created new DataID: fileID=448394061414400, dataID=448394061414401, writerType=1
+Jan 28 19:54 ZaCubePro766 icewhale-files[406327]: [2026-01-28 19:54.591] [VFS DEBUG] [VFS ChunkedFileWriter Create] Created ChunkedFileWriterfor sparse file: fileID=448394061414400, dataID=448394061414401, fileN
+ame=252a4291b9b4c0e4.jpg, chunkSize=10485760, realtimeCompressEncrypt=false
+[17:58:04] 84328
+[17:58:04] 84329
+[17:58:04]
+Jan 28 19:57:54 ZaCubePro766 icewhale-files[406327]:[2026-01-28 19:57:54.591] [VFS DEBUG] [VFS RandomAcc[essor Write] Using ChunkedFileWriter for sparse file:fileID=448394061414400, offset=393216
+Jan 28 19:57:54 ZaCubePro766 icewhale-files[406327]: [2026-01-28 19:57:54.591) [VFS DEBUG] [VFS ChunkedFileWriteer Write] Reading chunk from disk: fileID=4483940614144009, dataID=448394061414401, sn=0, offsetInChunk=3932
+16
+[17:58:04] 84330
+[17:58:04]
+Jan 28 19:57:54 ZaCubePro766 icewhale-files[406327]:[2026-01-28 19:57:54.591] [VFS DEBUG] [VFS ChunkedFileWriter Write] READ from disk failed or empty: fileID=448394061414400, dataID=448394061414401, sn=0, error=open
+/media/HDD-Storage11/.zima_encrypted_folders/448381562388480/508/77828C7EFD3EA508/448394061414401_: no such file or directory, size=0
+[17:58:04] 84331
+[17:58:04]
+Jan 28 19:54 ZaCubePro766 icewhale-files[406327]: [2026-01-28 19:54.591] [VFS DEBUG] [VFS ChunkedFileWriter Write] READING from disk after fluush wait: fileID=448394061414400, dataID=448394061414401, sn=0, writeSt
+artInChunk=393216
+[17:58:04] 84332
+[17:58:04]
+Jan 28 19:57:54 ZaCubePro766 icewhale-files[406327]:[2026-01-28 19:57:54.591] [VFS DEBUG] [VFS ChunkedF[ileWriter Write] READ from disk after flush wait failed/empty: fileID=448394061414400, dataID=4483940614414401, sn
+0, error=open /media/HDD-Storage11/.zima_encrypted_folders/448381562388480/508/77828C7EFD3EA508/4483394061414401_0: no such file or directory
+[17:58:04] 843333
+[17:58:04] 84334
+[17:58:04]
+Jan 28 19:57:54 ZaCubePro766 icewhale-files[406327]: [2026-01-28 19:57:54.596) [VFS DEBUG] [VFS ChunkedFileWritter] realtime processing decided: fileID=448394061414400, enableRealtime=true, kind=0x3
+Jan 28 19:54 ZaCubePro766 icewhale-files[40632]7]: [2026-01-28 19:57:54.596] [VFS DEBUG] [VFS ChunkedFileWriter Write] Data buffered in chunk: fileID=448394061414400, dataID=448394061414401, sn=0, bufferSize=450212/1
+0485760, remaining=10035548
+[17:58:04] 84335
+[17:58:04] 84336
+[17:58:04] 84337
+[17:58:04]
+Jan 28 19:57:54 ZaCubePro766 icewhale-files[406327]: [26026-01-28 19:57:54.596] [VFS DEBUG] [VFS ChunkedFileWriter Write] Updated file size: fileID=448394061414400, dataID=448394061414401, oldSize=0, newSize=450212
+Jan 28 19:57:54 ZaCubePro766 icewhale-files[406327]: [20926-01-28 19:54.596) [VFS DEBUG] [VFS Write] Successfually wrote data: fileID=448394061414400, offset=393216, ssize=56996, written=56996
+Jan 28 19:57:54 ZaCubePro766 icewhale-files[406327]:[2026-01-28 19:57:54.596] [VFS DEBUG] [VFS get0bj]
+316672, size=450212, DataID=0, mtime=17695942775
+Found in global cache: objID=448394061414400, type=2(FILE=2, DIR=1), name=252a4291b9b4c0e4.jpg, PID=448388684
+[17:58:04] 84338
+[17:58:04]
+Jan 28 19:57:54 ZaCubePro766 icewhale-files[406327]:[2026-01-28 19:54.597] [VFS DEBUG] [VFS get0bj]
+316672, size=450212, DataID=0, mtime=17695942775
+Found in global cache: objID=448394061414400, type=2 (FILE=2, DIR=1), name=252a4291b9b4c0e4.jpg, PID=448388684
+[17:58:04] 84339
+[17:58:04] 84340
+Jan 28 19:57:54 ZaCubePro766 icewhale-files[406327]:[2026-01-28 19:54.597] [VFS DEBUG] [VFS Write] Write] Wrrite called: objID=448394061414400, offset=0, size=131072
+Jan 28 19:57:54 ZaCubePro766 icewhaJe-files[406327]; [2026-01-28 19:57:54 597] [VES DEBUG] [VES getObi] 
+/ Found in global cache: obiID=4448394061414400. type=2_(FILE=2.DIR=1)_name=252a4291b9b4c0e4 inpa...PTD=448388684

@@ -20,6 +20,35 @@ import (
 	"github.com/zeebo/xxh3"
 )
 
+// journalBytePool is a sync.Pool for reusing byte slices in journal operations
+// This reduces memory allocation overhead for frequently created/destroyed buffers
+var journalBytePool = sync.Pool{
+	New: func() interface{} {
+		// Default size for small writes (1KB)
+		return make([]byte, 0, 1024)
+	},
+}
+
+// getJournalBuffer gets a byte slice from the pool, resizing if needed
+func getJournalBuffer(size int) []byte {
+	buf := journalBytePool.Get().([]byte)
+	if cap(buf) < size {
+		// Return small buffer to pool and allocate new one
+		journalBytePool.Put(buf)
+		return make([]byte, size)
+	}
+	return buf[:size]
+}
+
+// putJournalBuffer returns a byte slice to the pool
+// Only returns buffers <= 1MB to avoid holding large allocations
+func putJournalBuffer(buf []byte) {
+	if buf == nil || cap(buf) > 1024*1024 {
+		return // Don't pool large buffers
+	}
+	journalBytePool.Put(buf[:0])
+}
+
 // JournalEntry represents a single random write operation in the journal
 // Entries are stored in a way that allows merging and efficient reads
 type JournalEntry struct {
@@ -1534,8 +1563,16 @@ func (j *Journal) flushSmallFile(newSize int64) (int64, int64, error) {
 		DebugLog("[Journal flushSmallFile] Cleared memory: fileID=%d, freed=%d", j.fileID, oldMemory)
 	}
 
+	// MEMORY OPTIMIZATION: Release entry data before clearing entries
+	// Return small buffers to pool for reuse
+	for i := range j.entries {
+		putJournalBuffer(j.entries[i].Data)
+		j.entries[i].Data = nil
+	}
+
 	// Clear journal entries and mark as clean
-	j.entries = j.entries[:0]
+	// MEMORY OPTIMIZATION: Set to nil instead of [:0] to release underlying array
+	j.entries = nil
 	j.dataID = newDataID
 	j.baseSize = newSize
 	// CRITICAL: Reset currentSize to newSize after flush
@@ -1768,6 +1805,35 @@ func (j *Journal) flushLargeFileChunked(newSize int64) (int64, int64, error) {
 			// Read raw encrypted chunk data directly using DataAdapter
 			rawChunkData, err := da.Read(j.fs.c, j.fs.bktID, j.dataID, chunkIdx)
 			if err != nil {
+				// For sparse files with existing dataID, missing chunks are normal (sparse holes)
+				// Fill with zeros and continue
+				if j.isSparse {
+					DebugLog("[Journal flushLargeFileChunked] Sparse file: base chunk %d read failed (filling with zeros): fileID=%d, err=%v",
+						chunkIdx, j.fileID, err)
+
+					// Create zero-filled data for this chunk
+					zeroData := make([]byte, chunkLength)
+
+					// Process (compress/encrypt) if needed
+					if needsCompress || needsEncrypt {
+						chunkKind := processKind
+						processedChunk, procErr := core.ProcessData(zeroData, &chunkKind, j.fs.CmprQlty, j.fs.EndecKey, false)
+						if procErr != nil {
+							return 0, 0, fmt.Errorf("failed to process zero chunk %d for sparse file: %w", chunkIdx, procErr)
+						}
+						zeroData = processedChunk
+					}
+
+					// Write zero-filled chunk
+					if err := da.Write(j.fs.c, j.fs.bktID, newDataID, chunkIdx, zeroData); err != nil {
+						return 0, 0, fmt.Errorf("failed to write zero chunk %d for sparse file: %w", chunkIdx, err)
+					}
+
+					DebugLog("[Journal flushLargeFileChunked] Wrote zero chunk %d for sparse file: offset=%d, length=%d",
+						chunkIdx, chunkOffset, len(zeroData))
+					continue
+				}
+
 				// CRITICAL FIX:
 				// For unmodified chunks, we must not silently replace missing/unreadable base chunks
 				// with zeros for non-sparse files. Doing so corrupts data (and matches the observed
@@ -1775,7 +1841,7 @@ func (j *Journal) flushLargeFileChunked(newSize int64) (int64, int64, error) {
 				//
 				// If we're within baseSize, this is an error. Only allow zero-fill when:
 				// - the chunk is beyond baseSize (shouldn't reach here due to chunkLength<=0 check), or
-				// - the file is sparse (handled by the j.isSparse branch below, not here).
+				// - the file is sparse (handled above).
 				return 0, 0, fmt.Errorf("failed to read unmodified base chunk %d from dataID=%d (fileID=%d, baseSize=%d, chunkOffset=%d, chunkLength=%d): %w",
 					chunkIdx, j.dataID, j.fileID, j.baseSize, chunkOffset, chunkLength, err)
 			} else {
@@ -1898,8 +1964,16 @@ func (j *Journal) flushLargeFileChunked(newSize int64) (int64, int64, error) {
 		DebugLog("[Journal flushLargeFileChunked] Cleared memory: fileID=%d, freed=%d", j.fileID, oldMemory)
 	}
 
+	// MEMORY OPTIMIZATION: Release entry data before clearing entries
+	// Return small buffers to pool for reuse
+	for i := range j.entries {
+		putJournalBuffer(j.entries[i].Data)
+		j.entries[i].Data = nil
+	}
+
 	// Clear journal entries and mark as clean
-	j.entries = j.entries[:0]
+	// MEMORY OPTIMIZATION: Set to nil instead of [:0] to release underlying array
+	j.entries = nil
 	j.dataID = newDataID
 	j.baseSize = newSize
 	// CRITICAL: Reset currentSize to newSize after flush
@@ -2166,7 +2240,13 @@ func (j *Journal) Clear() {
 	j.entriesMu.Lock()
 	defer j.entriesMu.Unlock()
 
-	j.entries = j.entries[:0]
+	// MEMORY OPTIMIZATION: Release entry data before clearing entries
+	// Return small buffers to pool for reuse
+	for i := range j.entries {
+		putJournalBuffer(j.entries[i].Data)
+		j.entries[i].Data = nil
+	}
+	j.entries = nil
 	atomic.StoreInt32(&j.isDirty, 0)
 	atomic.StoreInt64(&j.currentSize, j.baseSize)
 

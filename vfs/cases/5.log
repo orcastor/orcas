@@ -1,0 +1,213 @@
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.571] [VFS DEBUG] [VFS Create] Entry: name=1920 x 1080 HD Wallpapers 365.jpg, parentID=446163782205440, flags=0x288c2, mode=0100766
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.571] [VFS DEBUG] [VFS Create] O_LARGEFILE flag set: name=1920 x 1080 HD Wallpapers 365.jpg, parentID=446163782205440, flags=0x288c2
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.571] [VFS DEBUG] [VFS Create] Creating file: name=1920 x 1080 HD Wallpapers 365.jpg, parentID=446163782205440, flags=0x288c2 (O_LARGEFILE=0x8000), mode=0100766
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.575] [VFS DEBUG] [VFS Create] Successfully created file: name=1920 x 1080 HD Wallpapers 365.jpg, fileID=446164017086476, parentID=446163782205440
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.575] [VFS DEBUG] [VFS invalidateDirListCache] Invalidated directory cache: dirID=446163782205440
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.575] [VFS DEBUG] [VFS getObj] Found in global cache: objID=446163782205440, type=1 (FILE=2, DIR=1), name=4000 pics, PID=446163652182016, size=0
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.577] [VFS DEBUG] [VFS Setattr] Entry: objID=446164017086476, valid=0x1, FileHandle=<nil>
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.577] [VFS DEBUG] [VFS Setattr] Setting file mode: objID=446164017086476, oldMode=0100766, newMode=0100766, oldModeField=502
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.577] [VFS DEBUG] [VFS Setattr] Mode updated: objID=446164017086476, newModeField=502
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.577] [VFS DEBUG] [VFS Setattr] Successfully updated object in database: objID=446164017086476, mode=502, mtime=1769062590
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.577] [VFS DEBUG] [VFS Setattr] Updated file object cache: objID=446164017086476
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.577] [VFS DEBUG] [VFS Setattr] Updated local object cache: objID=446164017086476
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.577] [VFS DEBUG] [VFS Setattr] Invalidated parent directory listing cache: objID=446164017086476, parentID=446163782205440
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.577] [VFS DEBUG] [VFS Setattr] Successfully completed: objID=446164017086476, mode=0100766, size=0, mtime=1769062590
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.580] [VFS DEBUG] [VFS getObj] Found in global cache: objID=446164017086476, type=2 (FILE=2, DIR=1), name=1920 x 1080 HD Wallpapers 365.jpg, PID=446163782205440, size=0
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.601] [VFS DEBUG] [VFS Opendir] Entry: objID=446163652182016
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.601] [VFS DEBUG] [VFS Opendir] Allowing directory open: objID=446163652182016
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.619] [VFS DEBUG] [VFS Write] Write called: objID=446164017086476, offset=0, size=524288
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.619] [VFS DEBUG] [VFS Write] Object info: objID=446164017086476, type=2 (FILE=2, DIR=1), name=1920 x 1080 HD Wallpapers 365.jpg, PID=446163782205440
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.619] [VFS DEBUG] [VFS NewRandomAccessor] Created RandomAccessor: fileID=446164017086476, fileName=1920 x 1080 HD Wallpapers 365.jpg, isTmpFile=false
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.619] [VFS DEBUG] [VFS getRandomAccessor] Registering RandomAccessor: fileID=446164017086476
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.619] [VFS DEBUG] [VFS RA Registry] Registered RandomAccessor: fileID=446164017086476, ra=0xc0897f55c0
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.619] [VFS DEBUG] [VFS Write] Writing data: fileID=446164017086476, offset=0, size=524288
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.619] [VFS DEBUG] [VFS shouldUseJournal] First write after truncate, preferring sequential buffer: fileID=446164017086476
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.619] [VFS DEBUG] [VFS initSequentialBufferWithNewData] FS config: fileID=446164017086476, bktID=443642359578624, CmprWay=0x0, EndecWay=0x2
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.619] [VFS DEBUG] [VFS initSequentialBufferWithNewData] Set encryption flag: fileID=446164017086476, EndecWay=0x2, Kind=0x2
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.619] [VFS DEBUG] [VFS initSequentialBufferWithNewData] Final DataInfo Kind: fileID=446164017086476, Kind=0x2
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.619] [VFS DEBUG] [VFS initSequentialBufferWithNewData] Created new DataID and updated DB: fileID=446164017086476, oldDataID=0, newDataID=446164017086477, size=0
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.620] [VFS DEBUG] [VFS Write] Successfully wrote data: fileID=446164017086476, offset=0, size=524288, written=524288
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.620] [VFS DEBUG] [VFS getObj] Found in global cache: objID=446164017086476, type=2 (FILE=2, DIR=1), name=1920 x 1080 HD Wallpapers 365.jpg, PID=446163782205440, size=0
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.620] [VFS DEBUG] [VFS Write] Write called: objID=446164017086476, offset=524288, size=524288
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.620] [VFS DEBUG] [VFS Write] Object info: objID=446164017086476, type=2 (FILE=2, DIR=1), name=1920 x 1080 HD Wallpapers 365.jpg, PID=446163782205440
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.620] [VFS DEBUG] [VFS Write] Writing data: fileID=446164017086476, offset=524288, size=524288
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.620] [VFS DEBUG] [VFS shouldUseJournal] Non-zero offset write, using journal: fileID=446164017086476, offset=524288, length=524288
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.620] [VFS DEBUG] [VFS RandomAccessor Write] Using journal: fileID=446164017086476, offset=524288, size=524288
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.620] [VFS DEBUG] [Journal GetOrCreate] JournalWAL initialized: fileID=446164017086476
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.620] [VFS DEBUG] [Journal GetOrCreate] Created new journal: fileID=446164017086476, dataID=446164017086477, baseSize=0, isLarge=false, wal=true
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.620] [VFS DEBUG] [VFS getOrCreateJournal] Created/retrieved journal: fileID=446164017086476, dataID=446164017086477, baseSize=0, isSparse=false
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.641] [VFS DEBUG] [Journal Write] Added entry: fileID=446164017086476, offset=524288, length=524288, totalEntries=1, memoryUsage=524304, currentSize=1048576
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.641] [VFS DEBUG] [VFS Write] Successfully wrote data: fileID=446164017086476, offset=524288, size=524288, written=524288
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.642] [VFS DEBUG] [VFS Write] Write called: objID=446164017086476, offset=1048576, size=782
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.642] [VFS DEBUG] [VFS getObj] Found in global cache: objID=446164017086476, type=2 (FILE=2, DIR=1), name=1920 x 1080 HD Wallpapers 365.jpg, PID=446163782205440, size=0
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.642] [VFS DEBUG] [VFS Write] Object info: objID=446164017086476, type=2 (FILE=2, DIR=1), name=1920 x 1080 HD Wallpapers 365.jpg, PID=446163782205440
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.642] [VFS DEBUG] [VFS Write] Writing data: fileID=446164017086476, offset=1048576, size=782
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.642] [VFS DEBUG] [VFS flushSequentialBuffer] Checking instant upload eligibility: fileID=446164017086476, totalSize=524288 (OrigSize=0 + bufferSize=524288), sn=0
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.643] [VFS DEBUG] [VFS flushSequentialChunk] Original chunk: fileID=446164017086476, chunk=524288, OrigSize=524288, Kind=0x2 (CMPR=false, ENDEC=true)
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.644] [VFS DEBUG] [VFS flushSequentialChunk] Chunk sizes: fileID=446164017086476, original=524288, encoded=524316, Kind=0x2
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.644] [VFS DEBUG] [VFS flushSequentialChunk] Updated Size: fileID=446164017086476, Size=524316, OrigSize=524288 (CMPR=false, ENDEC=true)
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.644] [VFS DEBUG] [VFS flushSequentialChunk] Writing chunk: fileID=446164017086476, dataID=446164017086477, sn=0, size=524316
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.652] [VFS DEBUG] [VFS flushSequentialChunk] Successfully wrote chunk: fileID=446164017086476, dataID=446164017086477, sn=0, size=524316
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.652] [VFS DEBUG] [VFS flushSequentialBuffer] Final DataInfo before update: fileID=446164017086476, OrigSize=524288, Size=524316, Kind=0x2 (CMPR=false, ENDEC=true)
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.652] [VFS DEBUG] [VFS flushSequentialBuffer] Has compression/encryption, Size already set: fileID=446164017086476, OrigSize=524288, Size=524316
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.652] [VFS DEBUG] [VFS flushSequentialBuffer] Writing DataInfo, version object, and file object to disk: fileID=446164017086476, dataID=446164017086477, size=524288, versionID=446164017086478, chunkSize=10485760
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.652] [VFS DEBUG] [VFS flushSequentialBuffer] Successfully wrote DataInfo, version object, and file object to disk: fileID=446164017086476, dataID=446164017086477, size=524288, versionID=446164017086478
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.652] [VFS DEBUG] [VFS invalidateDirListCache] Invalidated directory cache: dirID=446163782205440
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.652] [VFS DEBUG] [VFS flushSequentialBuffer] Appended file to directory listing cache after sync flush: fileID=446164017086476, dirID=446163782205440, name=1920 x 1080 HD Wallpapers 365.jpg
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.652] [VFS DEBUG] [VFS flushSequentialBuffer] Successfully flushed sequential buffer: fileID=446164017086476, dataID=446164017086477, size=524288, versionID=446164017086478
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.652] [VFS DEBUG] [VFS shouldUseJournal] Non-zero offset write, using journal: fileID=446164017086476, offset=1048576, length=782
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.652] [VFS DEBUG] [VFS RandomAccessor Write] Using journal: fileID=446164017086476, offset=1048576, size=782
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.659] [VFS DEBUG] [Journal Write] Added entry: fileID=446164017086476, offset=1048576, length=782, totalEntries=2, memoryUsage=525102, currentSize=1049358
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.659] [VFS DEBUG] [VFS Write] Successfully wrote data: fileID=446164017086476, offset=1048576, size=782, written=782
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.673] [VFS DEBUG] [VFS Fsync] Entry: objID=446164017086476, FileHandle=i446164017086476 g0 (reg): , flags=0x0
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.673] [VFS DEBUG] [VFS fsyncImpl] Entry: objID=446164017086476, flags=0x0
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.673] [VFS DEBUG] [VFS Flush] Entry: objID=446164017086476, FileHandle=<nil>
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.673] [VFS DEBUG] [VFS flushImpl] Entry: objID=446164017086476
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.673] [VFS DEBUG] [VFS getObj] Found in global cache: objID=446164017086476, type=2 (FILE=2, DIR=1), name=1920 x 1080 HD Wallpapers 365.jpg, PID=446163782205440, size=524288
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.673] [VFS DEBUG] [VFS Flush] Flushing file: fileID=446164017086476, currentSize=524288
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.673] [VFS DEBUG] [VFS RandomAccessor Flush] Starting flush: fileID=446164017086476, force=false
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.673] [VFS DEBUG] [VFS RandomAccessor Flush] 🔍 Checking journal flush path: fileID=446164017086476, force=false
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.673] [VFS DEBUG] [VFS flushJournal] Journal is dirty, proceeding to flush: fileID=446164017086476, isSparse=false, virtualSize=0
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.673] [VFS DEBUG] [VFS flushJournal] Flushing journal: fileID=446164017086476
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.673] [VFS DEBUG] [VFS flushJournal] Checking journal sparse properties: fileID=446164017086476, journal.isSparse=false, journal.virtualSize=0
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.673] [VFS DEBUG] [Journal Flush] Starting flush: fileID=446164017086476, entries=2, baseDataID=446164017086477, baseSize=0
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.673] [VFS DEBUG] [Journal Merge] Merged entries: fileID=446164017086476, before=2, after=1, mergeCount=1, oldMem=525102, newMem=525086, saved=16
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.688] [VFS DEBUG] [Journal flushSmallFile] Set Size to processed size: fileID=446164017086476, OrigSize=1049358, Size=1049386, Kind=0x3
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.690] [VFS DEBUG] [Journal flushSmallFile] Cleared memory: fileID=446164017086476, freed=525086
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.691] [VFS DEBUG] [Journal WAL] Deleted WAL file: fileID=446164017086476, path=/media/nvme/.zima_encrypted_folders/journals/446164017086476.jwal
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.691] [VFS DEBUG] [Journal WAL] Deleted snapshot file: fileID=446164017086476, path=/media/nvme/.zima_encrypted_folders/journals/446164017086476.jwal.snap
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.691] [VFS DEBUG] [Journal flushSmallFile] WAL files deleted: fileID=446164017086476
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.691] [VFS DEBUG] [Journal flushSmallFile] Flushed small file: fileID=446164017086476, newDataID=446164017086479, newSize=1049358
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.691] [VFS DEBUG] [Journal Flush] Performance: fileID=446164017086476, duration=17.919275ms, avgDuration=17ms, totalFlushes=1
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.691] [VFS DEBUG] [VFS flushJournal] 🔍 Prepared updateFileObj: fileID=446164017086476, DataID=446164017086479, Size=1049358, isSparse=false, virtualSize=0, newSize=1049358
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.692] [VFS DEBUG] [VFS flushJournal] 🔍 Calling SetObj to update file object: fileID=446164017086476, DataID=446164017086479, Size=1049358, MTime=1769062590, isSparse=false, virtualSize=0
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.692] [VFS DEBUG] [VFS flushJournal] Updated file object using SetObj: fileID=446164017086476, DataID=446164017086479, Size=1049358
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.692] [VFS DEBUG] [VFS flushJournal] Successfully flushed journal: fileID=446164017086476, newDataID=446164017086479, newSize=1049358, versionID=446164017086480
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.692] [VFS DEBUG] [VFS RandomAccessor Flush] ✅ Successfully flushed journal: fileID=446164017086476, versionID=446164017086480
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.692] [VFS DEBUG] [VFS Flush] Got updated object from RandomAccessor cache: fileID=446164017086476, size=1049358, dataID=446164017086479, mtime=1769062590
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.692] [VFS DEBUG] [VFS Flush] Updated file object cache: fileID=446164017086476, size=1049358, dataID=446164017086479, mtime=1769062590
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.692] [VFS DEBUG] [VFS invalidateDirListCache] Invalidated directory cache: dirID=446163782205440
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.692] [VFS DEBUG] [VFS Flush] Updated directory listing cache after flush: fileID=446164017086476, dirID=446163782205440, name=1920 x 1080 HD Wallpapers 365.jpg, size=1049358
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.692] [VFS DEBUG] [VFS Flush] Successfully flushed file: fileID=446164017086476, versionID=446164017086480, finalSize=1049358, dataID=446164017086479, mtime=1769062590
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.696] [VFS DEBUG] [VFS Statfs] Entry: objID=443642359578624, bktID=443642359578624
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.696] [VFS DEBUG] [VFS Statfs] Cache hit: bktID=443642359578624, returning cached statfs
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.698] [VFS DEBUG] [VFS Setattr] Entry: objID=446164017086476, valid=0x30, FileHandle=<nil>
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.699] [VFS DEBUG] [VFS getObj] Found in global cache: objID=446164017086476, type=2 (FILE=2, DIR=1), name=1920 x 1080 HD Wallpapers 365.jpg, PID=446163782205440, size=1049358
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.699] [VFS DEBUG] [VFS Setattr] Setting mtime: objID=446164017086476, oldMTime=1769062590, newMTime=1769062591
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.699] [VFS DEBUG] [VFS Setattr] Setting atime: objID=446164017086476, atime=1769062590
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.713] [VFS DEBUG] [VFS Setattr] Successfully updated object in database: objID=446164017086476, mode=0, mtime=1769062591
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.713] [VFS DEBUG] [VFS Setattr] Updated file object cache: objID=446164017086476
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.713] [VFS DEBUG] [VFS Setattr] Updated local object cache: objID=446164017086476
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.713] [VFS DEBUG] [VFS Setattr] Invalidated parent directory listing cache: objID=446164017086476, parentID=446163782205440
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.713] [VFS DEBUG] [VFS Setattr] Successfully completed: objID=446164017086476, mode=0100644, size=1049358, mtime=1769062591
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.721] [VFS DEBUG] [VFS getObj] Found in global cache: objID=446164017086476, type=2 (FILE=2, DIR=1), name=1920 x 1080 HD Wallpapers 365.jpg, PID=446163782205440, size=1049358
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.722] [VFS DEBUG] [VFS Flush] Entry: objID=446164017086476, FileHandle=i446164017086476 g0 (reg):
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.722] [VFS DEBUG] [VFS flushImpl] Entry: objID=446164017086476
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.722] [VFS DEBUG] [VFS Flush] Flushing file: fileID=446164017086476, currentSize=1049358
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.722] [VFS DEBUG] [VFS RandomAccessor Flush] Starting flush: fileID=446164017086476, force=false
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.722] [VFS DEBUG] [VFS RandomAccessor Flush] 🔍 Checking journal flush path: fileID=446164017086476, force=false
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.722] [VFS DEBUG] [VFS flushJournal] Journal not dirty: fileID=446164017086476
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.722] [VFS DEBUG] [VFS RandomAccessor Flush] ⚠️ Journal not flushed: fileID=446164017086476, versionID=0, will try other paths
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.722] [VFS DEBUG] [VFS RandomAccessor Flush] Got fileObj from cache after ChunkedFileWriter flush (non-tmp): fileID=446164017086476, dataID=446164017086479, size=1049358
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.722] [VFS DEBUG] [VFS RandomAccessor Flush] Buffer stats: fileID=446164017086476, writeIndex=0, totalSize=0
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.722] [VFS DEBUG] [VFS RandomAccessor Flush] No pending writes: fileID=446164017086476, writeIndex=0, totalSize=0
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.722] [VFS DEBUG] [VFS Flush] Got updated object from RandomAccessor cache: fileID=446164017086476, size=1049358, dataID=446164017086479, mtime=1769062591
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.722] [VFS DEBUG] [VFS Flush] Updated file object cache: fileID=446164017086476, size=1049358, dataID=446164017086479, mtime=1769062591
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.722] [VFS DEBUG] [VFS invalidateDirListCache] Invalidated directory cache: dirID=446163782205440
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.722] [VFS DEBUG] [VFS Flush] Updated directory listing cache after flush: fileID=446164017086476, dirID=446163782205440, name=1920 x 1080 HD Wallpapers 365.jpg, size=1049358
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.722] [VFS DEBUG] [VFS Flush] Successfully flushed file: fileID=446164017086476, versionID=0, finalSize=1049358, dataID=446164017086479, mtime=1769062591
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.722] [VFS DEBUG] [VFS Release] Entry: objID=446164017086476, FileHandle=i446164017086476 g0 (reg):
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.722] [VFS DEBUG] [VFS releaseImpl] Entry: objID=446164017086476
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.722] [VFS DEBUG] [VFS Release] Releasing file: fileID=446164017086476, currentSize=1049358, isTmpFile=false
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.722] [VFS DEBUG] [VFS RandomAccessor Flush] Starting flush: fileID=446164017086476, force=true
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.722] [VFS DEBUG] [VFS RandomAccessor Flush] 🔍 Checking journal flush path: fileID=446164017086476, force=true
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.722] [VFS DEBUG] [VFS flushJournal] Journal not dirty: fileID=446164017086476
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.722] [VFS DEBUG] [VFS RandomAccessor Flush] ⚠️ Journal not flushed: fileID=446164017086476, versionID=0, will try other paths
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.722] [VFS DEBUG] [VFS RandomAccessor Flush] Got fileObj from cache after ChunkedFileWriter flush (non-tmp): fileID=446164017086476, dataID=446164017086479, size=1049358
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.722] [VFS DEBUG] [VFS RandomAccessor Flush] Buffer stats: fileID=446164017086476, writeIndex=0, totalSize=0
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.722] [VFS DEBUG] [VFS RandomAccessor Flush] No pending writes: fileID=446164017086476, writeIndex=0, totalSize=0
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.722] [VFS DEBUG] [VFS Release] Flushed during release: fileID=446164017086476, versionID=0
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.722] [VFS DEBUG] [VFS Release] Got updated object from RandomAccessor cache before close: fileID=446164017086476, size=1049358, dataID=446164017086479, mtime=1769062591
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.722] [VFS DEBUG] [Journal Remove] Removed journal: fileID=446164017086476, freedMemory=0
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.722] [VFS DEBUG] [VFS closeJournal] Closed journal: fileID=446164017086476
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.722] [VFS DEBUG] [VFS RandomAccessor Flush] Starting flush: fileID=446164017086476, force=false
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.722] [VFS DEBUG] [VFS RandomAccessor Flush] 🔍 Checking journal flush path: fileID=446164017086476, force=false
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.722] [VFS DEBUG] [VFS flushJournal] No journal: fileID=446164017086476
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.722] [VFS DEBUG] [VFS RandomAccessor Flush] ⚠️ Journal not flushed: fileID=446164017086476, versionID=0, will try other paths
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.722] [VFS DEBUG] [VFS RandomAccessor Flush] Got fileObj from cache after ChunkedFileWriter flush (non-tmp): fileID=446164017086476, dataID=446164017086479, size=1049358
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.722] [VFS DEBUG] [VFS RandomAccessor Flush] Buffer stats: fileID=446164017086476, writeIndex=0, totalSize=0
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.722] [VFS DEBUG] [VFS RandomAccessor Flush] No pending writes: fileID=446164017086476, writeIndex=0, totalSize=0
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.722] [VFS DEBUG] [VFS Release] Updated file object cache: fileID=446164017086476, size=1049358, dataID=446164017086479, mtime=1769062591
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.722] [VFS DEBUG] [VFS invalidateDirListCache] Invalidated directory cache: dirID=446163782205440
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.722] [VFS DEBUG] [VFS Release] Updated directory listing cache after release: fileID=446164017086476, dirID=446163782205440, name=1920 x 1080 HD Wallpapers 365.jpg, size=1049358
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.722] [VFS DEBUG] [VFS Release] Successfully released file: fileID=446164017086476, finalSize=1049358, dataID=446164017086479, mtime=1769062591
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.723] [VFS DEBUG] [VFS Opendir] Entry: objID=446163782205440
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.723] [VFS DEBUG] [VFS Opendir] Allowing directory open: objID=446163782205440
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.725] [VFS DEBUG] [VFS Opendir] Entry: objID=446163782205440
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.725] [VFS DEBUG] [VFS Opendir] Allowing directory open: objID=446163782205440
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.733] [VFS DEBUG] [VFS Open] Entry: objID=446164017086476, flags=0x8000
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.733] [VFS DEBUG] [VFS Open] Object info: objID=446164017086476, type=2 (FILE=2, DIR=1), name=1920 x 1080 HD Wallpapers 365.jpg, PID=446163782205440, flags=0x8000
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.733] [VFS DEBUG] [VFS Open] O_LARGEFILE flag set: fileID=446164017086476, flags=0x8000
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.733] [VFS DEBUG] [VFS Open] Opened file: fileID=446164017086476, flags=0x8000 (O_WRONLY=0x1, O_RDWR=0x2, O_RDONLY=0x0, O_LARGEFILE=0x8000)
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.733] [VFS DEBUG] [VFS Open] File open mode: fileID=446164017086476, isWriteMode=false, hasLargeFileFlag=true, flags=0x8000 (O_WRONLY=0x1, O_RDWR=0x2, O_CREAT=0x40, O_TRUNC=0x200, O_EXCL=0x80)
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.733] [VFS DEBUG] [VFS Open] File metadata after Open: fileID=446164017086476, name=1920 x 1080 HD Wallpapers 365.jpg, size=1049358, dataID=446164017086479, mtime=1769062591, mode=0100644, type=2, pid=446163782205440
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.733] [VFS DEBUG] [VFS Open] Returning FileHandle: fileID=446164017086476, fuseFlags=0x0, FileHandle type=*vfs.OrcasNode, implements FileWriter=true
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.733] [VFS DEBUG] [VFS Read] Entry: objID=446164017086476, offset=0, size=16384
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.733] [VFS DEBUG] [VFS getObj] Found in global cache: objID=446164017086476, type=2 (FILE=2, DIR=1), name=1920 x 1080 HD Wallpapers 365.jpg, PID=446163782205440, size=1049358
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.733] [VFS DEBUG] [VFS chunkReader ReadAt] Reading chunk: dataID=446164017086479, sn=0, offset=0, offsetInChunk=0, remaining=16384, origSize=1049358, totalRead=0
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.734] [VFS DEBUG] [VFS chunkReader ReadAt] Read from chunk: dataID=446164017086479, sn=0, chunkSize=1049358, toRead=16384, totalRead=16384, remaining=0
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.734] [VFS DEBUG] [VFS chunkReader ReadAt] Completed read: dataID=446164017086479, totalRead=16384, requested=16384, origSize=1049358
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.734] [VFS DEBUG] [VFS Flush] Entry: objID=446164017086476, FileHandle=i446164017086476 g0 (reg):
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.734] [VFS DEBUG] [VFS flushImpl] Entry: objID=446164017086476
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.734] [VFS DEBUG] [VFS Release] Entry: objID=446164017086476, FileHandle=i446164017086476 g0 (reg):
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.735] [VFS DEBUG] [VFS releaseImpl] Entry: objID=446164017086476
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.735] [VFS DEBUG] [VFS Open] Entry: objID=446164017086476, flags=0x8000
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.735] [VFS DEBUG] [VFS Open] Object info: objID=446164017086476, type=2 (FILE=2, DIR=1), name=1920 x 1080 HD Wallpapers 365.jpg, PID=446163782205440, flags=0x8000
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.735] [VFS DEBUG] [VFS Open] O_LARGEFILE flag set: fileID=446164017086476, flags=0x8000
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.735] [VFS DEBUG] [VFS Open] Opened file: fileID=446164017086476, flags=0x8000 (O_WRONLY=0x1, O_RDWR=0x2, O_RDONLY=0x0, O_LARGEFILE=0x8000)
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.735] [VFS DEBUG] [VFS Open] File open mode: fileID=446164017086476, isWriteMode=false, hasLargeFileFlag=true, flags=0x8000 (O_WRONLY=0x1, O_RDWR=0x2, O_CREAT=0x40, O_TRUNC=0x200, O_EXCL=0x80)
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.735] [VFS DEBUG] [VFS Open] File metadata after Open: fileID=446164017086476, name=1920 x 1080 HD Wallpapers 365.jpg, size=1049358, dataID=446164017086479, mtime=1769062591, mode=0100644, type=2, pid=446163782205440
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.735] [VFS DEBUG] [VFS Open] Returning FileHandle: fileID=446164017086476, fuseFlags=0x0, FileHandle type=*vfs.OrcasNode, implements FileWriter=true
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.735] [VFS DEBUG] [VFS Read] Entry: objID=446164017086476, offset=1048576, size=4096
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.735] [VFS DEBUG] [VFS getObj] Found in global cache: objID=446164017086476, type=2 (FILE=2, DIR=1), name=1920 x 1080 HD Wallpapers 365.jpg, PID=446163782205440, size=1049358
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.735] [VFS DEBUG] [VFS chunkReader ReadAt] Reading chunk: dataID=446164017086479, sn=0, offset=1048576, offsetInChunk=1048576, remaining=782, origSize=1049358, totalRead=0
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.735] [VFS DEBUG] [VFS chunkReader ReadAt] Read from chunk: dataID=446164017086479, sn=0, chunkSize=1049358, toRead=782, totalRead=782, remaining=0
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.735] [VFS DEBUG] [VFS chunkReader ReadAt] Completed read: dataID=446164017086479, totalRead=782, requested=782, origSize=1049358
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.735] [VFS DEBUG] [VFS Read] Entry: objID=446164017086476, offset=0, size=16384
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.735] [VFS DEBUG] [VFS getObj] Found in global cache: objID=446164017086476, type=2 (FILE=2, DIR=1), name=1920 x 1080 HD Wallpapers 365.jpg, PID=446163782205440, size=1049358
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.735] [VFS DEBUG] [VFS chunkReader ReadAt] Reading chunk: dataID=446164017086479, sn=0, offset=0, offsetInChunk=0, remaining=16384, origSize=1049358, totalRead=0
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.735] [VFS DEBUG] [VFS chunkReader ReadAt] Read from chunk: dataID=446164017086479, sn=0, chunkSize=1049358, toRead=16384, totalRead=16384, remaining=0
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.735] [VFS DEBUG] [VFS chunkReader ReadAt] Completed read: dataID=446164017086479, totalRead=16384, requested=16384, origSize=1049358
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.735] [VFS DEBUG] [VFS Flush] Entry: objID=446164017086476, FileHandle=i446164017086476 g0 (reg):
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.735] [VFS DEBUG] [VFS flushImpl] Entry: objID=446164017086476
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.735] [VFS DEBUG] [VFS Release] Entry: objID=446164017086476, FileHandle=i446164017086476 g0 (reg):
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.735] [VFS DEBUG] [VFS releaseImpl] Entry: objID=446164017086476
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.736] [VFS DEBUG] [VFS Open] Entry: objID=446164017086476, flags=0x8000
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.736] [VFS DEBUG] [VFS Open] Object info: objID=446164017086476, type=2 (FILE=2, DIR=1), name=1920 x 1080 HD Wallpapers 365.jpg, PID=446163782205440, flags=0x8000
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.736] [VFS DEBUG] [VFS Open] O_LARGEFILE flag set: fileID=446164017086476, flags=0x8000
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.736] [VFS DEBUG] [VFS Open] Opened file: fileID=446164017086476, flags=0x8000 (O_WRONLY=0x1, O_RDWR=0x2, O_RDONLY=0x0, O_LARGEFILE=0x8000)
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.736] [VFS DEBUG] [VFS Open] File open mode: fileID=446164017086476, isWriteMode=false, hasLargeFileFlag=true, flags=0x8000 (O_WRONLY=0x1, O_RDWR=0x2, O_CREAT=0x40, O_TRUNC=0x200, O_EXCL=0x80)
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.736] [VFS DEBUG] [VFS Open] File metadata after Open: fileID=446164017086476, name=1920 x 1080 HD Wallpapers 365.jpg, size=1049358, dataID=446164017086479, mtime=1769062591, mode=0100644, type=2, pid=446163782205440
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.736] [VFS DEBUG] [VFS Open] Returning FileHandle: fileID=446164017086476, fuseFlags=0x0, FileHandle type=*vfs.OrcasNode, implements FileWriter=true
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.736] [VFS DEBUG] [VFS Read] Entry: objID=446164017086476, offset=0, size=16384
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.736] [VFS DEBUG] [VFS getObj] Found in global cache: objID=446164017086476, type=2 (FILE=2, DIR=1), name=1920 x 1080 HD Wallpapers 365.jpg, PID=446163782205440, size=1049358
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.736] [VFS DEBUG] [VFS chunkReader ReadAt] Reading chunk: dataID=446164017086479, sn=0, offset=0, offsetInChunk=0, remaining=16384, origSize=1049358, totalRead=0
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.736] [VFS DEBUG] [VFS chunkReader ReadAt] Read from chunk: dataID=446164017086479, sn=0, chunkSize=1049358, toRead=16384, totalRead=16384, remaining=0
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.736] [VFS DEBUG] [VFS chunkReader ReadAt] Completed read: dataID=446164017086479, totalRead=16384, requested=16384, origSize=1049358
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.736] [VFS DEBUG] [VFS Flush] Entry: objID=446164017086476, FileHandle=i446164017086476 g0 (reg):
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.736] [VFS DEBUG] [VFS flushImpl] Entry: objID=446164017086476
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.736] [VFS DEBUG] [VFS Release] Entry: objID=446164017086476, FileHandle=i446164017086476 g0 (reg):
+Jan 22 14:16:30 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:30.736] [VFS DEBUG] [VFS releaseImpl] Entry: objID=446164017086476
+Jan 22 14:16:31 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:31.117] [VFS DEBUG] [VFS Setattr] Entry: objID=446164017086476, valid=0x30, FileHandle=<nil>
+Jan 22 14:16:31 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:31.117] [VFS DEBUG] [VFS Setattr] Setting mtime: objID=446164017086476, oldMTime=1769062591, newMTime=1741600404
+Jan 22 14:16:31 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:31.117] [VFS DEBUG] [VFS Setattr] Setting atime: objID=446164017086476, atime=1769062591
+Jan 22 14:16:31 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:31.124] [VFS DEBUG] [VFS Setattr] Successfully updated object in database: objID=446164017086476, mode=0, mtime=1741600404
+Jan 22 14:16:31 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:31.124] [VFS DEBUG] [VFS Setattr] Updated file object cache: objID=446164017086476
+Jan 22 14:16:31 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:31.124] [VFS DEBUG] [VFS Setattr] Updated local object cache: objID=446164017086476
+Jan 22 14:16:31 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:31.124] [VFS DEBUG] [VFS Setattr] Invalidated parent directory listing cache: objID=446164017086476, parentID=446163782205440
+Jan 22 14:16:31 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:31.124] [VFS DEBUG] [VFS Setattr] Successfully completed: objID=446164017086476, mode=0100644, size=1049358, mtime=1741600404
+Jan 22 14:16:31 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:31.126] [VFS DEBUG] [VFS getObj] Found in global cache: objID=446164017086476, type=2 (FILE=2, DIR=1), name=1920 x 1080 HD Wallpapers 365.jpg, PID=446163782205440, size=1049358
+Jan 22 14:16:31 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:31.146] [VFS DEBUG] [VFS Opendir] Entry: objID=446163782205440
+Jan 22 14:16:31 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:31.146] [VFS DEBUG] [VFS Opendir] Allowing directory open: objID=446163782205440
+Jan 22 14:16:31 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:31.704] [VFS DEBUG] [VFS Opendir] Entry: objID=446163782205440
+Jan 22 14:16:31 ZimaCube77 icewhale-files[5249]: [2026-01-22 14:16:31.704] [VFS DEBUG] [VFS Opendir] Allowing directory open: objID=446163782205440

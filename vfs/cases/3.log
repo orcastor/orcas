@@ -1,0 +1,127 @@
+[2026-01-09 20:15:57.778] [VFS DEBUG] [VFS chunkReader ReadAt] Read from chunk: dataID=441543374667777, sn=0, chunkSize=6389248, toRead=4096, totalRead=4096, remaining=0
+[2026-01-09 20:15:57.778] [VFS DEBUG] [VFS chunkReader ReadAt] Completed read: dataID=441543374667777, totalRead=4096, requested=4096, origSize=6389248
+[2026-01-09 20:15:57.794] [VFS DEBUG] [VFS Setattr] Entry: objID=441543374667776, valid=0x30, FileHandle=<nil>
+[2026-01-09 20:15:57.795] [VFS DEBUG] [VFS Setattr] Setting mtime: objID=441543374667776, oldMTime=1767960943, newMTime=1767960955
+[2026-01-09 20:15:57.795] [VFS DEBUG] [VFS Setattr] Setting atime: objID=441543374667776, atime=1767960943
+[2026-01-09 20:15:57.795] [VFS DEBUG] [VFS Setattr] Successfully updated object in database: objID=441543374667776, mode=0, mtime=1767960955
+[2026-01-09 20:15:57.795] [VFS DEBUG] [VFS Setattr] Updated file object cache: objID=441543374667776
+[2026-01-09 20:15:57.795] [VFS DEBUG] [VFS Setattr] Updated local object cache: objID=441543374667776
+[2026-01-09 20:15:57.795] [VFS DEBUG] [VFS Setattr] Invalidated parent directory listing cache: objID=441543374667776, parentID=441483471618048
+[2026-01-09 20:15:57.795] [VFS DEBUG] [VFS Setattr] Successfully completed: objID=441543374667776, mode=0100644, size=6389248, mtime=1767960955
+[2026-01-09 20:15:57.800] [VFS DEBUG] [VFS Read] Entry: objID=441543374667776, offset=6336512, size=16384
+[2026-01-09 20:15:57.800] [VFS DEBUG] [VFS getObj] Found in global cache: objID=441543374667776, type=2 (FILE=2, DIR=1), name=1.ppt, PID=441483471618048, size=6389248
+[2026-01-09 20:15:57.800] [VFS DEBUG] [VFS chunkReader ReadAt] Reading chunk: dataID=441543374667777, sn=0, offset=6336512, offsetInChunk=6336512, remaining=16384, origSize=6389248, totalRead=0
+[2026-01-09 20:15:57.800] [VFS DEBUG] [VFS chunkReader ReadAt] Read from chunk: dataID=441543374667777, sn=0, chunkSize=6389248, toRead=16384, totalRead=16384, remaining=0
+[2026-01-09 20:15:57.800] [VFS DEBUG] [VFS chunkReader ReadAt] Completed read: dataID=441543374667777, totalRead=16384, requested=16384, origSize=6389248
+[2026-01-09 20:15:57.825] [VFS DEBUG] [VFS Read] Entry: objID=441543374667776, offset=6352896, size=32768
+[2026-01-09 20:15:57.825] [VFS DEBUG] [VFS getObj] Found in global cache: objID=441543374667776, type=2 (FILE=2, DIR=1), name=1.ppt, PID=441483471618048, size=6389248
+[2026-01-09 20:15:57.825] [VFS DEBUG] [VFS chunkReader ReadAt] Reading chunk: dataID=441543374667777, sn=0, offset=6352896, offsetInChunk=6352896, remaining=32768, origSize=6389248, totalRead=0
+[2026-01-09 20:15:57.825] [VFS DEBUG] [VFS chunkReader ReadAt] Read from chunk: dataID=441543374667777, sn=0, chunkSize=6389248, toRead=32768, totalRead=32768, remaining=0
+[2026-01-09 20:15:57.825] [VFS DEBUG] [VFS chunkReader ReadAt] Completed read: dataID=441543374667777, totalRead=32768, requested=32768, origSize=6389248
+[2026-01-09 20:15:57.846] [VFS DEBUG] [VFS Opendir] Entry: objID=441483471618048
+[2026-01-09 20:15:57.846] [VFS DEBUG] [VFS Opendir] Allowing directory open: objID=441483471618048
+[2026-01-09 20:15:58.213] [VFS DEBUG] [VFS Write] Write called: objID=441543374667776, offset=6391295, size=1
+[2026-01-09 20:15:58.213] [VFS DEBUG] [VFS Write] Object info: objID=441543374667776, type=2 (FILE=2, DIR=1), name=1.ppt, PID=441483471618048
+[2026-01-09 20:15:58.213] [VFS DEBUG] [VFS getRandomAccessor] Reusing existing RandomAccessor with TempFileWriter (fast path): fileID=441543374667776, ra=0xc009153680
+[2026-01-09 20:15:58.213] [VFS DEBUG] [VFS Write] Writing data: fileID=441543374667776, offset=6391295, size=1
+[2026-01-09 20:15:58.213] [VFS DEBUG] [VFS updateWriteRange] Updated write range: fileID=441543374667776, start=524288, end=6391296, rangeSize=5867008
+[2026-01-09 20:15:58.213] [VFS DEBUG] [VFS RandomAccessor Write] Detected .tmp rename for fileID=441543374667776 (oldName=1.ppt), clearing TMP ChunkedFileWriter and switching to non-tmp mode
+[2026-01-09 20:15:58.213] [VFS DEBUG] [VFS RandomAccessor Write] Sparse file with cleared ChunkedFileWriter, allowing writes (will recreate if needed): fileID=441543374667776
+[2026-01-09 20:15:58.213] [VFS DEBUG] [VFS ChunkedFileWriter Create] Reusing existing DataID: fileID=441543374667776, dataID=441543374667777, initialSize=6389248, writerType=1
+[2026-01-09 20:15:58.213] [VFS DEBUG] [VFS ChunkedFileWriter Create] Created ChunkedFileWriter for sparse file: fileID=441543374667776, dataID=441543374667777, fileName=1.ppt, chunkSize=10485760, realtimeCompressEncrypt=false
+[2026-01-09 20:15:58.213] [VFS DEBUG] [VFS RandomAccessor Write] Using ChunkedFileWriter for sparse file: fileID=441543374667776, offset=6391295, size=1
+[2026-01-09 20:15:58.213] [VFS DEBUG] [VFS ChunkedFileWriter Write] Reading chunk from disk: fileID=441543374667776, dataID=441543374667777, sn=0, offsetInChunk=6391295
+[2026-01-09 20:15:58.217] [VFS DEBUG] [VFS ChunkedFileWriter Write] READ from disk successful: fileID=441543374667776, dataID=441543374667777, sn=0, size=6389276
+[2026-01-09 20:15:58.217] [VFS DEBUG] [VFS ChunkedFileWriter Write] Getting DataInfo for chunk decode: fileID=441543374667776, dataID=441543374667777, sn=0
+[2026-01-09 20:15:58.217] [VFS DEBUG] [VFS ChunkedFileWriter Write] Got DataInfo, decoding chunk with Kind: fileID=441543374667776, dataID=441543374667777, sn=0, kind=0x3
+[2026-01-09 20:15:58.228] [VFS DEBUG] [VFS ChunkedFileWriter] realtime processing decided: fileID=441543374667776, enableRealtime=true, kind=0x3
+[2026-01-09 20:15:58.229] [VFS DEBUG] [VFS ChunkedFileWriter Write] Data buffered in chunk: fileID=441543374667776, dataID=441543374667777, sn=0, bufferSize=6391296/10485760, remaining=4094464
+[2026-01-09 20:15:58.229] [VFS DEBUG] [VFS ChunkedFileWriter Write] Updated file size: fileID=441543374667776, dataID=441543374667777, oldSize=6389248, newSize=6391296
+[2026-01-09 20:15:58.229] [VFS DEBUG] [VFS Write] Successfully wrote data: fileID=441543374667776, offset=6391295, size=1, written=1
+[2026-01-09 20:15:58.234] [VFS DEBUG] [VFS getObj] Found in global cache: objID=441543374667776, type=2 (FILE=2, DIR=1), name=1.ppt, PID=441483471618048, size=6389248
+[2026-01-09 20:15:58.237] [VFS DEBUG] [VFS Write] Write called: objID=441543374667776, offset=6391295, size=1
+[2026-01-09 20:15:58.237] [VFS DEBUG] [VFS Write] Object info: objID=441543374667776, type=2 (FILE=2, DIR=1), name=1.ppt, PID=441483471618048
+[2026-01-09 20:15:58.237] [VFS DEBUG] [VFS Write] Writing data: fileID=441543374667776, offset=6391295, size=1
+[2026-01-09 20:15:58.237] [VFS DEBUG] [VFS updateWriteRange] Updated write range: fileID=441543374667776, start=524288, end=6391296, rangeSize=5867008
+[2026-01-09 20:15:58.237] [VFS DEBUG] [VFS shouldUseJournal] Sparse file first write, deferring journal decision: fileID=441543374667776, sparseSize=6389248, lastOffset=0
+[2026-01-09 20:15:58.237] [VFS DEBUG] [VFS RandomAccessor Write] Using ChunkedFileWriter for sparse file: fileID=441543374667776, offset=6391295, size=1
+[2026-01-09 20:15:58.237] [VFS DEBUG] [VFS ChunkedFileWriter Write] Data buffered in chunk: fileID=441543374667776, dataID=441543374667777, sn=0, bufferSize=6391296/10485760, remaining=4094464
+[2026-01-09 20:15:58.237] [VFS DEBUG] [VFS Write] Successfully wrote data: fileID=441543374667776, offset=6391295, size=1, written=1
+[2026-01-09 20:15:58.240] [VFS DEBUG] [VFS getObj] Found in global cache: objID=441543374667776, type=2 (FILE=2, DIR=1), name=1.ppt, PID=441483471618048, size=6389248
+[2026-01-09 20:15:58.243] [VFS DEBUG] [VFS Write] Write called: objID=441543374667776, offset=6391807, size=1
+[2026-01-09 20:15:58.243] [VFS DEBUG] [VFS Write] Object info: objID=441543374667776, type=2 (FILE=2, DIR=1), name=1.ppt, PID=441483471618048
+[2026-01-09 20:15:58.243] [VFS DEBUG] [VFS Write] Writing data: fileID=441543374667776, offset=6391807, size=1
+[2026-01-09 20:15:58.243] [VFS DEBUG] [VFS updateWriteRange] Updated write range: fileID=441543374667776, start=524288, end=6391808, rangeSize=5867520
+[2026-01-09 20:15:58.243] [VFS DEBUG] [VFS shouldUseJournal] Sparse file first write, deferring journal decision: fileID=441543374667776, sparseSize=6389248, lastOffset=0
+[2026-01-09 20:15:58.243] [VFS DEBUG] [VFS RandomAccessor Write] Using ChunkedFileWriter for sparse file: fileID=441543374667776, offset=6391807, size=1
+[2026-01-09 20:15:58.243] [VFS DEBUG] [VFS ChunkedFileWriter Write] Data buffered in chunk: fileID=441543374667776, dataID=441543374667777, sn=0, bufferSize=6391808/10485760, remaining=4093952
+[2026-01-09 20:15:58.243] [VFS DEBUG] [VFS ChunkedFileWriter Write] Updated file size: fileID=441543374667776, dataID=441543374667777, oldSize=6391296, newSize=6391808
+[2026-01-09 20:15:58.243] [VFS DEBUG] [VFS Write] Successfully wrote data: fileID=441543374667776, offset=6391807, size=1, written=1
+[2026-01-09 20:15:58.246] [VFS DEBUG] [VFS getObj] Found in global cache: objID=441543374667776, type=2 (FILE=2, DIR=1), name=1.ppt, PID=441483471618048, size=6389248
+[2026-01-09 20:15:58.250] [VFS DEBUG] [VFS Write] Write called: objID=441543374667776, offset=6391807, size=1
+[2026-01-09 20:15:58.250] [VFS DEBUG] [VFS Write] Object info: objID=441543374667776, type=2 (FILE=2, DIR=1), name=1.ppt, PID=441483471618048
+[2026-01-09 20:15:58.250] [VFS DEBUG] [VFS Write] Writing data: fileID=441543374667776, offset=6391807, size=1
+[2026-01-09 20:15:58.250] [VFS DEBUG] [VFS updateWriteRange] Updated write range: fileID=441543374667776, start=524288, end=6391808, rangeSize=5867520
+[2026-01-09 20:15:58.250] [VFS DEBUG] [VFS shouldUseJournal] Sparse file first write, deferring journal decision: fileID=441543374667776, sparseSize=6389248, lastOffset=0
+[2026-01-09 20:15:58.250] [VFS DEBUG] [VFS RandomAccessor Write] Using ChunkedFileWriter for sparse file: fileID=441543374667776, offset=6391807, size=1
+[2026-01-09 20:15:58.250] [VFS DEBUG] [VFS ChunkedFileWriter Write] Data buffered in chunk: fileID=441543374667776, dataID=441543374667777, sn=0, bufferSize=6391808/10485760, remaining=4093952
+[2026-01-09 20:15:58.250] [VFS DEBUG] [VFS Write] Successfully wrote data: fileID=441543374667776, offset=6391807, size=1, written=1
+[2026-01-09 20:15:58.253] [VFS DEBUG] [VFS Write] Write called: objID=441543374667776, offset=6391296, size=32
+[2026-01-09 20:15:58.253] [VFS DEBUG] [VFS getObj] Found in global cache: objID=441543374667776, type=2 (FILE=2, DIR=1), name=1.ppt, PID=441483471618048, size=6389248
+[2026-01-09 20:15:58.253] [VFS DEBUG] [VFS Write] Object info: objID=441543374667776, type=2 (FILE=2, DIR=1), name=1.ppt, PID=441483471618048
+[2026-01-09 20:15:58.253] [VFS DEBUG] [VFS Write] Writing data: fileID=441543374667776, offset=6391296, size=32
+[2026-01-09 20:15:58.253] [VFS DEBUG] [VFS updateWriteRange] Updated write range: fileID=441543374667776, start=524288, end=6391808, rangeSize=5867520
+[2026-01-09 20:15:58.253] [VFS DEBUG] [VFS shouldUseJournal] Sparse file first write, deferring journal decision: fileID=441543374667776, sparseSize=6389248, lastOffset=0
+[2026-01-09 20:15:58.253] [VFS DEBUG] [VFS RandomAccessor Write] Using ChunkedFileWriter for sparse file: fileID=441543374667776, offset=6391296, size=32
+[2026-01-09 20:15:58.253] [VFS DEBUG] [VFS ChunkedFileWriter Write] Data buffered in chunk: fileID=441543374667776, dataID=441543374667777, sn=0, bufferSize=6391808/10485760, remaining=4093952
+[2026-01-09 20:15:58.253] [VFS DEBUG] [VFS Write] Successfully wrote data: fileID=441543374667776, offset=6391296, size=32, written=32
+[2026-01-09 20:15:58.257] [VFS DEBUG] [VFS Write] Write called: objID=441543374667776, offset=6389248, size=512
+[2026-01-09 20:15:58.257] [VFS DEBUG] [VFS getObj] Found in global cache: objID=441543374667776, type=2 (FILE=2, DIR=1), name=1.ppt, PID=441483471618048, size=6389248
+[2026-01-09 20:15:58.257] [VFS DEBUG] [VFS Write] Object info: objID=441543374667776, type=2 (FILE=2, DIR=1), name=1.ppt, PID=441483471618048
+[2026-01-09 20:15:58.257] [VFS DEBUG] [VFS Write] Writing data: fileID=441543374667776, offset=6389248, size=512
+[2026-01-09 20:15:58.257] [VFS DEBUG] [VFS updateWriteRange] Updated write range: fileID=441543374667776, start=524288, end=6391808, rangeSize=5867520
+[2026-01-09 20:15:58.257] [VFS DEBUG] [VFS shouldUseJournal] Sparse file first write, deferring journal decision: fileID=441543374667776, sparseSize=6389248, lastOffset=0
+[2026-01-09 20:15:58.257] [VFS DEBUG] [VFS RandomAccessor Write] Using ChunkedFileWriter for sparse file: fileID=441543374667776, offset=6389248, size=512
+[2026-01-09 20:15:58.257] [VFS DEBUG] [VFS ChunkedFileWriter Write] Data buffered in chunk: fileID=441543374667776, dataID=441543374667777, sn=0, bufferSize=6391808/10485760, remaining=4093952
+[2026-01-09 20:15:58.257] [VFS DEBUG] [VFS Write] Successfully wrote data: fileID=441543374667776, offset=6389248, size=512, written=512
+[2026-01-09 20:15:58.257] [VFS DEBUG] [VFS Write] Write called: objID=441543374667776, offset=6389760, size=1536
+[2026-01-09 20:15:58.257] [VFS DEBUG] [VFS getObj] Found in global cache: objID=441543374667776, type=2 (FILE=2, DIR=1), name=1.ppt, PID=441483471618048, size=6389248
+[2026-01-09 20:15:58.257] [VFS DEBUG] [VFS Write] Object info: objID=441543374667776, type=2 (FILE=2, DIR=1), name=1.ppt, PID=441483471618048
+[2026-01-09 20:15:58.257] [VFS DEBUG] [VFS Write] Writing data: fileID=441543374667776, offset=6389760, size=1536
+[2026-01-09 20:15:58.257] [VFS DEBUG] [VFS updateWriteRange] Updated write range: fileID=441543374667776, start=524288, end=6391808, rangeSize=5867520
+[2026-01-09 20:15:58.257] [VFS DEBUG] [VFS shouldUseJournal] Sparse file first write, deferring journal decision: fileID=441543374667776, sparseSize=6389248, lastOffset=0
+[2026-01-09 20:15:58.257] [VFS DEBUG] [VFS RandomAccessor Write] Using ChunkedFileWriter for sparse file: fileID=441543374667776, offset=6389760, size=1536
+[2026-01-09 20:15:58.257] [VFS DEBUG] [VFS ChunkedFileWriter Write] Data buffered in chunk: fileID=441543374667776, dataID=441543374667777, sn=0, bufferSize=6391808/10485760, remaining=4093952
+[2026-01-09 20:15:58.257] [VFS DEBUG] [VFS Write] Successfully wrote data: fileID=441543374667776, offset=6389760, size=1536, written=1536
+[2026-01-09 20:15:58.260] [VFS DEBUG] [VFS Fsync] Entry: objID=441543374667776, FileHandle=i441543374667776 g0 (reg): , flags=0x0
+[2026-01-09 20:15:58.260] [VFS DEBUG] [VFS fsyncImpl] Entry: objID=441543374667776, flags=0x0
+[2026-01-09 20:15:58.260] [VFS DEBUG] [VFS Flush] Entry: objID=441543374667776, FileHandle=<nil>
+[2026-01-09 20:15:58.260] [VFS DEBUG] [VFS flushImpl] Entry: objID=441543374667776
+[2026-01-09 20:15:58.260] [VFS DEBUG] [VFS getObj] Found in global cache: objID=441543374667776, type=2 (FILE=2, DIR=1), name=1.ppt, PID=441483471618048, size=6389248
+[2026-01-09 20:15:58.260] [VFS DEBUG] [VFS Flush] Flushing file: fileID=441543374667776, currentSize=6389248
+[2026-01-09 20:15:58.260] [VFS DEBUG] [VFS RandomAccessor Flush] Starting flush: fileID=441543374667776, force=false
+[2026-01-09 20:15:58.260] [VFS DEBUG] [VFS RandomAccessor Flush] 🔍 Checking journal flush path: fileID=441543374667776, force=false
+[2026-01-09 20:15:58.260] [VFS DEBUG] [VFS flushJournal] No journal: fileID=441543374667776
+[2026-01-09 20:15:58.260] [VFS DEBUG] [VFS RandomAccessor Flush] ⚠️ Journal not flushed: fileID=441543374667776, versionID=0, will try other paths
+[2026-01-09 20:15:58.260] [VFS DEBUG] [VFS RandomAccessor Flush] WARNING: Sparse file ChunkedFileWriter still exists in Flush(), flushing: fileID=441543374667776
+[2026-01-09 20:15:58.260] [VFS DEBUG] [VFS RandomAccessor flushChunkedWriter] Forcing ChunkedFileWriter flush for sparse file: fileID=441543374667776, dataID=441543374667777
+[2026-01-09 20:15:58.260] [VFS DEBUG] [VFS ChunkedFileWriter Flush] Starting flush for large file: fileID=441543374667776, dataID=441543374667777, fileSize=6391808, writerType=1
+[2026-01-09 20:15:58.260] [VFS DEBUG] [VFS ChunkedFileWriter Flush] Flushing 1 remaining incomplete chunks concurrently: fileID=441543374667776, dataID=441543374667777, chunks=[0]
+[2026-01-09 20:15:58.264] [VFS DEBUG] [VFS ChunkedFileWriter flushChunk] Buffer state: fileID=441543374667776, dataID=441543374667777, sn=0, offsetInChunk=6391808, bufDataLen=10485760, chunkDataLen=6391808, numRanges=2
+[2026-01-09 20:15:58.264] [VFS DEBUG] [VFS ChunkedFileWriter flushChunk] Processing chunk: fileID=441543374667776, dataID=441543374667777, sn=0, originalSize=6391808, enableRealtime=true
+[2026-01-09 20:15:58.284] [VFS DEBUG] [VFS ChunkedFileWriter flushChunk] Compression/encryption applied: fileID=441543374667776, dataID=441543374667777, sn=0, originalSize=6391808, finalSize=6391836, ratio=100.00%
+[2026-01-09 20:15:58.284] [VFS DEBUG] [VFS ChunkedFileWriter flushChunk] Writing chunk synchronously: fileID=441543374667776, dataID=441543374667777, sn=0, size=6391836, realtime=true
+[2026-01-09 20:15:58.284] [VFS DEBUG] [VFS ChunkedFileWriter writeChunkSync] WRITING chunk (NO PRE-READ): fileID=441543374667776, dataID=441543374667777, sn=0, size=6391836
+[2026-01-09 20:15:58.289] [VFS DEBUG] [VFS ChunkedFileWriter writeChunkSync] ERROR: Chunk exists but size mismatch (ERR_OPEN_FILE), cannot skip write: fileID=441543374667776, dataID=441543374667777, sn=0, writtenSize=6391836, existingSize=6389276
+[2026-01-09 20:15:58.289] [VFS DEBUG] [VFS ChunkedFileWriter Write] ERROR: Failed to write chunk synchronously: fileID=441543374667776, dataID=441543374667777, sn=0, size=6391836, error=chunk exists but size mismatch: open file failed
+[2026-01-09 20:15:58.289] [VFS DEBUG] [VFS ChunkedFileWriter Flush] ERROR: Failed to flush chunk: fileID=441543374667776, dataID=441543374667777, sn=0, error=chunk exists but size mismatch: open file failed
+[2026-01-09 20:15:58.289] [VFS DEBUG] [VFS RandomAccessor flushChunkedWriter] ERROR: ChunkedFileWriter flush failed: fileID=441543374667776, dataID=441543374667777, error=chunk exists but size mismatch: open file failed
+[2026-01-09 20:15:58.289] [VFS DEBUG] [VFS Flush] ERROR: Failed to flush file: fileID=441543374667776, error=chunk exists but size mismatch: open file failed
+[2026-01-09 20:15:58.289] [VFS DEBUG] [VFS Fsync] ERROR: Flush failed: objID=441543374667776, flags=0x0, errno=5
+[2026-01-09 20:15:58.337] [VFS DEBUG] [VFS Opendir] Entry: objID=441483471618048
+[2026-01-09 20:15:58.337] [VFS DEBUG] [VFS Opendir] Allowing directory open: objID=441483471618048
+2026-01-09T20:16:07.587+0800	info	scan orphaned chunks completed	{"path": "/media/Main-Storage1/123", "bucketID": 439606281502720, "total_scanned": 1865, "orphaned_chunks": 2, "deleted_chunks": 2, "freed_size": 14442040, "func": "service.(*EncryptedFolderService).UnlockFolder.func1", "file": "/media/nvme1n1p1/IceWhale-Files/service/encrypted_folder.go", "line": 1379}
+[2026-01-09 20:16:10.099] [VFS DEBUG] [VFS Flush] Entry: objID=441490325110784, FileHandle=i441490325110784 g0 (reg): 
+[2026-01-09 20:16:10.099] [VFS DEBUG] [VFS flushImpl] Entry: objID=441490325110784
+[2026-01-09 20:16:10.099] [VFS DEBUG] [VFS Release] Entry: objID=441490325110784, FileHandle=i441490325110784 g0 (reg): 
+[2026-01-09 20:16:10.099] [VFS DEBUG] [VFS releaseImpl] Entry: objID=441490325110784

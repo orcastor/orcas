@@ -1,0 +1,49 @@
+[2026-01-26 17:58:41.218] [VFS DEBUG] [VFS processWritesStreaming] Read less data than expected: fileID=447669474426881, dataID=447669482815488, chunkIdx=0, pos=0, n=10084352, actualChunkSize=10485760
+[2026-01-26 17:58:41.252] [VFS DEBUG] [VFS applyWritesStreamingCompressed] Writing encoded chunk to disk: fileID=447669474426881, dataID=447669482815488, chunkIdx=0, sn=0, pos=0, size=10485788, writesCount=1
+[2026-01-26 17:58:41.268] [VFS DEBUG] [VFS applyWritesStreamingCompressed] Successfully wrote encoded chunk to disk: fileID=447669474426881, dataID=447669482815488, sn=0, size=10485788
+[2026-01-26 17:58:41.269] [VFS DEBUG] [VFS processWritesStreaming] Processing chunk: fileID=447669474426881, dataID=447669482815488, chunkIdx=1, sn=1, pos=10485760, chunkEnd=15728640, actualChunkSize=5242880, writesCount=1
+[2026-01-26 17:58:41.269] [VFS DEBUG] [VFS processWritesStreaming] Read less data than expected: fileID=447669474426881, dataID=447669482815488, chunkIdx=1, pos=10485760, n=0, actualChunkSize=5242880
+[2026-01-26 17:58:41.286] [VFS DEBUG] [VFS applyWritesStreamingCompressed] Writing encoded chunk to disk: fileID=447669474426881, dataID=447669482815488, chunkIdx=1, sn=1, pos=10485760, size=5242908, writesCount=1
+[2026-01-26 17:58:41.292] [VFS DEBUG] [VFS applyWritesStreamingCompressed] Successfully wrote encoded chunk to disk: fileID=447669474426881, dataID=447669482815488, sn=1, size=5242908
+[2026-01-26 17:58:41.293] [VFS DEBUG] [VFS applyWritesStreamingCompressed] Writing DataInfo to disk: fileID=447669474426881, dataID=447669482815488, OrigSize=15728640, Size=15728696
+[2026-01-26 17:58:41.293] [VFS DEBUG] [VFS applyWritesStreamingCompressed] Successfully wrote DataInfo to disk: fileID=447669474426881, dataID=447669482815488, OrigSize=15728640, Size=15728696
+[2026-01-26 17:58:41.297] [VFS DEBUG] [VFS DEBUG_SAMPLE] after_streaming_write: fileID=447669474426881, dataID=447669482815488, origSize=15728640, sn=0, inChunk=5800000, sampleLen=64, allZero=false, first16=404142434445464748494a4b4c4d4e4f
+[2026-01-26 17:58:41.297] [VFS DEBUG] [VFS applyWritesStreamingCompressed] Updating fileObj: fileID=447669474426881, oldDataID=447669474426889, newDataID=447669482815488, oldSize=10084352, newSize=15728640
+[2026-01-26 17:58:41.298] [VFS DEBUG] [VFS applyWritesStreamingCompressed] Successfully updated fileObj: fileID=447669474426881, dataID=447669482815488, size=15728640
+[2026-01-26 17:58:41.304] [VFS DEBUG] [VFS DEBUG_SAMPLE] after_streaming_fileobj_update: fileID=447669474426881, dataID=447669482815488, origSize=15728640, sn=0, inChunk=5800000, sampleLen=64, allZero=false, first16=404142434445464748494a4b4c4d4e4f
+[2026-01-26 17:58:41.305] [VFS DEBUG] [VFS applyRandomWritesWithSDK] 🔍 Calling SetObj to update file object (no DataInfo): fileID=447669474426881, DataID=447669482815488, Size=15728640, MTime=1769421521
+[2026-01-26 17:58:41.305] [VFS DEBUG] [VFS applyRandomWritesWithSDK] Successfully applied writes (compressed/encrypted): fileID=447669474426881, versionID=447669482815489, newDataID=447669482815488, size=15728640
+[2026-01-26 17:58:41.305] [VFS DEBUG] [VFS invalidateDirListCache] Invalidated directory cache: dirID=447669474426880
+[2026-01-26 17:58:41.305] [VFS DEBUG] [VFS applyRandomWritesWithSDK] Appended file to directory listing cache: fileID=447669474426881, dirID=447669474426880, name=test_large_file.ppt
+[2026-01-26 17:58:41.305] [VFS DEBUG] [VFS RandomAccessor Flush] Verified file object cache after flush: fileID=447669474426881, size=15728640, dataID=447669482815488, mtime=1769421521
+✔[2026-01-26 17:58:41.305] [VFS DEBUG] [VFS Read DEBUG] journal-read: fileID=447669474426881, offset=5800000, size=65536, fileObj(DataID=447669482815488,Size=15728640), journalSize=10084352, journal(dataID=447669474426889,baseSize=10084352,currentSize=10084352,dirty=false,entries=0)
+[2026-01-26 17:58:41.305] [VFS DEBUG] [VFS Read] Offset within fileSize, not limiting by journalSize: fileID=447669474426881, offset=5800000, journalSize=10084352, fileSize=15728640
+[2026-01-26 17:58:41.305] [VFS DEBUG] [VFS Read] Reading from journal: fileID=447669474426881, offset=5800000, size=65536, isSparse=false, journalSize=10084352
+[2026-01-26 17:58:41.310] [VFS DEBUG] [Journal Read] WARNING: baseReader returned all-zero data within base range: fileID=447669474426881, offset=5800000, length=65536, baseSize=10084352
+[2026-01-26 17:58:41.310] [VFS DEBUG] [VFS Read] Read from journal (hex): fileID=447669474426881, offset=5800000, size=65536, first64Bytes=00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+✔✔✘[2026-01-26 17:58:41.310] [VFS DEBUG] [VFS RandomAccessor Close] Starting Close: fileID=447669474426881
+[2026-01-26 17:58:41.310] [VFS DEBUG] [Journal Remove] Removed journal: fileID=447669474426881, freedMemory=0
+[2026-01-26 17:58:41.310] [VFS DEBUG] [VFS closeJournal] Closed journal: fileID=447669474426881
+[2026-01-26 17:58:41.310] [VFS DEBUG] [VFS RandomAccessor Close] Calling ForceFlush: fileID=447669474426881
+[2026-01-26 17:58:41.310] [VFS DEBUG] [VFS RandomAccessor Flush] Starting flush: fileID=447669474426881, force=true
+[2026-01-26 17:58:41.310] [VFS DEBUG] [VFS RandomAccessor Flush] 🔍 Checking journal flush path: fileID=447669474426881, force=true
+[2026-01-26 17:58:41.310] [VFS DEBUG] [VFS flushJournal] No journal: fileID=447669474426881
+[2026-01-26 17:58:41.310] [VFS DEBUG] [VFS RandomAccessor Flush] ⚠️ Journal not flushed: fileID=447669474426881, versionID=0, will try other paths
+[2026-01-26 17:58:41.310] [VFS DEBUG] [VFS RandomAccessor Flush] Got fileObj from cache after ChunkedFileWriter flush (non-tmp): fileID=447669474426881, dataID=447669482815488, size=15728640
+[2026-01-26 17:58:41.310] [VFS DEBUG] [VFS RandomAccessor Flush] Buffer stats: fileID=447669474426881, writeIndex=0, totalSize=0
+[2026-01-26 17:58:41.310] [VFS DEBUG] [VFS RandomAccessor Flush] No pending writes: fileID=447669474426881, writeIndex=0, totalSize=0
+[2026-01-26 17:58:41.310] [VFS DEBUG] [VFS RandomAccessor Close] ForceFlush completed: fileID=447669474426881
+[2026-01-26 17:58:41.310] [VFS DEBUG] [VFS RandomAccessor Close] Final file object after flush: fileID=447669474426881, DataID=447669482815488, Size=15728640
+[2026-01-26 17:58:41.310] [VFS DEBUG] [VFS RandomAccessor Close] Removed from decodingReaderCache: fileID=447669474426881, dataID=447669482815488
+
+
+
+Failures:
+
+  * /Users/orca/Documents/GitHub/orcas/vfs/random_accessor_test.go 
+  Line 4447:
+  Expected: false
+  Actual:   true
+
+
+24 total assertions

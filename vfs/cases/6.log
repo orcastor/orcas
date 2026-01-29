@@ -1,0 +1,354 @@
+[2026-01-26 15:58:17.816] [VFS DEBUG] [VFS Open] Entry: objID=447639065722880, flags=0x8000
+[2026-01-26 15:58:17.816] [VFS DEBUG] [VFS Open] Object info: objID=447639065722880, type=2 (FILE=2, DIR=1), name=_manticore.zip, PID=445451027349504, flags=0x8000
+[2026-01-26 15:58:17.816] [VFS DEBUG] [VFS Open] O_LARGEFILE flag set: fileID=447639065722880, flags=0x8000
+[2026-01-26 15:58:17.816] [VFS DEBUG] [VFS Open] Opened file: fileID=447639065722880, flags=0x8000 (O_WRONLY=0x1, O_RDWR=0x2, O_RDONLY=0x0, O_LARGEFILE=0x8000)
+[2026-01-26 15:58:17.816] [VFS DEBUG] [VFS Open] File open mode: fileID=447639065722880, isWriteMode=false, hasLargeFileFlag=true, flags=0x8000 (O_WRONLY=0x1, O_RDWR=0x2, O_CREAT=0x40, O_TRUNC=0x200, O_EXCL=0x80)
+[2026-01-26 15:58:17.816] [VFS DEBUG] [VFS Open] File metadata after Open: fileID=447639065722880, name=_manticore.zip, size=103516164, dataID=447639065722881, mtime=1729061848, mode=0100644, type=2, pid=445451027349504
+[2026-01-26 15:58:17.816] [VFS DEBUG] [VFS Open] Returning FileHandle: fileID=447639065722880, fuseFlags=0x0, FileHandle type=*vfs.OrcasNode, implements FileWriter=true
+[2026-01-26 15:58:17.817] [VFS DEBUG] [VFS Read] Entry: objID=447639065722880, offset=0, size=16384
+[2026-01-26 15:58:17.817] [VFS DEBUG] [VFS chunkReader ReadAt] Before size limit: dataID=447639065722881, offset=0, bufSize=16384, origSize=103516164
+[2026-01-26 15:58:17.817] [VFS DEBUG] [VFS chunkReader ReadAt] Final read size: dataID=447639065722881, offset=0, readSize=16384, origSize=103516164
+[2026-01-26 15:58:17.817] [VFS DEBUG] [VFS chunkReader ReadAt] Reading chunk: dataID=447639065722881, sn=0, offset=0, offsetInChunk=0, remaining=16384, origSize=103516164, totalRead=0
+[2026-01-26 15:58:17.882] [VFS DEBUG] [VFS chunkReader ReadAt] Read from chunk: dataID=447639065722881, sn=0, chunkSize=10485760, toRead=16384, totalRead=16384, remaining=0
+[2026-01-26 15:58:17.882] [VFS DEBUG] [VFS chunkReader ReadAt] Completed read: dataID=447639065722881, totalRead=16384, requested=16384, origSize=103516164
+[2026-01-26 15:58:17.883] [VFS DEBUG] [VFS Read] Entry: objID=447639065722880, offset=16384, size=32768
+[2026-01-26 15:58:17.883] [VFS DEBUG] [VFS Read] Entry: objID=447639065722880, offset=49152, size=65536
+[2026-01-26 15:58:17.883] [VFS DEBUG] [VFS chunkReader ReadAt] Before size limit: dataID=447639065722881, offset=49152, bufSize=65536, origSize=103516164
+[2026-01-26 15:58:17.883] [VFS DEBUG] [VFS chunkReader ReadAt] Final read size: dataID=447639065722881, offset=49152, readSize=65536, origSize=103516164
+[2026-01-26 15:58:17.883] [VFS DEBUG] [VFS chunkReader ReadAt] Reading chunk: dataID=447639065722881, sn=0, offset=49152, offsetInChunk=49152, remaining=65536, origSize=103516164, totalRead=0
+[2026-01-26 15:58:17.883] [VFS DEBUG] [VFS chunkReader ReadAt] Before size limit: dataID=447639065722881, offset=16384, bufSize=32768, origSize=103516164
+[2026-01-26 15:58:17.884] [VFS DEBUG] [VFS chunkReader ReadAt] Final read size: dataID=447639065722881, offset=16384, readSize=32768, origSize=103516164
+[2026-01-26 15:58:17.884] [VFS DEBUG] [VFS chunkReader ReadAt] Reading chunk: dataID=447639065722881, sn=0, offset=16384, offsetInChunk=16384, remaining=32768, origSize=103516164, totalRead=0
+[2026-01-26 15:58:17.884] [VFS DEBUG] [VFS chunkReader ReadAt] Read from chunk: dataID=447639065722881, sn=0, chunkSize=10485760, toRead=32768, totalRead=32768, remaining=0
+[2026-01-26 15:58:17.884] [VFS DEBUG] [VFS chunkReader ReadAt] Completed read: dataID=447639065722881, totalRead=32768, requested=32768, origSize=103516164
+[2026-01-26 15:58:17.883] [VFS DEBUG] [VFS chunkReader ReadAt] Read from chunk: dataID=447639065722881, sn=0, chunkSize=10485760, toRead=65536, totalRead=65536, remaining=0
+[2026-01-26 15:58:17.884] [VFS DEBUG] [VFS chunkReader ReadAt] Completed read: dataID=447639065722881, totalRead=65536, requested=65536, origSize=103516164
+[2026-01-26 15:58:17.884] [VFS DEBUG] [VFS Read] Entry: objID=447639065722880, offset=114688, size=131072
+[2026-01-26 15:58:17.884] [VFS DEBUG] [VFS Read] Entry: objID=447639065722880, offset=245760, size=131072
+[2026-01-26 15:58:17.884] [VFS DEBUG] [VFS chunkReader ReadAt] Before size limit: dataID=447639065722881, offset=114688, bufSize=131072, origSize=103516164
+[2026-01-26 15:58:17.884] [VFS DEBUG] [VFS chunkReader ReadAt] Final read size: dataID=447639065722881, offset=114688, readSize=131072, origSize=103516164
+[2026-01-26 15:58:17.884] [VFS DEBUG] [VFS chunkReader ReadAt] Reading chunk: dataID=447639065722881, sn=0, offset=114688, offsetInChunk=114688, remaining=131072, origSize=103516164, totalRead=0
+[2026-01-26 15:58:17.884] [VFS DEBUG] [VFS chunkReader ReadAt] Read from chunk: dataID=447639065722881, sn=0, chunkSize=10485760, toRead=131072, totalRead=131072, remaining=0
+[2026-01-26 15:58:17.884] [VFS DEBUG] [VFS chunkReader ReadAt] Completed read: dataID=447639065722881, totalRead=131072, requested=131072, origSize=103516164
+[2026-01-26 15:58:17.884] [VFS DEBUG] [VFS Read] Entry: objID=447639065722880, offset=376832, size=131072
+[2026-01-26 15:58:17.885] [VFS DEBUG] [VFS chunkReader ReadAt] Before size limit: dataID=447639065722881, offset=376832, bufSize=131072, origSize=103516164
+[2026-01-26 15:58:17.885] [VFS DEBUG] [VFS chunkReader ReadAt] Final read size: dataID=447639065722881, offset=376832, readSize=131072, origSize=103516164
+[2026-01-26 15:58:17.885] [VFS DEBUG] [VFS chunkReader ReadAt] Reading chunk: dataID=447639065722881, sn=0, offset=376832, offsetInChunk=376832, remaining=131072, origSize=103516164, totalRead=0
+[2026-01-26 15:58:17.885] [VFS DEBUG] [VFS chunkReader ReadAt] Read from chunk: dataID=447639065722881, sn=0, chunkSize=10485760, toRead=131072, totalRead=131072, remaining=0
+[2026-01-26 15:58:17.885] [VFS DEBUG] [VFS chunkReader ReadAt] Completed read: dataID=447639065722881, totalRead=131072, requested=131072, origSize=103516164
+[2026-01-26 15:58:17.887] [VFS DEBUG] [VFS chunkReader ReadAt] Before size limit: dataID=447639065722881, offset=245760, bufSize=131072, origSize=103516164
+[2026-01-26 15:58:17.887] [VFS DEBUG] [VFS chunkReader ReadAt] Final read size: dataID=447639065722881, offset=245760, readSize=131072, origSize=103516164
+[2026-01-26 15:58:17.887] [VFS DEBUG] [VFS chunkReader ReadAt] Reading chunk: dataID=447639065722881, sn=0, offset=245760, offsetInChunk=245760, remaining=131072, origSize=103516164, totalRead=0
+[2026-01-26 15:58:17.887] [VFS DEBUG] [VFS chunkReader ReadAt] Read from chunk: dataID=447639065722881, sn=0, chunkSize=10485760, toRead=131072, totalRead=131072, remaining=0
+[2026-01-26 15:58:17.887] [VFS DEBUG] [VFS chunkReader ReadAt] Completed read: dataID=447639065722881, totalRead=131072, requested=131072, origSize=103516164
+[2026-01-26 15:58:17.887] [VFS DEBUG] [VFS Read] Entry: objID=447639065722880, offset=507904, size=131072
+[2026-01-26 15:58:17.888] [VFS DEBUG] [VFS Read] Entry: objID=447639065722880, offset=638976, size=131072
+[2026-01-26 15:58:17.888] [VFS DEBUG] [VFS chunkReader ReadAt] Before size limit: dataID=447639065722881, offset=507904, bufSize=131072, origSize=103516164
+[2026-01-26 15:58:17.888] [VFS DEBUG] [VFS chunkReader ReadAt] Final read size: dataID=447639065722881, offset=507904, readSize=131072, origSize=103516164
+[2026-01-26 15:58:17.888] [VFS DEBUG] [VFS chunkReader ReadAt] Reading chunk: dataID=447639065722881, sn=0, offset=507904, offsetInChunk=507904, remaining=131072, origSize=103516164, totalRead=0
+[2026-01-26 15:58:17.888] [VFS DEBUG] [VFS chunkReader ReadAt] Read from chunk: dataID=447639065722881, sn=0, chunkSize=10485760, toRead=131072, totalRead=131072, remaining=0
+[2026-01-26 15:58:17.888] [VFS DEBUG] [VFS chunkReader ReadAt] Completed read: dataID=447639065722881, totalRead=131072, requested=131072, origSize=103516164
+[2026-01-26 15:58:17.888] [VFS DEBUG] [VFS chunkReader ReadAt] Before size limit: dataID=447639065722881, offset=638976, bufSize=131072, origSize=103516164
+[2026-01-26 15:58:17.888] [VFS DEBUG] [VFS chunkReader ReadAt] Final read size: dataID=447639065722881, offset=638976, readSize=131072, origSize=103516164
+[2026-01-26 15:58:17.888] [VFS DEBUG] [VFS chunkReader ReadAt] Reading chunk: dataID=447639065722881, sn=0, offset=638976, offsetInChunk=638976, remaining=131072, origSize=103516164, totalRead=0
+[2026-01-26 15:58:17.888] [VFS DEBUG] [VFS chunkReader ReadAt] Read from chunk: dataID=447639065722881, sn=0, chunkSize=10485760, toRead=131072, totalRead=131072, remaining=0
+[2026-01-26 15:58:17.888] [VFS DEBUG] [VFS chunkReader ReadAt] Completed read: dataID=447639065722881, totalRead=131072, requested=131072, origSize=103516164
+[2026-01-26 15:58:17.889] [VFS DEBUG] [VFS Read] Entry: objID=447639065722880, offset=770048, size=131072
+[2026-01-26 15:58:17.889] [VFS DEBUG] [VFS Read] Entry: objID=447639065722880, offset=901120, size=131072
+[2026-01-26 15:58:17.889] [VFS DEBUG] [VFS chunkReader ReadAt] Before size limit: dataID=447639065722881, offset=770048, bufSize=131072, origSize=103516164
+[2026-01-26 15:58:17.889] [VFS DEBUG] [VFS chunkReader ReadAt] Final read size: dataID=447639065722881, offset=770048, readSize=131072, origSize=103516164
+[2026-01-26 15:58:17.889] [VFS DEBUG] [VFS chunkReader ReadAt] Reading chunk: dataID=447639065722881, sn=0, offset=770048, offsetInChunk=770048, remaining=131072, origSize=103516164, totalRead=0
+[2026-01-26 15:58:17.889] [VFS DEBUG] [VFS chunkReader ReadAt] Read from chunk: dataID=447639065722881, sn=0, chunkSize=10485760, toRead=131072, totalRead=131072, remaining=0
+[2026-01-26 15:58:17.889] [VFS DEBUG] [VFS chunkReader ReadAt] Completed read: dataID=447639065722881, totalRead=131072, requested=131072, origSize=103516164
+[2026-01-26 15:58:17.889] [VFS DEBUG] [VFS chunkReader ReadAt] Before size limit: dataID=447639065722881, offset=901120, bufSize=131072, origSize=103516164
+[2026-01-26 15:58:17.889] [VFS DEBUG] [VFS chunkReader ReadAt] Final read size: dataID=447639065722881, offset=901120, readSize=131072, origSize=103516164
+[2026-01-26 15:58:17.889] [VFS DEBUG] [VFS chunkReader ReadAt] Reading chunk: dataID=447639065722881, sn=0, offset=901120, offsetInChunk=901120, remaining=131072, origSize=103516164, totalRead=0
+[2026-01-26 15:58:17.889] [VFS DEBUG] [VFS chunkReader ReadAt] Read from chunk: dataID=447639065722881, sn=0, chunkSize=10485760, toRead=131072, totalRead=131072, remaining=0
+[2026-01-26 15:58:17.889] [VFS DEBUG] [VFS chunkReader ReadAt] Completed read: dataID=447639065722881, totalRead=131072, requested=131072, origSize=103516164
+[2026-01-26 15:58:17.890] [VFS DEBUG] [VFS Read] Entry: objID=447639065722880, offset=1032192, size=131072
+[2026-01-26 15:58:17.890] [VFS DEBUG] [VFS Read] Entry: objID=447639065722880, offset=1163264, size=131072
+[2026-01-26 15:58:17.890] [VFS DEBUG] [VFS chunkReader ReadAt] Before size limit: dataID=447639065722881, offset=1163264, bufSize=131072, origSize=103516164
+[2026-01-26 15:58:17.890] [VFS DEBUG] [VFS chunkReader ReadAt] Final read size: dataID=447639065722881, offset=1163264, readSize=131072, origSize=103516164
+[2026-01-26 15:58:17.890] [VFS DEBUG] [VFS chunkReader ReadAt] Reading chunk: dataID=447639065722881, sn=0, offset=1163264, offsetInChunk=1163264, remaining=131072, origSize=103516164, totalRead=0
+[2026-01-26 15:58:17.890] [VFS DEBUG] [VFS chunkReader ReadAt] Read from chunk: dataID=447639065722881, sn=0, chunkSize=10485760, toRead=131072, totalRead=131072, remaining=0
+[2026-01-26 15:58:17.890] [VFS DEBUG] [VFS chunkReader ReadAt] Completed read: dataID=447639065722881, totalRead=131072, requested=131072, origSize=103516164
+[2026-01-26 15:58:17.890] [VFS DEBUG] [VFS chunkReader ReadAt] Before size limit: dataID=447639065722881, offset=1032192, bufSize=131072, origSize=103516164
+[2026-01-26 15:58:17.890] [VFS DEBUG] [VFS chunkReader ReadAt] Final read size: dataID=447639065722881, offset=1032192, readSize=131072, origSize=103516164
+[2026-01-26 15:58:17.890] [VFS DEBUG] [VFS chunkReader ReadAt] Reading chunk: dataID=447639065722881, sn=0, offset=1032192, offsetInChunk=1032192, remaining=131072, origSize=103516164, totalRead=0
+[2026-01-26 15:58:17.890] [VFS DEBUG] [VFS chunkReader ReadAt] Read from chunk: dataID=447639065722881, sn=0, chunkSize=10485760, toRead=131072, totalRead=131072, remaining=0
+[2026-01-26 15:58:17.890] [VFS DEBUG] [VFS chunkReader ReadAt] Completed read: dataID=447639065722881, totalRead=131072, requested=131072, origSize=103516164
+[2026-01-26 15:58:17.891] [VFS DEBUG] [VFS Read] Entry: objID=447639065722880, offset=1294336, size=131072
+[2026-01-26 15:58:17.891] [VFS DEBUG] [VFS Read] Entry: objID=447639065722880, offset=1425408, size=131072
+[2026-01-26 15:58:17.891] [VFS DEBUG] [VFS chunkReader ReadAt] Before size limit: dataID=447639065722881, offset=1294336, bufSize=131072, origSize=103516164
+[2026-01-26 15:58:17.891] [VFS DEBUG] [VFS chunkReader ReadAt] Final read size: dataID=447639065722881, offset=1294336, readSize=131072, origSize=103516164
+[2026-01-26 15:58:17.891] [VFS DEBUG] [VFS chunkReader ReadAt] Reading chunk: dataID=447639065722881, sn=0, offset=1294336, offsetInChunk=1294336, remaining=131072, origSize=103516164, totalRead=0
+[2026-01-26 15:58:17.891] [VFS DEBUG] [VFS chunkReader ReadAt] Read from chunk: dataID=447639065722881, sn=0, chunkSize=10485760, toRead=131072, totalRead=131072, remaining=0
+[2026-01-26 15:58:17.891] [VFS DEBUG] [VFS chunkReader ReadAt] Completed read: dataID=447639065722881, totalRead=131072, requested=131072, origSize=103516164
+[2026-01-26 15:58:17.891] [VFS DEBUG] [VFS chunkReader ReadAt] Before size limit: dataID=447639065722881, offset=1425408, bufSize=131072, origSize=103516164
+[2026-01-26 15:58:17.891] [VFS DEBUG] [VFS chunkReader ReadAt] Final read size: dataID=447639065722881, offset=1425408, readSize=131072, origSize=103516164
+[2026-01-26 15:58:17.891] [VFS DEBUG] [VFS chunkReader ReadAt] Reading chunk: dataID=447639065722881, sn=0, offset=1425408, offsetInChunk=1425408, remaining=131072, origSize=103516164, totalRead=0
+[2026-01-26 15:58:17.891] [VFS DEBUG] [VFS chunkReader ReadAt] Read from chunk: dataID=447639065722881, sn=0, chunkSize=10485760, toRead=131072, totalRead=131072, remaining=0
+[2026-01-26 15:58:17.891] [VFS DEBUG] [VFS chunkReader ReadAt] Completed read: dataID=447639065722881, totalRead=131072, requested=131072, origSize=103516164
+[2026-01-26 15:58:17.892] [VFS DEBUG] [VFS Read] Entry: objID=447639065722880, offset=1556480, size=131072
+[2026-01-26 15:58:17.892] [VFS DEBUG] [VFS Read] Entry: objID=447639065722880, offset=1687552, size=131072
+[2026-01-26 15:58:17.892] [VFS DEBUG] [VFS chunkReader ReadAt] Before size limit: dataID=447639065722881, offset=1556480, bufSize=131072, origSize=103516164
+[2026-01-26 15:58:17.892] [VFS DEBUG] [VFS chunkReader ReadAt] Final read size: dataID=447639065722881, offset=1556480, readSize=131072, origSize=103516164
+[2026-01-26 15:58:17.892] [VFS DEBUG] [VFS chunkReader ReadAt] Reading chunk: dataID=447639065722881, sn=0, offset=1556480, offsetInChunk=1556480, remaining=131072, origSize=103516164, totalRead=0
+[2026-01-26 15:58:17.892] [VFS DEBUG] [VFS chunkReader ReadAt] Read from chunk: dataID=447639065722881, sn=0, chunkSize=10485760, toRead=131072, totalRead=131072, remaining=0
+[2026-01-26 15:58:17.892] [VFS DEBUG] [VFS chunkReader ReadAt] Completed read: dataID=447639065722881, totalRead=131072, requested=131072, origSize=103516164
+[2026-01-26 15:58:17.892] [VFS DEBUG] [VFS chunkReader ReadAt] Before size limit: dataID=447639065722881, offset=1687552, bufSize=131072, origSize=103516164
+[2026-01-26 15:58:17.892] [VFS DEBUG] [VFS chunkReader ReadAt] Final read size: dataID=447639065722881, offset=1687552, readSize=131072, origSize=103516164
+[2026-01-26 15:58:17.893] [VFS DEBUG] [VFS chunkReader ReadAt] Reading chunk: dataID=447639065722881, sn=0, offset=1687552, offsetInChunk=1687552, remaining=131072, origSize=103516164, totalRead=0
+[2026-01-26 15:58:17.892] [VFS DEBUG] [VFS Read] Entry: objID=447639065722880, offset=1818624, size=131072
+[2026-01-26 15:58:17.893] [VFS DEBUG] [VFS chunkReader ReadAt] Read from chunk: dataID=447639065722881, sn=0, chunkSize=10485760, toRead=131072, totalRead=131072, remaining=0
+[2026-01-26 15:58:17.893] [VFS DEBUG] [VFS chunkReader ReadAt] Completed read: dataID=447639065722881, totalRead=131072, requested=131072, origSize=103516164
+[2026-01-26 15:58:17.893] [VFS DEBUG] [VFS chunkReader ReadAt] Before size limit: dataID=447639065722881, offset=1818624, bufSize=131072, origSize=103516164
+[2026-01-26 15:58:17.893] [VFS DEBUG] [VFS chunkReader ReadAt] Final read size: dataID=447639065722881, offset=1818624, readSize=131072, origSize=103516164
+[2026-01-26 15:58:17.893] [VFS DEBUG] [VFS chunkReader ReadAt] Reading chunk: dataID=447639065722881, sn=0, offset=1818624, offsetInChunk=1818624, remaining=131072, origSize=103516164, totalRead=0
+[2026-01-26 15:58:17.893] [VFS DEBUG] [VFS Read] Entry: objID=447639065722880, offset=1949696, size=131072
+[2026-01-26 15:58:17.893] [VFS DEBUG] [VFS chunkReader ReadAt] Read from chunk: dataID=447639065722881, sn=0, chunkSize=10485760, toRead=131072, totalRead=131072, remaining=0
+[2026-01-26 15:58:17.893] [VFS DEBUG] [VFS chunkReader ReadAt] Completed read: dataID=447639065722881, totalRead=131072, requested=131072, origSize=103516164
+[2026-01-26 15:58:17.893] [VFS DEBUG] [VFS chunkReader ReadAt] Before size limit: dataID=447639065722881, offset=1949696, bufSize=131072, origSize=103516164
+[2026-01-26 15:58:17.893] [VFS DEBUG] [VFS chunkReader ReadAt] Final read size: dataID=447639065722881, offset=1949696, readSize=131072, origSize=103516164
+[2026-01-26 15:58:17.893] [VFS DEBUG] [VFS chunkReader ReadAt] Reading chunk: dataID=447639065722881, sn=0, offset=1949696, offsetInChunk=1949696, remaining=131072, origSize=103516164, totalRead=0
+[2026-01-26 15:58:17.893] [VFS DEBUG] [VFS Read] Entry: objID=447639065722880, offset=2080768, size=131072
+[2026-01-26 15:58:17.893] [VFS DEBUG] [VFS chunkReader ReadAt] Read from chunk: dataID=447639065722881, sn=0, chunkSize=10485760, toRead=131072, totalRead=131072, remaining=0
+[2026-01-26 15:58:17.893] [VFS DEBUG] [VFS chunkReader ReadAt] Completed read: dataID=447639065722881, totalRead=131072, requested=131072, origSize=103516164
+[2026-01-26 15:58:17.894] [VFS DEBUG] [VFS chunkReader ReadAt] Before size limit: dataID=447639065722881, offset=2080768, bufSize=131072, origSize=103516164
+[2026-01-26 15:58:17.894] [VFS DEBUG] [VFS chunkReader ReadAt] Final read size: dataID=447639065722881, offset=2080768, readSize=131072, origSize=103516164
+[2026-01-26 15:58:17.894] [VFS DEBUG] [VFS chunkReader ReadAt] Reading chunk: dataID=447639065722881, sn=0, offset=2080768, offsetInChunk=2080768, remaining=131072, origSize=103516164, totalRead=0
+[2026-01-26 15:58:17.894] [VFS DEBUG] [VFS chunkReader ReadAt] Read from chunk: dataID=447639065722881, sn=0, chunkSize=10485760, toRead=131072, totalRead=131072, remaining=0
+[2026-01-26 15:58:17.894] [VFS DEBUG] [VFS chunkReader ReadAt] Completed read: dataID=447639065722881, totalRead=131072, requested=131072, origSize=103516164
+[2026-01-26 15:58:17.894] [VFS DEBUG] [VFS Read] Entry: objID=447639065722880, offset=2211840, size=131072
+[2026-01-26 15:58:17.895] [VFS DEBUG] [VFS chunkReader ReadAt] Before size limit: dataID=447639065722881, offset=2211840, bufSize=131072, origSize=103516164
+[2026-01-26 15:58:17.895] [VFS DEBUG] [VFS chunkReader ReadAt] Final read size: dataID=447639065722881, offset=2211840, readSize=131072, origSize=103516164
+[2026-01-26 15:58:17.895] [VFS DEBUG] [VFS chunkReader ReadAt] Reading chunk: dataID=447639065722881, sn=0, offset=2211840, offsetInChunk=2211840, remaining=131072, origSize=103516164, totalRead=0
+[2026-01-26 15:58:17.895] [VFS DEBUG] [VFS chunkReader ReadAt] Read from chunk: dataID=447639065722881, sn=0, chunkSize=10485760, toRead=131072, totalRead=131072, remaining=0
+[2026-01-26 15:58:17.895] [VFS DEBUG] [VFS chunkReader ReadAt] Completed read: dataID=447639065722881, totalRead=131072, requested=131072, origSize=103516164
+[2026-01-26 15:58:17.894] [VFS DEBUG] [VFS Read] Entry: objID=447639065722880, offset=2342912, size=131072
+[2026-01-26 15:58:17.895] [VFS DEBUG] [VFS Read] Entry: objID=447639065722880, offset=2473984, size=131072
+[2026-01-26 15:58:17.895] [VFS DEBUG] [VFS chunkReader ReadAt] Before size limit: dataID=447639065722881, offset=2342912, bufSize=131072, origSize=103516164
+[2026-01-26 15:58:17.895] [VFS DEBUG] [VFS chunkReader ReadAt] Final read size: dataID=447639065722881, offset=2342912, readSize=131072, origSize=103516164
+[2026-01-26 15:58:17.895] [VFS DEBUG] [VFS chunkReader ReadAt] Reading chunk: dataID=447639065722881, sn=0, offset=2342912, offsetInChunk=2342912, remaining=131072, origSize=103516164, totalRead=0
+[2026-01-26 15:58:17.896] [VFS DEBUG] [VFS chunkReader ReadAt] Read from chunk: dataID=447639065722881, sn=0, chunkSize=10485760, toRead=131072, totalRead=131072, remaining=0
+[2026-01-26 15:58:17.896] [VFS DEBUG] [VFS chunkReader ReadAt] Completed read: dataID=447639065722881, totalRead=131072, requested=131072, origSize=103516164
+[2026-01-26 15:58:17.896] [VFS DEBUG] [VFS chunkReader ReadAt] Before size limit: dataID=447639065722881, offset=2473984, bufSize=131072, origSize=103516164
+[2026-01-26 15:58:17.896] [VFS DEBUG] [VFS chunkReader ReadAt] Final read size: dataID=447639065722881, offset=2473984, readSize=131072, origSize=103516164
+[2026-01-26 15:58:17.896] [VFS DEBUG] [VFS chunkReader ReadAt] Reading chunk: dataID=447639065722881, sn=0, offset=2473984, offsetInChunk=2473984, remaining=131072, origSize=103516164, totalRead=0
+[2026-01-26 15:58:17.896] [VFS DEBUG] [VFS Read] Entry: objID=447639065722880, offset=2605056, size=131072
+[2026-01-26 15:58:17.896] [VFS DEBUG] [VFS chunkReader ReadAt] Read from chunk: dataID=447639065722881, sn=0, chunkSize=10485760, toRead=131072, totalRead=131072, remaining=0
+[2026-01-26 15:58:17.896] [VFS DEBUG] [VFS chunkReader ReadAt] Completed read: dataID=447639065722881, totalRead=131072, requested=131072, origSize=103516164
+[2026-01-26 15:58:17.896] [VFS DEBUG] [VFS Open] Entry: objID=447639065722880, flags=0x8000
+[2026-01-26 15:58:17.896] [VFS DEBUG] [VFS Open] Object info: objID=447639065722880, type=2 (FILE=2, DIR=1), name=_manticore.zip, PID=445451027349504, flags=0x8000
+[2026-01-26 15:58:17.896] [VFS DEBUG] [VFS Open] O_LARGEFILE flag set: fileID=447639065722880, flags=0x8000
+[2026-01-26 15:58:17.896] [VFS DEBUG] [VFS chunkReader ReadAt] Before size limit: dataID=447639065722881, offset=2605056, bufSize=131072, origSize=103516164
+[2026-01-26 15:58:17.896] [VFS DEBUG] [VFS chunkReader ReadAt] Final read size: dataID=447639065722881, offset=2605056, readSize=131072, origSize=103516164
+[2026-01-26 15:58:17.896] [VFS DEBUG] [VFS chunkReader ReadAt] Reading chunk: dataID=447639065722881, sn=0, offset=2605056, offsetInChunk=2605056, remaining=131072, origSize=103516164, totalRead=0
+[2026-01-26 15:58:17.896] [VFS DEBUG] [VFS chunkReader ReadAt] Read from chunk: dataID=447639065722881, sn=0, chunkSize=10485760, toRead=131072, totalRead=131072, remaining=0
+[2026-01-26 15:58:17.896] [VFS DEBUG] [VFS chunkReader ReadAt] Completed read: dataID=447639065722881, totalRead=131072, requested=131072, origSize=103516164
+[2026-01-26 15:58:17.896] [VFS DEBUG] [VFS Open] Opened file: fileID=447639065722880, flags=0x8000 (O_WRONLY=0x1, O_RDWR=0x2, O_RDONLY=0x0, O_LARGEFILE=0x8000)
+[2026-01-26 15:58:17.896] [VFS DEBUG] [VFS Open] File open mode: fileID=447639065722880, isWriteMode=false, hasLargeFileFlag=true, flags=0x8000 (O_WRONLY=0x1, O_RDWR=0x2, O_CREAT=0x40, O_TRUNC=0x200, O_EXCL=0x80)
+[2026-01-26 15:58:17.896] [VFS DEBUG] [VFS Open] File metadata after Open: fileID=447639065722880, name=_manticore.zip, size=103516164, dataID=447639065722881, mtime=1729061848, mode=0100644, type=2, pid=445451027349504
+[2026-01-26 15:58:17.896] [VFS DEBUG] [VFS Open] Returning FileHandle: fileID=447639065722880, fuseFlags=0x0, FileHandle type=*vfs.OrcasNode, implements FileWriter=true
+[2026-01-26 15:58:17.896] [VFS DEBUG] [VFS Read] Entry: objID=447639065722880, offset=2736128, size=131072
+[2026-01-26 15:58:17.897] [VFS DEBUG] [VFS Read] Entry: objID=447639065722880, offset=2621440, size=114688
+[2026-01-26 15:58:17.897] [VFS DEBUG] [VFS chunkReader ReadAt] Before size limit: dataID=447639065722881, offset=2736128, bufSize=131072, origSize=103516164
+[2026-01-26 15:58:17.897] [VFS DEBUG] [VFS chunkReader ReadAt] Final read size: dataID=447639065722881, offset=2736128, readSize=131072, origSize=103516164
+[2026-01-26 15:58:17.897] [VFS DEBUG] [VFS chunkReader ReadAt] Reading chunk: dataID=447639065722881, sn=0, offset=2736128, offsetInChunk=2736128, remaining=131072, origSize=103516164, totalRead=0
+[2026-01-26 15:58:17.897] [VFS DEBUG] [VFS chunkReader ReadAt] Before size limit: dataID=447639065722881, offset=2621440, bufSize=114688, origSize=103516164
+[2026-01-26 15:58:17.897] [VFS DEBUG] [VFS chunkReader ReadAt] Final read size: dataID=447639065722881, offset=2621440, readSize=114688, origSize=103516164
+[2026-01-26 15:58:17.897] [VFS DEBUG] [VFS chunkReader ReadAt] Reading chunk: dataID=447639065722881, sn=0, offset=2621440, offsetInChunk=2621440, remaining=114688, origSize=103516164, totalRead=0
+[2026-01-26 15:58:17.897] [VFS DEBUG] [VFS chunkReader ReadAt] Read from chunk: dataID=447639065722881, sn=0, chunkSize=10485760, toRead=114688, totalRead=114688, remaining=0
+[2026-01-26 15:58:17.897] [VFS DEBUG] [VFS chunkReader ReadAt] Completed read: dataID=447639065722881, totalRead=114688, requested=114688, origSize=103516164
+[2026-01-26 15:58:17.897] [VFS DEBUG] [VFS chunkReader ReadAt] Read from chunk: dataID=447639065722881, sn=0, chunkSize=10485760, toRead=131072, totalRead=131072, remaining=0
+[2026-01-26 15:58:17.898] [VFS DEBUG] [VFS chunkReader ReadAt] Completed read: dataID=447639065722881, totalRead=131072, requested=131072, origSize=103516164
+[2026-01-26 15:58:17.898] [VFS DEBUG] [VFS Read] Entry: objID=447639065722880, offset=2867200, size=16384
+[2026-01-26 15:58:17.898] [VFS DEBUG] [VFS Read] Entry: objID=447639065722880, offset=2736128, size=32768
+[2026-01-26 15:58:17.898] [VFS DEBUG] [VFS chunkReader ReadAt] Before size limit: dataID=447639065722881, offset=2736128, bufSize=32768, origSize=103516164
+[2026-01-26 15:58:17.898] [VFS DEBUG] [VFS chunkReader ReadAt] Final read size: dataID=447639065722881, offset=2736128, readSize=32768, origSize=103516164
+[2026-01-26 15:58:17.898] [VFS DEBUG] [VFS chunkReader ReadAt] Reading chunk: dataID=447639065722881, sn=0, offset=2736128, offsetInChunk=2736128, remaining=32768, origSize=103516164, totalRead=0
+[2026-01-26 15:58:17.898] [VFS DEBUG] [VFS chunkReader ReadAt] Read from chunk: dataID=447639065722881, sn=0, chunkSize=10485760, toRead=32768, totalRead=32768, remaining=0
+[2026-01-26 15:58:17.898] [VFS DEBUG] [VFS chunkReader ReadAt] Completed read: dataID=447639065722881, totalRead=32768, requested=32768, origSize=103516164
+[2026-01-26 15:58:17.898] [VFS DEBUG] [VFS chunkReader ReadAt] Before size limit: dataID=447639065722881, offset=2867200, bufSize=16384, origSize=103516164
+[2026-01-26 15:58:17.898] [VFS DEBUG] [VFS chunkReader ReadAt] Final read size: dataID=447639065722881, offset=2867200, readSize=16384, origSize=103516164
+[2026-01-26 15:58:17.898] [VFS DEBUG] [VFS chunkReader ReadAt] Reading chunk: dataID=447639065722881, sn=0, offset=2867200, offsetInChunk=2867200, remaining=16384, origSize=103516164, totalRead=0
+[2026-01-26 15:58:17.898] [VFS DEBUG] [VFS chunkReader ReadAt] Read from chunk: dataID=447639065722881, sn=0, chunkSize=10485760, toRead=16384, totalRead=16384, remaining=0
+[2026-01-26 15:58:17.898] [VFS DEBUG] [VFS chunkReader ReadAt] Completed read: dataID=447639065722881, totalRead=16384, requested=16384, origSize=103516164
+[2026-01-26 15:58:17.899] [VFS DEBUG] [VFS Read] Entry: objID=447639065722880, offset=2768896, size=65536
+[2026-01-26 15:58:17.899] [VFS DEBUG] [VFS Read] Entry: objID=447639065722880, offset=2834432, size=131072
+[2026-01-26 15:58:17.899] [VFS DEBUG] [VFS chunkReader ReadAt] Before size limit: dataID=447639065722881, offset=2768896, bufSize=65536, origSize=103516164
+[2026-01-26 15:58:17.899] [VFS DEBUG] [VFS chunkReader ReadAt] Final read size: dataID=447639065722881, offset=2768896, readSize=65536, origSize=103516164
+[2026-01-26 15:58:17.899] [VFS DEBUG] [VFS chunkReader ReadAt] Reading chunk: dataID=447639065722881, sn=0, offset=2768896, offsetInChunk=2768896, remaining=65536, origSize=103516164, totalRead=0
+[2026-01-26 15:58:17.899] [VFS DEBUG] [VFS chunkReader ReadAt] Before size limit: dataID=447639065722881, offset=2834432, bufSize=131072, origSize=103516164
+[2026-01-26 15:58:17.899] [VFS DEBUG] [VFS chunkReader ReadAt] Final read size: dataID=447639065722881, offset=2834432, readSize=131072, origSize=103516164
+[2026-01-26 15:58:17.899] [VFS DEBUG] [VFS chunkReader ReadAt] Reading chunk: dataID=447639065722881, sn=0, offset=2834432, offsetInChunk=2834432, remaining=131072, origSize=103516164, totalRead=0
+[2026-01-26 15:58:17.899] [VFS DEBUG] [VFS chunkReader ReadAt] Read from chunk: dataID=447639065722881, sn=0, chunkSize=10485760, toRead=131072, totalRead=131072, remaining=0
+[2026-01-26 15:58:17.899] [VFS DEBUG] [VFS chunkReader ReadAt] Completed read: dataID=447639065722881, totalRead=131072, requested=131072, origSize=103516164
+[2026-01-26 15:58:17.899] [VFS DEBUG] [VFS chunkReader ReadAt] Read from chunk: dataID=447639065722881, sn=0, chunkSize=10485760, toRead=65536, totalRead=65536, remaining=0
+[2026-01-26 15:58:17.899] [VFS DEBUG] [VFS chunkReader ReadAt] Completed read: dataID=447639065722881, totalRead=65536, requested=65536, origSize=103516164
+[2026-01-26 15:58:17.899] [VFS DEBUG] [VFS Read] Entry: objID=447639065722880, offset=0, size=16384
+[2026-01-26 15:58:17.899] [VFS DEBUG] [VFS Read] Entry: objID=447639065722880, offset=2965504, size=131072
+[2026-01-26 15:58:17.900] [VFS DEBUG] [VFS chunkReader ReadAt] Before size limit: dataID=447639065722881, offset=0, bufSize=16384, origSize=103516164
+[2026-01-26 15:58:17.900] [VFS DEBUG] [VFS chunkReader ReadAt] Final read size: dataID=447639065722881, offset=0, readSize=16384, origSize=103516164
+[2026-01-26 15:58:17.900] [VFS DEBUG] [VFS chunkReader ReadAt] Reading chunk: dataID=447639065722881, sn=0, offset=0, offsetInChunk=0, remaining=16384, origSize=103516164, totalRead=0
+[2026-01-26 15:58:17.900] [VFS DEBUG] [VFS chunkReader ReadAt] Read from chunk: dataID=447639065722881, sn=0, chunkSize=10485760, toRead=16384, totalRead=16384, remaining=0
+[2026-01-26 15:58:17.900] [VFS DEBUG] [VFS chunkReader ReadAt] Completed read: dataID=447639065722881, totalRead=16384, requested=16384, origSize=103516164
+[2026-01-26 15:58:17.900] [VFS DEBUG] [VFS Read] Entry: objID=447639065722880, offset=3096576, size=131072
+[2026-01-26 15:58:17.900] [VFS DEBUG] [VFS chunkReader ReadAt] Before size limit: dataID=447639065722881, offset=2965504, bufSize=131072, origSize=103516164
+[2026-01-26 15:58:17.900] [VFS DEBUG] [VFS chunkReader ReadAt] Final read size: dataID=447639065722881, offset=2965504, readSize=131072, origSize=103516164
+[2026-01-26 15:58:17.900] [VFS DEBUG] [VFS chunkReader ReadAt] Reading chunk: dataID=447639065722881, sn=0, offset=2965504, offsetInChunk=2965504, remaining=131072, origSize=103516164, totalRead=0
+[2026-01-26 15:58:17.900] [VFS DEBUG] [VFS chunkReader ReadAt] Read from chunk: dataID=447639065722881, sn=0, chunkSize=10485760, toRead=131072, totalRead=131072, remaining=0
+[2026-01-26 15:58:17.900] [VFS DEBUG] [VFS chunkReader ReadAt] Completed read: dataID=447639065722881, totalRead=131072, requested=131072, origSize=103516164
+[2026-01-26 15:58:17.900] [VFS DEBUG] [VFS chunkReader ReadAt] Before size limit: dataID=447639065722881, offset=3096576, bufSize=131072, origSize=103516164
+[2026-01-26 15:58:17.900] [VFS DEBUG] [VFS chunkReader ReadAt] Final read size: dataID=447639065722881, offset=3096576, readSize=131072, origSize=103516164
+[2026-01-26 15:58:17.900] [VFS DEBUG] [VFS chunkReader ReadAt] Reading chunk: dataID=447639065722881, sn=0, offset=3096576, offsetInChunk=3096576, remaining=131072, origSize=103516164, totalRead=0
+[2026-01-26 15:58:17.900] [VFS DEBUG] [VFS chunkReader ReadAt] Read from chunk: dataID=447639065722881, sn=0, chunkSize=10485760, toRead=131072, totalRead=131072, remaining=0
+[2026-01-26 15:58:17.900] [VFS DEBUG] [VFS chunkReader ReadAt] Completed read: dataID=447639065722881, totalRead=131072, requested=131072, origSize=103516164
+[2026-01-26 15:58:17.900] [VFS DEBUG] [VFS Read] Entry: objID=447639065722880, offset=3227648, size=131072
+[2026-01-26 15:58:17.900] [VFS DEBUG] [VFS Read] Entry: objID=447639065722880, offset=3358720, size=131072
+[2026-01-26 15:58:17.900] [VFS DEBUG] [VFS chunkReader ReadAt] Before size limit: dataID=447639065722881, offset=3227648, bufSize=131072, origSize=103516164
+[2026-01-26 15:58:17.900] [VFS DEBUG] [VFS chunkReader ReadAt] Before size limit: dataID=447639065722881, offset=3358720, bufSize=131072, origSize=103516164
+[2026-01-26 15:58:17.900] [VFS DEBUG] [VFS chunkReader ReadAt] Final read size: dataID=447639065722881, offset=3358720, readSize=131072, origSize=103516164
+[2026-01-26 15:58:17.900] [VFS DEBUG] [VFS chunkReader ReadAt] Reading chunk: dataID=447639065722881, sn=0, offset=3358720, offsetInChunk=3358720, remaining=131072, origSize=103516164, totalRead=0
+[2026-01-26 15:58:17.901] [VFS DEBUG] [VFS chunkReader ReadAt] Read from chunk: dataID=447639065722881, sn=0, chunkSize=10485760, toRead=131072, totalRead=131072, remaining=0
+[2026-01-26 15:58:17.901] [VFS DEBUG] [VFS chunkReader ReadAt] Completed read: dataID=447639065722881, totalRead=131072, requested=131072, origSize=103516164
+[2026-01-26 15:58:17.901] [VFS DEBUG] [VFS Read] Entry: objID=447639065722880, offset=16384, size=32768
+[2026-01-26 15:58:17.901] [VFS DEBUG] [VFS Read] Entry: objID=447639065722880, offset=49152, size=65536
+[2026-01-26 15:58:17.900] [VFS DEBUG] [VFS chunkReader ReadAt] Final read size: dataID=447639065722881, offset=3227648, readSize=131072, origSize=103516164
+[2026-01-26 15:58:17.901] [VFS DEBUG] [VFS chunkReader ReadAt] Reading chunk: dataID=447639065722881, sn=0, offset=3227648, offsetInChunk=3227648, remaining=131072, origSize=103516164, totalRead=0
+[2026-01-26 15:58:17.901] [VFS DEBUG] [VFS chunkReader ReadAt] Before size limit: dataID=447639065722881, offset=16384, bufSize=32768, origSize=103516164
+[2026-01-26 15:58:17.901] [VFS DEBUG] [VFS chunkReader ReadAt] Final read size: dataID=447639065722881, offset=16384, readSize=32768, origSize=103516164
+[2026-01-26 15:58:17.901] [VFS DEBUG] [VFS chunkReader ReadAt] Reading chunk: dataID=447639065722881, sn=0, offset=16384, offsetInChunk=16384, remaining=32768, origSize=103516164, totalRead=0
+[2026-01-26 15:58:17.901] [VFS DEBUG] [VFS chunkReader ReadAt] Read from chunk: dataID=447639065722881, sn=0, chunkSize=10485760, toRead=131072, totalRead=131072, remaining=0
+[2026-01-26 15:58:17.901] [VFS DEBUG] [VFS chunkReader ReadAt] Completed read: dataID=447639065722881, totalRead=131072, requested=131072, origSize=103516164
+[2026-01-26 15:58:17.901] [VFS DEBUG] [VFS chunkReader ReadAt] Read from chunk: dataID=447639065722881, sn=0, chunkSize=10485760, toRead=32768, totalRead=32768, remaining=0
+[2026-01-26 15:58:17.901] [VFS DEBUG] [VFS chunkReader ReadAt] Completed read: dataID=447639065722881, totalRead=32768, requested=32768, origSize=103516164
+[2026-01-26 15:58:17.901] [VFS DEBUG] [VFS Read] Entry: objID=447639065722880, offset=114688, size=131072
+[2026-01-26 15:58:17.901] [VFS DEBUG] [VFS Read] Entry: objID=447639065722880, offset=3489792, size=131072
+[2026-01-26 15:58:17.901] [VFS DEBUG] [VFS chunkReader ReadAt] Before size limit: dataID=447639065722881, offset=114688, bufSize=131072, origSize=103516164
+[2026-01-26 15:58:17.901] [VFS DEBUG] [VFS chunkReader ReadAt] Final read size: dataID=447639065722881, offset=114688, readSize=131072, origSize=103516164
+[2026-01-26 15:58:17.901] [VFS DEBUG] [VFS chunkReader ReadAt] Reading chunk: dataID=447639065722881, sn=0, offset=114688, offsetInChunk=114688, remaining=131072, origSize=103516164, totalRead=0
+[2026-01-26 15:58:17.901] [VFS DEBUG] [VFS Read] Entry: objID=447639065722880, offset=3620864, size=131072
+[2026-01-26 15:58:17.902] [VFS DEBUG] [VFS chunkReader ReadAt] Read from chunk: dataID=447639065722881, sn=0, chunkSize=10485760, toRead=131072, totalRead=131072, remaining=0
+[2026-01-26 15:58:17.902] [VFS DEBUG] [VFS chunkReader ReadAt] Completed read: dataID=447639065722881, totalRead=131072, requested=131072, origSize=103516164
+[2026-01-26 15:58:17.902] [VFS DEBUG] [VFS chunkReader ReadAt] Before size limit: dataID=447639065722881, offset=49152, bufSize=65536, origSize=103516164
+[2026-01-26 15:58:17.902] [VFS DEBUG] [VFS chunkReader ReadAt] Final read size: dataID=447639065722881, offset=49152, readSize=65536, origSize=103516164
+[2026-01-26 15:58:17.902] [VFS DEBUG] [VFS chunkReader ReadAt] Reading chunk: dataID=447639065722881, sn=0, offset=49152, offsetInChunk=49152, remaining=65536, origSize=103516164, totalRead=0
+[2026-01-26 15:58:17.902] [VFS DEBUG] [VFS chunkReader ReadAt] Before size limit: dataID=447639065722881, offset=3620864, bufSize=131072, origSize=103516164
+[2026-01-26 15:58:17.902] [VFS DEBUG] [VFS chunkReader ReadAt] Final read size: dataID=447639065722881, offset=3620864, readSize=131072, origSize=103516164
+[2026-01-26 15:58:17.902] [VFS DEBUG] [VFS chunkReader ReadAt] Reading chunk: dataID=447639065722881, sn=0, offset=3620864, offsetInChunk=3620864, remaining=131072, origSize=103516164, totalRead=0
+[2026-01-26 15:58:17.902] [VFS DEBUG] [VFS chunkReader ReadAt] Read from chunk: dataID=447639065722881, sn=0, chunkSize=10485760, toRead=65536, totalRead=65536, remaining=0
+[2026-01-26 15:58:17.902] [VFS DEBUG] [VFS chunkReader ReadAt] Completed read: dataID=447639065722881, totalRead=65536, requested=65536, origSize=103516164
+[2026-01-26 15:58:17.902] [VFS DEBUG] [VFS chunkReader ReadAt] Before size limit: dataID=447639065722881, offset=3489792, bufSize=131072, origSize=103516164
+[2026-01-26 15:58:17.902] [VFS DEBUG] [VFS chunkReader ReadAt] Final read size: dataID=447639065722881, offset=3489792, readSize=131072, origSize=103516164
+[2026-01-26 15:58:17.902] [VFS DEBUG] [VFS chunkReader ReadAt] Reading chunk: dataID=447639065722881, sn=0, offset=3489792, offsetInChunk=3489792, remaining=131072, origSize=103516164, totalRead=0
+[2026-01-26 15:58:17.902] [VFS DEBUG] [VFS chunkReader ReadAt] Read from chunk: dataID=447639065722881, sn=0, chunkSize=10485760, toRead=131072, totalRead=131072, remaining=0
+[2026-01-26 15:58:17.902] [VFS DEBUG] [VFS chunkReader ReadAt] Completed read: dataID=447639065722881, totalRead=131072, requested=131072, origSize=103516164
+[2026-01-26 15:58:17.902] [VFS DEBUG] [VFS chunkReader ReadAt] Read from chunk: dataID=447639065722881, sn=0, chunkSize=10485760, toRead=131072, totalRead=131072, remaining=0
+[2026-01-26 15:58:17.902] [VFS DEBUG] [VFS chunkReader ReadAt] Completed read: dataID=447639065722881, totalRead=131072, requested=131072, origSize=103516164
+[2026-01-26 15:58:17.902] [VFS DEBUG] [VFS Read] Entry: objID=447639065722880, offset=3751936, size=131072
+[2026-01-26 15:58:17.902] [VFS DEBUG] [VFS Read] Entry: objID=447639065722880, offset=245760, size=131072
+[2026-01-26 15:58:17.903] [VFS DEBUG] [VFS Read] Entry: objID=447639065722880, offset=3883008, size=131072
+[2026-01-26 15:58:17.903] [VFS DEBUG] [VFS chunkReader ReadAt] Before size limit: dataID=447639065722881, offset=3883008, bufSize=131072, origSize=103516164
+[2026-01-26 15:58:17.903] [VFS DEBUG] [VFS chunkReader ReadAt] Final read size: dataID=447639065722881, offset=3883008, readSize=131072, origSize=103516164
+[2026-01-26 15:58:17.903] [VFS DEBUG] [VFS chunkReader ReadAt] Before size limit: dataID=447639065722881, offset=245760, bufSize=131072, origSize=103516164
+[2026-01-26 15:58:17.903] [VFS DEBUG] [VFS chunkReader ReadAt] Final read size: dataID=447639065722881, offset=245760, readSize=131072, origSize=103516164
+[2026-01-26 15:58:17.903] [VFS DEBUG] [VFS chunkReader ReadAt] Reading chunk: dataID=447639065722881, sn=0, offset=245760, offsetInChunk=245760, remaining=131072, origSize=103516164, totalRead=0
+[2026-01-26 15:58:17.903] [VFS DEBUG] [VFS chunkReader ReadAt] Read from chunk: dataID=447639065722881, sn=0, chunkSize=10485760, toRead=131072, totalRead=131072, remaining=0
+[2026-01-26 15:58:17.903] [VFS DEBUG] [VFS chunkReader ReadAt] Completed read: dataID=447639065722881, totalRead=131072, requested=131072, origSize=103516164
+[2026-01-26 15:58:17.903] [VFS DEBUG] [VFS chunkReader ReadAt] Reading chunk: dataID=447639065722881, sn=0, offset=3883008, offsetInChunk=3883008, remaining=131072, origSize=103516164, totalRead=0
+[2026-01-26 15:58:17.903] [VFS DEBUG] [VFS chunkReader ReadAt] Before size limit: dataID=447639065722881, offset=3751936, bufSize=131072, origSize=103516164
+[2026-01-26 15:58:17.903] [VFS DEBUG] [VFS chunkReader ReadAt] Final read size: dataID=447639065722881, offset=3751936, readSize=131072, origSize=103516164
+[2026-01-26 15:58:17.903] [VFS DEBUG] [VFS chunkReader ReadAt] Reading chunk: dataID=447639065722881, sn=0, offset=3751936, offsetInChunk=3751936, remaining=131072, origSize=103516164, totalRead=0
+[2026-01-26 15:58:17.903] [VFS DEBUG] [VFS chunkReader ReadAt] Read from chunk: dataID=447639065722881, sn=0, chunkSize=10485760, toRead=131072, totalRead=131072, remaining=0
+[2026-01-26 15:58:17.903] [VFS DEBUG] [VFS chunkReader ReadAt] Completed read: dataID=447639065722881, totalRead=131072, requested=131072, origSize=103516164
+[2026-01-26 15:58:17.903] [VFS DEBUG] [VFS chunkReader ReadAt] Read from chunk: dataID=447639065722881, sn=0, chunkSize=10485760, toRead=131072, totalRead=131072, remaining=0
+[2026-01-26 15:58:17.903] [VFS DEBUG] [VFS chunkReader ReadAt] Completed read: dataID=447639065722881, totalRead=131072, requested=131072, origSize=103516164
+[2026-01-26 15:58:17.903] [VFS DEBUG] [VFS Read] Entry: objID=447639065722880, offset=507904, size=131072
+[2026-01-26 15:58:17.903] [VFS DEBUG] [VFS Read] Entry: objID=447639065722880, offset=376832, size=131072
+[2026-01-26 15:58:17.904] [VFS DEBUG] [VFS Read] Entry: objID=447639065722880, offset=4014080, size=131072
+[2026-01-26 15:58:17.904] [VFS DEBUG] [VFS chunkReader ReadAt] Before size limit: dataID=447639065722881, offset=376832, bufSize=131072, origSize=103516164
+[2026-01-26 15:58:17.904] [VFS DEBUG] [VFS chunkReader ReadAt] Final read size: dataID=447639065722881, offset=376832, readSize=131072, origSize=103516164
+[2026-01-26 15:58:17.904] [VFS DEBUG] [VFS chunkReader ReadAt] Reading chunk: dataID=447639065722881, sn=0, offset=376832, offsetInChunk=376832, remaining=131072, origSize=103516164, totalRead=0
+[2026-01-26 15:58:17.904] [VFS DEBUG] [VFS chunkReader ReadAt] Before size limit: dataID=447639065722881, offset=4014080, bufSize=131072, origSize=103516164
+[2026-01-26 15:58:17.904] [VFS DEBUG] [VFS chunkReader ReadAt] Final read size: dataID=447639065722881, offset=4014080, readSize=131072, origSize=103516164
+[2026-01-26 15:58:17.904] [VFS DEBUG] [VFS chunkReader ReadAt] Reading chunk: dataID=447639065722881, sn=0, offset=4014080, offsetInChunk=4014080, remaining=131072, origSize=103516164, totalRead=0
+[2026-01-26 15:58:17.904] [VFS DEBUG] [VFS chunkReader ReadAt] Read from chunk: dataID=447639065722881, sn=0, chunkSize=10485760, toRead=131072, totalRead=131072, remaining=0
+[2026-01-26 15:58:17.904] [VFS DEBUG] [VFS chunkReader ReadAt] Completed read: dataID=447639065722881, totalRead=131072, requested=131072, origSize=103516164
+[2026-01-26 15:58:17.904] [VFS DEBUG] [VFS chunkReader ReadAt] Read from chunk: dataID=447639065722881, sn=0, chunkSize=10485760, toRead=131072, totalRead=131072, remaining=0
+[2026-01-26 15:58:17.904] [VFS DEBUG] [VFS chunkReader ReadAt] Completed read: dataID=447639065722881, totalRead=131072, requested=131072, origSize=103516164
+[2026-01-26 15:58:17.904] [VFS DEBUG] [VFS Read] Entry: objID=447639065722880, offset=4145152, size=131072
+[2026-01-26 15:58:17.904] [VFS DEBUG] [VFS Read] Entry: objID=447639065722880, offset=4276224, size=131072
+[2026-01-26 15:58:17.904] [VFS DEBUG] [VFS chunkReader ReadAt] Before size limit: dataID=447639065722881, offset=4145152, bufSize=131072, origSize=103516164
+[2026-01-26 15:58:17.904] [VFS DEBUG] [VFS chunkReader ReadAt] Final read size: dataID=447639065722881, offset=4145152, readSize=131072, origSize=103516164
+[2026-01-26 15:58:17.904] [VFS DEBUG] [VFS chunkReader ReadAt] Reading chunk: dataID=447639065722881, sn=0, offset=4145152, offsetInChunk=4145152, remaining=131072, origSize=103516164, totalRead=0
+[2026-01-26 15:58:17.904] [VFS DEBUG] [VFS chunkReader ReadAt] Read from chunk: dataID=447639065722881, sn=0, chunkSize=10485760, toRead=131072, totalRead=131072, remaining=0
+[2026-01-26 15:58:17.904] [VFS DEBUG] [VFS chunkReader ReadAt] Before size limit: dataID=447639065722881, offset=4276224, bufSize=131072, origSize=103516164
+[2026-01-26 15:58:17.904] [VFS DEBUG] [VFS chunkReader ReadAt] Final read size: dataID=447639065722881, offset=4276224, readSize=131072, origSize=103516164
+[2026-01-26 15:58:17.904] [VFS DEBUG] [VFS chunkReader ReadAt] Reading chunk: dataID=447639065722881, sn=0, offset=4276224, offsetInChunk=4276224, remaining=131072, origSize=103516164, totalRead=0
+[2026-01-26 15:58:17.904] [VFS DEBUG] [VFS chunkReader ReadAt] Read from chunk: dataID=447639065722881, sn=0, chunkSize=10485760, toRead=131072, totalRead=131072, remaining=0
+[2026-01-26 15:58:17.904] [VFS DEBUG] [VFS chunkReader ReadAt] Completed read: dataID=447639065722881, totalRead=131072, requested=131072, origSize=103516164
+[2026-01-26 15:58:17.905] [VFS DEBUG] [VFS Read] Entry: objID=447639065722880, offset=638976, size=131072
+[2026-01-26 15:58:17.905] [VFS DEBUG] [VFS chunkReader ReadAt] Before size limit: dataID=447639065722881, offset=507904, bufSize=131072, origSize=103516164
+[2026-01-26 15:58:17.905] [VFS DEBUG] [VFS chunkReader ReadAt] Final read size: dataID=447639065722881, offset=507904, readSize=131072, origSize=103516164
+[2026-01-26 15:58:17.904] [VFS DEBUG] [VFS chunkReader ReadAt] Completed read: dataID=447639065722881, totalRead=131072, requested=131072, origSize=103516164
+[2026-01-26 15:58:17.905] [VFS DEBUG] [VFS chunkReader ReadAt] Reading chunk: dataID=447639065722881, sn=0, offset=507904, offsetInChunk=507904, remaining=131072, origSize=103516164, totalRead=0
+[2026-01-26 15:58:17.905] [VFS DEBUG] [VFS Read] Entry: objID=447639065722880, offset=4407296, size=131072
+[2026-01-26 15:58:17.905] [VFS DEBUG] [VFS chunkReader ReadAt] Read from chunk: dataID=447639065722881, sn=0, chunkSize=10485760, toRead=131072, totalRead=131072, remaining=0
+[2026-01-26 15:58:17.905] [VFS DEBUG] [VFS chunkReader ReadAt] Completed read: dataID=447639065722881, totalRead=131072, requested=131072, origSize=103516164
+[2026-01-26 15:58:17.905] [VFS DEBUG] [VFS chunkReader ReadAt] Before size limit: dataID=447639065722881, offset=638976, bufSize=131072, origSize=103516164
+[2026-01-26 15:58:17.905] [VFS DEBUG] [VFS chunkReader ReadAt] Final read size: dataID=447639065722881, offset=638976, readSize=131072, origSize=103516164
+[2026-01-26 15:58:17.905] [VFS DEBUG] [VFS chunkReader ReadAt] Reading chunk: dataID=447639065722881, sn=0, offset=638976, offsetInChunk=638976, remaining=131072, origSize=103516164, totalRead=0
+[2026-01-26 15:58:17.905] [VFS DEBUG] [VFS Read] Entry: objID=447639065722880, offset=4538368, size=131072
+[2026-01-26 15:58:17.905] [VFS DEBUG] [VFS chunkReader ReadAt] Read from chunk: dataID=447639065722881, sn=0, chunkSize=10485760, toRead=131072, totalRead=131072, remaining=0
+[2026-01-26 15:58:17.905] [VFS DEBUG] [VFS chunkReader ReadAt] Completed read: dataID=447639065722881, totalRead=131072, requested=131072, origSize=103516164
+[2026-01-26 15:58:17.906] [VFS DEBUG] [VFS Read] Entry: objID=447639065722880, offset=770048, size=131072
+[2026-01-26 15:58:17.906] [VFS DEBUG] [VFS Read] Entry: objID=447639065722880, offset=901120, size=131072
+[2026-01-26 15:58:17.906] [VFS DEBUG] [VFS chunkReader ReadAt] Before size limit: dataID=447639065722881, offset=4407296, bufSize=131072, origSize=103516164
+[2026-01-26 15:58:17.906] [VFS DEBUG] [VFS chunkReader ReadAt] Final read size: dataID=447639065722881, offset=4407296, readSize=131072, origSize=103516164
+[2026-01-26 15:58:17.906] [VFS DEBUG] [VFS chunkReader ReadAt] Reading chunk: dataID=447639065722881, sn=0, offset=4407296, offsetInChunk=4407296, remaining=131072, origSize=103516164, totalRead=0
+[2026-01-26 15:58:17.906] [VFS DEBUG] [VFS chunkReader ReadAt] Read from chunk: dataID=447639065722881, sn=0, chunkSize=10485760, toRead=131072, totalRead=131072, remaining=0
+[2026-01-26 15:58:17.906] [VFS DEBUG] [VFS chunkReader ReadAt] Completed read: dataID=447639065722881, totalRead=131072, requested=131072, origSize=103516164
+[2026-01-26 15:58:17.906] [VFS DEBUG] [VFS chunkReader ReadAt] Before size limit: dataID=447639065722881, offset=770048, bufSize=131072, origSize=103516164
+[2026-01-26 15:58:17.906] [VFS DEBUG] [VFS chunkReader ReadAt] Final read size: dataID=447639065722881, offset=770048, readSize=131072, origSize=103516164
+[2026-01-26 15:58:17.906] [VFS DEBUG] [VFS chunkReader ReadAt] Reading chunk: dataID=447639065722881, sn=0, offset=770048, offsetInChunk=770048, remaining=131072, origSize=103516164, totalRead=0
+[2026-01-26 15:58:17.906] [VFS DEBUG] [VFS chunkReader ReadAt] Before size limit: dataID=447639065722881, offset=901120, bufSize=131072, origSize=103516164
+[2026-01-26 15:58:17.906] [VFS DEBUG] [VFS chunkReader ReadAt] Before size limit: dataID=447639065722881, offset=4538368, bufSize=131072, origSize=103516164
+[2026-01-26 15:58:17.906] [VFS DEBUG] [VFS chunkReader ReadAt] Read from chunk: dataID=447639065722881, sn=0, chunkSize=10485760, toRead=131072, totalRead=131072, remaining=0
+[2026-01-26 15:58:17.906] [VFS DEBUG] [VFS chunkReader ReadAt] Completed read: dataID=447639065722881, totalRead=131072, requested=131072, origSize=103516164
+[2026-01-26 15:58:17.906] [VFS DEBUG] [VFS chunkReader ReadAt] Final read size: dataID=447639065722881, offset=901120, readSize=131072, origSize=103516164
+[2026-01-26 15:58:17.906] [VFS DEBUG] [VFS chunkReader ReadAt] Reading chunk: dataID=447639065722881, sn=0, offset=901120, offsetInChunk=901120, remaining=131072, origSize=103516164, totalRead=0
+[2026-01-26 15:58:17.907] [VFS DEBUG] [VFS Read] Entry: objID=447639065722880, offset=1032192, size=131072
+。。。。。
+
+[2026-01-26 15:58:19.279] [VFS DEBUG] [VFS chunkReader ReadAt] Final read size: dataID=447639065722881, offset=103067648, readSize=131072, origSize=103516164
+[2026-01-26 15:58:19.279] [VFS DEBUG] [VFS chunkReader ReadAt] Reading chunk: dataID=447639065722881, sn=9, offset=103067648, offsetInChunk=8695808, remaining=131072, origSize=103516164, totalRead=0
+[2026-01-26 15:58:19.279] [VFS DEBUG] [VFS chunkReader ReadAt] Read from chunk: dataID=447639065722881, sn=9, chunkSize=9144324, toRead=131072, totalRead=131072, remaining=0
+[2026-01-26 15:58:19.279] [VFS DEBUG] [VFS chunkReader ReadAt] Completed read: dataID=447639065722881, totalRead=131072, requested=131072, origSize=103516164
+[2026-01-26 15:58:19.279] [VFS DEBUG] [VFS chunkReader ReadAt] Read from chunk: dataID=447639065722881, sn=9, chunkSize=9144324, toRead=131072, totalRead=131072, remaining=0
+[2026-01-26 15:58:19.279] [VFS DEBUG] [VFS chunkReader ReadAt] Completed read: dataID=447639065722881, totalRead=131072, requested=131072, origSize=103516164
+[2026-01-26 15:58:19.280] [VFS DEBUG] [VFS Read] Entry: objID=447639065722880, offset=103198720, size=131072
+[2026-01-26 15:58:19.280] [VFS DEBUG] [VFS Read] Entry: objID=447639065722880, offset=103329792, size=131072
+[2026-01-26 15:58:19.281] [VFS DEBUG] [VFS chunkReader ReadAt] Before size limit: dataID=447639065722881, offset=103329792, bufSize=131072, origSize=103516164
+[2026-01-26 15:58:19.281] [VFS DEBUG] [VFS chunkReader ReadAt] Final read size: dataID=447639065722881, offset=103329792, readSize=131072, origSize=103516164
+[2026-01-26 15:58:19.281] [VFS DEBUG] [VFS chunkReader ReadAt] Reading chunk: dataID=447639065722881, sn=9, offset=103329792, offsetInChunk=8957952, remaining=131072, origSize=103516164, totalRead=0
+[2026-01-26 15:58:19.281] [VFS DEBUG] [VFS chunkReader ReadAt] Read from chunk: dataID=447639065722881, sn=9, chunkSize=9144324, toRead=131072, totalRead=131072, remaining=0
+[2026-01-26 15:58:19.281] [VFS DEBUG] [VFS chunkReader ReadAt] Completed read: dataID=447639065722881, totalRead=131072, requested=131072, origSize=103516164
+[2026-01-26 15:58:19.281] [VFS DEBUG] [VFS chunkReader ReadAt] Before size limit: dataID=447639065722881, offset=103198720, bufSize=131072, origSize=103516164
+[2026-01-26 15:58:19.281] [VFS DEBUG] [VFS chunkReader ReadAt] Final read size: dataID=447639065722881, offset=103198720, readSize=131072, origSize=103516164
+[2026-01-26 15:58:19.281] [VFS DEBUG] [VFS chunkReader ReadAt] Reading chunk: dataID=447639065722881, sn=9, offset=103198720, offsetInChunk=8826880, remaining=131072, origSize=103516164, totalRead=0
+[2026-01-26 15:58:19.281] [VFS DEBUG] [VFS chunkReader ReadAt] Read from chunk: dataID=447639065722881, sn=9, chunkSize=9144324, toRead=131072, totalRead=131072, remaining=0
+[2026-01-26 15:58:19.281] [VFS DEBUG] [VFS chunkReader ReadAt] Completed read: dataID=447639065722881, totalRead=131072, requested=131072, origSize=103516164
+[2026-01-26 15:58:19.282] [VFS DEBUG] [VFS Read] Entry: objID=447639065722880, offset=103460864, size=57344
+[2026-01-26 15:58:19.282] [VFS DEBUG] [VFS chunkReader ReadAt] Before size limit: dataID=447639065722881, offset=103460864, bufSize=57344, origSize=103516164
+[2026-01-26 15:58:19.282] [VFS DEBUG] [VFS chunkReader ReadAt] Limited read size: dataID=447639065722881, offset=103460864, oldReadSize=57344, newReadSize=55300, origSize=103516164
+[2026-01-26 15:58:19.282] [VFS DEBUG] [VFS chunkReader ReadAt] Final read size: dataID=447639065722881, offset=103460864, readSize=55300, origSize=103516164
+[2026-01-26 15:58:19.282] [VFS DEBUG] [VFS chunkReader ReadAt] Reading chunk: dataID=447639065722881, sn=9, offset=103460864, offsetInChunk=9089024, remaining=55300, origSize=103516164, totalRead=0
+[2026-01-26 15:58:19.282] [VFS DEBUG] [VFS chunkReader ReadAt] Read from chunk: dataID=447639065722881, sn=9, chunkSize=9144324, toRead=55300, totalRead=55300, remaining=0
+[2026-01-26 15:58:19.282] [VFS DEBUG] [VFS chunkReader ReadAt] Completed read: dataID=447639065722881, totalRead=55300, requested=55300, origSize=103516164
+[2026-01-26 15:58:19.282] [VFS DEBUG] [VFS Flush] Entry: objID=447639065722880, FileHandle=i447639065722880 g0 (reg): 
+[2026-01-26 15:58:19.282] [VFS DEBUG] [VFS flushImpl] Entry: objID=447639065722880
+[2026-01-26 15:58:19.282] [VFS DEBUG] [VFS Release] Entry: objID=447639065722880, FileHandle=i447639065722880 g0 (reg): 
+[2026-01-26 15:58:19.282] [VFS DEBUG] [VFS releaseImpl] Entry: objID=447639065722880
+[2026-01-26 15:58:20.207] [VFS DEBUG] [AtomicReplaceMgr] Processing 1 expired deletions
+[2026-01-26 15:58:20.207] [VFS DEBUG] [AtomicReplaceMgr] Executing deletion: fileID=447601044357120, name=_manticore (2).zip, versions=0

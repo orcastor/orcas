@@ -1,0 +1,81 @@
+[2026-01-09 12:20:16.237] [VFS DEBUG] [VFS TempFileWriter Write] Data buffered in chunk: fileID=441423698591744, dataID=441423698591745, sn=22, bufferSize=7864320/10485760, remaining=2621440
+[2026-01-09 12:20:16.237] [VFS DEBUG] [VFS TempFileWriter Write] Updated file size: fileID=441423698591744, dataID=441423698591745, oldSize=238026752, newSize=238551040
+[2026-01-09 12:20:16.237] [VFS DEBUG] [VFS Write] Successfully wrote data: fileID=441423698591744, offset=238026752, size=524288, written=524288
+[2026-01-09 12:20:16.237] [VFS DEBUG] [VFS Write] Write called: objID=441423698591744, offset=238551040, size=13713
+[2026-01-09 12:20:16.237] [VFS DEBUG] [VFS getObj] Found in global cache: objID=441423698591744, type=2 (FILE=2, DIR=1), name=文档类.zip, PID=439606281502720, size=238564753
+[2026-01-09 12:20:16.237] [VFS DEBUG] [VFS Write] Object info: objID=441423698591744, type=2 (FILE=2, DIR=1), name=文档类.zip, PID=439606281502720
+[2026-01-09 12:20:16.237] [VFS DEBUG] [VFS Write] Writing data: fileID=441423698591744, offset=238551040, size=13713
+[2026-01-09 12:20:16.237] [VFS DEBUG] [VFS updateWriteRange] Updated write range: fileID=441423698591744, start=524288, end=238564753, rangeSize=238040465
+[2026-01-09 12:20:16.237] [VFS DEBUG] [VFS shouldUseJournal] Sparse file first write, deferring journal decision: fileID=441423698591744, sparseSize=238564753, lastOffset=0
+[2026-01-09 12:20:16.237] [VFS DEBUG] [VFS RandomAccessor Write] WARNING: ChunkedFileWriter exists but reached sequential buffer init, this should not happen: fileID=441423698591744
+[2026-01-09 12:20:16.237] [VFS DEBUG] [VFS RandomAccessor Write] WARNING: ChunkedFileWriter exists but reached random write mode, using existing ChunkedFileWriter: fileID=441423698591744, writerType=1
+[2026-01-09 12:20:16.237] [VFS DEBUG] [VFS TempFileWriter Write] Data buffered in chunk: fileID=441423698591744, dataID=441423698591745, sn=22, bufferSize=7878033/10485760, remaining=2607727
+[2026-01-09 12:20:16.237] [VFS DEBUG] [VFS TempFileWriter Write] Updated file size: fileID=441423698591744, dataID=441423698591745, oldSize=238551040, newSize=238564753
+[2026-01-09 12:20:16.237] [VFS DEBUG] [VFS Write] Successfully wrote data: fileID=441423698591744, offset=238551040, size=13713, written=13713
+[2026-01-09 12:20:16.239] [VFS DEBUG] [VFS getObj] Found in global cache: objID=441423698591744, type=2 (FILE=2, DIR=1), name=文档类.zip, PID=439606281502720, size=238564753
+[2026-01-09 12:20:16.240] [VFS DEBUG] [VFS Setattr] Entry: objID=441423698591744, valid=0x30, FileHandle=<nil>
+[2026-01-09 12:20:16.240] [VFS DEBUG] [VFS Setattr] Setting mtime: objID=441423698591744, oldMTime=1767932410, newMTime=1767585220
+[2026-01-09 12:20:16.240] [VFS DEBUG] [VFS Setattr] Setting atime: objID=441423698591744, atime=1767932410
+[2026-01-09 12:20:16.240] [VFS DEBUG] [VFS Setattr] Successfully updated object in database: objID=441423698591744, mode=502, mtime=1767585220
+[2026-01-09 12:20:16.240] [VFS DEBUG] [VFS Setattr] Updated file object cache: objID=441423698591744
+[2026-01-09 12:20:16.240] [VFS DEBUG] [VFS Setattr] Updated local object cache: objID=441423698591744
+[2026-01-09 12:20:16.240] [VFS DEBUG] [VFS Setattr] Invalidated parent directory listing cache: objID=441423698591744, parentID=439606281502720
+[2026-01-09 12:20:16.240] [VFS DEBUG] [VFS Setattr] Successfully completed: objID=441423698591744, mode=0100766, size=238564753, mtime=1767585220
+[2026-01-09 12:20:16.242] [VFS DEBUG] [VFS getObj] Found in global cache: objID=441423698591744, type=2 (FILE=2, DIR=1), name=文档类.zip, PID=439606281502720, size=238564753
+[2026-01-09 12:20:16.250] [VFS DEBUG] [VFS Flush] Entry: objID=441423698591744, FileHandle=i441423698591744 g0 (reg): 
+[2026-01-09 12:20:16.250] [VFS DEBUG] [VFS flushImpl] Entry: objID=441423698591744
+[2026-01-09 12:20:16.250] [VFS DEBUG] [VFS Flush] Flushing file: fileID=441423698591744, currentSize=238564753
+[2026-01-09 12:20:16.250] [VFS DEBUG] [VFS RandomAccessor Flush] Starting flush: fileID=441423698591744, force=false
+[2026-01-09 12:20:16.250] [VFS DEBUG] [VFS RandomAccessor Flush] 🔍 Checking journal flush path: fileID=441423698591744, force=false
+[2026-01-09 12:20:16.250] [VFS DEBUG] [VFS flushJournal] No journal: fileID=441423698591744
+[2026-01-09 12:20:16.250] [VFS DEBUG] [VFS RandomAccessor Flush] ⚠️ Journal not flushed: fileID=441423698591744, versionID=0, will try other paths
+[2026-01-09 12:20:16.250] [VFS DEBUG] [VFS RandomAccessor Flush] Got fileObj from cache after TempFileWriter flush (non-tmp): fileID=441423698591744, dataID=0, size=238564753
+[2026-01-09 12:20:16.250] [VFS DEBUG] [VFS RandomAccessor Flush] Buffer stats: fileID=441423698591744, writeIndex=0, totalSize=0
+[2026-01-09 12:20:16.250] [VFS DEBUG] [VFS RandomAccessor Flush] No pending writes: fileID=441423698591744, writeIndex=0, totalSize=0
+[2026-01-09 12:20:16.250] [VFS DEBUG] [VFS Flush] Got updated object from RandomAccessor cache: fileID=441423698591744, size=238564753, dataID=0, mtime=1767585220
+[2026-01-09 12:20:16.250] [VFS DEBUG] [VFS Flush] Updated file object cache: fileID=441423698591744, size=238564753, dataID=0, mtime=1767585220
+[2026-01-09 12:20:16.250] [VFS DEBUG] [VFS invalidateDirListCache] Invalidated directory cache: dirID=439606281502720
+[2026-01-09 12:20:16.250] [VFS DEBUG] [VFS Flush] Updated directory listing cache after flush: fileID=441423698591744, dirID=439606281502720, name=文档类.zip, size=238564753
+[2026-01-09 12:20:16.250] [VFS DEBUG] [VFS Flush] Successfully flushed file: fileID=441423698591744, versionID=0, finalSize=238564753, dataID=0, mtime=1767585220
+[2026-01-09 12:20:16.251] [VFS DEBUG] [VFS Release] Entry: objID=441423698591744, FileHandle=i441423698591744 g0 (reg): 
+[2026-01-09 12:20:16.251] [VFS DEBUG] [VFS releaseImpl] Entry: objID=441423698591744
+[2026-01-09 12:20:16.251] [VFS DEBUG] [VFS Release] Releasing file: fileID=441423698591744, currentSize=238564753, isTmpFile=false
+[2026-01-09 12:20:16.251] [VFS DEBUG] [VFS RandomAccessor Flush] Starting flush: fileID=441423698591744, force=true
+[2026-01-09 12:20:16.251] [VFS DEBUG] [VFS RandomAccessor Flush] 🔍 Checking journal flush path: fileID=441423698591744, force=true
+[2026-01-09 12:20:16.251] [VFS DEBUG] [VFS flushJournal] No journal: fileID=441423698591744
+[2026-01-09 12:20:16.251] [VFS DEBUG] [VFS RandomAccessor Flush] ⚠️ Journal not flushed: fileID=441423698591744, versionID=0, will try other paths
+[2026-01-09 12:20:16.251] [VFS DEBUG] [VFS RandomAccessor Flush] Got fileObj from cache after TempFileWriter flush (non-tmp): fileID=441423698591744, dataID=0, size=238564753
+[2026-01-09 12:20:16.251] [VFS DEBUG] [VFS RandomAccessor Flush] Buffer stats: fileID=441423698591744, writeIndex=0, totalSize=0
+[2026-01-09 12:20:16.251] [VFS DEBUG] [VFS RandomAccessor Flush] No pending writes: fileID=441423698591744, writeIndex=0, totalSize=0
+[2026-01-09 12:20:16.251] [VFS DEBUG] [VFS Release] Flushed during release: fileID=441423698591744, versionID=0
+[2026-01-09 12:20:16.251] [VFS DEBUG] [VFS Release] Got updated object from RandomAccessor cache before close: fileID=441423698591744, size=238564753, dataID=0, mtime=1767585220
+[2026-01-09 12:20:16.251] [VFS DEBUG] [VFS RandomAccessor flushChunkedWriter] Forcing ChunkedFileWriter flush for sparse file: fileID=441423698591744, dataID=441423698591745
+[2026-01-09 12:20:16.251] [VFS DEBUG] [VFS ChunkedFileWriter Flush] Starting flush for large file: fileID=441423698591744, dataID=441423698591745, fileSize=238564753, writerType=1
+[2026-01-09 12:20:16.251] [VFS DEBUG] [VFS TempFileWriter Flush] Flushing 1 remaining incomplete chunks concurrently: fileID=441423698591744, dataID=441423698591745, chunks=[22]
+[2026-01-09 12:20:16.254] [VFS DEBUG] [VFS TempFileWriter flushChunk] Buffer state: fileID=441423698591744, dataID=441423698591745, sn=22, offsetInChunk=7878033, bufDataLen=10485760, chunkDataLen=7878033, numRanges=1
+[2026-01-09 12:20:16.254] [VFS DEBUG] [VFS TempFileWriter flushChunk] Processing chunk: fileID=441423698591744, dataID=441423698591745, sn=22, originalSize=7878033, enableRealtime=true
+[2026-01-09 12:20:16.262] [VFS DEBUG] [VFS Opendir] Entry: objID=439606281502720
+[2026-01-09 12:20:16.262] [VFS DEBUG] [VFS Opendir] Allowing directory open: objID=439606281502720
+[2026-01-09 12:20:16.263] [VFS DEBUG] [VFS TempFileWriter flushChunk] Compression/encryption applied: fileID=441423698591744, dataID=441423698591745, sn=22, originalSize=7878033, finalSize=7878061, ratio=100.00%
+[2026-01-09 12:20:16.263] [VFS DEBUG] [VFS TempFileWriter flushChunk] Writing chunk synchronously: fileID=441423698591744, dataID=441423698591745, sn=22, size=7878061, realtime=true
+[2026-01-09 12:20:16.263] [VFS DEBUG] [VFS TempFileWriter writeChunkSync] WRITING chunk (NO PRE-READ): fileID=441423698591744, dataID=441423698591745, sn=22, size=7878061
+[2026-01-09 12:20:16.442] [VFS DEBUG] [VFS TempFileWriter writeChunkSync] Successfully wrote and flushed chunk to disk: fileID=441423698591744, dataID=441423698591745, sn=22, size=7878061
+[2026-01-09 12:20:16.442] [VFS DEBUG] [VFS TempFileWriter Flush] Real-time processing: OrigSize=238564753, Size=238565397 (compressed/encrypted)
+[2026-01-09 12:20:16.442] [VFS DEBUG] [VFS TempFileWriter Flush] Uploading metadata: fileID=441423698591744, dataID=441423698591745, fileName=文档类.zip, origSize=238564753, size=238565397, chunkSize=10485760, realtime=true, hasCompression=false, hasEncryption=true
+[2026-01-09 12:20:16.442] [VFS DEBUG] [VFS TempFileWriter Flush] Re-fetched file object from database: fileID=441423698591744, dataID=441423698591745, size=238564753, pid=439606281502720, name=文档类.zip
+[2026-01-09 12:20:16.442] [VFS DEBUG] [VFS invalidateDirListCache] Invalidated directory cache: dirID=439606281502720
+[2026-01-09 12:20:16.442] [VFS DEBUG] [VFS TempFileWriter Flush] Appended file to directory listing cache after sync flush: fileID=441423698591744, dirID=439606281502720, name=文档类.zip
+[2026-01-09 12:20:16.442] [VFS DEBUG] [VFS TempFileWriter Flush] Successfully flushed large file: fileID=441423698591744, dataID=441423698591745, fileName=文档类.zip, origSize=238564753, size=238565397, chunkSize=10485760, compressionRatio=100.00%
+[2026-01-09 12:20:16.442] [VFS DEBUG] [VFS RandomAccessor flushChunkedWriter] Verified fileObj cache after ChunkedFileWriter flush: fileID=441423698591744, size=238564753, dataID=441423698591745
+[2026-01-09 12:20:16.442] [VFS DEBUG] [VFS RandomAccessor Close] Completed ChunkedFileWriter flush for sparse file: fileID=441423698591744
+[2026-01-09 12:20:16.442] [VFS DEBUG] [VFS RandomAccessor Flush] Starting flush: fileID=441423698591744, force=false
+[2026-01-09 12:20:16.443] [VFS DEBUG] [VFS RandomAccessor Flush] 🔍 Checking journal flush path: fileID=441423698591744, force=false
+[2026-01-09 12:20:16.443] [VFS DEBUG] [VFS flushJournal] No journal: fileID=441423698591744
+[2026-01-09 12:20:16.443] [VFS DEBUG] [VFS RandomAccessor Flush] ⚠️ Journal not flushed: fileID=441423698591744, versionID=0, will try other paths
+[2026-01-09 12:20:16.443] [VFS DEBUG] [VFS RandomAccessor Flush] Got fileObj from cache after TempFileWriter flush (non-tmp): fileID=441423698591744, dataID=441423698591745, size=238564753
+[2026-01-09 12:20:16.443] [VFS DEBUG] [VFS RandomAccessor Flush] Buffer stats: fileID=441423698591744, writeIndex=0, totalSize=0
+[2026-01-09 12:20:16.443] [VFS DEBUG] [VFS RandomAccessor Flush] No pending writes: fileID=441423698591744, writeIndex=0, totalSize=0
+[2026-01-09 12:20:16.443] [VFS DEBUG] [VFS Release] Updated file object cache: fileID=441423698591744, size=238564753, dataID=0, mtime=1767585220
+[2026-01-09 12:20:16.443] [VFS DEBUG] [VFS invalidateDirListCache] Invalidated directory cache: dirID=439606281502720
+[2026-01-09 12:20:16.443] [VFS DEBUG] [VFS Release] Updated directory listing cache after release: fileID=441423698591744, dirID=439606281502720, name=文档类.zip, size=238564753
+[2026-01-09 12:20:16.443] [VFS DEBUG] [VFS Release] Successfully released file: fileID=441423698591744, finalSize=238564753, dataID=0, mtime=1767585220

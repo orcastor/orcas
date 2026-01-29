@@ -48,9 +48,10 @@ const (
 
 	// Maximum number of buffers to keep in each pool tier
 	// Larger buffers consume more memory, so we limit them more strictly
+	// OPTIMIZATION: Reduced tier 3 max from 5 to 3 to lower peak memory (~30MB instead of ~50MB)
 	SequentialBufferTier1Max = 100 // 128KB buffers: ~12.8MB total
 	SequentialBufferTier2Max = 20  // 1MB buffers: ~20MB total
-	SequentialBufferTier3Max = 5   // 10MB buffers: ~50MB total
+	SequentialBufferTier3Max = 3   // 10MB buffers: ~30MB total (reduced from 5)
 
 	// Buffer operation limits
 	DefaultMaxBufferOps  = 10000     // Maximum number of write operations in buffer
@@ -2377,13 +2378,10 @@ func (cw *ChunkedFileWriter) Flush(force bool) error {
 		return err
 	}
 
-	// Re-fetch file object from database to ensure we have the latest information
-	// This is important for directory cache updates
-	updatedFileObjs, err := cw.fs.h.Get(cw.fs.c, cw.fs.bktID, []int64{cw.fileID})
-	if err == nil && len(updatedFileObjs) > 0 {
-		obj = updatedFileObjs[0]
-		DebugLog("[VFS ChunkedFileWriter Flush] Re-fetched file object from database: fileID=%d, dataID=%d, size=%d, pid=%d, name=%s", cw.fileID, obj.DataID, obj.Size, obj.PID, obj.Name)
-	}
+	// OPTIMIZATION: No need to re-fetch from database after PutDataInfoAndObj
+	// We already have the updated object (obj) with correct DataID, Size, MTime
+	// Re-fetching would be redundant and add unnecessary database query
+	DebugLog("[VFS ChunkedFileWriter Flush] Using updated object directly (no re-fetch): fileID=%d, dataID=%d, size=%d, pid=%d, name=%s", cw.fileID, obj.DataID, obj.Size, obj.PID, obj.Name)
 
 	// Update cache
 	// CRITICAL: Update both fileID key and fileObjKey to ensure cache consistency
@@ -4076,17 +4074,26 @@ func (ra *RandomAccessor) flushSequentialChunkLocked() error {
 		return fmt.Errorf("encodedChunk is empty for fileID=%d, dataID=%d, sn=%d", ra.fileID, ra.seqBuffer.dataID, ra.seqBuffer.sn)
 	}
 
-	// CRITICAL: Copy before PutData.
-	// Some adapters/batch paths may retain the slice after this call, and the source slice
-	// can alias pooled buffers. Writing a dedicated copy prevents subtle corruption.
-	encodedChunkCopy := make([]byte, len(encodedChunk))
-	copy(encodedChunkCopy, encodedChunk)
-	if isFirstChunk && len(encodedChunkCopy) >= 64 {
+	// OPTIMIZATION: Only copy if encodedChunk aliases chunkData (ProcessData returned original data)
+	// If ProcessData allocated new memory (compression/encryption applied), no copy needed
+	// Check by comparing underlying array pointers
+	var dataToWrite []byte
+	if len(encodedChunk) > 0 && len(chunkData) > 0 && &encodedChunk[0] == &chunkData[0] {
+		// encodedChunk aliases chunkData (no compression/encryption applied)
+		// Must copy because PutData may retain the slice
+		dataToWrite = make([]byte, len(encodedChunk))
+		copy(dataToWrite, encodedChunk)
+	} else {
+		// encodedChunk is independent (ProcessData allocated new memory)
+		// Safe to use directly
+		dataToWrite = encodedChunk
+	}
+	if isFirstChunk && len(dataToWrite) >= 64 {
 		DebugLog("[VFS flushSequentialChunk] First chunk encoded sample (hex): fileID=%d, dataID=%d, sn=%d, first64Bytes=%s",
-			ra.fileID, ra.seqBuffer.dataID, ra.seqBuffer.sn, hex.EncodeToString(encodedChunkCopy[:64]))
+			ra.fileID, ra.seqBuffer.dataID, ra.seqBuffer.sn, hex.EncodeToString(dataToWrite[:64]))
 	}
 
-	if _, err := ra.fs.h.PutData(ra.fs.c, ra.fs.bktID, ra.seqBuffer.dataID, ra.seqBuffer.sn, encodedChunkCopy); err != nil {
+	if _, err := ra.fs.h.PutData(ra.fs.c, ra.fs.bktID, ra.seqBuffer.dataID, ra.seqBuffer.sn, dataToWrite); err != nil {
 		DebugLog("[VFS flushSequentialChunk] ERROR: Failed to put data for fileID=%d, dataID=%d, sn=%d, size=%d: %v", ra.fileID, ra.seqBuffer.dataID, ra.seqBuffer.sn, len(encodedChunk), err)
 		if err == core.ERR_QUOTA_EXCEED {
 			DebugLog("[VFS flushSequentialChunk] ERROR: Quota exceeded for fileID=%d", ra.fileID)
@@ -9116,6 +9123,24 @@ func (ra *RandomAccessor) Close() error {
 			decodingReaderCache.Del(fileObj.DataID)
 			DebugLog("[VFS RandomAccessor Close] Removed from decodingReaderCache: fileID=%d, dataID=%d", ra.fileID, fileObj.DataID)
 		}
+	}
+
+	// MEMORY OPTIMIZATION: Release buffer memory on close
+	// Clear buffer operations to allow garbage collection
+	if ra.buffer != nil {
+		for i := range ra.buffer.operations {
+			ra.buffer.operations[i].Data = nil
+		}
+		ra.buffer.operations = nil
+		DebugLog("[VFS RandomAccessor Close] Released buffer memory: fileID=%d", ra.fileID)
+	}
+
+	// MEMORY OPTIMIZATION: Release sequential buffer memory on close
+	if ra.seqBuffer != nil {
+		ra.seqBuffer.mu.Lock()
+		ra.seqBuffer.buffer = nil
+		ra.seqBuffer.mu.Unlock()
+		DebugLog("[VFS RandomAccessor Close] Released sequential buffer memory: fileID=%d", ra.fileID)
 	}
 
 	return nil

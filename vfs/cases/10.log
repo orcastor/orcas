@@ -1,0 +1,196 @@
+[2026-01-27 14:32:10.528] [VFS DEBUG] [VFS Create] Entry: name=11.txt, parentID=447979680956416, flags=0x288c2, mode=0100766
+[2026-01-27 14:32:10.528] [VFS DEBUG] [VFS getObj] ✅ Found in global cache: objID=447979680956416, type=1 (FILE=2, DIR=1), name=smb-win-alpha111, PID=447927554146304, size=0, DataID=0, mtime=1769495478
+[2026-01-27 14:32:10.528] [VFS DEBUG] [VFS Create] O_LARGEFILE flag set: name=11.txt, parentID=447979680956416, flags=0x288c2
+[2026-01-27 14:32:10.528] [VFS DEBUG] [VFS Create] Creating file: name=11.txt, parentID=447979680956416, flags=0x288c2 (O_LARGEFILE=0x8000), mode=0100766
+[2026-01-27 14:32:10.576] [VFS DEBUG] [VFS Create] Successfully created file: name=11.txt, fileID=447979899060224, parentID=447979680956416
+[2026-01-27 14:32:10.576] [VFS DEBUG] [VFS invalidateDirListCache] Invalidated directory cache: dirID=447979680956416
+[2026-01-27 14:32:10.576] [VFS DEBUG] [VFS getObj] ✅ Found in global cache: objID=447979899060224, type=2 (FILE=2, DIR=1), name=11.txt, PID=447979680956416, size=0, DataID=0, mtime=1769495530
+[2026-01-27 14:32:10.576] [VFS DEBUG] [VFS getObj] ✅ Found in global cache: objID=447979899060224, type=2 (FILE=2, DIR=1), name=11.txt, PID=447979680956416, size=0, DataID=0, mtime=1769495530
+[2026-01-27 14:32:10.576] [VFS DEBUG] [VFS getObj] ✅ Found in global cache: objID=447979680956416, type=1 (FILE=2, DIR=1), name=smb-win-alpha111, PID=447927554146304, size=0, DataID=0, mtime=1769495478
+[2026-01-27 14:32:10.576] [VFS DEBUG] [VFS getObj] ✅ Found in global cache: objID=447979680956416, type=1 (FILE=2, DIR=1), name=smb-win-alpha111, PID=447927554146304, size=0, DataID=0, mtime=1769495478
+[2026-01-27 14:32:10.576] [VFS DEBUG] [VFS getObj] ✅ Found in global cache: objID=447979899060224, type=2 (FILE=2, DIR=1), name=11.txt, PID=447979680956416, size=0, DataID=0, mtime=1769495530
+[2026-01-27 14:32:10.577] [VFS DEBUG] [VFS getObj] ✅ Found in global cache: objID=447979899060224, type=2 (FILE=2, DIR=1), name=11.txt, PID=447979680956416, size=0, DataID=0, mtime=1769495530
+[2026-01-27 14:32:10.577] [VFS DEBUG] [VFS Setattr] Entry: objID=447979899060224, valid=0x1, FileHandle=<nil>
+[2026-01-27 14:32:10.577] [VFS DEBUG] [VFS getObj] ✅ Found in global cache: objID=447979899060224, type=2 (FILE=2, DIR=1), name=11.txt, PID=447979680956416, size=0, DataID=0, mtime=1769495530
+[2026-01-27 14:32:10.577] [VFS DEBUG] [VFS Setattr] Setting file mode: objID=447979899060224, oldMode=0100766, newMode=0100766, oldModeField=502
+[2026-01-27 14:32:10.577] [VFS DEBUG] [VFS Setattr] Mode updated: objID=447979899060224, newModeField=502
+[2026-01-27 14:32:10.577] [VFS DEBUG] [VFS Setattr] Successfully updated object in database: objID=447979899060224, mode=502, mtime=1769495530
+[2026-01-27 14:32:10.577] [VFS DEBUG] [VFS Setattr] Updated file object cache: objID=447979899060224
+[2026-01-27 14:32:10.577] [VFS DEBUG] [VFS Setattr] Updated local object cache: objID=447979899060224
+[2026-01-27 14:32:10.577] [VFS DEBUG] [VFS Setattr] Invalidated parent directory listing cache: objID=447979899060224, parentID=447979680956416
+[2026-01-27 14:32:10.577] [VFS DEBUG] [VFS Setattr] Successfully completed: objID=447979899060224, mode=0100766, size=0, mtime=1769495530
+[2026-01-27 14:32:10.578] [VFS DEBUG] [VFS getObj] ✅ Found in global cache: objID=447979680956416, type=1 (FILE=2, DIR=1), name=smb-win-alpha111, PID=447927554146304, size=0, DataID=0, mtime=1769495478
+[2026-01-27 14:32:10.578] [VFS DEBUG] [VFS getObj] ✅ Found in global cache: objID=447979680956416, type=1 (FILE=2, DIR=1), name=smb-win-alpha111, PID=447927554146304, size=0, DataID=0, mtime=1769495478
+[2026-01-27 14:32:10.578] [VFS DEBUG] [VFS getObj] ✅ Found in global cache: objID=447979680956416, type=1 (FILE=2, DIR=1), name=smb-win-alpha111, PID=447927554146304, size=0, DataID=0, mtime=1769495478
+[2026-01-27 14:32:10.578] [VFS DEBUG] [VFS getObj] ✅ Found in global cache: objID=447979680956416, type=1 (FILE=2, DIR=1), name=smb-win-alpha111, PID=447927554146304, size=0, DataID=0, mtime=1769495478
+[2026-01-27 14:32:10.578] [VFS DEBUG] [VFS getObj] ✅ Found in global cache: objID=447979680956416, type=1 (FILE=2, DIR=1), name=smb-win-alpha111, PID=447927554146304, size=0, DataID=0, mtime=1769495478
+[2026-01-27 14:32:10.578] [VFS DEBUG] [VFS getObj] ✅ Found in global cache: objID=447979680956416, type=1 (FILE=2, DIR=1), name=smb-win-alpha111, PID=447927554146304, size=0, DataID=0, mtime=1769495478
+[2026-01-27 14:32:10.580] [VFS DEBUG] [VFS getObj] ✅ Found in global cache: objID=447979680956416, type=1 (FILE=2, DIR=1), name=smb-win-alpha111, PID=447927554146304, size=0, DataID=0, mtime=1769495478
+[2026-01-27 14:32:10.580] [VFS DEBUG] [VFS getObj] ✅ Found in global cache: objID=447979680956416, type=1 (FILE=2, DIR=1), name=smb-win-alpha111, PID=447927554146304, size=0, DataID=0, mtime=1769495478
+[2026-01-27 14:32:10.580] [VFS DEBUG] [VFS getObj] ✅ Found in global cache: objID=447979899060224, type=2 (FILE=2, DIR=1), name=11.txt, PID=447979680956416, size=0, DataID=0, mtime=1769495530
+[2026-01-27 14:32:10.580] [VFS DEBUG] [VFS getObj] ✅ Found in global cache: objID=447979680956416, type=1 (FILE=2, DIR=1), name=smb-win-alpha111, PID=447927554146304, size=0, DataID=0, mtime=1769495478
+[2026-01-27 14:32:10.580] [VFS DEBUG] [VFS getObj] ✅ Found in global cache: objID=447979680956416, type=1 (FILE=2, DIR=1), name=smb-win-alpha111, PID=447927554146304, size=0, DataID=0, mtime=1769495478
+[2026-01-27 14:32:10.580] [VFS DEBUG] [VFS getObj] ✅ Found in global cache: objID=447979899060224, type=2 (FILE=2, DIR=1), name=11.txt, PID=447979680956416, size=0, DataID=0, mtime=1769495530
+[2026-01-27 14:32:10.581] [VFS DEBUG] [VFS getObj] ✅ Found in global cache: objID=447979899060224, type=2 (FILE=2, DIR=1), name=11.txt, PID=447979680956416, size=0, DataID=0, mtime=1769495530
+[2026-01-27 14:32:10.581] [VFS DEBUG] [VFS Setattr] Entry: objID=447979899060224, valid=0x248, FileHandle=i447979899060224 g0 (reg): 
+[2026-01-27 14:32:10.581] [VFS DEBUG] [VFS getObj] ✅ Found in global cache: objID=447979899060224, type=2 (FILE=2, DIR=1), name=11.txt, PID=447979680956416, size=0, DataID=0, mtime=1769495530
+[2026-01-27 14:32:10.581] [VFS DEBUG] [VFS getObj] ✅ Found in global cache: objID=447979899060224, type=2 (FILE=2, DIR=1), name=11.txt, PID=447979680956416, size=0, DataID=0, mtime=1769495530
+[2026-01-27 14:32:10.581] [VFS DEBUG] [VFS getObj] ✅ Found in global cache: objID=447979899060224, type=2 (FILE=2, DIR=1), name=11.txt, PID=447979680956416, size=0, DataID=0, mtime=1769495530
+[2026-01-27 14:32:10.581] [VFS DEBUG] [VFS NewRandomAccessor] Created RandomAccessor: fileID=447979899060224, fileName=11.txt, isTmpFile=false
+[2026-01-27 14:32:10.581] [VFS DEBUG] [VFS getRandomAccessor] Registering RandomAccessor: fileID=447979899060224
+[2026-01-27 14:32:10.581] [VFS DEBUG] [VFS RA Registry] Registered RandomAccessor: fileID=447979899060224, ra=0xc00ce57380
+[2026-01-27 14:32:10.581] [VFS DEBUG] [VFS Setattr] No object updated: objID=447979899060224
+[2026-01-27 14:32:10.582] [VFS DEBUG] [VFS getObj] ✅ Found in global cache: objID=447979899060224, type=2 (FILE=2, DIR=1), name=11.txt, PID=447979680956416, size=2, DataID=0, mtime=1769495530
+[2026-01-27 14:32:10.582] [VFS DEBUG] [VFS Setattr] Entry: objID=447979899060224, valid=0x30, FileHandle=<nil>
+[2026-01-27 14:32:10.582] [VFS DEBUG] [VFS getObj] ✅ Found in global cache: objID=447979899060224, type=2 (FILE=2, DIR=1), name=11.txt, PID=447979680956416, size=2, DataID=0, mtime=1769495530
+[2026-01-27 14:32:10.582] [VFS DEBUG] [VFS Setattr] Setting mtime: objID=447979899060224, oldMTime=1769495530, newMTime=1769495531
+[2026-01-27 14:32:10.582] [VFS DEBUG] [VFS Setattr] Setting atime: objID=447979899060224, atime=1769495530
+[2026-01-27 14:32:10.582] [VFS DEBUG] [VFS Setattr] Successfully updated object in database: objID=447979899060224, mode=502, mtime=1769495531
+[2026-01-27 14:32:10.582] [VFS DEBUG] [VFS Setattr] Updated file object cache: objID=447979899060224
+[2026-01-27 14:32:10.582] [VFS DEBUG] [VFS Setattr] Updated local object cache: objID=447979899060224
+[2026-01-27 14:32:10.582] [VFS DEBUG] [VFS Setattr] Invalidated parent directory listing cache: objID=447979899060224, parentID=447979680956416
+[2026-01-27 14:32:10.582] [VFS DEBUG] [VFS Setattr] Successfully completed: objID=447979899060224, mode=0100766, size=2, mtime=1769495531
+[2026-01-27 14:32:10.583] [VFS DEBUG] [VFS getObj] ✅ Found in global cache: objID=447979899060224, type=2 (FILE=2, DIR=1), name=11.txt, PID=447979680956416, size=2, DataID=0, mtime=1769495531
+[2026-01-27 14:32:10.583] [VFS DEBUG] [VFS getObj] ✅ Found in global cache: objID=447979899060224, type=2 (FILE=2, DIR=1), name=11.txt, PID=447979680956416, size=2, DataID=0, mtime=1769495531
+[2026-01-27 14:32:10.583] [VFS DEBUG] [VFS Write] Write called: objID=447979899060224, offset=0, size=2
+[2026-01-27 14:32:10.583] [VFS DEBUG] [VFS getObj] ✅ Found in global cache: objID=447979899060224, type=2 (FILE=2, DIR=1), name=11.txt, PID=447979680956416, size=2, DataID=0, mtime=1769495531
+[2026-01-27 14:32:10.583] [VFS DEBUG] [VFS Write] Object info: objID=447979899060224, type=2 (FILE=2, DIR=1), name=11.txt, PID=447979680956416
+[2026-01-27 14:32:10.583] [VFS DEBUG] [VFS Write] Writing data: fileID=447979899060224, offset=0, size=2
+[2026-01-27 14:32:10.583] [VFS DEBUG] [VFS RandomAccessor Write] Writing data (hex): fileID=447979899060224, offset=0, size=2, first2Bytes=4141
+[2026-01-27 14:32:10.583] [VFS DEBUG] [VFS updateWriteRange] Initialized write range: fileID=447979899060224, start=0, end=2
+[2026-01-27 14:32:10.583] [VFS DEBUG] [VFS shouldUseJournal] Default case, not using journal: fileID=447979899060224, offset=0
+[2026-01-27 14:32:10.583] [VFS DEBUG] [VFS initSequentialBufferWithNewData] FS config: fileID=447979899060224, bktID=447927554146304, CmprWay=0x0, EndecWay=0x2
+[2026-01-27 14:32:10.583] [VFS DEBUG] [VFS initSequentialBufferWithNewData] Set encryption flag: fileID=447979899060224, EndecWay=0x2, Kind=0x2
+[2026-01-27 14:32:10.583] [VFS DEBUG] [VFS initSequentialBufferWithNewData] Final DataInfo Kind: fileID=447979899060224, Kind=0x2
+[2026-01-27 14:32:10.583] [VFS DEBUG] [VFS initSequentialBufferWithNewData] Created new DataID and updated DB: fileID=447979899060224, oldDataID=0, newDataID=447979899060225, size=2
+[2026-01-27 14:32:10.583] [VFS DEBUG] [VFS tryInitSeqBuffer] Initialized seqBuffer for new file: fileID=447979899060224
+[2026-01-27 14:32:10.583] [VFS DEBUG] [VFS RandomAccessor Write] Initialized seqBuffer, using sequential write: fileID=447979899060224, offset=0
+[2026-01-27 14:32:10.583] [VFS DEBUG] [VFS Write] Successfully wrote data: fileID=447979899060224, offset=0, size=2, written=2
+[2026-01-27 14:32:10.584] [VFS DEBUG] [VFS getObj] ✅ Found in global cache: objID=447979899060224, type=2 (FILE=2, DIR=1), name=11.txt, PID=447979680956416, size=2, DataID=447979899060225, mtime=1769495530
+[2026-01-27 14:32:10.584] [VFS DEBUG] [VFS Setattr] Entry: objID=447979899060224, valid=0x30, FileHandle=<nil>
+[2026-01-27 14:32:10.584] [VFS DEBUG] [VFS getObj] ✅ Found in global cache: objID=447979899060224, type=2 (FILE=2, DIR=1), name=11.txt, PID=447979680956416, size=2, DataID=447979899060225, mtime=1769495530
+[2026-01-27 14:32:10.584] [VFS DEBUG] [VFS Setattr] Setting mtime: objID=447979899060224, oldMTime=1769495530, newMTime=1769495271
+[2026-01-27 14:32:10.584] [VFS DEBUG] [VFS Setattr] Setting atime: objID=447979899060224, atime=1769495530
+[2026-01-27 14:32:10.584] [VFS DEBUG] [VFS Setattr] Successfully updated object in database: objID=447979899060224, mode=0, mtime=1769495271
+[2026-01-27 14:32:10.584] [VFS DEBUG] [VFS Setattr] Updated file object cache: objID=447979899060224
+[2026-01-27 14:32:10.584] [VFS DEBUG] [VFS Setattr] Updated local object cache: objID=447979899060224
+[2026-01-27 14:32:10.584] [VFS DEBUG] [VFS Setattr] Invalidated parent directory listing cache: objID=447979899060224, parentID=447979680956416
+[2026-01-27 14:32:10.584] [VFS DEBUG] [VFS Setattr] Successfully completed: objID=447979899060224, mode=0100644, size=2, mtime=1769495271
+[2026-01-27 14:32:10.586] [VFS DEBUG] [VFS getObj] ✅ Found in global cache: objID=447979899060224, type=2 (FILE=2, DIR=1), name=11.txt, PID=447979680956416, size=2, DataID=447979899060225, mtime=1769495271
+[2026-01-27 14:32:10.586] [VFS DEBUG] [VFS getObj] ✅ Found in global cache: objID=447979899060224, type=2 (FILE=2, DIR=1), name=11.txt, PID=447979680956416, size=2, DataID=447979899060225, mtime=1769495271
+[2026-01-27 14:32:10.586] [VFS DEBUG] [VFS getObj] ✅ Found in global cache: objID=447979899060224, type=2 (FILE=2, DIR=1), name=11.txt, PID=447979680956416, size=2, DataID=447979899060225, mtime=1769495271
+[2026-01-27 14:32:10.587] [VFS DEBUG] [VFS getObj] ✅ Found in global cache: objID=447979899060224, type=2 (FILE=2, DIR=1), name=11.txt, PID=447979680956416, size=2, DataID=447979899060225, mtime=1769495271
+[2026-01-27 14:32:10.587] [VFS DEBUG] [VFS getObj] ✅ Found in global cache: objID=447979899060224, type=2 (FILE=2, DIR=1), name=11.txt, PID=447979680956416, size=2, DataID=447979899060225, mtime=1769495271
+[2026-01-27 14:32:10.587] [VFS DEBUG] [VFS getObj] ✅ Found in global cache: objID=447979899060224, type=2 (FILE=2, DIR=1), name=11.txt, PID=447979680956416, size=2, DataID=447979899060225, mtime=1769495271
+[2026-01-27 14:32:10.587] [VFS DEBUG] [VFS getObj] ✅ Found in global cache: objID=447979899060224, type=2 (FILE=2, DIR=1), name=11.txt, PID=447979680956416, size=2, DataID=447979899060225, mtime=1769495271
+[2026-01-27 14:32:10.587] [VFS DEBUG] [VFS getObj] ✅ Found in global cache: objID=447979899060224, type=2 (FILE=2, DIR=1), name=11.txt, PID=447979680956416, size=2, DataID=447979899060225, mtime=1769495271
+[2026-01-27 14:32:10.587] [VFS DEBUG] [VFS getObj] ✅ Found in global cache: objID=447979899060224, type=2 (FILE=2, DIR=1), name=11.txt, PID=447979680956416, size=2, DataID=447979899060225, mtime=1769495271
+[2026-01-27 14:32:10.587] [VFS DEBUG] [VFS getObj] ✅ Found in global cache: objID=447979899060224, type=2 (FILE=2, DIR=1), name=11.txt, PID=447979680956416, size=2, DataID=447979899060225, mtime=1769495271
+[2026-01-27 14:32:10.587] [VFS DEBUG] [VFS Flush] Entry: objID=447979899060224, FileHandle=i447979899060224 g0 (reg): 
+[2026-01-27 14:32:10.587] [VFS DEBUG] [VFS flushImpl] Entry: objID=447979899060224
+[2026-01-27 14:32:10.587] [VFS DEBUG] [VFS getObj] ✅ Found in global cache: objID=447979899060224, type=2 (FILE=2, DIR=1), name=11.txt, PID=447979680956416, size=2, DataID=447979899060225, mtime=1769495271
+[2026-01-27 14:32:10.587] [VFS DEBUG] [VFS Flush] Flushing file: fileID=447979899060224, currentSize=2
+[2026-01-27 14:32:10.587] [VFS DEBUG] [VFS RandomAccessor Flush] Starting flush: fileID=447979899060224, force=false
+[2026-01-27 14:32:10.587] [VFS DEBUG] [VFS RandomAccessor Flush] 🔍 Checking journal flush path: fileID=447979899060224, force=false
+[2026-01-27 14:32:10.587] [VFS DEBUG] [VFS flushJournal] No journal: fileID=447979899060224
+[2026-01-27 14:32:10.587] [VFS DEBUG] [VFS RandomAccessor Flush] ⚠️ Journal not flushed: fileID=447979899060224, versionID=0, will try other paths
+[2026-01-27 14:32:10.587] [VFS DEBUG] [VFS RandomAccessor Flush] Got fileObj from cache after ChunkedFileWriter flush (non-tmp): fileID=447979899060224, dataID=447979899060225, size=2
+[2026-01-27 14:32:10.587] [VFS DEBUG] [VFS RandomAccessor Flush] Sequential buffer state: fileID=447979899060224, hasData=true, closed=false, bufferSize=2, chunkSize=10485760, sn=0, force=false, shouldFlush=true
+[2026-01-27 14:32:10.587] [VFS DEBUG] [VFS RandomAccessor Flush] Flushing sequential buffer: fileID=447979899060224, dataID=447979899060225, sn=0, bufferSize=2, chunkSize=10485760, force=false
+[2026-01-27 14:32:10.587] [VFS DEBUG] [VFS flushSequentialBuffer] Entry: fileID=447979899060224, hasData=true, bufferLen=2, sn=0, OrigSize=0, Size=0, dataID=447979899060225
+[2026-01-27 14:32:10.587] [VFS DEBUG] [VFS flushSequentialBuffer] Checking instant upload eligibility: fileID=447979899060224, totalSize=2 (OrigSize=0 + bufferSize=2), sn=0
+[2026-01-27 14:32:10.587] [VFS DEBUG] [VFS flushSequentialBuffer] Flushing remaining buffer: fileID=447979899060224, bufferSize=2, sn=0
+[2026-01-27 14:32:10.587] [VFS DEBUG] [VFS flushSequentialChunk] Original chunk: fileID=447979899060224, chunk=2, OrigSize=2, Kind=0x2 (CMPR=false, ENDEC=true)
+[2026-01-27 14:32:10.587] [VFS DEBUG] [VFS flushSequentialChunk] Chunk sizes: fileID=447979899060224, original=2, encoded=30, Kind=0x2
+[2026-01-27 14:32:10.587] [VFS DEBUG] [VFS flushSequentialChunk] Updated Size: fileID=447979899060224, Size=30, OrigSize=2 (CMPR=false, ENDEC=true)
+[2026-01-27 14:32:10.587] [VFS DEBUG] [VFS flushSequentialChunk] Writing chunk: fileID=447979899060224, dataID=447979899060225, sn=0, originalSize=2, encodedSize=30
+[2026-01-27 14:32:10.621] [VFS DEBUG] [VFS flushSequentialChunk] Successfully wrote chunk: fileID=447979899060224, dataID=447979899060225, sn=0, encodedSize=30, OrigSize=2, Size=30
+[2026-01-27 14:32:10.621] [VFS DEBUG] [VFS flushSequentialChunk] After flush: fileID=447979899060224, dataID=447979899060225, sn=1, bufferLen=0, hasData=true, OrigSize=2, Size=30
+[2026-01-27 14:32:10.621] [VFS DEBUG] [VFS flushSequentialBuffer] After flushing remaining buffer: fileID=447979899060224, sn=1, OrigSize=2, Size=30
+[2026-01-27 14:32:10.621] [VFS DEBUG] [VFS flushSequentialBuffer] Final DataInfo before update: fileID=447979899060224, OrigSize=2, Size=30, Kind=0x2 (CMPR=false, ENDEC=true)
+[2026-01-27 14:32:10.621] [VFS DEBUG] [VFS flushSequentialBuffer] Has compression/encryption, Size already set: fileID=447979899060224, OrigSize=2, Size=30
+[2026-01-27 14:32:10.621] [VFS DEBUG] [VFS flushSequentialBuffer] File already had data (oldDataID=447979899060225, oldSize=2), merging with new writes (newSize=2) using streaming: fileID=447979899060224
+[2026-01-27 14:32:10.621] [VFS DEBUG] [VFS flushSequentialBuffer] No new data to merge (buffer empty, newSize=2 == oldSize=2), skipping merge: fileID=447979899060224
+[2026-01-27 14:32:10.621] [VFS DEBUG] [VFS flushSequentialBuffer] 🔄 Before SetObj: fileID=447979899060224, oldDataID=447979899060225, newDataID=447979899060225, oldSize=2, newSize=2, oldMTime=1769495271, newMTime=1769495530
+[2026-01-27 14:32:10.621] [VFS DEBUG] [VFS flushSequentialBuffer] Syncing file object to DB (ensuring DB consistency): fileID=447979899060224, dataID=447979899060225, size=2, mtime=1769495530
+[2026-01-27 14:32:10.621] [VFS DEBUG] [VFS flushSequentialBuffer] ✅ Successfully synced file object to DB: fileID=447979899060224, dataID=447979899060225, size=2, mtime=1769495530
+[2026-01-27 14:32:10.621] [VFS DEBUG] [VFS flushSequentialBuffer] Updated caches after SetObj: fileID=447979899060224, cacheKey=447979899060224
+[2026-01-27 14:32:10.621] [VFS DEBUG] [VFS RandomAccessor Flush] Sequential buffer flushed successfully: fileID=447979899060224
+[2026-01-27 14:32:10.621] [VFS DEBUG] [VFS RandomAccessor Flush] Sequential flush completed: fileID=447979899060224, dataID=447979899060225, size=2
+[2026-01-27 14:32:10.621] [VFS DEBUG] [VFS RandomAccessor Flush] Verified file object cache after sequential flush: fileID=447979899060224, size=2, dataID=447979899060225, mtime=1769495530
+[2026-01-27 14:32:10.621] [VFS DEBUG] [VFS Flush] Got updated object from RandomAccessor cache: fileID=447979899060224, size=2, dataID=447979899060225, mtime=1769495530
+[2026-01-27 14:32:10.621] [VFS DEBUG] [VFS Flush] Updated file object cache: fileID=447979899060224, size=2, dataID=447979899060225, mtime=1769495530
+[2026-01-27 14:32:10.621] [VFS DEBUG] [VFS invalidateDirListCache] Invalidated directory cache: dirID=447979680956416
+[2026-01-27 14:32:10.621] [VFS DEBUG] [VFS Flush] Updated directory listing cache after flush: fileID=447979899060224, dirID=447979680956416, name=11.txt, size=2
+[2026-01-27 14:32:10.621] [VFS DEBUG] [VFS Flush] Successfully flushed file: fileID=447979899060224, versionID=447979899060226, finalSize=2, dataID=447979899060225, mtime=1769495530
+[2026-01-27 14:32:10.621] [VFS DEBUG] [VFS Release] Entry: objID=447979899060224, FileHandle=i447979899060224 g0 (reg): 
+[2026-01-27 14:32:10.621] [VFS DEBUG] [VFS releaseImpl] Entry: objID=447979899060224
+[2026-01-27 14:32:10.621] [VFS DEBUG] [VFS getObj] ✅ Found in global cache: objID=447979899060224, type=2 (FILE=2, DIR=1), name=11.txt, PID=447979680956416, size=2, DataID=447979899060225, mtime=1769495530
+[2026-01-27 14:32:10.621] [VFS DEBUG] [VFS Release] Releasing file: fileID=447979899060224, currentSize=2, isTmpFile=false
+[2026-01-27 14:32:10.621] [VFS DEBUG] [VFS RandomAccessor Flush] Starting flush: fileID=447979899060224, force=true
+[2026-01-27 14:32:10.621] [VFS DEBUG] [VFS RandomAccessor Flush] 🔍 Checking journal flush path: fileID=447979899060224, force=true
+[2026-01-27 14:32:10.621] [VFS DEBUG] [VFS flushJournal] No journal: fileID=447979899060224
+[2026-01-27 14:32:10.621] [VFS DEBUG] [VFS RandomAccessor Flush] ⚠️ Journal not flushed: fileID=447979899060224, versionID=0, will try other paths
+[2026-01-27 14:32:10.621] [VFS DEBUG] [VFS RandomAccessor Flush] Got fileObj from cache after ChunkedFileWriter flush (non-tmp): fileID=447979899060224, dataID=447979899060225, size=2
+[2026-01-27 14:32:10.621] [VFS DEBUG] [VFS RandomAccessor Flush] Buffer stats: fileID=447979899060224, writeIndex=0, totalSize=0
+[2026-01-27 14:32:10.621] [VFS DEBUG] [VFS RandomAccessor Flush] No pending writes: fileID=447979899060224, writeIndex=0, totalSize=0
+[2026-01-27 14:32:10.621] [VFS DEBUG] [VFS Release] Flushed during release: fileID=447979899060224, versionID=0
+[2026-01-27 14:32:10.621] [VFS DEBUG] [VFS Release] Got updated object from RandomAccessor cache before close: fileID=447979899060224, size=2, dataID=447979899060225, mtime=1769495530
+[2026-01-27 14:32:10.621] [VFS DEBUG] [VFS RandomAccessor Close] Starting Close: fileID=447979899060224
+[2026-01-27 14:32:10.621] [VFS DEBUG] [VFS RandomAccessor Close] Sparse file fully written (size=2 >= sparseSize=2), clearing sparse file flag: fileID=447979899060224
+[2026-01-27 14:32:10.621] [VFS DEBUG] [VFS RandomAccessor Close] Completed ChunkedFileWriter flush for sparse file: fileID=447979899060224
+[2026-01-27 14:32:10.621] [VFS DEBUG] [VFS RandomAccessor Close] Saved dataID before ForceFlush(): fileID=447979899060224, dataID=447979899060225
+[2026-01-27 14:32:10.621] [VFS DEBUG] [VFS RandomAccessor Close] Calling ForceFlush: fileID=447979899060224
+[2026-01-27 14:32:10.621] [VFS DEBUG] [VFS RandomAccessor Flush] Starting flush: fileID=447979899060224, force=true
+[2026-01-27 14:32:10.621] [VFS DEBUG] [VFS RandomAccessor Flush] 🔍 Checking journal flush path: fileID=447979899060224, force=true
+[2026-01-27 14:32:10.621] [VFS DEBUG] [VFS flushJournal] No journal: fileID=447979899060224
+[2026-01-27 14:32:10.621] [VFS DEBUG] [VFS RandomAccessor Flush] ⚠️ Journal not flushed: fileID=447979899060224, versionID=0, will try other paths
+[2026-01-27 14:32:10.621] [VFS DEBUG] [VFS RandomAccessor Flush] Got fileObj from cache after ChunkedFileWriter flush (non-tmp): fileID=447979899060224, dataID=447979899060225, size=2
+[2026-01-27 14:32:10.621] [VFS DEBUG] [VFS RandomAccessor Flush] Buffer stats: fileID=447979899060224, writeIndex=0, totalSize=0
+[2026-01-27 14:32:10.621] [VFS DEBUG] [VFS RandomAccessor Flush] No pending writes: fileID=447979899060224, writeIndex=0, totalSize=0
+[2026-01-27 14:32:10.621] [VFS DEBUG] [VFS RandomAccessor Close] ForceFlush completed: fileID=447979899060224
+[2026-01-27 14:32:10.621] [VFS DEBUG] [VFS RandomAccessor Close] Final file object after flush: fileID=447979899060224, DataID=447979899060225, Size=2
+[2026-01-27 14:32:10.621] [VFS DEBUG] [VFS RandomAccessor Close] Removed from decodingReaderCache: fileID=447979899060224, dataID=447979899060225
+[2026-01-27 14:32:10.621] [VFS DEBUG] [VFS Release] Updated file object cache: fileID=447979899060224, size=2, dataID=447979899060225, mtime=1769495530
+[2026-01-27 14:32:10.621] [VFS DEBUG] [VFS invalidateDirListCache] Invalidated directory cache: dirID=447979680956416
+[2026-01-27 14:32:10.621] [VFS DEBUG] [VFS Release] Updated directory listing cache after release: fileID=447979899060224, dirID=447979680956416, name=11.txt, size=2
+[2026-01-27 14:32:10.621] [VFS DEBUG] [VFS Release] Successfully released file: fileID=447979899060224, finalSize=2, dataID=447979899060225, mtime=1769495530
+
+
+[2026-01-27 14:32:20.194] [VFS DEBUG] [VFS Open] Entry: objID=447979899060224, flags=0x8800
+[2026-01-27 14:32:20.194] [VFS DEBUG] [VFS getObj] ✅ Found in global cache: objID=447979899060224, type=2 (FILE=2, DIR=1), name=11.txt, PID=447979680956416, size=2, DataID=447979899060225, mtime=1769495530
+[2026-01-27 14:32:20.194] [VFS DEBUG] [VFS Open] Object info: objID=447979899060224, type=2 (FILE=2, DIR=1), name=11.txt, PID=447979680956416, flags=0x8800
+[2026-01-27 14:32:20.194] [VFS DEBUG] [VFS Open] O_LARGEFILE flag set: fileID=447979899060224, flags=0x8800
+[2026-01-27 14:32:20.194] [VFS DEBUG] [VFS Open] Opened file: fileID=447979899060224, flags=0x8800 (O_WRONLY=0x1, O_RDWR=0x2, O_RDONLY=0x0, O_LARGEFILE=0x8000)
+[2026-01-27 14:32:20.194] [VFS DEBUG] [VFS Open] File open mode: fileID=447979899060224, isWriteMode=false, hasLargeFileFlag=true, flags=0x8800 (O_WRONLY=0x1, O_RDWR=0x2, O_CREAT=0x40, O_TRUNC=0x200, O_EXCL=0x80)
+[2026-01-27 14:32:20.194] [VFS DEBUG] [VFS Open] File metadata after Open: fileID=447979899060224, name=11.txt, size=2, dataID=447979899060225, mtime=1769495530, mode=0100644, type=2, pid=447979680956416
+[2026-01-27 14:32:20.194] [VFS DEBUG] [VFS Open] Returning FileHandle: fileID=447979899060224, fuseFlags=0x0, FileHandle type=*vfs.OrcasNode, implements FileWriter=true
+[2026-01-27 14:32:20.194] [VFS DEBUG] [VFS getObj] ✅ Found in global cache: objID=447979899060224, type=2 (FILE=2, DIR=1), name=11.txt, PID=447979680956416, size=2, DataID=447979899060225, mtime=1769495530
+[2026-01-27 14:32:20.194] [VFS DEBUG] [VFS getObj] ✅ Found in global cache: objID=447979899060224, type=2 (FILE=2, DIR=1), name=11.txt, PID=447979680956416, size=2, DataID=447979899060225, mtime=1769495530
+[2026-01-27 14:32:20.500] [VFS DEBUG] [VFS getObj] ✅ Found in global cache: objID=447979899060224, type=2 (FILE=2, DIR=1), name=11.txt, PID=447979680956416, size=2, DataID=447979899060225, mtime=1769495530
+[2026-01-27 14:32:20.500] [VFS DEBUG] [VFS getObj] ✅ Found in global cache: objID=447979899060224, type=2 (FILE=2, DIR=1), name=11.txt, PID=447979680956416, size=2, DataID=447979899060225, mtime=1769495530
+[2026-01-27 14:32:20.500] [VFS DEBUG] [VFS getObj] ✅ Found in global cache: objID=447979899060224, type=2 (FILE=2, DIR=1), name=11.txt, PID=447979680956416, size=2, DataID=447979899060225, mtime=1769495530
+[2026-01-27 14:32:20.502] [VFS DEBUG] [VFS Read] 🔵 Entry: objID=447979899060224, offset=0, size=4096
+[2026-01-27 14:32:20.502] [VFS DEBUG] [VFS Read] ✅ Step 1: fs check passed, objID=447979899060224, fs=0xc007ed3a40
+[2026-01-27 14:32:20.502] [VFS DEBUG] [VFS Read] 🔑 Step 2: Checking key requirement: objID=447979899060224, requireKey=true, hasEndecKey=true
+[2026-01-27 14:32:20.502] [VFS DEBUG] [VFS Read] ✅ Step 2: checkKey passed, proceeding to normal read path: objID=447979899060224
+[2026-01-27 14:32:20.502] [VFS DEBUG] [VFS Read] 📋 Step 3: Getting file object: objID=447979899060224
+[2026-01-27 14:32:20.502] [VFS DEBUG] [VFS getObj] ✅ Found in global cache: objID=447979899060224, type=2 (FILE=2, DIR=1), name=11.txt, PID=447979680956416, size=2, DataID=447979899060225, mtime=1769495530
+[2026-01-27 14:32:20.502] [VFS DEBUG] [VFS Read] ✅ Step 3: Got object: objID=447979899060224, type=2, name=11.txt, size=2, DataID=447979899060225, mtime=1769495530
+[2026-01-27 14:32:20.502] [VFS DEBUG] [VFS Read] 📄 Step 4: Reading file: objID=447979899060224, DataID=447979899060225, Size=2, offset=0, requestedSize=4096, fileSize=2
+[2026-01-27 14:32:20.502] [VFS DEBUG] [VFS Read] 🔍 Step 5: Checking for active RandomAccessor with journal: objID=447979899060224
+[2026-01-27 14:32:20.502] [VFS DEBUG] [VFS Read] ✅ Found RandomAccessor, checking journal: objID=447979899060224, ra=0xc00ce57380
+[2026-01-27 14:32:20.502] [VFS DEBUG] [VFS Read] ⏭️ Branch: RandomAccessor found but no journal, using DataReader: objID=447979899060224
+[2026-01-27 14:32:20.502] [VFS DEBUG] [VFS Read] 📚 Step 6: Getting DataReader: objID=447979899060224, DataID=447979899060225, offset=0
+[2026-01-27 14:32:20.502] [VFS DEBUG] [VFS getDataReader] Entry: objID=447979899060224, DataID=447979899060225, offset=0, n.fs=0xc007ed3a40
+[2026-01-27 14:32:20.502] [VFS DEBUG] [VFS getDataReader] Getting DataInfo: objID=447979899060224, DataID=447979899060225, bktID=447927554146304
+[2026-01-27 14:32:20.503] [VFS DEBUG] [VFS getDataReader] Got DataInfo: objID=447979899060224, DataID=447979899060225, OrigSize=0, Size=0, Kind=0x0, PkgID=0, PkgOffset=0
+[2026-01-27 14:32:20.503] [VFS DEBUG] [VFS getDataReader] Encryption key info: objID=447979899060224, DataID=447979899060225, hasEncryption=false, endecKey length=32
+[2026-01-27 14:32:20.503] [VFS DEBUG] [VFS getDataReader] Creating plain reader: objID=447979899060224, DataID=447979899060225, OrigSize=0, Size=0, chunkSize=10485760
+[2026-01-27 14:32:20.503] [VFS DEBUG] [VFS getDataReader] Created and cached new reader: objID=447979899060224, DataID=447979899060225, reader=0xc00d2b0d20
+[2026-01-27 14:32:20.503] [VFS DEBUG] [VFS Read] ✅ Step 6: Got DataReader: objID=447979899060224, DataID=447979899060225, offset=0, reader=0xc00d2b0d20, readerType=*vfs.chunkReader
+[2026-01-27 14:32:20.503] [VFS DEBUG] [VFS Read] 📖 Step 7: Calling reader.Read: objID=447979899060224, DataID=447979899060225, offset=0, size=4096
+[2026-01-27 14:32:20.503] [VFS DEBUG] [VFS Read] 📖 Read data: objID=447979899060224, DataID=447979899060225, offset=0, requested=4096, read=0, EOF=true, firstBytesHex=, firstBytesText=""
+[2026-01-27 14:32:20.503] [VFS DEBUG] [VFS Read] Successfully completed: objID=447979899060224, DataID=447979899060225, offset=0, requested=4096, read=0
+
+
