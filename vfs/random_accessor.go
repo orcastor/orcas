@@ -4919,6 +4919,8 @@ func (ra *RandomAccessor) Read(offset int64, size int) ([]byte, error) {
 		if cw, ok := val.(*ChunkedFileWriter); ok && cw != nil {
 			// Only serve from writer for tmp/sparse/seq modes where it represents the latest data.
 			// For .tmp files, this is the core behavior we need.
+			// CRITICAL: Release journalMu.RLock() before returning to avoid deadlock
+			ra.journalMu.RUnlock()
 			data, err := cw.ReadAt(offset, size)
 			if err != nil {
 				return nil, err
@@ -5636,9 +5638,24 @@ func (ra *RandomAccessor) flushInternal(force bool) (int64, error) {
 			val := ra.chunkedWriter.Load()
 			if val != nil && val != clearedChunkedWriterMarker {
 				if cw, ok := val.(*ChunkedFileWriter); ok && cw != nil && cw.writerType == WRITER_TYPE_SPARSE {
-					DebugLog("[VFS RandomAccessor Flush] WARNING: Sparse file ChunkedFileWriter still exists in Flush(), flushing: fileID=%d", ra.fileID)
+					// Check if ChunkedFileWriter has pending data to flush
+					cwSize := atomic.LoadInt64(&cw.size)
+					oldDataID := fileObj.DataID
+					DebugLog("[VFS RandomAccessor Flush] WARNING: Sparse file ChunkedFileWriter still exists in Flush(), flushing: fileID=%d, cwSize=%d", ra.fileID, cwSize)
 					if err := ra.flushChunkedWriter(WRITER_TYPE_SPARSE); err != nil {
 						return 0, err
+					}
+					// After successful flush, return a new version ID only if data was actually written
+					// (i.e., fileObj.DataID changed from 0 to non-0, or cwSize > 0 on first flush)
+					fileObj, err = ra.getFileObj()
+					if err == nil && fileObj != nil && fileObj.DataID > 0 {
+						// Only return versionID if this is the first flush (DataID changed from 0)
+						// or if there was actual data to flush
+						if oldDataID == 0 || oldDataID == core.EmptyDataID {
+							DebugLog("[VFS RandomAccessor Flush] Sparse file ChunkedFileWriter flushed successfully (first flush): fileID=%d, dataID=%d, size=%d", ra.fileID, fileObj.DataID, fileObj.Size)
+							return core.NewID(), nil
+						}
+						DebugLog("[VFS RandomAccessor Flush] Sparse file ChunkedFileWriter flushed (no new data): fileID=%d, dataID=%d, size=%d", ra.fileID, fileObj.DataID, fileObj.Size)
 					}
 				}
 			}
@@ -9900,11 +9917,16 @@ func (ra *RandomAccessor) getOrCreateJournal() (*Journal, error) {
 			}
 		}
 	}
+	// CRITICAL FIX: For sparse files, do NOT use sparseSize as baseSize.
+	// sparseSize is the pre-allocated/expected final size, but baseSize must reflect
+	// the actual committed data size. Using sparseSize as baseSize causes Journal flush
+	// to attempt reading non-existent chunks (e.g., chunk 4, 5) when only chunks 0-3
+	// have been written, resulting in "no such file or directory" errors.
+	// Instead, keep baseSize as the actual data size (from DataInfo.OrigSize or fileObj.Size),
+	// and only set virtualSize to sparseSize for proper sparse file handling.
 	if sparseSize > 0 {
-		// Use sparse size as the base size
-		baseSize = sparseSize
-		DebugLog("[VFS getOrCreateJournal] Sparse file detected: fileID=%d, sparseSize=%d, actualSize=%d",
-			ra.fileID, sparseSize, fileObj.Size)
+		DebugLog("[VFS getOrCreateJournal] Sparse file detected: fileID=%d, sparseSize=%d, actualBaseSize=%d, fileObj.Size=%d",
+			ra.fileID, sparseSize, baseSize, fileObj.Size)
 	}
 
 	// Get or create journal from manager

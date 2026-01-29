@@ -3959,28 +3959,6 @@ func (n *OrcasNode) readImpl(ctx context.Context, dest []byte, off int64) (fuse.
 		DebugLog("[VFS Read] ERROR: Read failed: objID=%d, DataID=%d, offset=%d, size=%d, error=%v, errorType=%T", obj.ID, obj.DataID, off, len(dest), err, err)
 		return nil, syscall.EIO
 	}
-	// Note: err == io.EOF is expected for end of file reads
-	// Log first few bytes of read data for debugging
-	firstBytesHex := ""
-	firstBytesText := ""
-	if nRead > 0 {
-		sampleLen := nRead
-		if sampleLen > 64 {
-			sampleLen = 64
-		}
-		firstBytesHex = fmt.Sprintf("%x", dest[:sampleLen])
-		// Convert bytes to string and replace non-printable characters with dots
-		firstBytesTextBytes := make([]byte, sampleLen)
-		copy(firstBytesTextBytes, dest[:sampleLen])
-		for i, b := range firstBytesTextBytes {
-			if b < 32 || b > 126 {
-				firstBytesTextBytes[i] = '.'
-			}
-		}
-		firstBytesText = string(firstBytesTextBytes)
-	}
-	DebugLog("[VFS Read] 📖 Read data: objID=%d, DataID=%d, offset=%d, requested=%d, read=%d, EOF=%v, firstBytesHex=%s, firstBytesText=%q",
-		obj.ID, obj.DataID, off, len(dest), nRead, err == io.EOF, firstBytesHex, firstBytesText)
 
 	// Verify read data integrity (for debugging - can be disabled in production)
 	// Only verify on first read (offset=0) to avoid performance impact

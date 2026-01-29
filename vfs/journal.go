@@ -1778,6 +1778,9 @@ func (j *Journal) flushLargeFileChunked(newSize int64) (int64, int64, error) {
 	// 1. Read the encrypted chunk data directly (not decrypted)
 	// 2. Write it as-is to maintain encryption consistency
 	if j.dataID > 0 && j.dataID != core.EmptyDataID {
+		DebugLog("[Journal flushLargeFileChunked] Processing unmodified chunks: fileID=%d, baseDataID=%d, totalChunks=%d",
+			j.fileID, j.dataID, totalChunks)
+
 		for chunkIdx := 0; chunkIdx < totalChunks; chunkIdx++ {
 			if modifiedChunks[chunkIdx] {
 				continue // Already written
@@ -1791,6 +1794,9 @@ func (j *Journal) flushLargeFileChunked(newSize int64) (int64, int64, error) {
 			if chunkLength <= 0 {
 				continue // Beyond original file size
 			}
+
+			DebugLog("[Journal flushLargeFileChunked] Reading unmodified chunk %d: fileID=%d, baseDataID=%d, offset=%d, length=%d",
+				chunkIdx, j.fileID, j.dataID, chunkOffset, chunkLength)
 
 			// Read raw chunk from original DataID (encrypted data if original was encrypted)
 			// NOTE: GetData returns encrypted data, we need to decrypt then re-encrypt for consistency
@@ -2088,6 +2094,38 @@ func (j *Journal) generateChunkData(offset, length int64) ([]byte, error) {
 
 		entryCopyStart := overlapStart - entry.Offset
 		entryCopyEnd := overlapEnd - entry.Offset
+
+		// DEBUG: Log entry details and check for zero data
+		if entry.Data == nil {
+			DebugLog("[Journal generateChunkData] ERROR: entry.Data is nil: fileID=%d, entryIdx=%d, entryOffset=%d, entryLength=%d",
+				j.fileID, i, entry.Offset, entry.Length)
+			continue
+		}
+		if int64(len(entry.Data)) < entryCopyEnd {
+			DebugLog("[Journal generateChunkData] ERROR: entry.Data too short: fileID=%d, entryIdx=%d, entryOffset=%d, entryLength=%d, dataLen=%d, entryCopyEnd=%d",
+				j.fileID, i, entry.Offset, entry.Length, len(entry.Data), entryCopyEnd)
+			continue
+		}
+
+		// Check if entry data is all zeros (potential data corruption)
+		isAllZero := true
+		checkLen := entryCopyEnd - entryCopyStart
+		if checkLen > 1024 {
+			checkLen = 1024 // Only check first 1KB for performance
+		}
+		for k := entryCopyStart; k < entryCopyStart+checkLen; k++ {
+			if entry.Data[k] != 0 {
+				isAllZero = false
+				break
+			}
+		}
+		if isAllZero && checkLen > 0 {
+			DebugLog("[Journal generateChunkData] WARNING: entry.Data appears to be all zeros: fileID=%d, entryIdx=%d, entryOffset=%d, entryLength=%d, checkLen=%d",
+				j.fileID, i, entry.Offset, entry.Length, checkLen)
+		}
+
+		DebugLog("[Journal generateChunkData] Applying entry: fileID=%d, entryIdx=%d, entryOffset=%d, entryLength=%d, chunkOffset=%d, chunkLength=%d, overlapStart=%d, overlapEnd=%d, chunkCopyStart=%d, chunkCopyEnd=%d, entryCopyStart=%d, entryCopyEnd=%d",
+			j.fileID, i, entry.Offset, entry.Length, offset, length, overlapStart, overlapEnd, chunkCopyStart, chunkCopyEnd, entryCopyStart, entryCopyEnd)
 
 		copy(chunkData[chunkCopyStart:chunkCopyEnd],
 			entry.Data[entryCopyStart:entryCopyEnd])

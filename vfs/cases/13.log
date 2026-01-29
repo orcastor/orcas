@@ -1,0 +1,904 @@
+Jan 29 06:30:52 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:52.613] [VFS DEBUG] [VFS Opendir] Allowing directory open: objID=448701399040000
+Jan 29 06:30:52 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:52.613] [VFS DEBUG] [VFS Create] Entry: name=5月23日.mp4, parentID=448701399040000, flags=0x288c2, mode=0100766
+Jan 29 06:30:52 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:52.613] [VFS DEBUG] [VFS Create] O_LARGEFILE flag set: name=5月23日.mp4, parentID=448701399040000, flags=0x288c2
+Jan 29 06:30:52 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:52.613] [VFS DEBUG] [VFS Create] Creating file: name=5月23日.mp4, parentID=448701399040000, flags=0x288c2 (O_LARGEFILE=0x8000), mode=0100766
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.141] [VFS DEBUG] [VFS Create] Successfully created file: name=5月23日.mp4, fileID=448704347635712, parentID=448701399040000
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.141] [VFS DEBUG] [VFS invalidateDirListCache] Invalidated directory cache: dirID=448701399040000
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.142] [VFS DEBUG] [VFS Setattr] Entry: objID=448704347635712, valid=0x1, FileHandle=<nil>
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.142] [VFS DEBUG] [VFS Setattr] Setting file mode: objID=448704347635712, oldMode=0100766, newMode=0100766, oldModeField=502
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.142] [VFS DEBUG] [VFS Setattr] Mode updated: objID=448704347635712, newModeField=502
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.143] [VFS DEBUG] [VFS Setattr] Successfully updated object in database: objID=448704347635712, mode=502, mtime=1769668252
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.143] [VFS DEBUG] [VFS Setattr] Updated file object cache: objID=448704347635712
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.143] [VFS DEBUG] [VFS Setattr] Updated local object cache: objID=448704347635712
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.143] [VFS DEBUG] [VFS Setattr] Invalidated parent directory listing cache: objID=448704347635712, parentID=448701399040000
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.143] [VFS DEBUG] [VFS Setattr] Successfully completed: objID=448704347635712, mode=0100766, size=0, mtime=1769668252
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.149] [VFS DEBUG] [VFS Setattr] Entry: objID=448704347635712, valid=0x248, FileHandle=i448704347635712 g0 (reg):
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.149] [VFS DEBUG] [VFS NewRandomAccessor] Created RandomAccessor: fileID=448704347635712, fileName=5月23日.mp4, isTmpFile=false
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.149] [VFS DEBUG] [VFS getRandomAccessor] Registering RandomAccessor: fileID=448704347635712
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.149] [VFS DEBUG] [VFS RA Registry] Registered RandomAccessor: fileID=448704347635712, ra=0xc009be6240
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.149] [VFS DEBUG] [VFS Setattr] No object updated: objID=448704347635712
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.149] [VFS DEBUG] [VFS Setattr] Entry: objID=448704347635712, valid=0x30, FileHandle=<nil>
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.149] [VFS DEBUG] [VFS Setattr] Setting mtime: objID=448704347635712, oldMTime=1769668252, newMTime=1769668253
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.149] [VFS DEBUG] [VFS Setattr] Setting atime: objID=448704347635712, atime=1769668252
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.149] [VFS DEBUG] [VFS Setattr] Successfully updated object in database: objID=448704347635712, mode=502, mtime=1769668253
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.149] [VFS DEBUG] [VFS Setattr] Updated file object cache: objID=448704347635712
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.149] [VFS DEBUG] [VFS Setattr] Updated local object cache: objID=448704347635712
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.149] [VFS DEBUG] [VFS Setattr] Invalidated parent directory listing cache: objID=448704347635712, parentID=448701399040000
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.149] [VFS DEBUG] [VFS Setattr] Successfully completed: objID=448704347635712, mode=0100766, size=56233610, mtime=1769668253
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.178] [VFS DEBUG] [VFS Write] Write called: objID=448704347635712, offset=0, size=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.178] [VFS DEBUG] [VFS Write] Object info: objID=448704347635712, type=2 (FILE=2, DIR=1), name=5月23日.mp4, PID=448701399040000
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.178] [VFS DEBUG] [VFS Write] Writing data: fileID=448704347635712, offset=0, size=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.178] [VFS DEBUG] [VFS updateWriteRange] Initialized write range: fileID=448704347635712, start=0, end=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.178] [VFS DEBUG] [VFS shouldUseJournal] Default case, not using journal: fileID=448704347635712, offset=0
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.178] [VFS DEBUG] [VFS initSequentialBufferWithNewData] FS config: fileID=448704347635712, bktID=448701399040000, CmprWay=0x0, EndecWay=0x2
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.178] [VFS DEBUG] [VFS initSequentialBufferWithNewData] Set encryption flag: fileID=448704347635712, EndecWay=0x2, Kind=0x2
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.178] [VFS DEBUG] [VFS initSequentialBufferWithNewData] Final DataInfo Kind: fileID=448704347635712, Kind=0x2
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.178] [VFS DEBUG] [VFS initSequentialBufferWithNewData] Created new DataID and updated DB: fileID=448704347635712, oldDataID=0, newDataID=448704351830016, size=56233610
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.178] [VFS DEBUG] [VFS tryInitSeqBuffer] Initialized seqBuffer for new file: fileID=448704347635712
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.178] [VFS DEBUG] [VFS RandomAccessor Write] Initialized seqBuffer, using sequential write: fileID=448704347635712, offset=0
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.179] [VFS DEBUG] [VFS writeSequential] Upgraded buffer: fileID=448704347635712, dataID=448704351830016, fromTier=1, toTier=2, neededCap=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.179] [VFS DEBUG] [VFS Write] Successfully wrote data: fileID=448704347635712, offset=0, size=524288, written=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.179] [VFS DEBUG] [VFS Write] Write called: objID=448704347635712, offset=524288, size=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.179] [VFS DEBUG] [VFS Write] Object info: objID=448704347635712, type=2 (FILE=2, DIR=1), name=5月23日.mp4, PID=448701399040000
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.179] [VFS DEBUG] [VFS Write] Writing data: fileID=448704347635712, offset=524288, size=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.179] [VFS DEBUG] [VFS updateWriteRange] Initialized write range: fileID=448704347635712, start=524288, end=1048576
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.179] [VFS DEBUG] [VFS RandomAccessor Write] Using existing seqBuffer: fileID=448704347635712, offset=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.179] [VFS DEBUG] [VFS Write] Successfully wrote data: fileID=448704347635712, offset=524288, size=524288, written=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.196] [VFS DEBUG] [VFS Write] Write called: objID=448704347635712, offset=1048576, size=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.196] [VFS DEBUG] [VFS Write] Object info: objID=448704347635712, type=2 (FILE=2, DIR=1), name=5月23日.mp4, PID=448701399040000
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.196] [VFS DEBUG] [VFS Write] Writing data: fileID=448704347635712, offset=1048576, size=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.196] [VFS DEBUG] [VFS updateWriteRange] Updated write range: fileID=448704347635712, start=524288, end=1572864, rangeSize=1048576
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.196] [VFS DEBUG] [VFS RandomAccessor Write] Using existing seqBuffer: fileID=448704347635712, offset=1048576
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.200] [VFS DEBUG] [VFS writeSequential] Upgraded buffer: fileID=448704347635712, dataID=448704351830016, fromTier=2, toTier=3, neededCap=1572864
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.200] [VFS DEBUG] [VFS Write] Successfully wrote data: fileID=448704347635712, offset=1048576, size=524288, written=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.200] [VFS DEBUG] [VFS Write] Write called: objID=448704347635712, offset=1572864, size=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.200] [VFS DEBUG] [VFS Write] Object info: objID=448704347635712, type=2 (FILE=2, DIR=1), name=5月23日.mp4, PID=448701399040000
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.200] [VFS DEBUG] [VFS Write] Writing data: fileID=448704347635712, offset=1572864, size=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.200] [VFS DEBUG] [VFS updateWriteRange] Updated write range: fileID=448704347635712, start=524288, end=2097152, rangeSize=1572864
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.200] [VFS DEBUG] [VFS RandomAccessor Write] Using existing seqBuffer: fileID=448704347635712, offset=1572864
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.200] [VFS DEBUG] [VFS Write] Successfully wrote data: fileID=448704347635712, offset=1572864, size=524288, written=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.214] [VFS DEBUG] [VFS Write] Write called: objID=448704347635712, offset=2097152, size=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.214] [VFS DEBUG] [VFS Write] Object info: objID=448704347635712, type=2 (FILE=2, DIR=1), name=5月23日.mp4, PID=448701399040000
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.214] [VFS DEBUG] [VFS Write] Writing data: fileID=448704347635712, offset=2097152, size=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.214] [VFS DEBUG] [VFS updateWriteRange] Updated write range: fileID=448704347635712, start=524288, end=2621440, rangeSize=2097152
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.214] [VFS DEBUG] [VFS RandomAccessor Write] Using existing seqBuffer: fileID=448704347635712, offset=2097152
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.214] [VFS DEBUG] [VFS Write] Successfully wrote data: fileID=448704347635712, offset=2097152, size=524288, written=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.214] [VFS DEBUG] [VFS Write] Write called: objID=448704347635712, offset=2621440, size=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.214] [VFS DEBUG] [VFS Write] Object info: objID=448704347635712, type=2 (FILE=2, DIR=1), name=5月23日.mp4, PID=448701399040000
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.214] [VFS DEBUG] [VFS Write] Writing data: fileID=448704347635712, offset=2621440, size=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.214] [VFS DEBUG] [VFS updateWriteRange] Updated write range: fileID=448704347635712, start=524288, end=3145728, rangeSize=2621440
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.214] [VFS DEBUG] [VFS RandomAccessor Write] Using existing seqBuffer: fileID=448704347635712, offset=2621440
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.214] [VFS DEBUG] [VFS Write] Successfully wrote data: fileID=448704347635712, offset=2621440, size=524288, written=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.224] [VFS DEBUG] [VFS Write] Write called: objID=448704347635712, offset=3145728, size=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.224] [VFS DEBUG] [VFS Write] Object info: objID=448704347635712, type=2 (FILE=2, DIR=1), name=5月23日.mp4, PID=448701399040000
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.224] [VFS DEBUG] [VFS Write] Writing data: fileID=448704347635712, offset=3145728, size=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.224] [VFS DEBUG] [VFS updateWriteRange] Updated write range: fileID=448704347635712, start=524288, end=3670016, rangeSize=3145728
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.224] [VFS DEBUG] [VFS RandomAccessor Write] Using existing seqBuffer: fileID=448704347635712, offset=3145728
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.224] [VFS DEBUG] [VFS Write] Successfully wrote data: fileID=448704347635712, offset=3145728, size=524288, written=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.224] [VFS DEBUG] [VFS Write] Write called: objID=448704347635712, offset=3670016, size=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.224] [VFS DEBUG] [VFS Write] Object info: objID=448704347635712, type=2 (FILE=2, DIR=1), name=5月23日.mp4, PID=448701399040000
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.224] [VFS DEBUG] [VFS Write] Writing data: fileID=448704347635712, offset=3670016, size=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.224] [VFS DEBUG] [VFS updateWriteRange] Updated write range: fileID=448704347635712, start=524288, end=4194304, rangeSize=3670016
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.224] [VFS DEBUG] [VFS RandomAccessor Write] Using existing seqBuffer: fileID=448704347635712, offset=3670016
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.224] [VFS DEBUG] [VFS Write] Successfully wrote data: fileID=448704347635712, offset=3670016, size=524288, written=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.249] [VFS DEBUG] [VFS Write] Write called: objID=448704347635712, offset=4194304, size=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.249] [VFS DEBUG] [VFS Write] Object info: objID=448704347635712, type=2 (FILE=2, DIR=1), name=5月23日.mp4, PID=448701399040000
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.249] [VFS DEBUG] [VFS Write] Writing data: fileID=448704347635712, offset=4194304, size=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.249] [VFS DEBUG] [VFS updateWriteRange] Updated write range: fileID=448704347635712, start=524288, end=4718592, rangeSize=4194304
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.249] [VFS DEBUG] [VFS RandomAccessor Write] Using existing seqBuffer: fileID=448704347635712, offset=4194304
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.249] [VFS DEBUG] [VFS Write] Successfully wrote data: fileID=448704347635712, offset=4194304, size=524288, written=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.249] [VFS DEBUG] [VFS Write] Write called: objID=448704347635712, offset=4718592, size=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.249] [VFS DEBUG] [VFS Write] Object info: objID=448704347635712, type=2 (FILE=2, DIR=1), name=5月23日.mp4, PID=448701399040000
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.249] [VFS DEBUG] [VFS Write] Writing data: fileID=448704347635712, offset=4718592, size=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.249] [VFS DEBUG] [VFS updateWriteRange] Updated write range: fileID=448704347635712, start=524288, end=5242880, rangeSize=4718592
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.249] [VFS DEBUG] [VFS RandomAccessor Write] Using existing seqBuffer: fileID=448704347635712, offset=4718592
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.249] [VFS DEBUG] [VFS Write] Successfully wrote data: fileID=448704347635712, offset=4718592, size=524288, written=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.257] [VFS DEBUG] [VFS Write] Write called: objID=448704347635712, offset=5242880, size=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.257] [VFS DEBUG] [VFS Write] Object info: objID=448704347635712, type=2 (FILE=2, DIR=1), name=5月23日.mp4, PID=448701399040000
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.257] [VFS DEBUG] [VFS Write] Writing data: fileID=448704347635712, offset=5242880, size=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.257] [VFS DEBUG] [VFS updateWriteRange] Updated write range: fileID=448704347635712, start=524288, end=5767168, rangeSize=5242880
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.257] [VFS DEBUG] [VFS RandomAccessor Write] Using existing seqBuffer: fileID=448704347635712, offset=5242880
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.257] [VFS DEBUG] [VFS Write] Successfully wrote data: fileID=448704347635712, offset=5242880, size=524288, written=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.257] [VFS DEBUG] [VFS Write] Write called: objID=448704347635712, offset=5767168, size=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.257] [VFS DEBUG] [VFS Write] Object info: objID=448704347635712, type=2 (FILE=2, DIR=1), name=5月23日.mp4, PID=448701399040000
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.257] [VFS DEBUG] [VFS Write] Writing data: fileID=448704347635712, offset=5767168, size=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.257] [VFS DEBUG] [VFS updateWriteRange] Updated write range: fileID=448704347635712, start=524288, end=6291456, rangeSize=5767168
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.257] [VFS DEBUG] [VFS RandomAccessor Write] Using existing seqBuffer: fileID=448704347635712, offset=5767168
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.258] [VFS DEBUG] [VFS Write] Successfully wrote data: fileID=448704347635712, offset=5767168, size=524288, written=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.275] [VFS DEBUG] [VFS Write] Write called: objID=448704347635712, offset=6291456, size=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.276] [VFS DEBUG] [VFS Write] Object info: objID=448704347635712, type=2 (FILE=2, DIR=1), name=5月23日.mp4, PID=448701399040000
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.276] [VFS DEBUG] [VFS Write] Writing data: fileID=448704347635712, offset=6291456, size=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.276] [VFS DEBUG] [VFS updateWriteRange] Updated write range: fileID=448704347635712, start=524288, end=6815744, rangeSize=6291456
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.276] [VFS DEBUG] [VFS RandomAccessor Write] Using existing seqBuffer: fileID=448704347635712, offset=6291456
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.276] [VFS DEBUG] [VFS Write] Successfully wrote data: fileID=448704347635712, offset=6291456, size=524288, written=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.276] [VFS DEBUG] [VFS Write] Write called: objID=448704347635712, offset=6815744, size=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.276] [VFS DEBUG] [VFS Write] Object info: objID=448704347635712, type=2 (FILE=2, DIR=1), name=5月23日.mp4, PID=448701399040000
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.276] [VFS DEBUG] [VFS Write] Writing data: fileID=448704347635712, offset=6815744, size=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.276] [VFS DEBUG] [VFS updateWriteRange] Updated write range: fileID=448704347635712, start=524288, end=7340032, rangeSize=6815744
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.276] [VFS DEBUG] [VFS RandomAccessor Write] Using existing seqBuffer: fileID=448704347635712, offset=6815744
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.276] [VFS DEBUG] [VFS Write] Successfully wrote data: fileID=448704347635712, offset=6815744, size=524288, written=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.291] [VFS DEBUG] [VFS Write] Write called: objID=448704347635712, offset=7340032, size=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.291] [VFS DEBUG] [VFS Write] Object info: objID=448704347635712, type=2 (FILE=2, DIR=1), name=5月23日.mp4, PID=448701399040000
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.291] [VFS DEBUG] [VFS Write] Writing data: fileID=448704347635712, offset=7340032, size=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.291] [VFS DEBUG] [VFS updateWriteRange] Updated write range: fileID=448704347635712, start=524288, end=7864320, rangeSize=7340032
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.291] [VFS DEBUG] [VFS RandomAccessor Write] Using existing seqBuffer: fileID=448704347635712, offset=7340032
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.292] [VFS DEBUG] [VFS Write] Successfully wrote data: fileID=448704347635712, offset=7340032, size=524288, written=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.292] [VFS DEBUG] [VFS Write] Write called: objID=448704347635712, offset=7864320, size=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.292] [VFS DEBUG] [VFS Write] Object info: objID=448704347635712, type=2 (FILE=2, DIR=1), name=5月23日.mp4, PID=448701399040000
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.292] [VFS DEBUG] [VFS Write] Writing data: fileID=448704347635712, offset=7864320, size=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.292] [VFS DEBUG] [VFS updateWriteRange] Updated write range: fileID=448704347635712, start=524288, end=8388608, rangeSize=7864320
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.292] [VFS DEBUG] [VFS RandomAccessor Write] Using existing seqBuffer: fileID=448704347635712, offset=7864320
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.292] [VFS DEBUG] [VFS Write] Successfully wrote data: fileID=448704347635712, offset=7864320, size=524288, written=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.311] [VFS DEBUG] [VFS Write] Write called: objID=448704347635712, offset=8388608, size=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.311] [VFS DEBUG] [VFS Write] Object info: objID=448704347635712, type=2 (FILE=2, DIR=1), name=5月23日.mp4, PID=448701399040000
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.311] [VFS DEBUG] [VFS Write] Writing data: fileID=448704347635712, offset=8388608, size=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.311] [VFS DEBUG] [VFS updateWriteRange] Updated write range: fileID=448704347635712, start=524288, end=8912896, rangeSize=8388608
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.311] [VFS DEBUG] [VFS RandomAccessor Write] Using existing seqBuffer: fileID=448704347635712, offset=8388608
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.311] [VFS DEBUG] [VFS Write] Successfully wrote data: fileID=448704347635712, offset=8388608, size=524288, written=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.312] [VFS DEBUG] [VFS Write] Write called: objID=448704347635712, offset=8912896, size=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.312] [VFS DEBUG] [VFS Write] Object info: objID=448704347635712, type=2 (FILE=2, DIR=1), name=5月23日.mp4, PID=448701399040000
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.312] [VFS DEBUG] [VFS Write] Writing data: fileID=448704347635712, offset=8912896, size=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.312] [VFS DEBUG] [VFS updateWriteRange] Updated write range: fileID=448704347635712, start=524288, end=9437184, rangeSize=8912896
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.312] [VFS DEBUG] [VFS RandomAccessor Write] Using existing seqBuffer: fileID=448704347635712, offset=8912896
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.312] [VFS DEBUG] [VFS Write] Successfully wrote data: fileID=448704347635712, offset=8912896, size=524288, written=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.323] [VFS DEBUG] [VFS Write] Write called: objID=448704347635712, offset=9437184, size=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.323] [VFS DEBUG] [VFS Write] Object info: objID=448704347635712, type=2 (FILE=2, DIR=1), name=5月23日.mp4, PID=448701399040000
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.323] [VFS DEBUG] [VFS Write] Writing data: fileID=448704347635712, offset=9437184, size=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.323] [VFS DEBUG] [VFS updateWriteRange] Updated write range: fileID=448704347635712, start=524288, end=9961472, rangeSize=9437184
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.323] [VFS DEBUG] [VFS RandomAccessor Write] Using existing seqBuffer: fileID=448704347635712, offset=9437184
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.324] [VFS DEBUG] [VFS Write] Successfully wrote data: fileID=448704347635712, offset=9437184, size=524288, written=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.324] [VFS DEBUG] [VFS Write] Write called: objID=448704347635712, offset=9961472, size=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.324] [VFS DEBUG] [VFS Write] Object info: objID=448704347635712, type=2 (FILE=2, DIR=1), name=5月23日.mp4, PID=448701399040000
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.324] [VFS DEBUG] [VFS Write] Writing data: fileID=448704347635712, offset=9961472, size=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.324] [VFS DEBUG] [VFS updateWriteRange] Updated write range: fileID=448704347635712, start=524288, end=10485760, rangeSize=9961472
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.324] [VFS DEBUG] [VFS RandomAccessor Write] Using existing seqBuffer: fileID=448704347635712, offset=9961472
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.334] [VFS DEBUG] [VFS flushSequentialChunk] Original chunk: fileID=448704347635712, chunk=10485760, OrigSize=10485760, Kind=0x2 (CMPR=false, ENDEC=true)
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.345] [VFS DEBUG] [VFS flushSequentialChunk] Chunk sizes: fileID=448704347635712, original=10485760, encoded=10485788, Kind=0x2
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.345] [VFS DEBUG] [VFS flushSequentialChunk] Updated Size: fileID=448704347635712, Size=10485788, OrigSize=10485760 (CMPR=false, ENDEC=true)
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.345] [VFS DEBUG] [VFS flushSequentialChunk] Writing chunk: fileID=448704347635712, dataID=448704351830016, sn=0, originalSize=10485760, encodedSize=10485788
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.345] [VFS DEBUG] [VFS flushSequentialChunk] First chunk encoded sample (hex): fileID=448704347635712, dataID=448704351830016, sn=0, first64Bytes=c6c1ceaf1f267e9d35af1146d0efab3a780c0da842c3cb2c035ee21eb50ff30700921170976ffe1dbbdad3e1d8092fb6bcac0cb4a987a648928b839065712eb5
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.501] [VFS DEBUG] [VFS flushSequentialChunk] Successfully wrote chunk: fileID=448704347635712, dataID=448704351830016, sn=0, encodedSize=10485788, OrigSize=10485760, Size=10485788
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.501] [VFS DEBUG] [VFS clearSeqBuffer] Released tier 3 buffer and reset to tier 1: fileID=448704347635712, dataID=448704351830016, oldCap=10485760, newCap=131072
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.501] [VFS DEBUG] [VFS flushSequentialChunk] After flush: fileID=448704347635712, dataID=448704351830016, sn=1, bufferLen=0, hasData=true, OrigSize=10485760, Size=10485788
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.501] [VFS DEBUG] [VFS Write] Successfully wrote data: fileID=448704347635712, offset=9961472, size=524288, written=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.502] [VFS DEBUG] [VFS Write] Write called: objID=448704347635712, offset=10485760, size=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.502] [VFS DEBUG] [VFS Write] Object info: objID=448704347635712, type=2 (FILE=2, DIR=1), name=5月23日.mp4, PID=448701399040000
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.502] [VFS DEBUG] [VFS Write] Writing data: fileID=448704347635712, offset=10485760, size=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.502] [VFS DEBUG] [VFS updateWriteRange] Updated write range: fileID=448704347635712, start=524288, end=11010048, rangeSize=10485760
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.502] [VFS DEBUG] [VFS RandomAccessor Write] Using existing seqBuffer: fileID=448704347635712, offset=10485760
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.502] [VFS DEBUG] [VFS writeSequential] Upgraded buffer: fileID=448704347635712, dataID=448704351830016, fromTier=1, toTier=2, neededCap=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.502] [VFS DEBUG] [VFS Write] Successfully wrote data: fileID=448704347635712, offset=10485760, size=524288, written=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.502] [VFS DEBUG] [VFS Write] Write called: objID=448704347635712, offset=11010048, size=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.502] [VFS DEBUG] [VFS Write] Object info: objID=448704347635712, type=2 (FILE=2, DIR=1), name=5月23日.mp4, PID=448701399040000
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.502] [VFS DEBUG] [VFS Write] Writing data: fileID=448704347635712, offset=11010048, size=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.502] [VFS DEBUG] [VFS updateWriteRange] Updated write range: fileID=448704347635712, start=524288, end=11534336, rangeSize=11010048
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.502] [VFS DEBUG] [VFS RandomAccessor Write] Using existing seqBuffer: fileID=448704347635712, offset=11010048
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.502] [VFS DEBUG] [VFS Write] Successfully wrote data: fileID=448704347635712, offset=11010048, size=524288, written=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.502] [VFS DEBUG] [VFS Write] Write called: objID=448704347635712, offset=11534336, size=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.502] [VFS DEBUG] [VFS Write] Object info: objID=448704347635712, type=2 (FILE=2, DIR=1), name=5月23日.mp4, PID=448701399040000
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.502] [VFS DEBUG] [VFS Write] Writing data: fileID=448704347635712, offset=11534336, size=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.502] [VFS DEBUG] [VFS updateWriteRange] Updated write range: fileID=448704347635712, start=524288, end=12058624, rangeSize=11534336
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.502] [VFS DEBUG] [VFS RandomAccessor Write] Using existing seqBuffer: fileID=448704347635712, offset=11534336
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.503] [VFS DEBUG] [VFS writeSequential] Upgraded buffer: fileID=448704347635712, dataID=448704351830016, fromTier=2, toTier=3, neededCap=1572864
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.503] [VFS DEBUG] [VFS Write] Successfully wrote data: fileID=448704347635712, offset=11534336, size=524288, written=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.503] [VFS DEBUG] [VFS Write] Write called: objID=448704347635712, offset=12058624, size=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.503] [VFS DEBUG] [VFS Write] Object info: objID=448704347635712, type=2 (FILE=2, DIR=1), name=5月23日.mp4, PID=448701399040000
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.503] [VFS DEBUG] [VFS Write] Writing data: fileID=448704347635712, offset=12058624, size=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.503] [VFS DEBUG] [VFS updateWriteRange] Updated write range: fileID=448704347635712, start=524288, end=12582912, rangeSize=12058624
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.503] [VFS DEBUG] [VFS RandomAccessor Write] Using existing seqBuffer: fileID=448704347635712, offset=12058624
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.503] [VFS DEBUG] [VFS Write] Successfully wrote data: fileID=448704347635712, offset=12058624, size=524288, written=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.503] [VFS DEBUG] [VFS Write] Write called: objID=448704347635712, offset=12582912, size=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.503] [VFS DEBUG] [VFS Write] Object info: objID=448704347635712, type=2 (FILE=2, DIR=1), name=5月23日.mp4, PID=448701399040000
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.503] [VFS DEBUG] [VFS Write] Writing data: fileID=448704347635712, offset=12582912, size=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.503] [VFS DEBUG] [VFS updateWriteRange] Updated write range: fileID=448704347635712, start=524288, end=13107200, rangeSize=12582912
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.503] [VFS DEBUG] [VFS RandomAccessor Write] Using existing seqBuffer: fileID=448704347635712, offset=12582912
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.503] [VFS DEBUG] [VFS Write] Successfully wrote data: fileID=448704347635712, offset=12582912, size=524288, written=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.504] [VFS DEBUG] [VFS Write] Write called: objID=448704347635712, offset=13107200, size=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.504] [VFS DEBUG] [VFS Write] Object info: objID=448704347635712, type=2 (FILE=2, DIR=1), name=5月23日.mp4, PID=448701399040000
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.504] [VFS DEBUG] [VFS Write] Writing data: fileID=448704347635712, offset=13107200, size=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.504] [VFS DEBUG] [VFS updateWriteRange] Updated write range: fileID=448704347635712, start=524288, end=13631488, rangeSize=13107200
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.504] [VFS DEBUG] [VFS RandomAccessor Write] Using existing seqBuffer: fileID=448704347635712, offset=13107200
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.504] [VFS DEBUG] [VFS Write] Successfully wrote data: fileID=448704347635712, offset=13107200, size=524288, written=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.504] [VFS DEBUG] [VFS Write] Write called: objID=448704347635712, offset=13631488, size=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.504] [VFS DEBUG] [VFS Write] Object info: objID=448704347635712, type=2 (FILE=2, DIR=1), name=5月23日.mp4, PID=448701399040000
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.504] [VFS DEBUG] [VFS Write] Writing data: fileID=448704347635712, offset=13631488, size=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.504] [VFS DEBUG] [VFS updateWriteRange] Updated write range: fileID=448704347635712, start=524288, end=14155776, rangeSize=13631488
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.504] [VFS DEBUG] [VFS RandomAccessor Write] Using existing seqBuffer: fileID=448704347635712, offset=13631488
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.504] [VFS DEBUG] [VFS Write] Successfully wrote data: fileID=448704347635712, offset=13631488, size=524288, written=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.505] [VFS DEBUG] [VFS Write] Write called: objID=448704347635712, offset=14155776, size=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.505] [VFS DEBUG] [VFS Write] Object info: objID=448704347635712, type=2 (FILE=2, DIR=1), name=5月23日.mp4, PID=448701399040000
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.505] [VFS DEBUG] [VFS Write] Writing data: fileID=448704347635712, offset=14155776, size=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.505] [VFS DEBUG] [VFS updateWriteRange] Updated write range: fileID=448704347635712, start=524288, end=14680064, rangeSize=14155776
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.505] [VFS DEBUG] [VFS RandomAccessor Write] Using existing seqBuffer: fileID=448704347635712, offset=14155776
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.505] [VFS DEBUG] [VFS Write] Successfully wrote data: fileID=448704347635712, offset=14155776, size=524288, written=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.505] [VFS DEBUG] [VFS Write] Write called: objID=448704347635712, offset=14680064, size=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.505] [VFS DEBUG] [VFS Write] Object info: objID=448704347635712, type=2 (FILE=2, DIR=1), name=5月23日.mp4, PID=448701399040000
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.505] [VFS DEBUG] [VFS Write] Writing data: fileID=448704347635712, offset=14680064, size=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.505] [VFS DEBUG] [VFS updateWriteRange] Updated write range: fileID=448704347635712, start=524288, end=15204352, rangeSize=14680064
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.505] [VFS DEBUG] [VFS RandomAccessor Write] Using existing seqBuffer: fileID=448704347635712, offset=14680064
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.505] [VFS DEBUG] [VFS Write] Successfully wrote data: fileID=448704347635712, offset=14680064, size=524288, written=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.505] [VFS DEBUG] [VFS Write] Write called: objID=448704347635712, offset=15204352, size=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.505] [VFS DEBUG] [VFS Write] Object info: objID=448704347635712, type=2 (FILE=2, DIR=1), name=5月23日.mp4, PID=448701399040000
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.505] [VFS DEBUG] [VFS Write] Writing data: fileID=448704347635712, offset=15204352, size=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.505] [VFS DEBUG] [VFS updateWriteRange] Updated write range: fileID=448704347635712, start=524288, end=15728640, rangeSize=15204352
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.505] [VFS DEBUG] [VFS RandomAccessor Write] Using existing seqBuffer: fileID=448704347635712, offset=15204352
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.505] [VFS DEBUG] [VFS Write] Successfully wrote data: fileID=448704347635712, offset=15204352, size=524288, written=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.506] [VFS DEBUG] [VFS Write] Write called: objID=448704347635712, offset=15728640, size=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.506] [VFS DEBUG] [VFS Write] Object info: objID=448704347635712, type=2 (FILE=2, DIR=1), name=5月23日.mp4, PID=448701399040000
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.506] [VFS DEBUG] [VFS Write] Writing data: fileID=448704347635712, offset=15728640, size=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.506] [VFS DEBUG] [VFS updateWriteRange] Updated write range: fileID=448704347635712, start=524288, end=16252928, rangeSize=15728640
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.506] [VFS DEBUG] [VFS RandomAccessor Write] Using existing seqBuffer: fileID=448704347635712, offset=15728640
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.506] [VFS DEBUG] [VFS Write] Successfully wrote data: fileID=448704347635712, offset=15728640, size=524288, written=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.506] [VFS DEBUG] [VFS Write] Write called: objID=448704347635712, offset=16252928, size=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.506] [VFS DEBUG] [VFS Write] Object info: objID=448704347635712, type=2 (FILE=2, DIR=1), name=5月23日.mp4, PID=448701399040000
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.506] [VFS DEBUG] [VFS Write] Writing data: fileID=448704347635712, offset=16252928, size=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.506] [VFS DEBUG] [VFS updateWriteRange] Updated write range: fileID=448704347635712, start=524288, end=16777216, rangeSize=16252928
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.506] [VFS DEBUG] [VFS RandomAccessor Write] Using existing seqBuffer: fileID=448704347635712, offset=16252928
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.506] [VFS DEBUG] [VFS Write] Successfully wrote data: fileID=448704347635712, offset=16252928, size=524288, written=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.507] [VFS DEBUG] [VFS Write] Write called: objID=448704347635712, offset=16777216, size=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.507] [VFS DEBUG] [VFS Write] Object info: objID=448704347635712, type=2 (FILE=2, DIR=1), name=5月23日.mp4, PID=448701399040000
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.507] [VFS DEBUG] [VFS Write] Writing data: fileID=448704347635712, offset=16777216, size=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.507] [VFS DEBUG] [VFS updateWriteRange] Updated write range: fileID=448704347635712, start=524288, end=17301504, rangeSize=16777216
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.507] [VFS DEBUG] [VFS RandomAccessor Write] Using existing seqBuffer: fileID=448704347635712, offset=16777216
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.507] [VFS DEBUG] [VFS Write] Successfully wrote data: fileID=448704347635712, offset=16777216, size=524288, written=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.507] [VFS DEBUG] [VFS Write] Write called: objID=448704347635712, offset=17301504, size=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.507] [VFS DEBUG] [VFS Write] Object info: objID=448704347635712, type=2 (FILE=2, DIR=1), name=5月23日.mp4, PID=448701399040000
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.507] [VFS DEBUG] [VFS Write] Writing data: fileID=448704347635712, offset=17301504, size=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.507] [VFS DEBUG] [VFS updateWriteRange] Updated write range: fileID=448704347635712, start=524288, end=17825792, rangeSize=17301504
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.507] [VFS DEBUG] [VFS RandomAccessor Write] Using existing seqBuffer: fileID=448704347635712, offset=17301504
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.507] [VFS DEBUG] [VFS Write] Successfully wrote data: fileID=448704347635712, offset=17301504, size=524288, written=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.537] [VFS DEBUG] [VFS Write] Write called: objID=448704347635712, offset=17825792, size=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.537] [VFS DEBUG] [VFS Write] Object info: objID=448704347635712, type=2 (FILE=2, DIR=1), name=5月23日.mp4, PID=448701399040000
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.537] [VFS DEBUG] [VFS Write] Writing data: fileID=448704347635712, offset=17825792, size=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.537] [VFS DEBUG] [VFS updateWriteRange] Updated write range: fileID=448704347635712, start=524288, end=18350080, rangeSize=17825792
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.537] [VFS DEBUG] [VFS RandomAccessor Write] Using existing seqBuffer: fileID=448704347635712, offset=17825792
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.537] [VFS DEBUG] [VFS Write] Successfully wrote data: fileID=448704347635712, offset=17825792, size=524288, written=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.537] [VFS DEBUG] [VFS Write] Write called: objID=448704347635712, offset=18350080, size=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.537] [VFS DEBUG] [VFS Write] Object info: objID=448704347635712, type=2 (FILE=2, DIR=1), name=5月23日.mp4, PID=448701399040000
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.537] [VFS DEBUG] [VFS Write] Writing data: fileID=448704347635712, offset=18350080, size=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.537] [VFS DEBUG] [VFS updateWriteRange] Updated write range: fileID=448704347635712, start=524288, end=18874368, rangeSize=18350080
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.537] [VFS DEBUG] [VFS RandomAccessor Write] Using existing seqBuffer: fileID=448704347635712, offset=18350080
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.538] [VFS DEBUG] [VFS Write] Successfully wrote data: fileID=448704347635712, offset=18350080, size=524288, written=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.549] [VFS DEBUG] [VFS Write] Write called: objID=448704347635712, offset=18874368, size=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.549] [VFS DEBUG] [VFS Write] Object info: objID=448704347635712, type=2 (FILE=2, DIR=1), name=5月23日.mp4, PID=448701399040000
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.549] [VFS DEBUG] [VFS Write] Writing data: fileID=448704347635712, offset=18874368, size=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.549] [VFS DEBUG] [VFS updateWriteRange] Updated write range: fileID=448704347635712, start=524288, end=19398656, rangeSize=18874368
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.549] [VFS DEBUG] [VFS RandomAccessor Write] Using existing seqBuffer: fileID=448704347635712, offset=18874368
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.549] [VFS DEBUG] [VFS Write] Successfully wrote data: fileID=448704347635712, offset=18874368, size=524288, written=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.549] [VFS DEBUG] [VFS Write] Write called: objID=448704347635712, offset=19398656, size=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.549] [VFS DEBUG] [VFS Write] Object info: objID=448704347635712, type=2 (FILE=2, DIR=1), name=5月23日.mp4, PID=448701399040000
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.549] [VFS DEBUG] [VFS Write] Writing data: fileID=448704347635712, offset=19398656, size=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.549] [VFS DEBUG] [VFS updateWriteRange] Updated write range: fileID=448704347635712, start=524288, end=19922944, rangeSize=19398656
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.549] [VFS DEBUG] [VFS RandomAccessor Write] Using existing seqBuffer: fileID=448704347635712, offset=19398656
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.549] [VFS DEBUG] [VFS Write] Successfully wrote data: fileID=448704347635712, offset=19398656, size=524288, written=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.577] [VFS DEBUG] [VFS Write] Write called: objID=448704347635712, offset=19922944, size=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.577] [VFS DEBUG] [VFS Write] Object info: objID=448704347635712, type=2 (FILE=2, DIR=1), name=5月23日.mp4, PID=448701399040000
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.577] [VFS DEBUG] [VFS Write] Writing data: fileID=448704347635712, offset=19922944, size=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.577] [VFS DEBUG] [VFS updateWriteRange] Updated write range: fileID=448704347635712, start=524288, end=20447232, rangeSize=19922944
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.577] [VFS DEBUG] [VFS RandomAccessor Write] Using existing seqBuffer: fileID=448704347635712, offset=19922944
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.577] [VFS DEBUG] [VFS Write] Successfully wrote data: fileID=448704347635712, offset=19922944, size=524288, written=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.577] [VFS DEBUG] [VFS Write] Write called: objID=448704347635712, offset=20447232, size=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.577] [VFS DEBUG] [VFS Write] Object info: objID=448704347635712, type=2 (FILE=2, DIR=1), name=5月23日.mp4, PID=448701399040000
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.577] [VFS DEBUG] [VFS Write] Writing data: fileID=448704347635712, offset=20447232, size=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.577] [VFS DEBUG] [VFS updateWriteRange] Updated write range: fileID=448704347635712, start=524288, end=20971520, rangeSize=20447232
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.577] [VFS DEBUG] [VFS RandomAccessor Write] Using existing seqBuffer: fileID=448704347635712, offset=20447232
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.588] [VFS DEBUG] [VFS flushSequentialChunk] Original chunk: fileID=448704347635712, chunk=10485760, OrigSize=20971520, Kind=0x2 (CMPR=false, ENDEC=true)
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.599] [VFS DEBUG] [VFS flushSequentialChunk] Chunk sizes: fileID=448704347635712, original=10485760, encoded=10485788, Kind=0x2
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.599] [VFS DEBUG] [VFS flushSequentialChunk] Updated Size: fileID=448704347635712, Size=20971576, OrigSize=20971520 (CMPR=false, ENDEC=true)
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.599] [VFS DEBUG] [VFS flushSequentialChunk] Writing chunk: fileID=448704347635712, dataID=448704351830016, sn=1, originalSize=10485760, encodedSize=10485788
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.753] [VFS DEBUG] [VFS flushSequentialChunk] Successfully wrote chunk: fileID=448704347635712, dataID=448704351830016, sn=1, encodedSize=10485788, OrigSize=20971520, Size=20971576
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.753] [VFS DEBUG] [VFS clearSeqBuffer] Released tier 3 buffer and reset to tier 1: fileID=448704347635712, dataID=448704351830016, oldCap=10485760, newCap=131072
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.753] [VFS DEBUG] [VFS flushSequentialChunk] After flush: fileID=448704347635712, dataID=448704351830016, sn=2, bufferLen=0, hasData=true, OrigSize=20971520, Size=20971576
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.753] [VFS DEBUG] [VFS Write] Successfully wrote data: fileID=448704347635712, offset=20447232, size=524288, written=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.754] [VFS DEBUG] [VFS Write] Write called: objID=448704347635712, offset=20971520, size=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.754] [VFS DEBUG] [VFS Write] Object info: objID=448704347635712, type=2 (FILE=2, DIR=1), name=5月23日.mp4, PID=448701399040000
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.754] [VFS DEBUG] [VFS Write] Writing data: fileID=448704347635712, offset=20971520, size=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.754] [VFS DEBUG] [VFS updateWriteRange] Updated write range: fileID=448704347635712, start=524288, end=21495808, rangeSize=20971520
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.754] [VFS DEBUG] [VFS RandomAccessor Write] Using existing seqBuffer: fileID=448704347635712, offset=20971520
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.754] [VFS DEBUG] [VFS writeSequential] Upgraded buffer: fileID=448704347635712, dataID=448704351830016, fromTier=1, toTier=2, neededCap=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.754] [VFS DEBUG] [VFS Write] Successfully wrote data: fileID=448704347635712, offset=20971520, size=524288, written=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.754] [VFS DEBUG] [VFS Write] Write called: objID=448704347635712, offset=21495808, size=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.754] [VFS DEBUG] [VFS Write] Object info: objID=448704347635712, type=2 (FILE=2, DIR=1), name=5月23日.mp4, PID=448701399040000
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.754] [VFS DEBUG] [VFS Write] Writing data: fileID=448704347635712, offset=21495808, size=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.754] [VFS DEBUG] [VFS updateWriteRange] Updated write range: fileID=448704347635712, start=524288, end=22020096, rangeSize=21495808
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.754] [VFS DEBUG] [VFS RandomAccessor Write] Using existing seqBuffer: fileID=448704347635712, offset=21495808
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.754] [VFS DEBUG] [VFS Write] Successfully wrote data: fileID=448704347635712, offset=21495808, size=524288, written=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.755] [VFS DEBUG] [VFS Write] Write called: objID=448704347635712, offset=22020096, size=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.755] [VFS DEBUG] [VFS Write] Object info: objID=448704347635712, type=2 (FILE=2, DIR=1), name=5月23日.mp4, PID=448701399040000
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.755] [VFS DEBUG] [VFS Write] Writing data: fileID=448704347635712, offset=22020096, size=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.755] [VFS DEBUG] [VFS updateWriteRange] Updated write range: fileID=448704347635712, start=524288, end=22544384, rangeSize=22020096
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.755] [VFS DEBUG] [VFS RandomAccessor Write] Using existing seqBuffer: fileID=448704347635712, offset=22020096
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.759] [VFS DEBUG] [VFS writeSequential] Upgraded buffer: fileID=448704347635712, dataID=448704351830016, fromTier=2, toTier=3, neededCap=1572864
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.759] [VFS DEBUG] [VFS Write] Successfully wrote data: fileID=448704347635712, offset=22020096, size=524288, written=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.759] [VFS DEBUG] [VFS Write] Write called: objID=448704347635712, offset=22544384, size=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.759] [VFS DEBUG] [VFS Write] Object info: objID=448704347635712, type=2 (FILE=2, DIR=1), name=5月23日.mp4, PID=448701399040000
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.759] [VFS DEBUG] [VFS Write] Writing data: fileID=448704347635712, offset=22544384, size=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.759] [VFS DEBUG] [VFS updateWriteRange] Updated write range: fileID=448704347635712, start=524288, end=23068672, rangeSize=22544384
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.759] [VFS DEBUG] [VFS RandomAccessor Write] Using existing seqBuffer: fileID=448704347635712, offset=22544384
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.759] [VFS DEBUG] [VFS Write] Successfully wrote data: fileID=448704347635712, offset=22544384, size=524288, written=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.759] [VFS DEBUG] [VFS Write] Write called: objID=448704347635712, offset=23068672, size=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.759] [VFS DEBUG] [VFS Write] Object info: objID=448704347635712, type=2 (FILE=2, DIR=1), name=5月23日.mp4, PID=448701399040000
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.759] [VFS DEBUG] [VFS Write] Writing data: fileID=448704347635712, offset=23068672, size=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.759] [VFS DEBUG] [VFS updateWriteRange] Updated write range: fileID=448704347635712, start=524288, end=23592960, rangeSize=23068672
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.759] [VFS DEBUG] [VFS RandomAccessor Write] Using existing seqBuffer: fileID=448704347635712, offset=23068672
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.759] [VFS DEBUG] [VFS Write] Successfully wrote data: fileID=448704347635712, offset=23068672, size=524288, written=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.760] [VFS DEBUG] [VFS Write] Write called: objID=448704347635712, offset=23592960, size=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.760] [VFS DEBUG] [VFS Write] Object info: objID=448704347635712, type=2 (FILE=2, DIR=1), name=5月23日.mp4, PID=448701399040000
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.760] [VFS DEBUG] [VFS Write] Writing data: fileID=448704347635712, offset=23592960, size=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.760] [VFS DEBUG] [VFS updateWriteRange] Updated write range: fileID=448704347635712, start=524288, end=24117248, rangeSize=23592960
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.760] [VFS DEBUG] [VFS RandomAccessor Write] Using existing seqBuffer: fileID=448704347635712, offset=23592960
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.760] [VFS DEBUG] [VFS Write] Successfully wrote data: fileID=448704347635712, offset=23592960, size=524288, written=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.760] [VFS DEBUG] [VFS Write] Write called: objID=448704347635712, offset=24117248, size=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.760] [VFS DEBUG] [VFS Write] Object info: objID=448704347635712, type=2 (FILE=2, DIR=1), name=5月23日.mp4, PID=448701399040000
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.760] [VFS DEBUG] [VFS Write] Writing data: fileID=448704347635712, offset=24117248, size=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.760] [VFS DEBUG] [VFS updateWriteRange] Updated write range: fileID=448704347635712, start=524288, end=24641536, rangeSize=24117248
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.760] [VFS DEBUG] [VFS RandomAccessor Write] Using existing seqBuffer: fileID=448704347635712, offset=24117248
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.760] [VFS DEBUG] [VFS Write] Successfully wrote data: fileID=448704347635712, offset=24117248, size=524288, written=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.760] [VFS DEBUG] [VFS Write] Write called: objID=448704347635712, offset=24641536, size=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.760] [VFS DEBUG] [VFS Write] Object info: objID=448704347635712, type=2 (FILE=2, DIR=1), name=5月23日.mp4, PID=448701399040000
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.760] [VFS DEBUG] [VFS Write] Writing data: fileID=448704347635712, offset=24641536, size=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.760] [VFS DEBUG] [VFS updateWriteRange] Updated write range: fileID=448704347635712, start=524288, end=25165824, rangeSize=24641536
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.760] [VFS DEBUG] [VFS RandomAccessor Write] Using existing seqBuffer: fileID=448704347635712, offset=24641536
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.760] [VFS DEBUG] [VFS Write] Successfully wrote data: fileID=448704347635712, offset=24641536, size=524288, written=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.761] [VFS DEBUG] [VFS Write] Write called: objID=448704347635712, offset=25165824, size=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.761] [VFS DEBUG] [VFS Write] Object info: objID=448704347635712, type=2 (FILE=2, DIR=1), name=5月23日.mp4, PID=448701399040000
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.761] [VFS DEBUG] [VFS Write] Writing data: fileID=448704347635712, offset=25165824, size=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.761] [VFS DEBUG] [VFS updateWriteRange] Updated write range: fileID=448704347635712, start=524288, end=25690112, rangeSize=25165824
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.761] [VFS DEBUG] [VFS RandomAccessor Write] Using existing seqBuffer: fileID=448704347635712, offset=25165824
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.761] [VFS DEBUG] [VFS Write] Successfully wrote data: fileID=448704347635712, offset=25165824, size=524288, written=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.761] [VFS DEBUG] [VFS Write] Write called: objID=448704347635712, offset=25690112, size=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.761] [VFS DEBUG] [VFS Write] Object info: objID=448704347635712, type=2 (FILE=2, DIR=1), name=5月23日.mp4, PID=448701399040000
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.761] [VFS DEBUG] [VFS Write] Writing data: fileID=448704347635712, offset=25690112, size=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.761] [VFS DEBUG] [VFS updateWriteRange] Updated write range: fileID=448704347635712, start=524288, end=26214400, rangeSize=25690112
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.761] [VFS DEBUG] [VFS RandomAccessor Write] Using existing seqBuffer: fileID=448704347635712, offset=25690112
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.761] [VFS DEBUG] [VFS Write] Successfully wrote data: fileID=448704347635712, offset=25690112, size=524288, written=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.762] [VFS DEBUG] [VFS Write] Write called: objID=448704347635712, offset=26214400, size=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.762] [VFS DEBUG] [VFS Write] Object info: objID=448704347635712, type=2 (FILE=2, DIR=1), name=5月23日.mp4, PID=448701399040000
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.762] [VFS DEBUG] [VFS Write] Writing data: fileID=448704347635712, offset=26214400, size=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.762] [VFS DEBUG] [VFS updateWriteRange] Updated write range: fileID=448704347635712, start=524288, end=26738688, rangeSize=26214400
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.762] [VFS DEBUG] [VFS RandomAccessor Write] Using existing seqBuffer: fileID=448704347635712, offset=26214400
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.762] [VFS DEBUG] [VFS Write] Successfully wrote data: fileID=448704347635712, offset=26214400, size=524288, written=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.762] [VFS DEBUG] [VFS Write] Write called: objID=448704347635712, offset=26738688, size=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.762] [VFS DEBUG] [VFS Write] Object info: objID=448704347635712, type=2 (FILE=2, DIR=1), name=5月23日.mp4, PID=448701399040000
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.762] [VFS DEBUG] [VFS Write] Writing data: fileID=448704347635712, offset=26738688, size=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.762] [VFS DEBUG] [VFS updateWriteRange] Updated write range: fileID=448704347635712, start=524288, end=27262976, rangeSize=26738688
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.762] [VFS DEBUG] [VFS RandomAccessor Write] Using existing seqBuffer: fileID=448704347635712, offset=26738688
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.762] [VFS DEBUG] [VFS Write] Successfully wrote data: fileID=448704347635712, offset=26738688, size=524288, written=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.762] [VFS DEBUG] [VFS Write] Write called: objID=448704347635712, offset=27262976, size=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.762] [VFS DEBUG] [VFS Write] Object info: objID=448704347635712, type=2 (FILE=2, DIR=1), name=5月23日.mp4, PID=448701399040000
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.762] [VFS DEBUG] [VFS Write] Writing data: fileID=448704347635712, offset=27262976, size=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.762] [VFS DEBUG] [VFS updateWriteRange] Updated write range: fileID=448704347635712, start=524288, end=27787264, rangeSize=27262976
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.762] [VFS DEBUG] [VFS RandomAccessor Write] Using existing seqBuffer: fileID=448704347635712, offset=27262976
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.762] [VFS DEBUG] [VFS Write] Successfully wrote data: fileID=448704347635712, offset=27262976, size=524288, written=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.763] [VFS DEBUG] [VFS Write] Write called: objID=448704347635712, offset=27787264, size=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.763] [VFS DEBUG] [VFS Write] Object info: objID=448704347635712, type=2 (FILE=2, DIR=1), name=5月23日.mp4, PID=448701399040000
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.763] [VFS DEBUG] [VFS Write] Writing data: fileID=448704347635712, offset=27787264, size=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.763] [VFS DEBUG] [VFS updateWriteRange] Updated write range: fileID=448704347635712, start=524288, end=28311552, rangeSize=27787264
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.763] [VFS DEBUG] [VFS RandomAccessor Write] Using existing seqBuffer: fileID=448704347635712, offset=27787264
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.763] [VFS DEBUG] [VFS Write] Successfully wrote data: fileID=448704347635712, offset=27787264, size=524288, written=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.775] [VFS DEBUG] [VFS Write] Write called: objID=448704347635712, offset=28311552, size=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.775] [VFS DEBUG] [VFS Write] Object info: objID=448704347635712, type=2 (FILE=2, DIR=1), name=5月23日.mp4, PID=448701399040000
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.775] [VFS DEBUG] [VFS Write] Writing data: fileID=448704347635712, offset=28311552, size=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.775] [VFS DEBUG] [VFS updateWriteRange] Updated write range: fileID=448704347635712, start=524288, end=28835840, rangeSize=28311552
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.775] [VFS DEBUG] [VFS RandomAccessor Write] Using existing seqBuffer: fileID=448704347635712, offset=28311552
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.775] [VFS DEBUG] [VFS Write] Successfully wrote data: fileID=448704347635712, offset=28311552, size=524288, written=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.776] [VFS DEBUG] [VFS Write] Write called: objID=448704347635712, offset=28835840, size=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.776] [VFS DEBUG] [VFS Write] Object info: objID=448704347635712, type=2 (FILE=2, DIR=1), name=5月23日.mp4, PID=448701399040000
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.776] [VFS DEBUG] [VFS Write] Writing data: fileID=448704347635712, offset=28835840, size=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.776] [VFS DEBUG] [VFS updateWriteRange] Updated write range: fileID=448704347635712, start=524288, end=29360128, rangeSize=28835840
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.776] [VFS DEBUG] [VFS RandomAccessor Write] Using existing seqBuffer: fileID=448704347635712, offset=28835840
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.776] [VFS DEBUG] [VFS Write] Successfully wrote data: fileID=448704347635712, offset=28835840, size=524288, written=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.796] [VFS DEBUG] [VFS Write] Write called: objID=448704347635712, offset=29360128, size=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.796] [VFS DEBUG] [VFS Write] Object info: objID=448704347635712, type=2 (FILE=2, DIR=1), name=5月23日.mp4, PID=448701399040000
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.796] [VFS DEBUG] [VFS Write] Writing data: fileID=448704347635712, offset=29360128, size=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.796] [VFS DEBUG] [VFS updateWriteRange] Updated write range: fileID=448704347635712, start=524288, end=29884416, rangeSize=29360128
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.796] [VFS DEBUG] [VFS RandomAccessor Write] Using existing seqBuffer: fileID=448704347635712, offset=29360128
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.796] [VFS DEBUG] [VFS Write] Successfully wrote data: fileID=448704347635712, offset=29360128, size=524288, written=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.797] [VFS DEBUG] [VFS Write] Write called: objID=448704347635712, offset=29884416, size=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.797] [VFS DEBUG] [VFS Write] Object info: objID=448704347635712, type=2 (FILE=2, DIR=1), name=5月23日.mp4, PID=448701399040000
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.797] [VFS DEBUG] [VFS Write] Writing data: fileID=448704347635712, offset=29884416, size=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.797] [VFS DEBUG] [VFS updateWriteRange] Updated write range: fileID=448704347635712, start=524288, end=30408704, rangeSize=29884416
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.797] [VFS DEBUG] [VFS RandomAccessor Write] Using existing seqBuffer: fileID=448704347635712, offset=29884416
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.797] [VFS DEBUG] [VFS Write] Successfully wrote data: fileID=448704347635712, offset=29884416, size=524288, written=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.818] [VFS DEBUG] [VFS Write] Write called: objID=448704347635712, offset=30408704, size=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.818] [VFS DEBUG] [VFS Write] Object info: objID=448704347635712, type=2 (FILE=2, DIR=1), name=5月23日.mp4, PID=448701399040000
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.818] [VFS DEBUG] [VFS Write] Writing data: fileID=448704347635712, offset=30408704, size=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.818] [VFS DEBUG] [VFS updateWriteRange] Updated write range: fileID=448704347635712, start=524288, end=30932992, rangeSize=30408704
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.818] [VFS DEBUG] [VFS RandomAccessor Write] Using existing seqBuffer: fileID=448704347635712, offset=30408704
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.818] [VFS DEBUG] [VFS Write] Successfully wrote data: fileID=448704347635712, offset=30408704, size=524288, written=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.818] [VFS DEBUG] [VFS Write] Write called: objID=448704347635712, offset=30932992, size=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.818] [VFS DEBUG] [VFS Write] Object info: objID=448704347635712, type=2 (FILE=2, DIR=1), name=5月23日.mp4, PID=448701399040000
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.818] [VFS DEBUG] [VFS Write] Writing data: fileID=448704347635712, offset=30932992, size=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.818] [VFS DEBUG] [VFS updateWriteRange] Updated write range: fileID=448704347635712, start=524288, end=31457280, rangeSize=30932992
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.818] [VFS DEBUG] [VFS RandomAccessor Write] Using existing seqBuffer: fileID=448704347635712, offset=30932992
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.829] [VFS DEBUG] [VFS flushSequentialChunk] Original chunk: fileID=448704347635712, chunk=10485760, OrigSize=31457280, Kind=0x2 (CMPR=false, ENDEC=true)
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.841] [VFS DEBUG] [VFS flushSequentialChunk] Chunk sizes: fileID=448704347635712, original=10485760, encoded=10485788, Kind=0x2
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.841] [VFS DEBUG] [VFS flushSequentialChunk] Updated Size: fileID=448704347635712, Size=31457364, OrigSize=31457280 (CMPR=false, ENDEC=true)
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.841] [VFS DEBUG] [VFS flushSequentialChunk] Writing chunk: fileID=448704347635712, dataID=448704351830016, sn=2, originalSize=10485760, encodedSize=10485788
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.993] [VFS DEBUG] [VFS flushSequentialChunk] Successfully wrote chunk: fileID=448704347635712, dataID=448704351830016, sn=2, encodedSize=10485788, OrigSize=31457280, Size=31457364
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.993] [VFS DEBUG] [VFS clearSeqBuffer] Released tier 3 buffer and reset to tier 1: fileID=448704347635712, dataID=448704351830016, oldCap=10485760, newCap=131072
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.993] [VFS DEBUG] [VFS flushSequentialChunk] After flush: fileID=448704347635712, dataID=448704351830016, sn=3, bufferLen=0, hasData=true, OrigSize=31457280, Size=31457364
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.993] [VFS DEBUG] [VFS Write] Successfully wrote data: fileID=448704347635712, offset=30932992, size=524288, written=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.994] [VFS DEBUG] [VFS Write] Write called: objID=448704347635712, offset=31457280, size=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.994] [VFS DEBUG] [VFS Write] Object info: objID=448704347635712, type=2 (FILE=2, DIR=1), name=5月23日.mp4, PID=448701399040000
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.994] [VFS DEBUG] [VFS Write] Writing data: fileID=448704347635712, offset=31457280, size=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.994] [VFS DEBUG] [VFS updateWriteRange] Updated write range: fileID=448704347635712, start=524288, end=31981568, rangeSize=31457280
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.994] [VFS DEBUG] [VFS RandomAccessor Write] Using existing seqBuffer: fileID=448704347635712, offset=31457280
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.994] [VFS DEBUG] [VFS writeSequential] Upgraded buffer: fileID=448704347635712, dataID=448704351830016, fromTier=1, toTier=2, neededCap=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.994] [VFS DEBUG] [VFS Write] Successfully wrote data: fileID=448704347635712, offset=31457280, size=524288, written=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.994] [VFS DEBUG] [VFS Write] Write called: objID=448704347635712, offset=31981568, size=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.994] [VFS DEBUG] [VFS Write] Object info: objID=448704347635712, type=2 (FILE=2, DIR=1), name=5月23日.mp4, PID=448701399040000
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.994] [VFS DEBUG] [VFS Write] Writing data: fileID=448704347635712, offset=31981568, size=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.994] [VFS DEBUG] [VFS updateWriteRange] Updated write range: fileID=448704347635712, start=524288, end=32505856, rangeSize=31981568
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.994] [VFS DEBUG] [VFS RandomAccessor Write] Using existing seqBuffer: fileID=448704347635712, offset=31981568
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.994] [VFS DEBUG] [VFS Write] Successfully wrote data: fileID=448704347635712, offset=31981568, size=524288, written=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.994] [VFS DEBUG] [VFS Write] Write called: objID=448704347635712, offset=32505856, size=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.994] [VFS DEBUG] [VFS Write] Object info: objID=448704347635712, type=2 (FILE=2, DIR=1), name=5月23日.mp4, PID=448701399040000
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.994] [VFS DEBUG] [VFS Write] Writing data: fileID=448704347635712, offset=32505856, size=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.994] [VFS DEBUG] [VFS updateWriteRange] Updated write range: fileID=448704347635712, start=524288, end=33030144, rangeSize=32505856
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.994] [VFS DEBUG] [VFS RandomAccessor Write] Using existing seqBuffer: fileID=448704347635712, offset=32505856
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.994] [VFS DEBUG] [VFS writeSequential] Upgraded buffer: fileID=448704347635712, dataID=448704351830016, fromTier=2, toTier=3, neededCap=1572864
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.995] [VFS DEBUG] [VFS Write] Successfully wrote data: fileID=448704347635712, offset=32505856, size=524288, written=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.995] [VFS DEBUG] [VFS Write] Write called: objID=448704347635712, offset=33030144, size=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.995] [VFS DEBUG] [VFS Write] Object info: objID=448704347635712, type=2 (FILE=2, DIR=1), name=5月23日.mp4, PID=448701399040000
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.995] [VFS DEBUG] [VFS Write] Writing data: fileID=448704347635712, offset=33030144, size=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.995] [VFS DEBUG] [VFS updateWriteRange] Updated write range: fileID=448704347635712, start=524288, end=33554432, rangeSize=33030144
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.995] [VFS DEBUG] [VFS RandomAccessor Write] Using existing seqBuffer: fileID=448704347635712, offset=33030144
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.995] [VFS DEBUG] [VFS Write] Successfully wrote data: fileID=448704347635712, offset=33030144, size=524288, written=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.995] [VFS DEBUG] [VFS Write] Write called: objID=448704347635712, offset=33554432, size=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.995] [VFS DEBUG] [VFS Write] Object info: objID=448704347635712, type=2 (FILE=2, DIR=1), name=5月23日.mp4, PID=448701399040000
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.995] [VFS DEBUG] [VFS Write] Writing data: fileID=448704347635712, offset=33554432, size=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.995] [VFS DEBUG] [VFS updateWriteRange] Updated write range: fileID=448704347635712, start=524288, end=34078720, rangeSize=33554432
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.995] [VFS DEBUG] [VFS RandomAccessor Write] Using existing seqBuffer: fileID=448704347635712, offset=33554432
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.995] [VFS DEBUG] [VFS Write] Successfully wrote data: fileID=448704347635712, offset=33554432, size=524288, written=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.996] [VFS DEBUG] [VFS Write] Write called: objID=448704347635712, offset=34078720, size=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.996] [VFS DEBUG] [VFS Write] Object info: objID=448704347635712, type=2 (FILE=2, DIR=1), name=5月23日.mp4, PID=448701399040000
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.996] [VFS DEBUG] [VFS Write] Writing data: fileID=448704347635712, offset=34078720, size=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.996] [VFS DEBUG] [VFS updateWriteRange] Updated write range: fileID=448704347635712, start=524288, end=34603008, rangeSize=34078720
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.996] [VFS DEBUG] [VFS RandomAccessor Write] Using existing seqBuffer: fileID=448704347635712, offset=34078720
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.996] [VFS DEBUG] [VFS Write] Successfully wrote data: fileID=448704347635712, offset=34078720, size=524288, written=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.996] [VFS DEBUG] [VFS Write] Write called: objID=448704347635712, offset=34603008, size=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.996] [VFS DEBUG] [VFS Write] Object info: objID=448704347635712, type=2 (FILE=2, DIR=1), name=5月23日.mp4, PID=448701399040000
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.996] [VFS DEBUG] [VFS Write] Writing data: fileID=448704347635712, offset=34603008, size=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.996] [VFS DEBUG] [VFS updateWriteRange] Updated write range: fileID=448704347635712, start=524288, end=35127296, rangeSize=34603008
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.996] [VFS DEBUG] [VFS RandomAccessor Write] Using existing seqBuffer: fileID=448704347635712, offset=34603008
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.996] [VFS DEBUG] [VFS Write] Successfully wrote data: fileID=448704347635712, offset=34603008, size=524288, written=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.997] [VFS DEBUG] [VFS Write] Write called: objID=448704347635712, offset=35127296, size=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.997] [VFS DEBUG] [VFS Write] Object info: objID=448704347635712, type=2 (FILE=2, DIR=1), name=5月23日.mp4, PID=448701399040000
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.997] [VFS DEBUG] [VFS Write] Writing data: fileID=448704347635712, offset=35127296, size=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.997] [VFS DEBUG] [VFS updateWriteRange] Updated write range: fileID=448704347635712, start=524288, end=35651584, rangeSize=35127296
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.997] [VFS DEBUG] [VFS RandomAccessor Write] Using existing seqBuffer: fileID=448704347635712, offset=35127296
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.997] [VFS DEBUG] [VFS Write] Successfully wrote data: fileID=448704347635712, offset=35127296, size=524288, written=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.997] [VFS DEBUG] [VFS Write] Write called: objID=448704347635712, offset=35651584, size=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.997] [VFS DEBUG] [VFS Write] Object info: objID=448704347635712, type=2 (FILE=2, DIR=1), name=5月23日.mp4, PID=448701399040000
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.997] [VFS DEBUG] [VFS Write] Writing data: fileID=448704347635712, offset=35651584, size=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.997] [VFS DEBUG] [VFS updateWriteRange] Updated write range: fileID=448704347635712, start=524288, end=36175872, rangeSize=35651584
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.997] [VFS DEBUG] [VFS RandomAccessor Write] Using existing seqBuffer: fileID=448704347635712, offset=35651584
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.997] [VFS DEBUG] [VFS Write] Successfully wrote data: fileID=448704347635712, offset=35651584, size=524288, written=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.997] [VFS DEBUG] [VFS Write] Write called: objID=448704347635712, offset=36175872, size=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.997] [VFS DEBUG] [VFS Write] Object info: objID=448704347635712, type=2 (FILE=2, DIR=1), name=5月23日.mp4, PID=448701399040000
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.997] [VFS DEBUG] [VFS Write] Writing data: fileID=448704347635712, offset=36175872, size=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.997] [VFS DEBUG] [VFS updateWriteRange] Updated write range: fileID=448704347635712, start=524288, end=36700160, rangeSize=36175872
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.997] [VFS DEBUG] [VFS RandomAccessor Write] Using existing seqBuffer: fileID=448704347635712, offset=36175872
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.997] [VFS DEBUG] [VFS Write] Successfully wrote data: fileID=448704347635712, offset=36175872, size=524288, written=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.998] [VFS DEBUG] [VFS Write] Write called: objID=448704347635712, offset=36700160, size=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.998] [VFS DEBUG] [VFS Write] Object info: objID=448704347635712, type=2 (FILE=2, DIR=1), name=5月23日.mp4, PID=448701399040000
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.998] [VFS DEBUG] [VFS Write] Writing data: fileID=448704347635712, offset=36700160, size=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.998] [VFS DEBUG] [VFS updateWriteRange] Updated write range: fileID=448704347635712, start=524288, end=37224448, rangeSize=36700160
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.998] [VFS DEBUG] [VFS RandomAccessor Write] Using existing seqBuffer: fileID=448704347635712, offset=36700160
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.998] [VFS DEBUG] [VFS Write] Successfully wrote data: fileID=448704347635712, offset=36700160, size=524288, written=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.998] [VFS DEBUG] [VFS Write] Write called: objID=448704347635712, offset=37224448, size=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.998] [VFS DEBUG] [VFS Write] Object info: objID=448704347635712, type=2 (FILE=2, DIR=1), name=5月23日.mp4, PID=448701399040000
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.998] [VFS DEBUG] [VFS Write] Writing data: fileID=448704347635712, offset=37224448, size=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.998] [VFS DEBUG] [VFS updateWriteRange] Updated write range: fileID=448704347635712, start=524288, end=37748736, rangeSize=37224448
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.998] [VFS DEBUG] [VFS RandomAccessor Write] Using existing seqBuffer: fileID=448704347635712, offset=37224448
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.998] [VFS DEBUG] [VFS Write] Successfully wrote data: fileID=448704347635712, offset=37224448, size=524288, written=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.999] [VFS DEBUG] [VFS Write] Write called: objID=448704347635712, offset=37748736, size=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.999] [VFS DEBUG] [VFS Write] Object info: objID=448704347635712, type=2 (FILE=2, DIR=1), name=5月23日.mp4, PID=448701399040000
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.999] [VFS DEBUG] [VFS Write] Writing data: fileID=448704347635712, offset=37748736, size=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.999] [VFS DEBUG] [VFS updateWriteRange] Updated write range: fileID=448704347635712, start=524288, end=38273024, rangeSize=37748736
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.999] [VFS DEBUG] [VFS RandomAccessor Write] Using existing seqBuffer: fileID=448704347635712, offset=37748736
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.999] [VFS DEBUG] [VFS Write] Successfully wrote data: fileID=448704347635712, offset=37748736, size=524288, written=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.999] [VFS DEBUG] [VFS Write] Write called: objID=448704347635712, offset=38273024, size=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.999] [VFS DEBUG] [VFS Write] Object info: objID=448704347635712, type=2 (FILE=2, DIR=1), name=5月23日.mp4, PID=448701399040000
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.999] [VFS DEBUG] [VFS Write] Writing data: fileID=448704347635712, offset=38273024, size=524288
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.999] [VFS DEBUG] [VFS updateWriteRange] Updated write range: fileID=448704347635712, start=524288, end=38797312, rangeSize=38273024
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.999] [VFS DEBUG] [VFS RandomAccessor Write] Using existing seqBuffer: fileID=448704347635712, offset=38273024
+Jan 29 06:30:53 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:53.999] [VFS DEBUG] [VFS Write] Successfully wrote data: fileID=448704347635712, offset=38273024, size=524288, written=524288
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.021] [VFS DEBUG] [VFS Write] Write called: objID=448704347635712, offset=38797312, size=524288
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.021] [VFS DEBUG] [VFS Write] Object info: objID=448704347635712, type=2 (FILE=2, DIR=1), name=5月23日.mp4, PID=448701399040000
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.021] [VFS DEBUG] [VFS Write] Writing data: fileID=448704347635712, offset=38797312, size=524288
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.021] [VFS DEBUG] [VFS updateWriteRange] Updated write range: fileID=448704347635712, start=524288, end=39321600, rangeSize=38797312
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.021] [VFS DEBUG] [VFS RandomAccessor Write] Using existing seqBuffer: fileID=448704347635712, offset=38797312
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.021] [VFS DEBUG] [VFS Write] Successfully wrote data: fileID=448704347635712, offset=38797312, size=524288, written=524288
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.021] [VFS DEBUG] [VFS Write] Write called: objID=448704347635712, offset=39321600, size=524288
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.021] [VFS DEBUG] [VFS Write] Object info: objID=448704347635712, type=2 (FILE=2, DIR=1), name=5月23日.mp4, PID=448701399040000
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.021] [VFS DEBUG] [VFS Write] Writing data: fileID=448704347635712, offset=39321600, size=524288
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.021] [VFS DEBUG] [VFS updateWriteRange] Updated write range: fileID=448704347635712, start=524288, end=39845888, rangeSize=39321600
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.021] [VFS DEBUG] [VFS RandomAccessor Write] Using existing seqBuffer: fileID=448704347635712, offset=39321600
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.021] [VFS DEBUG] [VFS Write] Successfully wrote data: fileID=448704347635712, offset=39321600, size=524288, written=524288
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.042] [VFS DEBUG] [VFS Write] Write called: objID=448704347635712, offset=39845888, size=524288
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.042] [VFS DEBUG] [VFS Write] Object info: objID=448704347635712, type=2 (FILE=2, DIR=1), name=5月23日.mp4, PID=448701399040000
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.042] [VFS DEBUG] [VFS Write] Writing data: fileID=448704347635712, offset=39845888, size=524288
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.042] [VFS DEBUG] [VFS updateWriteRange] Updated write range: fileID=448704347635712, start=524288, end=40370176, rangeSize=39845888
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.042] [VFS DEBUG] [VFS RandomAccessor Write] Using existing seqBuffer: fileID=448704347635712, offset=39845888
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.042] [VFS DEBUG] [VFS Write] Successfully wrote data: fileID=448704347635712, offset=39845888, size=524288, written=524288
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.043] [VFS DEBUG] [VFS Write] Write called: objID=448704347635712, offset=40370176, size=524288
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.043] [VFS DEBUG] [VFS Write] Object info: objID=448704347635712, type=2 (FILE=2, DIR=1), name=5月23日.mp4, PID=448701399040000
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.043] [VFS DEBUG] [VFS Write] Writing data: fileID=448704347635712, offset=40370176, size=524288
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.043] [VFS DEBUG] [VFS updateWriteRange] Updated write range: fileID=448704347635712, start=524288, end=40894464, rangeSize=40370176
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.043] [VFS DEBUG] [VFS RandomAccessor Write] Using existing seqBuffer: fileID=448704347635712, offset=40370176
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.043] [VFS DEBUG] [VFS Write] Successfully wrote data: fileID=448704347635712, offset=40370176, size=524288, written=524288
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.055] [VFS DEBUG] [VFS Write] Write called: objID=448704347635712, offset=40894464, size=524288
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.055] [VFS DEBUG] [VFS Write] Object info: objID=448704347635712, type=2 (FILE=2, DIR=1), name=5月23日.mp4, PID=448701399040000
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.055] [VFS DEBUG] [VFS Write] Writing data: fileID=448704347635712, offset=40894464, size=524288
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.055] [VFS DEBUG] [VFS updateWriteRange] Updated write range: fileID=448704347635712, start=524288, end=41418752, rangeSize=40894464
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.055] [VFS DEBUG] [VFS RandomAccessor Write] Using existing seqBuffer: fileID=448704347635712, offset=40894464
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.055] [VFS DEBUG] [VFS Write] Successfully wrote data: fileID=448704347635712, offset=40894464, size=524288, written=524288
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.055] [VFS DEBUG] [VFS Write] Write called: objID=448704347635712, offset=41418752, size=524288
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.055] [VFS DEBUG] [VFS Write] Object info: objID=448704347635712, type=2 (FILE=2, DIR=1), name=5月23日.mp4, PID=448701399040000
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.055] [VFS DEBUG] [VFS Write] Writing data: fileID=448704347635712, offset=41418752, size=524288
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.055] [VFS DEBUG] [VFS updateWriteRange] Updated write range: fileID=448704347635712, start=524288, end=41943040, rangeSize=41418752
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.055] [VFS DEBUG] [VFS RandomAccessor Write] Using existing seqBuffer: fileID=448704347635712, offset=41418752
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.067] [VFS DEBUG] [VFS flushSequentialChunk] Original chunk: fileID=448704347635712, chunk=10485760, OrigSize=41943040, Kind=0x2 (CMPR=false, ENDEC=true)
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.076] [VFS DEBUG] [VFS flushSequentialChunk] Chunk sizes: fileID=448704347635712, original=10485760, encoded=10485788, Kind=0x2
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.076] [VFS DEBUG] [VFS flushSequentialChunk] Updated Size: fileID=448704347635712, Size=41943152, OrigSize=41943040 (CMPR=false, ENDEC=true)
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.076] [VFS DEBUG] [VFS flushSequentialChunk] Writing chunk: fileID=448704347635712, dataID=448704351830016, sn=3, originalSize=10485760, encodedSize=10485788
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.233] [VFS DEBUG] [VFS flushSequentialChunk] Successfully wrote chunk: fileID=448704347635712, dataID=448704351830016, sn=3, encodedSize=10485788, OrigSize=41943040, Size=41943152
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.233] [VFS DEBUG] [VFS clearSeqBuffer] Released tier 3 buffer and reset to tier 1: fileID=448704347635712, dataID=448704351830016, oldCap=10485760, newCap=131072
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.233] [VFS DEBUG] [VFS flushSequentialChunk] After flush: fileID=448704347635712, dataID=448704351830016, sn=4, bufferLen=0, hasData=true, OrigSize=41943040, Size=41943152
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.233] [VFS DEBUG] [VFS Write] Successfully wrote data: fileID=448704347635712, offset=41418752, size=524288, written=524288
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.234] [VFS DEBUG] [VFS Write] Write called: objID=448704347635712, offset=41943040, size=524288
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.234] [VFS DEBUG] [VFS Write] Object info: objID=448704347635712, type=2 (FILE=2, DIR=1), name=5月23日.mp4, PID=448701399040000
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.234] [VFS DEBUG] [VFS Write] Writing data: fileID=448704347635712, offset=41943040, size=524288
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.234] [VFS DEBUG] [VFS updateWriteRange] Updated write range: fileID=448704347635712, start=524288, end=42467328, rangeSize=41943040
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.234] [VFS DEBUG] [VFS RandomAccessor Write] Using existing seqBuffer: fileID=448704347635712, offset=41943040
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.234] [VFS DEBUG] [VFS writeSequential] Upgraded buffer: fileID=448704347635712, dataID=448704351830016, fromTier=1, toTier=2, neededCap=524288
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.234] [VFS DEBUG] [VFS Write] Successfully wrote data: fileID=448704347635712, offset=41943040, size=524288, written=524288
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.234] [VFS DEBUG] [VFS Write] Write called: objID=448704347635712, offset=42467328, size=524288
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.234] [VFS DEBUG] [VFS Write] Object info: objID=448704347635712, type=2 (FILE=2, DIR=1), name=5月23日.mp4, PID=448701399040000
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.234] [VFS DEBUG] [VFS Write] Writing data: fileID=448704347635712, offset=42467328, size=524288
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.234] [VFS DEBUG] [VFS updateWriteRange] Updated write range: fileID=448704347635712, start=524288, end=42991616, rangeSize=42467328
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.234] [VFS DEBUG] [VFS RandomAccessor Write] Using existing seqBuffer: fileID=448704347635712, offset=42467328
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.234] [VFS DEBUG] [VFS Write] Successfully wrote data: fileID=448704347635712, offset=42467328, size=524288, written=524288
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.235] [VFS DEBUG] [VFS Write] Write called: objID=448704347635712, offset=42991616, size=524288
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.235] [VFS DEBUG] [VFS Write] Object info: objID=448704347635712, type=2 (FILE=2, DIR=1), name=5月23日.mp4, PID=448701399040000
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.235] [VFS DEBUG] [VFS Write] Writing data: fileID=448704347635712, offset=42991616, size=524288
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.235] [VFS DEBUG] [VFS updateWriteRange] Updated write range: fileID=448704347635712, start=524288, end=43515904, rangeSize=42991616
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.235] [VFS DEBUG] [VFS RandomAccessor Write] Using existing seqBuffer: fileID=448704347635712, offset=42991616
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.235] [VFS DEBUG] [VFS writeSequential] Upgraded buffer: fileID=448704347635712, dataID=448704351830016, fromTier=2, toTier=3, neededCap=1572864
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.235] [VFS DEBUG] [VFS Write] Successfully wrote data: fileID=448704347635712, offset=42991616, size=524288, written=524288
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.235] [VFS DEBUG] [VFS Write] Write called: objID=448704347635712, offset=43515904, size=524288
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.235] [VFS DEBUG] [VFS Write] Object info: objID=448704347635712, type=2 (FILE=2, DIR=1), name=5月23日.mp4, PID=448701399040000
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.235] [VFS DEBUG] [VFS Write] Writing data: fileID=448704347635712, offset=43515904, size=524288
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.235] [VFS DEBUG] [VFS updateWriteRange] Updated write range: fileID=448704347635712, start=524288, end=44040192, rangeSize=43515904
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.235] [VFS DEBUG] [VFS RandomAccessor Write] Using existing seqBuffer: fileID=448704347635712, offset=43515904
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.235] [VFS DEBUG] [VFS Write] Successfully wrote data: fileID=448704347635712, offset=43515904, size=524288, written=524288
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.236] [VFS DEBUG] [VFS Write] Write called: objID=448704347635712, offset=44040192, size=524288
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.236] [VFS DEBUG] [VFS Write] Object info: objID=448704347635712, type=2 (FILE=2, DIR=1), name=5月23日.mp4, PID=448701399040000
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.236] [VFS DEBUG] [VFS Write] Writing data: fileID=448704347635712, offset=44040192, size=524288
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.236] [VFS DEBUG] [VFS updateWriteRange] Updated write range: fileID=448704347635712, start=524288, end=44564480, rangeSize=44040192
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.236] [VFS DEBUG] [VFS RandomAccessor Write] Using existing seqBuffer: fileID=448704347635712, offset=44040192
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.236] [VFS DEBUG] [VFS Write] Successfully wrote data: fileID=448704347635712, offset=44040192, size=524288, written=524288
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.236] [VFS DEBUG] [VFS Write] Write called: objID=448704347635712, offset=44564480, size=524288
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.236] [VFS DEBUG] [VFS Write] Object info: objID=448704347635712, type=2 (FILE=2, DIR=1), name=5月23日.mp4, PID=448701399040000
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.236] [VFS DEBUG] [VFS Write] Writing data: fileID=448704347635712, offset=44564480, size=524288
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.236] [VFS DEBUG] [VFS updateWriteRange] Updated write range: fileID=448704347635712, start=524288, end=45088768, rangeSize=44564480
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.236] [VFS DEBUG] [VFS RandomAccessor Write] Using existing seqBuffer: fileID=448704347635712, offset=44564480
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.236] [VFS DEBUG] [VFS Write] Successfully wrote data: fileID=448704347635712, offset=44564480, size=524288, written=524288
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.237] [VFS DEBUG] [VFS Write] Write called: objID=448704347635712, offset=45088768, size=524288
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.237] [VFS DEBUG] [VFS Write] Object info: objID=448704347635712, type=2 (FILE=2, DIR=1), name=5月23日.mp4, PID=448701399040000
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.237] [VFS DEBUG] [VFS Write] Writing data: fileID=448704347635712, offset=45088768, size=524288
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.237] [VFS DEBUG] [VFS updateWriteRange] Updated write range: fileID=448704347635712, start=524288, end=45613056, rangeSize=45088768
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.237] [VFS DEBUG] [VFS RandomAccessor Write] Using existing seqBuffer: fileID=448704347635712, offset=45088768
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.237] [VFS DEBUG] [VFS Write] Successfully wrote data: fileID=448704347635712, offset=45088768, size=524288, written=524288
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.237] [VFS DEBUG] [VFS Write] Write called: objID=448704347635712, offset=45613056, size=524288
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.237] [VFS DEBUG] [VFS Write] Object info: objID=448704347635712, type=2 (FILE=2, DIR=1), name=5月23日.mp4, PID=448701399040000
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.237] [VFS DEBUG] [VFS Write] Writing data: fileID=448704347635712, offset=45613056, size=524288
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.237] [VFS DEBUG] [VFS updateWriteRange] Updated write range: fileID=448704347635712, start=524288, end=46137344, rangeSize=45613056
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.237] [VFS DEBUG] [VFS RandomAccessor Write] Using existing seqBuffer: fileID=448704347635712, offset=45613056
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.237] [VFS DEBUG] [VFS Write] Successfully wrote data: fileID=448704347635712, offset=45613056, size=524288, written=524288
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.237] [VFS DEBUG] [VFS Write] Write called: objID=448704347635712, offset=46137344, size=524288
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.237] [VFS DEBUG] [VFS Write] Object info: objID=448704347635712, type=2 (FILE=2, DIR=1), name=5月23日.mp4, PID=448701399040000
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.237] [VFS DEBUG] [VFS Write] Writing data: fileID=448704347635712, offset=46137344, size=524288
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.237] [VFS DEBUG] [VFS updateWriteRange] Updated write range: fileID=448704347635712, start=524288, end=46661632, rangeSize=46137344
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.237] [VFS DEBUG] [VFS RandomAccessor Write] Using existing seqBuffer: fileID=448704347635712, offset=46137344
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.237] [VFS DEBUG] [VFS Write] Successfully wrote data: fileID=448704347635712, offset=46137344, size=524288, written=524288
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.238] [VFS DEBUG] [VFS Write] Write called: objID=448704347635712, offset=46661632, size=524288
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.238] [VFS DEBUG] [VFS Write] Object info: objID=448704347635712, type=2 (FILE=2, DIR=1), name=5月23日.mp4, PID=448701399040000
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.238] [VFS DEBUG] [VFS Write] Writing data: fileID=448704347635712, offset=46661632, size=524288
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.238] [VFS DEBUG] [VFS updateWriteRange] Updated write range: fileID=448704347635712, start=524288, end=47185920, rangeSize=46661632
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.238] [VFS DEBUG] [VFS RandomAccessor Write] Using existing seqBuffer: fileID=448704347635712, offset=46661632
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.238] [VFS DEBUG] [VFS Write] Successfully wrote data: fileID=448704347635712, offset=46661632, size=524288, written=524288
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.238] [VFS DEBUG] [VFS Write] Write called: objID=448704347635712, offset=47185920, size=524288
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.238] [VFS DEBUG] [VFS Write] Object info: objID=448704347635712, type=2 (FILE=2, DIR=1), name=5月23日.mp4, PID=448701399040000
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.238] [VFS DEBUG] [VFS Write] Writing data: fileID=448704347635712, offset=47185920, size=524288
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.238] [VFS DEBUG] [VFS updateWriteRange] Updated write range: fileID=448704347635712, start=524288, end=47710208, rangeSize=47185920
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.238] [VFS DEBUG] [VFS RandomAccessor Write] Using existing seqBuffer: fileID=448704347635712, offset=47185920
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.238] [VFS DEBUG] [VFS Write] Successfully wrote data: fileID=448704347635712, offset=47185920, size=524288, written=524288
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.238] [VFS DEBUG] [VFS Write] Write called: objID=448704347635712, offset=47710208, size=524288
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.238] [VFS DEBUG] [VFS Write] Object info: objID=448704347635712, type=2 (FILE=2, DIR=1), name=5月23日.mp4, PID=448701399040000
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.238] [VFS DEBUG] [VFS Write] Writing data: fileID=448704347635712, offset=47710208, size=524288
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.238] [VFS DEBUG] [VFS updateWriteRange] Updated write range: fileID=448704347635712, start=524288, end=48234496, rangeSize=47710208
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.238] [VFS DEBUG] [VFS RandomAccessor Write] Using existing seqBuffer: fileID=448704347635712, offset=47710208
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.238] [VFS DEBUG] [VFS Write] Successfully wrote data: fileID=448704347635712, offset=47710208, size=524288, written=524288
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.239] [VFS DEBUG] [VFS Write] Write called: objID=448704347635712, offset=48234496, size=524288
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.239] [VFS DEBUG] [VFS Write] Object info: objID=448704347635712, type=2 (FILE=2, DIR=1), name=5月23日.mp4, PID=448701399040000
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.239] [VFS DEBUG] [VFS Write] Writing data: fileID=448704347635712, offset=48234496, size=524288
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.239] [VFS DEBUG] [VFS updateWriteRange] Updated write range: fileID=448704347635712, start=524288, end=48758784, rangeSize=48234496
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.239] [VFS DEBUG] [VFS RandomAccessor Write] Using existing seqBuffer: fileID=448704347635712, offset=48234496
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.239] [VFS DEBUG] [VFS Write] Successfully wrote data: fileID=448704347635712, offset=48234496, size=524288, written=524288
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.239] [VFS DEBUG] [VFS Write] Write called: objID=448704347635712, offset=48758784, size=524288
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.239] [VFS DEBUG] [VFS Write] Object info: objID=448704347635712, type=2 (FILE=2, DIR=1), name=5月23日.mp4, PID=448701399040000
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.239] [VFS DEBUG] [VFS Write] Writing data: fileID=448704347635712, offset=48758784, size=524288
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.239] [VFS DEBUG] [VFS updateWriteRange] Updated write range: fileID=448704347635712, start=524288, end=49283072, rangeSize=48758784
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.239] [VFS DEBUG] [VFS RandomAccessor Write] Using existing seqBuffer: fileID=448704347635712, offset=48758784
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.239] [VFS DEBUG] [VFS Write] Successfully wrote data: fileID=448704347635712, offset=48758784, size=524288, written=524288
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.254] [VFS DEBUG] [VFS Write] Write called: objID=448704347635712, offset=55574528, size=524288
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.254] [VFS DEBUG] [VFS Write] Object info: objID=448704347635712, type=2 (FILE=2, DIR=1), name=5月23日.mp4, PID=448701399040000
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.254] [VFS DEBUG] [VFS Write] Writing data: fileID=448704347635712, offset=55574528, size=524288
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.254] [VFS DEBUG] [VFS updateWriteRange] Updated write range: fileID=448704347635712, start=524288, end=56098816, rangeSize=55574528
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.254] [VFS DEBUG] [VFS shouldUseJournal] Random write on existing file, using journal: fileID=448704347635712, offset=55574528
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.254] [VFS DEBUG] [VFS RandomAccessor Write] Using journal: fileID=448704347635712, offset=55574528, size=524288
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.254] [VFS DEBUG] [VFS migrateSeqBufferToJournal] Migrating seqBuffer to Journal: fileID=448704347635712, offset=41943040, size=7340032
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.254] [VFS DEBUG] [VFS getOrCreateJournal] Sparse file detected: fileID=448704347635712, sparseSize=56233610, actualSize=56233610
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.255] [VFS DEBUG] [Journal GetOrCreate] JournalWAL initialized: fileID=448704347635712
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.255] [VFS DEBUG] [Journal GetOrCreate] Created new journal: fileID=448704347635712, dataID=448704351830016, baseSize=56233610, isLarge=true, wal=true
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.255] [VFS DEBUG] [VFS getOrCreateJournal] Created/retrieved journal: fileID=448704347635712, dataID=448704351830016, baseSize=56233610, isSparse=true
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.377] [VFS DEBUG] [Journal Write] Added entry: fileID=448704347635712, offset=41943040, length=7340032, totalEntries=1, memoryUsage=7340048, currentSize=56233610
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.377] [VFS DEBUG] [VFS clearSeqBuffer] Released tier 3 buffer and reset to tier 1: fileID=448704347635712, dataID=448704351830016, oldCap=10485760, newCap=131072
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.425] [VFS DEBUG] [Journal Write] Added entry: fileID=448704347635712, offset=55574528, length=524288, totalEntries=2, memoryUsage=7864352, currentSize=56233610
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.425] [VFS DEBUG] [VFS Write] Successfully wrote data: fileID=448704347635712, offset=55574528, size=524288, written=524288
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.425] [VFS DEBUG] [VFS Write] Write called: objID=448704347635712, offset=56098816, size=134794
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.425] [VFS DEBUG] [VFS Write] Object info: objID=448704347635712, type=2 (FILE=2, DIR=1), name=5月23日.mp4, PID=448701399040000
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.425] [VFS DEBUG] [VFS Write] Writing data: fileID=448704347635712, offset=56098816, size=134794
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.425] [VFS DEBUG] [VFS updateWriteRange] Updated write range: fileID=448704347635712, start=524288, end=56233610, rangeSize=55709322
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.425] [VFS DEBUG] [VFS shouldUseJournal] Random write on existing file, using journal: fileID=448704347635712, offset=56098816
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.425] [VFS DEBUG] [VFS RandomAccessor Write] Using journal: fileID=448704347635712, offset=56098816, size=134794
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.461] [VFS DEBUG] [Journal Write] Added entry: fileID=448704347635712, offset=56098816, length=134794, totalEntries=3, memoryUsage=7999162, currentSize=56233610
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.461] [VFS DEBUG] [VFS Write] Successfully wrote data: fileID=448704347635712, offset=56098816, size=134794, written=134794
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.462] [VFS DEBUG] [VFS Write] Write called: objID=448704347635712, offset=50331648, size=524288
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.462] [VFS DEBUG] [VFS Write] Object info: objID=448704347635712, type=2 (FILE=2, DIR=1), name=5月23日.mp4, PID=448701399040000
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.462] [VFS DEBUG] [VFS Write] Writing data: fileID=448704347635712, offset=50331648, size=524288
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.462] [VFS DEBUG] [VFS updateWriteRange] Updated write range: fileID=448704347635712, start=524288, end=56233610, rangeSize=55709322
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.462] [VFS DEBUG] [VFS shouldUseJournal] Random write on existing file, using journal: fileID=448704347635712, offset=50331648
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.462] [VFS DEBUG] [VFS RandomAccessor Write] Using journal: fileID=448704347635712, offset=50331648, size=524288
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.509] [VFS DEBUG] [Journal Write] Added entry: fileID=448704347635712, offset=50331648, length=524288, totalEntries=4, memoryUsage=8523466, currentSize=56233610
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.509] [VFS DEBUG] [VFS Write] Successfully wrote data: fileID=448704347635712, offset=50331648, size=524288, written=524288
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.509] [VFS DEBUG] [VFS Write] Write called: objID=448704347635712, offset=50855936, size=524288
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.509] [VFS DEBUG] [VFS Write] Object info: objID=448704347635712, type=2 (FILE=2, DIR=1), name=5月23日.mp4, PID=448701399040000
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.509] [VFS DEBUG] [VFS Write] Writing data: fileID=448704347635712, offset=50855936, size=524288
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.509] [VFS DEBUG] [VFS updateWriteRange] Updated write range: fileID=448704347635712, start=524288, end=56233610, rangeSize=55709322
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.510] [VFS DEBUG] [VFS shouldUseJournal] Random write on existing file, using journal: fileID=448704347635712, offset=50855936
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.510] [VFS DEBUG] [VFS RandomAccessor Write] Using journal: fileID=448704347635712, offset=50855936, size=524288
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.557] [VFS DEBUG] [Journal Write] Added entry: fileID=448704347635712, offset=50855936, length=524288, totalEntries=5, memoryUsage=9047770, currentSize=56233610
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.557] [VFS DEBUG] [VFS Write] Successfully wrote data: fileID=448704347635712, offset=50855936, size=524288, written=524288
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.558] [VFS DEBUG] [VFS Write] Write called: objID=448704347635712, offset=49283072, size=524288
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.558] [VFS DEBUG] [VFS Write] Object info: objID=448704347635712, type=2 (FILE=2, DIR=1), name=5月23日.mp4, PID=448701399040000
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.558] [VFS DEBUG] [VFS Write] Writing data: fileID=448704347635712, offset=49283072, size=524288
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.558] [VFS DEBUG] [VFS updateWriteRange] Updated write range: fileID=448704347635712, start=524288, end=56233610, rangeSize=55709322
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.558] [VFS DEBUG] [VFS shouldUseJournal] Random write on existing file, using journal: fileID=448704347635712, offset=49283072
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.558] [VFS DEBUG] [VFS RandomAccessor Write] Using journal: fileID=448704347635712, offset=49283072, size=524288
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.593] [VFS DEBUG] [Journal Write] Added entry: fileID=448704347635712, offset=49283072, length=524288, totalEntries=6, memoryUsage=9572074, currentSize=56233610
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.593] [VFS DEBUG] [VFS Write] Successfully wrote data: fileID=448704347635712, offset=49283072, size=524288, written=524288
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.593] [VFS DEBUG] [VFS Write] Write called: objID=448704347635712, offset=49807360, size=524288
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.593] [VFS DEBUG] [VFS Write] Object info: objID=448704347635712, type=2 (FILE=2, DIR=1), name=5月23日.mp4, PID=448701399040000
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.593] [VFS DEBUG] [VFS Write] Writing data: fileID=448704347635712, offset=49807360, size=524288
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.593] [VFS DEBUG] [VFS updateWriteRange] Updated write range: fileID=448704347635712, start=524288, end=56233610, rangeSize=55709322
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.593] [VFS DEBUG] [VFS shouldUseJournal] Random write on existing file, using journal: fileID=448704347635712, offset=49807360
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.593] [VFS DEBUG] [VFS RandomAccessor Write] Using journal: fileID=448704347635712, offset=49807360, size=524288
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.641] [VFS DEBUG] [Journal Write] Added entry: fileID=448704347635712, offset=49807360, length=524288, totalEntries=7, memoryUsage=10096378, currentSize=56233610
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.641] [VFS DEBUG] [VFS Write] Successfully wrote data: fileID=448704347635712, offset=49807360, size=524288, written=524288
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.642] [VFS DEBUG] [VFS Write] Write called: objID=448704347635712, offset=51380224, size=524288
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.642] [VFS DEBUG] [VFS Write] Object info: objID=448704347635712, type=2 (FILE=2, DIR=1), name=5月23日.mp4, PID=448701399040000
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.642] [VFS DEBUG] [VFS Write] Writing data: fileID=448704347635712, offset=51380224, size=524288
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.642] [VFS DEBUG] [VFS updateWriteRange] Updated write range: fileID=448704347635712, start=524288, end=56233610, rangeSize=55709322
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.642] [VFS DEBUG] [VFS shouldUseJournal] Random write on existing file, using journal: fileID=448704347635712, offset=51380224
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.642] [VFS DEBUG] [VFS RandomAccessor Write] Using journal: fileID=448704347635712, offset=51380224, size=524288
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.689] [VFS DEBUG] [Journal Write] Added entry: fileID=448704347635712, offset=51380224, length=524288, totalEntries=8, memoryUsage=10620682, currentSize=56233610
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.689] [VFS DEBUG] [VFS Write] Successfully wrote data: fileID=448704347635712, offset=51380224, size=524288, written=524288
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.690] [VFS DEBUG] [VFS Write] Write called: objID=448704347635712, offset=51904512, size=524288
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.690] [VFS DEBUG] [VFS Write] Object info: objID=448704347635712, type=2 (FILE=2, DIR=1), name=5月23日.mp4, PID=448701399040000
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.690] [VFS DEBUG] [VFS Write] Writing data: fileID=448704347635712, offset=51904512, size=524288
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.690] [VFS DEBUG] [VFS updateWriteRange] Updated write range: fileID=448704347635712, start=524288, end=56233610, rangeSize=55709322
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.690] [VFS DEBUG] [VFS shouldUseJournal] Random write on existing file, using journal: fileID=448704347635712, offset=51904512
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.690] [VFS DEBUG] [VFS RandomAccessor Write] Using journal: fileID=448704347635712, offset=51904512, size=524288
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.725] [VFS DEBUG] [Journal Write] Added entry: fileID=448704347635712, offset=51904512, length=524288, totalEntries=9, memoryUsage=11144986, currentSize=56233610
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.725] [VFS DEBUG] [VFS Write] Successfully wrote data: fileID=448704347635712, offset=51904512, size=524288, written=524288
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.726] [VFS DEBUG] [VFS Write] Write called: objID=448704347635712, offset=52428800, size=524288
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.726] [VFS DEBUG] [VFS Write] Object info: objID=448704347635712, type=2 (FILE=2, DIR=1), name=5月23日.mp4, PID=448701399040000
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.726] [VFS DEBUG] [VFS Write] Writing data: fileID=448704347635712, offset=52428800, size=524288
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.726] [VFS DEBUG] [VFS updateWriteRange] Updated write range: fileID=448704347635712, start=524288, end=56233610, rangeSize=55709322
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.726] [VFS DEBUG] [VFS shouldUseJournal] Random write on existing file, using journal: fileID=448704347635712, offset=52428800
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.726] [VFS DEBUG] [VFS RandomAccessor Write] Using journal: fileID=448704347635712, offset=52428800, size=524288
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.773] [VFS DEBUG] [Journal Write] Added entry: fileID=448704347635712, offset=52428800, length=524288, totalEntries=10, memoryUsage=11669290, currentSize=56233610
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.773] [VFS DEBUG] [VFS Write] Successfully wrote data: fileID=448704347635712, offset=52428800, size=524288, written=524288
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.774] [VFS DEBUG] [VFS Write] Write called: objID=448704347635712, offset=52953088, size=524288
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.774] [VFS DEBUG] [VFS Write] Object info: objID=448704347635712, type=2 (FILE=2, DIR=1), name=5月23日.mp4, PID=448701399040000
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.774] [VFS DEBUG] [VFS Write] Writing data: fileID=448704347635712, offset=52953088, size=524288
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.774] [VFS DEBUG] [VFS updateWriteRange] Updated write range: fileID=448704347635712, start=524288, end=56233610, rangeSize=55709322
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.774] [VFS DEBUG] [VFS shouldUseJournal] Random write on existing file, using journal: fileID=448704347635712, offset=52953088
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.774] [VFS DEBUG] [VFS RandomAccessor Write] Using journal: fileID=448704347635712, offset=52953088, size=524288
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.809] [VFS DEBUG] [Journal Write] Added entry: fileID=448704347635712, offset=52953088, length=524288, totalEntries=11, memoryUsage=12193594, currentSize=56233610
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.809] [VFS DEBUG] [VFS Write] Successfully wrote data: fileID=448704347635712, offset=52953088, size=524288, written=524288
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.810] [VFS DEBUG] [VFS Write] Write called: objID=448704347635712, offset=53477376, size=524288
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.810] [VFS DEBUG] [VFS Write] Object info: objID=448704347635712, type=2 (FILE=2, DIR=1), name=5月23日.mp4, PID=448701399040000
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.810] [VFS DEBUG] [VFS Write] Writing data: fileID=448704347635712, offset=53477376, size=524288
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.810] [VFS DEBUG] [VFS updateWriteRange] Updated write range: fileID=448704347635712, start=524288, end=56233610, rangeSize=55709322
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.810] [VFS DEBUG] [VFS shouldUseJournal] Random write on existing file, using journal: fileID=448704347635712, offset=53477376
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.810] [VFS DEBUG] [VFS RandomAccessor Write] Using journal: fileID=448704347635712, offset=53477376, size=524288
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.857] [VFS DEBUG] [Journal Write] Added entry: fileID=448704347635712, offset=53477376, length=524288, totalEntries=12, memoryUsage=12717898, currentSize=56233610
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.857] [VFS DEBUG] [VFS Write] Successfully wrote data: fileID=448704347635712, offset=53477376, size=524288, written=524288
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.858] [VFS DEBUG] [VFS Write] Write called: objID=448704347635712, offset=54001664, size=524288
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.858] [VFS DEBUG] [VFS Write] Object info: objID=448704347635712, type=2 (FILE=2, DIR=1), name=5月23日.mp4, PID=448701399040000
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.858] [VFS DEBUG] [VFS Write] Writing data: fileID=448704347635712, offset=54001664, size=524288
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.858] [VFS DEBUG] [VFS updateWriteRange] Updated write range: fileID=448704347635712, start=524288, end=56233610, rangeSize=55709322
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.858] [VFS DEBUG] [VFS shouldUseJournal] Random write on existing file, using journal: fileID=448704347635712, offset=54001664
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.858] [VFS DEBUG] [VFS RandomAccessor Write] Using journal: fileID=448704347635712, offset=54001664, size=524288
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.893] [VFS DEBUG] [Journal Write] Added entry: fileID=448704347635712, offset=54001664, length=524288, totalEntries=13, memoryUsage=13242202, currentSize=56233610
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.893] [VFS DEBUG] [VFS Write] Successfully wrote data: fileID=448704347635712, offset=54001664, size=524288, written=524288
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.894] [VFS DEBUG] [VFS Write] Write called: objID=448704347635712, offset=54525952, size=524288
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.894] [VFS DEBUG] [VFS Write] Object info: objID=448704347635712, type=2 (FILE=2, DIR=1), name=5月23日.mp4, PID=448701399040000
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.894] [VFS DEBUG] [VFS Write] Writing data: fileID=448704347635712, offset=54525952, size=524288
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.894] [VFS DEBUG] [VFS updateWriteRange] Updated write range: fileID=448704347635712, start=524288, end=56233610, rangeSize=55709322
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.894] [VFS DEBUG] [VFS shouldUseJournal] Random write on existing file, using journal: fileID=448704347635712, offset=54525952
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.894] [VFS DEBUG] [VFS RandomAccessor Write] Using journal: fileID=448704347635712, offset=54525952, size=524288
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.941] [VFS DEBUG] [Journal Write] Added entry: fileID=448704347635712, offset=54525952, length=524288, totalEntries=14, memoryUsage=13766506, currentSize=56233610
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.941] [VFS DEBUG] [VFS Write] Successfully wrote data: fileID=448704347635712, offset=54525952, size=524288, written=524288
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.942] [VFS DEBUG] [VFS Write] Write called: objID=448704347635712, offset=55050240, size=524288
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.942] [VFS DEBUG] [VFS Write] Object info: objID=448704347635712, type=2 (FILE=2, DIR=1), name=5月23日.mp4, PID=448701399040000
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.942] [VFS DEBUG] [VFS Write] Writing data: fileID=448704347635712, offset=55050240, size=524288
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.942] [VFS DEBUG] [VFS updateWriteRange] Updated write range: fileID=448704347635712, start=524288, end=56233610, rangeSize=55709322
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.942] [VFS DEBUG] [VFS shouldUseJournal] Random write on existing file, using journal: fileID=448704347635712, offset=55050240
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.942] [VFS DEBUG] [VFS RandomAccessor Write] Using journal: fileID=448704347635712, offset=55050240, size=524288
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.989] [VFS DEBUG] [Journal Write] Added entry: fileID=448704347635712, offset=55050240, length=524288, totalEntries=15, memoryUsage=14290810, currentSize=56233610
+Jan 29 06:30:54 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:54.989] [VFS DEBUG] [VFS Write] Successfully wrote data: fileID=448704347635712, offset=55050240, size=524288, written=524288
+Jan 29 06:30:55 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:55.013] [VFS DEBUG] [VFS Statfs] Entry: objID=448704347635712, bktID=448701399040000
+Jan 29 06:30:55 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:55.013] [VFS DEBUG] [VFS Statfs] Cache hit: bktID=448701399040000, returning cached statfs
+Jan 29 06:30:55 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:55.018] [VFS DEBUG] [VFS Setattr] Entry: objID=448704347635712, valid=0x30, FileHandle=<nil>
+Jan 29 06:30:55 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:55.018] [VFS DEBUG] [VFS Setattr] Setting mtime: objID=448704347635712, oldMTime=1769668253, newMTime=1769668255
+Jan 29 06:30:55 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:55.018] [VFS DEBUG] [VFS Setattr] Setting atime: objID=448704347635712, atime=1769668253
+Jan 29 06:30:55 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:55.018] [VFS DEBUG] [VFS Setattr] Successfully updated object in database: objID=448704347635712, mode=0, mtime=1769668255
+Jan 29 06:30:55 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:55.018] [VFS DEBUG] [VFS Setattr] Updated file object cache: objID=448704347635712
+Jan 29 06:30:55 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:55.018] [VFS DEBUG] [VFS Setattr] Updated local object cache: objID=448704347635712
+Jan 29 06:30:55 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:55.018] [VFS DEBUG] [VFS Setattr] Invalidated parent directory listing cache: objID=448704347635712, parentID=448701399040000
+Jan 29 06:30:55 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:55.018] [VFS DEBUG] [VFS Setattr] Successfully completed: objID=448704347635712, mode=0100644, size=56233610, mtime=1769668255
+Jan 29 06:30:55 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:55.022] [VFS DEBUG] [VFS Setattr] Entry: objID=448704347635712, valid=0x30, FileHandle=<nil>
+Jan 29 06:30:55 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:55.022] [VFS DEBUG] [VFS Setattr] Setting mtime: objID=448704347635712, oldMTime=1769668255, newMTime=1727418549
+Jan 29 06:30:55 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:55.022] [VFS DEBUG] [VFS Setattr] Setting atime: objID=448704347635712, atime=1769668253
+Jan 29 06:30:55 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:55.022] [VFS DEBUG] [VFS Setattr] Successfully updated object in database: objID=448704347635712, mode=0, mtime=1727418549
+Jan 29 06:30:55 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:55.022] [VFS DEBUG] [VFS Setattr] Updated file object cache: objID=448704347635712
+Jan 29 06:30:55 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:55.022] [VFS DEBUG] [VFS Setattr] Updated local object cache: objID=448704347635712
+Jan 29 06:30:55 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:55.022] [VFS DEBUG] [VFS Setattr] Invalidated parent directory listing cache: objID=448704347635712, parentID=448701399040000
+Jan 29 06:30:55 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:55.022] [VFS DEBUG] [VFS Setattr] Successfully completed: objID=448704347635712, mode=0100644, size=56233610, mtime=1727418549
+Jan 29 06:30:55 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:55.022] [VFS DEBUG] [VFS Setattr] Entry: objID=448704347635712, valid=0x30, FileHandle=<nil>
+Jan 29 06:30:55 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:55.022] [VFS DEBUG] [VFS Setattr] Setting mtime: objID=448704347635712, oldMTime=1727418549, newMTime=1769668255
+Jan 29 06:30:55 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:55.022] [VFS DEBUG] [VFS Setattr] Setting atime: objID=448704347635712, atime=1769668253
+Jan 29 06:30:55 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:55.022] [VFS DEBUG] [VFS Setattr] Successfully updated object in database: objID=448704347635712, mode=0, mtime=1769668255
+Jan 29 06:30:55 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:55.022] [VFS DEBUG] [VFS Setattr] Updated file object cache: objID=448704347635712
+Jan 29 06:30:55 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:55.022] [VFS DEBUG] [VFS Setattr] Updated local object cache: objID=448704347635712
+Jan 29 06:30:55 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:55.022] [VFS DEBUG] [VFS Setattr] Invalidated parent directory listing cache: objID=448704347635712, parentID=448701399040000
+Jan 29 06:30:55 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:55.022] [VFS DEBUG] [VFS Setattr] Successfully completed: objID=448704347635712, mode=0100644, size=56233610, mtime=1769668255
+Jan 29 06:30:55 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:55.027] [VFS DEBUG] [VFS Setattr] Entry: objID=448704347635712, valid=0x30, FileHandle=<nil>
+Jan 29 06:30:55 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:55.027] [VFS DEBUG] [VFS Setattr] Setting mtime: objID=448704347635712, oldMTime=1769668255, newMTime=1727418549
+Jan 29 06:30:55 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:55.027] [VFS DEBUG] [VFS Setattr] Setting atime: objID=448704347635712, atime=1769668255
+Jan 29 06:30:55 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:55.027] [VFS DEBUG] [VFS Setattr] Successfully updated object in database: objID=448704347635712, mode=0, mtime=1727418549
+Jan 29 06:30:55 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:55.027] [VFS DEBUG] [VFS Setattr] Updated file object cache: objID=448704347635712
+Jan 29 06:30:55 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:55.027] [VFS DEBUG] [VFS Setattr] Updated local object cache: objID=448704347635712
+Jan 29 06:30:55 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:55.027] [VFS DEBUG] [VFS Setattr] Invalidated parent directory listing cache: objID=448704347635712, parentID=448701399040000
+Jan 29 06:30:55 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:55.027] [VFS DEBUG] [VFS Setattr] Successfully completed: objID=448704347635712, mode=0100644, size=56233610, mtime=1727418549
+Jan 29 06:30:55 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:55.035] [VFS DEBUG] [VFS Flush] Entry: objID=448704347635712, FileHandle=i448704347635712 g0 (reg):
+Jan 29 06:30:55 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:55.035] [VFS DEBUG] [VFS flushImpl] Entry: objID=448704347635712
+Jan 29 06:30:55 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:55.035] [VFS DEBUG] [VFS Flush] Flushing file: fileID=448704347635712, currentSize=56233610
+Jan 29 06:30:55 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:55.035] [VFS DEBUG] [VFS RandomAccessor Flush] Starting flush: fileID=448704347635712, force=false
+Jan 29 06:30:55 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:55.035] [VFS DEBUG] [VFS RandomAccessor Flush] 🔍 Checking journal flush path: fileID=448704347635712, force=false
+Jan 29 06:30:55 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:55.035] [VFS DEBUG] [VFS flushJournal] Journal is dirty, proceeding to flush: fileID=448704347635712, isSparse=true, virtualSize=56233610
+Jan 29 06:30:55 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:55.035] [VFS DEBUG] [VFS flushJournal] Flushing journal: fileID=448704347635712
+Jan 29 06:30:55 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:55.035] [VFS DEBUG] [VFS flushJournal] Checking journal sparse properties: fileID=448704347635712, journal.isSparse=true, journal.virtualSize=56233610
+Jan 29 06:30:55 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:55.035] [VFS DEBUG] [VFS flushJournal] Sparse file detected: fileID=448704347635712, virtualSize=56233610
+Jan 29 06:30:55 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:55.035] [VFS DEBUG] [Journal Flush] Starting flush: fileID=448704347635712, entries=15, baseDataID=448704351830016, baseSize=56233610
+Jan 29 06:30:55 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:55.090] [VFS DEBUG] [Journal Merge] Merged entries: fileID=448704347635712, before=15, after=1, mergeCount=1, oldMem=14290810, newMem=14290586, saved=224
+Jan 29 06:30:55 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:55.090] [VFS DEBUG] [Journal flushLargeFile] fileID=448704347635712, baseSize=56233610, modifiedBytes=14290570, ratio=25.41%
+Jan 29 06:30:55 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:55.090] [VFS DEBUG] [Journal flushLargeFile] Using chunked COW flush strategy
+Jan 29 06:30:55 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:55.090] [VFS DEBUG] [Journal flushLargeFileChunked] fileID=448704347635712, totalChunks=6, modifiedChunks=2 (33.3%)
+Jan 29 06:30:55 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:55.091] [VFS DEBUG] [Journal flushLargeFileChunked] Processing config: needsCompress=false, needsEncrypt=true, processKind=0x3, endecKey length=32
+Jan 29 06:30:55 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:55.092] [VFS DEBUG] [Journal generateChunkData] Sparse file: base read failed (keeping zeros): fileID=448704347635712, offset=41943040, length=10485760, err=failed to read chunk 4: open /media/HDD-Storage123/.zima_encrypted_folders/448701399040000/87F/BE45B6FA8AA8087F/448704351830016_4: no such file or directory
+Jan 29 06:30:55 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:55.097] [VFS DEBUG] [Journal flushLargeFileChunked] Processed chunk 4: original=10485760, processed=10485788, kind=0x3
+Jan 29 06:30:55 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:55.253] [VFS DEBUG] [Journal flushLargeFileChunked] Wrote chunk 4: offset=41943040, length=10485788
+Jan 29 06:30:55 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:55.254] [VFS DEBUG] [Journal generateChunkData] Sparse file: base read failed (keeping zeros): fileID=448704347635712, offset=52428800, length=3804810, err=failed to read chunk 5: open /media/HDD-Storage123/.zima_encrypted_folders/448701399040000/EF0/EB0EA1AEC2A82EF0/448704351830016_5: no such file or directory
+Jan 29 06:30:55 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:55.256] [VFS DEBUG] [Journal flushLargeFileChunked] Processed chunk 5: original=3804810, processed=3804838, kind=0x3
+Jan 29 06:30:55 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:55.337] [VFS DEBUG] [Journal flushLargeFileChunked] Wrote chunk 5: offset=52428800, length=3804838
+Jan 29 06:30:55 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:55.973] [VFS DEBUG] [Journal flushLargeFileChunked] Marking as sparse file: virtualSize=56233610, actualSize=56233610
+Jan 29 06:30:55 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:55.973] [VFS DEBUG] [Journal flushLargeFileChunked] DataInfo prepared: Kind=0x10003, needsCompress=false, needsEncrypt=true
+Jan 29 06:30:56 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:56.022] [VFS DEBUG] [Journal flushLargeFileChunked] Cleared memory: fileID=448704347635712, freed=14290586
+Jan 29 06:30:56 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:56.023] [VFS DEBUG] [Journal WAL] Deleted WAL file: fileID=448704347635712, path=/media/HDD-Storage123/.zima_encrypted_folders/journals/448704347635712.jwal
+Jan 29 06:30:56 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:56.023] [VFS DEBUG] [Journal WAL] Deleted snapshot file: fileID=448704347635712, path=/media/HDD-Storage123/.zima_encrypted_folders/journals/448704347635712.jwal.snap
+Jan 29 06:30:56 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:56.023] [VFS DEBUG] [Journal flushLargeFileChunked] WAL files deleted: fileID=448704347635712
+Jan 29 06:30:56 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:56.023] [VFS DEBUG] [Journal flushLargeFileChunked] Completed: fileID=448704347635712, newDataID=448704356024320, newSize=56233610, modifiedChunks=2/6, duration=932.377819ms
+Jan 29 06:30:56 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:56.023] [VFS DEBUG] [Journal Flush] Performance: fileID=448704347635712, duration=987.724154ms, avgDuration=987ms, totalFlushes=1
+Jan 29 06:30:56 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:56.023] [VFS DEBUG] [VFS flushJournal] Using virtualSize for sparse file: fileID=448704347635712, virtualSize=56233610, newSize=56233610
+Jan 29 06:30:56 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:56.023] [VFS DEBUG] [VFS flushJournal] 🔍 Prepared updateFileObj: fileID=448704347635712, DataID=448704356024320, Size=56233610, isSparse=true, virtualSize=56233610, newSize=56233610
+Jan 29 06:30:56 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:56.023] [VFS DEBUG] [VFS flushJournal] 🔍 Calling SetObj to update file object: fileID=448704347635712, DataID=448704356024320, Size=56233610, MTime=1769668255, isSparse=true, virtualSize=56233610
+Jan 29 06:30:56 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:56.023] [VFS DEBUG] [VFS flushJournal] Updated file object using SetObj: fileID=448704347635712, DataID=448704356024320, Size=56233610
+Jan 29 06:30:56 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:56.023] [VFS DEBUG] [VFS flushJournal] Successfully flushed journal: fileID=448704347635712, newDataID=448704356024320, newSize=56233610, versionID=448704360218624
+Jan 29 06:30:56 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:56.023] [VFS DEBUG] [VFS RandomAccessor Flush] ✅ Successfully flushed journal: fileID=448704347635712, versionID=448704360218624
+Jan 29 06:30:56 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:56.023] [VFS DEBUG] [VFS Flush] Got updated object from RandomAccessor cache: fileID=448704347635712, size=56233610, dataID=448704356024320, mtime=1769668255
+Jan 29 06:30:56 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:56.023] [VFS DEBUG] [VFS Flush] Updated file object cache: fileID=448704347635712, size=56233610, dataID=448704356024320, mtime=1769668255
+Jan 29 06:30:56 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:56.023] [VFS DEBUG] [VFS invalidateDirListCache] Invalidated directory cache: dirID=448701399040000
+Jan 29 06:30:56 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:56.023] [VFS DEBUG] [VFS Flush] Updated directory listing cache after flush: fileID=448704347635712, dirID=448701399040000, name=5月23日.mp4, size=56233610
+Jan 29 06:30:56 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:56.023] [VFS DEBUG] [VFS Flush] Successfully flushed file: fileID=448704347635712, versionID=448704360218624, finalSize=56233610, dataID=448704356024320, mtime=1769668255
+Jan 29 06:30:56 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:56.023] [VFS DEBUG] [VFS Release] Entry: objID=448704347635712, FileHandle=i448704347635712 g0 (reg):
+Jan 29 06:30:56 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:56.023] [VFS DEBUG] [VFS releaseImpl] Entry: objID=448704347635712
+Jan 29 06:30:56 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:56.023] [VFS DEBUG] [VFS Release] Releasing file: fileID=448704347635712, currentSize=56233610, isTmpFile=false
+Jan 29 06:30:56 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:56.023] [VFS DEBUG] [VFS RandomAccessor Flush] Starting flush: fileID=448704347635712, force=true
+Jan 29 06:30:56 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:56.023] [VFS DEBUG] [VFS RandomAccessor Flush] 🔍 Checking journal flush path: fileID=448704347635712, force=true
+Jan 29 06:30:56 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:56.023] [VFS DEBUG] [VFS flushJournal] Journal not dirty: fileID=448704347635712
+Jan 29 06:30:56 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:56.023] [VFS DEBUG] [VFS RandomAccessor Flush] ⚠️ Journal not flushed: fileID=448704347635712, versionID=0, will try other paths
+Jan 29 06:30:56 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:56.023] [VFS DEBUG] [VFS RandomAccessor Flush] Got fileObj from cache after ChunkedFileWriter flush (non-tmp): fileID=448704347635712, dataID=448704356024320, size=56233610
+Jan 29 06:30:56 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:56.023] [VFS DEBUG] [VFS RandomAccessor Flush] Buffer stats: fileID=448704347635712, writeIndex=0, totalSize=0
+Jan 29 06:30:56 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:56.023] [VFS DEBUG] [VFS RandomAccessor Flush] No pending writes: fileID=448704347635712, writeIndex=0, totalSize=0
+Jan 29 06:30:56 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:56.023] [VFS DEBUG] [VFS Release] Flushed during release: fileID=448704347635712, versionID=0
+Jan 29 06:30:56 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:56.023] [VFS DEBUG] [VFS Release] Got updated object from RandomAccessor cache before close: fileID=448704347635712, size=56233610, dataID=448704356024320, mtime=1769668255
+Jan 29 06:30:56 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:56.023] [VFS DEBUG] [VFS RandomAccessor Close] Starting Close: fileID=448704347635712
+Jan 29 06:30:56 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:56.023] [VFS DEBUG] [VFS RandomAccessor Close] Sparse file fully written (size=56233610 >= sparseSize=56233610), clearing sparse file flag: fileID=448704347635712
+Jan 29 06:30:56 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:56.023] [VFS DEBUG] [VFS RandomAccessor Close] Completed ChunkedFileWriter flush for sparse file: fileID=448704347635712
+Jan 29 06:30:56 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:56.023] [VFS DEBUG] [Journal Remove] Removed journal: fileID=448704347635712, freedMemory=0
+Jan 29 06:30:56 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:56.023] [VFS DEBUG] [VFS closeJournal] Closed journal: fileID=448704347635712
+Jan 29 06:30:56 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:56.023] [VFS DEBUG] [VFS RandomAccessor Close] Saved dataID before ForceFlush(): fileID=448704347635712, dataID=448704356024320
+Jan 29 06:30:56 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:56.023] [VFS DEBUG] [VFS RandomAccessor Close] Skipping ForceFlush (no data to flush): fileID=448704347635712
+Jan 29 06:30:56 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:56.023] [VFS DEBUG] [VFS RandomAccessor Close] Final file object after flush: fileID=448704347635712, DataID=448704356024320, Size=56233610
+Jan 29 06:30:56 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:56.023] [VFS DEBUG] [VFS RandomAccessor Close] Removed from decodingReaderCache: fileID=448704347635712, dataID=448704356024320
+Jan 29 06:30:56 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:56.023] [VFS DEBUG] [VFS RandomAccessor Close] Released buffer memory: fileID=448704347635712
+Jan 29 06:30:56 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:56.023] [VFS DEBUG] [VFS RandomAccessor Close] Released sequential buffer memory: fileID=448704347635712
+Jan 29 06:30:56 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:56.023] [VFS DEBUG] [VFS Release] Updated file object cache: fileID=448704347635712, size=56233610, dataID=448704356024320, mtime=1769668255
+Jan 29 06:30:56 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:56.023] [VFS DEBUG] [VFS invalidateDirListCache] Invalidated directory cache: dirID=448701399040000
+Jan 29 06:30:56 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:56.023] [VFS DEBUG] [VFS Release] Updated directory listing cache after release: fileID=448704347635712, dirID=448701399040000, name=5月23日.mp4, size=56233610
+Jan 29 06:30:56 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:56.023] [VFS DEBUG] [VFS Release] Successfully released file: fileID=448704347635712, finalSize=56233610, dataID=448704356024320, mtime=1769668255
+
+
+
+
+Jan 29 06:30:56 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:56.062] [VFS DEBUG] [VFS Opendir] Entry: objID=448701399040000
+Jan 29 06:30:56 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:56.062] [VFS DEBUG] [VFS Opendir] Allowing directory open: objID=448701399040000
+Jan 29 06:30:56 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:56.074] [VFS DEBUG] [VFS Open] Entry: objID=448704347635712, flags=0x8800
+Jan 29 06:30:56 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:56.074] [VFS DEBUG] [VFS Open] Object info: objID=448704347635712, type=2 (FILE=2, DIR=1), name=5月23日.mp4, PID=448701399040000, flags=0x8800
+Jan 29 06:30:56 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:56.074] [VFS DEBUG] [VFS Open] O_LARGEFILE flag set: fileID=448704347635712, flags=0x8800
+Jan 29 06:30:56 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:56.074] [VFS DEBUG] [VFS Open] Opened file: fileID=448704347635712, flags=0x8800 (O_WRONLY=0x1, O_RDWR=0x2, O_RDONLY=0x0, O_LARGEFILE=0x8000)
+Jan 29 06:30:56 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:56.074] [VFS DEBUG] [VFS Open] File open mode: fileID=448704347635712, isWriteMode=false, hasLargeFileFlag=true, flags=0x8800 (O_WRONLY=0x1, O_RDWR=0x2, O_CREAT=0x40, O_TRUNC=0x200, O_EXCL=0x80)
+Jan 29 06:30:56 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:56.074] [VFS DEBUG] [VFS Open] File metadata after Open: fileID=448704347635712, name=5月23日.mp4, size=56233610, dataID=448704356024320, mtime=1769668255, mode=0100644, type=2, pid=448701399040000
+Jan 29 06:30:56 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:56.074] [VFS DEBUG] [VFS Open] Returning FileHandle: fileID=448704347635712, fuseFlags=0x0, FileHandle type=*vfs.OrcasNode, implements FileWriter=true
+Jan 29 06:30:56 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:56.082] [VFS DEBUG] [VFS Read] 🔵 Entry: objID=448704347635712, offset=0, size=65536
+Jan 29 06:30:56 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:56.082] [VFS DEBUG] [VFS Read] ✅ Step 1: fs check passed, objID=448704347635712, fs=0xc009610540
+Jan 29 06:30:56 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:56.082] [VFS DEBUG] [VFS Read] 🔑 Step 2: Checking key requirement: objID=448704347635712, requireKey=true, hasEndecKey=true
+Jan 29 06:30:56 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:56.082] [VFS DEBUG] [VFS Read] ✅ Step 2: checkKey passed, proceeding to normal read path: objID=448704347635712
+Jan 29 06:30:56 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:56.082] [VFS DEBUG] [VFS Read] 📋 Step 3: Getting file object: objID=448704347635712
+Jan 29 06:30:56 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:56.082] [VFS DEBUG] [VFS Read] ✅ Step 3: Got object: objID=448704347635712, type=2, name=5月23日.mp4, size=56233610, DataID=448704356024320, mtime=1769668255
+Jan 29 06:30:56 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:56.082] [VFS DEBUG] [VFS Read] 📄 Step 4: Reading file: objID=448704347635712, DataID=448704356024320, Size=56233610, offset=0, requestedSize=65536, fileSize=56233610
+Jan 29 06:30:56 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:56.082] [VFS DEBUG] [VFS Read] 🔍 Step 5: Checking for active RandomAccessor with journal: objID=448704347635712
+Jan 29 06:30:56 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:56.082] [VFS DEBUG] [VFS Read] ✅ Found RandomAccessor, checking journal: objID=448704347635712, ra=0xc009be6240
+Jan 29 06:30:56 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:56.082] [VFS DEBUG] [VFS Read] ✅ Branch: Using RandomAccessor without journal: objID=448704347635712, offset=0, size=65536
+Jan 29 06:30:56 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:56.082] [VFS DEBUG] [VFS Read] Got fileObj from cache/DB: fileID=448704347635712, fileObj.Size=56233610, fileObj.DataID=448704356024320
+Jan 29 06:30:56 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:56.082] [VFS DEBUG] [VFS Read] Initial actualFileSize from fileObj.Size: fileID=448704347635712, actualFileSize=56233610
+Jan 29 06:30:56 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:56.082] [VFS DEBUG] [VFS Read] Before size limit: fileID=448704347635712, offset=0, requestedSize=65536, actualFileSize=56233610
+Jan 29 06:30:56 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:56.082] [VFS DEBUG] [VFS Read] After size limit: fileID=448704347635712, offset=0, size=65536, actualFileSize=56233610
+Jan 29 06:30:56 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:56.082] [VFS DEBUG] [VFS Read] File has DataID, getting DataInfo: fileID=448704347635712, DataID=448704356024320, fileObj.Size=56233610, offset=0, size=65536
+Jan 29 06:30:56 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:56.082] [VFS DEBUG] [VFS Read] DataInfo cache miss: fileID=448704347635712, DataID=448704356024320
+Jan 29 06:30:56 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:56.082] [VFS DEBUG] [VFS Read] DataInfo cache miss, fetching from database: fileID=448704347635712, DataID=448704356024320
+Jan 29 06:30:56 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:56.082] [VFS DEBUG] [VFS Read] Fetched DataInfo from database: fileID=448704347635712, DataID=448704356024320, OrigSize=56233610, Size=0, fileObj.Size=56233610
+Jan 29 06:30:56 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:56.082] [VFS DEBUG] [VFS Read] Cached DataInfo (OrigSize matches fileObj.Size): fileID=448704347635712, DataID=448704356024320
+Jan 29 06:30:56 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:56.082] [VFS DEBUG] [VFS Read] DataInfo check: fileID=448704347635712, DataID=448704356024320, DataInfo.OrigSize=56233610, DataInfo.Size=0, fileObj.Size=56233610, offset=0, requestedSize=65536
+Jan 29 06:30:56 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:56.082] [VFS DEBUG] [VFS Read] DataInfo OrigSize matches fileObj.Size: fileID=448704347635712, DataID=448704356024320, OrigSize=56233610
+Jan 29 06:30:56 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:56.082] [VFS DEBUG] [VFS Read] DataInfo: fileID=448704347635712, DataID=448704356024320, OrigSize=56233610, Size=0, Kind=0x10003, PkgID=0, PkgOffset=0
+Jan 29 06:30:56 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:56.082] [VFS DEBUG] [VFS Read] Encryption key info: fileID=448704347635712, DataID=448704356024320, Kind=0x10003, endecKey length=32
+Jan 29 06:30:56 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:56.082] [VFS DEBUG] [VFS Read] Created chunkReader: fileID=448704347635712, dataID=448704356024320, origSize=56233610, chunkSize=10485760, kind=0x10003, endecKey length=32
+Jan 29 06:30:56 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:56.082] [VFS DEBUG] [VFS Read] Starting readWithWrites: fileID=448704347635712, offset=0, size=65536, origSize=56233610, actualFileSize=56233610
+Jan 29 06:30:56 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:56.082] [VFS DEBUG] [VFS readWithWrites] Before reader.Read: fileID=448704347635712, readStart=0, readSize=65536, actualFileSize=56233610
+Jan 29 06:30:56 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:56.082] [VFS DEBUG] [VFS chunkReader ReadAt] Before size limit: dataID=448704356024320, offset=0, bufSize=65536, origSize=56233610
+Jan 29 06:30:56 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:56.082] [VFS DEBUG] [VFS chunkReader ReadAt] Final read size: dataID=448704356024320, offset=0, readSize=65536, origSize=56233610
+Jan 29 06:30:56 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:56.082] [VFS DEBUG] [VFS chunkReader ReadAt] Reading chunk: dataID=448704356024320, sn=0, offset=0, offsetInChunk=0, remaining=65536, origSize=56233610, totalRead=0
+Jan 29 06:30:56 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:56.092] [VFS DEBUG] [VFS chunkReader ReadAt] Read from chunk: dataID=448704356024320, sn=0, chunkSize=10485788, toRead=65536, totalRead=65536, remaining=0, offsetInChunk=0
+Jan 29 06:30:56 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:56.092] [VFS DEBUG] [VFS chunkReader ReadAt] Completed read: dataID=448704356024320, totalRead=65536, requested=65536, origSize=56233610
+Jan 29 06:30:56 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:56.092] [VFS DEBUG] [VFS readWithWrites] After reader.Read: fileID=448704347635712, readStart=0, readSize=65536, n=65536, err=<nil>, actualFileSize=56233610
+Jan 29 06:30:56 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:56.092] [VFS DEBUG] [VFS readWithWrites] Returning result: fileID=448704347635712, offset=0, size=65536, resultLen=65536, readDataLen=65536, resultOffset=0, resultEnd=65536, actualFileSize=56233610
+Jan 29 06:30:56 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:56.092] [VFS DEBUG] [VFS Read] readWithWrites completed: fileID=448704347635712, readSize=65536, requested=65536, actualFileSize=56233610, reader.origSize=56233610
+Jan 29 06:30:56 ZimaCube72 icewhale-files[4794]: [2026-01-29 06:30:56.092] [VFS DEBUG] [VFS Read] ✅ Branch: Successfully read via RandomAccessor (no journal): objID=448704347635712, offset=0, requested=65536, read=65536
