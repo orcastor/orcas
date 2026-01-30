@@ -8512,3 +8512,369 @@ func TestReadShouldNotReturnAllZeros(t *testing.T) {
 			totalSize)
 	})
 }
+
+// TestSparseFileEvictIncompleteChunkBug tests the bug where evictOldestChunks
+// would evict incomplete chunks, causing data loss.
+// This reproduces the Windows SMB upload issue where files had corrupted data
+// at offset 9961472 (the last 512KB of each chunk).
+//
+// Bug scenario:
+// 1. Windows SMB writes in 512KB blocks
+// 2. Each 10MB chunk requires 20 writes to complete
+// 3. When chunk count exceeds MaxConcurrentChunks (10), evictOldestChunks is called
+// 4. BUG: evictOldestChunks would evict incomplete chunks (e.g., only 19 writes done)
+// 5. The incomplete chunk is flushed with only 9961472 bytes instead of 10485760
+// 6. When the 20th write arrives, it tries to read from disk and rewrite
+// 7. But the rewrite may fail, causing data loss at offset 9961472
+func TestSparseFileEvictIncompleteChunkBug(t *testing.T) {
+	Convey("Sparse file evict incomplete chunk bug reproduction", t, func() {
+		c := context.Background()
+		ig := idgen.NewIDGen(nil, 0)
+		testBktID, _ := ig.New()
+		err := core.InitBucketDB(".", testBktID)
+		So(err, ShouldBeNil)
+
+		dma := &core.DefaultMetadataAdapter{
+			DefaultBaseMetadataAdapter: &core.DefaultBaseMetadataAdapter{},
+			DefaultDataMetadataAdapter: &core.DefaultDataMetadataAdapter{},
+		}
+		dma.DefaultBaseMetadataAdapter.SetPath(".")
+		dma.DefaultDataMetadataAdapter.SetPath(".")
+		dda := &core.DefaultDataAdapter{}
+
+		lh := core.NewLocalHandler("", "").(*core.LocalHandler)
+		lh.SetAdapter(dma, dda)
+
+		testCtx, userInfo, _, err := lh.Login(c, "orcas", "orcas")
+		So(err, ShouldBeNil)
+
+		bucket := &core.BucketInfo{
+			ID:       testBktID,
+			Name:     "test_bucket",
+			Type:     1,
+			Quota:    2000000000, // 2GB quota (need more for interleaved writes)
+			Used:     0,
+			RealUsed: 0,
+		}
+		admin := core.NewLocalAdmin(".", ".")
+		So(admin.PutBkt(testCtx, []*core.BucketInfo{bucket}), ShouldBeNil)
+
+		if userInfo != nil && userInfo.ID > 0 {
+			So(admin.PutACL(testCtx, testBktID, userInfo.ID, core.ALL), ShouldBeNil)
+		}
+
+		ofs := NewOrcasFS(lh, testCtx, testBktID)
+
+		// Create a sparse file large enough to trigger eviction
+		// Need more than MaxConcurrentChunks (10) chunks = 100MB+
+		// Use 150MB to ensure we trigger eviction multiple times
+		fileName := "evict_bug_test.bin"
+		fileID, _ := ig.New()
+		fileObj := &core.ObjectInfo{
+			ID:    fileID,
+			PID:   testBktID,
+			Type:  core.OBJ_TYPE_FILE,
+			Name:  fileName,
+			Size:  0,
+			MTime: core.Now(),
+		}
+		_, err = dma.PutObj(testCtx, testBktID, []*core.ObjectInfo{fileObj})
+		So(err, ShouldBeNil)
+
+		ra, err := NewRandomAccessor(ofs, fileID)
+		So(err, ShouldBeNil)
+		So(ra, ShouldNotBeNil)
+		defer ra.Close()
+
+		// Set sparse size: 150MB (15 chunks, will trigger eviction)
+		chunkSize := int64(10485760)       // 10MB
+		numChunks := 15                    // 15 chunks = 150MB
+		sparseSize := int64(numChunks) * chunkSize
+		ra.MarkSparseFile(sparseSize)
+
+		// Windows SMB write size: 512KB
+		writeSize := int64(524288)
+		writesPerChunk := int(chunkSize / writeSize) // 20 writes per chunk
+
+		// Generate test data with recognizable pattern
+		expectedData := make([]byte, sparseSize)
+		for i := range expectedData {
+			// Use chunk number and offset within chunk to create unique pattern
+			chunkNum := i / int(chunkSize)
+			offsetInChunk := i % int(chunkSize)
+			expectedData[i] = byte((chunkNum * 17 + offsetInChunk) % 256)
+		}
+
+		t.Logf("Testing evict incomplete chunk bug: fileID=%d, sparseSize=%d, numChunks=%d, writesPerChunk=%d",
+			fileID, sparseSize, numChunks, writesPerChunk)
+
+		// Simulate interleaved write pattern that triggers the bug:
+		// Write to multiple chunks in round-robin fashion, so when eviction happens,
+		// there are incomplete chunks that will be evicted prematurely.
+		//
+		// Pattern: For each write index (0-19), write to all chunks at that index
+		// This ensures all chunks have the same number of writes at any point,
+		// and when chunk count exceeds MaxConcurrentChunks, incomplete chunks exist.
+		//
+		// Example with 15 chunks and 20 writes per chunk:
+		// - Write index 0: write to chunk 0 offset 0, chunk 1 offset 0, ..., chunk 14 offset 0
+		// - Write index 1: write to chunk 0 offset 512KB, chunk 1 offset 512KB, ...
+		// - ...
+		// - After write index 9: all 15 chunks have 10 writes each (5MB each, incomplete)
+		// - At this point, eviction may be triggered, and incomplete chunks may be evicted
+		//
+		for writeIdx := 0; writeIdx < writesPerChunk; writeIdx++ {
+			for chunkNum := 0; chunkNum < numChunks; chunkNum++ {
+				chunkStart := int64(chunkNum) * chunkSize
+				offsetInChunk := int64(writeIdx) * writeSize
+				offset := chunkStart + offsetInChunk
+
+				if offset+writeSize > sparseSize {
+					continue
+				}
+
+				chunk := expectedData[offset : offset+writeSize]
+				err := ra.Write(offset, chunk)
+				So(err, ShouldBeNil)
+			}
+
+			// Log progress
+			if writeIdx > 0 && writeIdx%5 == 0 {
+				t.Logf("  Write progress: write index %d/%d completed (all chunks have %d writes)",
+					writeIdx, writesPerChunk, writeIdx)
+			}
+		}
+
+		t.Logf("All writes completed, flushing...")
+
+		// Flush to ensure all data is written
+		_, err = ra.Flush()
+		So(err, ShouldBeNil)
+
+		// Close and reopen to verify data persistence
+		ra.Close()
+
+		ra2, err := NewRandomAccessor(ofs, fileID)
+		So(err, ShouldBeNil)
+		So(ra2, ShouldNotBeNil)
+		defer ra2.Close()
+
+		t.Logf("Verifying data integrity...")
+
+		// Read back and verify data
+		readData, err := ra2.Read(0, int(sparseSize))
+		So(err, ShouldBeNil)
+		So(len(readData), ShouldEqual, int(sparseSize))
+
+		// Check for data corruption at the critical offset (9961472 = 19 * 512KB)
+		// This is where the bug would cause data loss
+		criticalOffset := int64(19) * writeSize // 9961472
+
+		// Check each chunk for corruption at the critical offset
+		corruptedChunks := []int{}
+		for chunkNum := 0; chunkNum < numChunks; chunkNum++ {
+			chunkStart := int64(chunkNum) * chunkSize
+			checkOffset := chunkStart + criticalOffset
+
+			// Check if the last 512KB of this chunk is correct
+			if checkOffset+writeSize <= sparseSize {
+				expected := expectedData[checkOffset : checkOffset+writeSize]
+				actual := readData[checkOffset : checkOffset+writeSize]
+
+				if !bytes.Equal(expected, actual) {
+					corruptedChunks = append(corruptedChunks, chunkNum)
+					t.Logf("  CORRUPTION detected in chunk %d at offset %d", chunkNum, checkOffset)
+
+					// Find first difference
+					for i := 0; i < len(expected); i++ {
+						if expected[i] != actual[i] {
+							t.Logf("    First diff at offset %d: expected 0x%02X, got 0x%02X",
+								checkOffset+int64(i), expected[i], actual[i])
+							break
+						}
+					}
+				}
+			}
+		}
+
+		// Verify no chunks are corrupted
+		if len(corruptedChunks) > 0 {
+			t.Errorf("Data corruption detected in %d chunks: %v", len(corruptedChunks), corruptedChunks)
+		}
+		So(len(corruptedChunks), ShouldEqual, 0)
+
+		// Verify entire file matches expected data
+		if !bytes.Equal(readData, expectedData) {
+			// Find first difference
+			for i := 0; i < len(expectedData); i++ {
+				if readData[i] != expectedData[i] {
+					chunkNum := i / int(chunkSize)
+					offsetInChunk := i % int(chunkSize)
+					t.Errorf("First difference at offset %d (chunk %d, offset in chunk %d): expected 0x%02X, got 0x%02X",
+						i, chunkNum, offsetInChunk, expectedData[i], readData[i])
+					break
+				}
+			}
+		}
+		So(bytes.Equal(readData, expectedData), ShouldBeTrue)
+
+		t.Logf("✅ Test passed: No data corruption detected in %d chunks (%d bytes)",
+			numChunks, sparseSize)
+	})
+}
+
+// TestEvictOldestChunksOnlyEvictsCompleteChunks tests that evictOldestChunks
+// only evicts complete chunks, not incomplete ones.
+// This is a unit test for the fix to prevent data loss.
+func TestEvictOldestChunksOnlyEvictsCompleteChunks(t *testing.T) {
+	Convey("evictOldestChunks should only evict complete chunks", t, func() {
+		c := context.Background()
+		ig := idgen.NewIDGen(nil, 0)
+		testBktID, _ := ig.New()
+		err := core.InitBucketDB(".", testBktID)
+		So(err, ShouldBeNil)
+
+		dma := &core.DefaultMetadataAdapter{
+			DefaultBaseMetadataAdapter: &core.DefaultBaseMetadataAdapter{},
+			DefaultDataMetadataAdapter: &core.DefaultDataMetadataAdapter{},
+		}
+		dma.DefaultBaseMetadataAdapter.SetPath(".")
+		dma.DefaultDataMetadataAdapter.SetPath(".")
+		dda := &core.DefaultDataAdapter{}
+
+		lh := core.NewLocalHandler("", "").(*core.LocalHandler)
+		lh.SetAdapter(dma, dda)
+
+		testCtx, userInfo, _, err := lh.Login(c, "orcas", "orcas")
+		So(err, ShouldBeNil)
+
+		bucket := &core.BucketInfo{
+			ID:       testBktID,
+			Name:     "test_bucket",
+			Type:     1,
+			Quota:    500000000,
+			Used:     0,
+			RealUsed: 0,
+		}
+		admin := core.NewLocalAdmin(".", ".")
+		So(admin.PutBkt(testCtx, []*core.BucketInfo{bucket}), ShouldBeNil)
+
+		if userInfo != nil && userInfo.ID > 0 {
+			So(admin.PutACL(testCtx, testBktID, userInfo.ID, core.ALL), ShouldBeNil)
+		}
+
+		ofs := NewOrcasFS(lh, testCtx, testBktID)
+
+		fileName := "evict_test.bin"
+		fileID, _ := ig.New()
+		fileObj := &core.ObjectInfo{
+			ID:    fileID,
+			PID:   testBktID,
+			Type:  core.OBJ_TYPE_FILE,
+			Name:  fileName,
+			Size:  0,
+			MTime: core.Now(),
+		}
+		_, err = dma.PutObj(testCtx, testBktID, []*core.ObjectInfo{fileObj})
+		So(err, ShouldBeNil)
+
+		ra, err := NewRandomAccessor(ofs, fileID)
+		So(err, ShouldBeNil)
+		So(ra, ShouldNotBeNil)
+		defer ra.Close()
+
+		chunkSize := int64(10485760) // 10MB
+		sparseSize := chunkSize * 15 // 15 chunks
+		ra.MarkSparseFile(sparseSize)
+
+		// Create ChunkedFileWriter
+		cw, err := ra.getOrCreateChunkedWriter(WRITER_TYPE_SPARSE)
+		So(err, ShouldBeNil)
+		So(cw, ShouldNotBeNil)
+
+		// Manually create chunks with different completion states
+		// Chunks 0-4: complete (full 10MB)
+		// Chunks 5-14: incomplete (only 5MB each)
+		writeSize := int64(524288) // 512KB
+
+		t.Log("Creating complete chunks (0-4)...")
+		for chunkNum := 0; chunkNum < 5; chunkNum++ {
+			chunkStart := int64(chunkNum) * chunkSize
+			// Write full chunk (20 writes of 512KB)
+			for writeIdx := 0; writeIdx < 20; writeIdx++ {
+				offset := chunkStart + int64(writeIdx)*writeSize
+				data := make([]byte, writeSize)
+				for i := range data {
+					data[i] = byte(chunkNum*17 + i%256)
+				}
+				err := cw.Write(offset, data)
+				So(err, ShouldBeNil)
+			}
+		}
+
+		t.Log("Creating incomplete chunks (5-14)...")
+		for chunkNum := 5; chunkNum < 15; chunkNum++ {
+			chunkStart := int64(chunkNum) * chunkSize
+			// Write only half chunk (10 writes of 512KB = 5MB)
+			for writeIdx := 0; writeIdx < 10; writeIdx++ {
+				offset := chunkStart + int64(writeIdx)*writeSize
+				data := make([]byte, writeSize)
+				for i := range data {
+					data[i] = byte(chunkNum*17 + i%256)
+				}
+				err := cw.Write(offset, data)
+				So(err, ShouldBeNil)
+			}
+		}
+
+		// Check chunk states before eviction
+		cw.mu.Lock()
+		chunkCount := len(cw.chunks)
+		completeCount := 0
+		incompleteCount := 0
+		for _, buf := range cw.chunks {
+			buf.mu.Lock()
+			if buf.isChunkComplete(chunkSize) {
+				completeCount++
+			} else {
+				incompleteCount++
+			}
+			buf.mu.Unlock()
+		}
+		cw.mu.Unlock()
+
+		t.Logf("Before eviction: total=%d, complete=%d, incomplete=%d", chunkCount, completeCount, incompleteCount)
+
+		// The complete chunks should have been flushed automatically when they became full
+		// So we expect only incomplete chunks in memory
+		// But let's verify the eviction behavior anyway
+
+		// Try to evict to target count of 5
+		evicted := cw.evictOldestChunks(5)
+		t.Logf("Evicted %d chunks (target count: 5)", evicted)
+
+		// Check chunk states after eviction
+		cw.mu.Lock()
+		chunkCountAfter := len(cw.chunks)
+		completeCountAfter := 0
+		incompleteCountAfter := 0
+		for _, buf := range cw.chunks {
+			buf.mu.Lock()
+			if buf.isChunkComplete(chunkSize) {
+				completeCountAfter++
+			} else {
+				incompleteCountAfter++
+			}
+			buf.mu.Unlock()
+		}
+		cw.mu.Unlock()
+
+		t.Logf("After eviction: total=%d, complete=%d, incomplete=%d", chunkCountAfter, completeCountAfter, incompleteCountAfter)
+
+		// CRITICAL: All incomplete chunks should still be in memory
+		// The fix ensures that only complete chunks are evicted
+		So(incompleteCountAfter, ShouldEqual, incompleteCount)
+
+		t.Logf("✅ Test passed: All %d incomplete chunks preserved after eviction", incompleteCountAfter)
+	})
+}

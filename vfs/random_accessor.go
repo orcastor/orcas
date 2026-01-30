@@ -1649,10 +1649,13 @@ func (cw *ChunkedFileWriter) Write(offset int64, data []byte) error {
 	return nil
 }
 
-// evictOldestChunks force-flushes the oldest incomplete chunks when memory limit is reached
+// evictOldestChunks force-flushes the oldest COMPLETE chunks when memory limit is reached
 // This prevents unbounded memory growth during large file uploads with scattered writes
+// CRITICAL: Only evict complete chunks to prevent data loss from incomplete chunk flush
 // Returns the number of chunks evicted
 func (cw *ChunkedFileWriter) evictOldestChunks(targetCount int) int {
+	chunkSize := cw.chunkSize
+
 	cw.mu.Lock()
 	currentCount := len(cw.chunks)
 	if currentCount <= targetCount {
@@ -1660,26 +1663,39 @@ func (cw *ChunkedFileWriter) evictOldestChunks(targetCount int) int {
 		return 0
 	}
 
-	// Collect all chunk SNs and sort them (oldest = lowest SN for sequential writes)
-	chunksToEvict := make([]int, 0, currentCount-targetCount)
-	allSNs := make([]int, 0, currentCount)
-	for sn := range cw.chunks {
-		allSNs = append(allSNs, sn)
+	// Collect all COMPLETE chunk SNs (only evict complete chunks to prevent data loss)
+	// CRITICAL: Do not evict incomplete chunks - they will lose data if evicted prematurely
+	completeSNs := make([]int, 0, currentCount)
+	for sn, buf := range cw.chunks {
+		buf.mu.Lock()
+		isComplete := buf.isChunkComplete(chunkSize)
+		buf.mu.Unlock()
+		if isComplete {
+			completeSNs = append(completeSNs, sn)
+		}
 	}
 	cw.mu.Unlock()
 
+	// If no complete chunks to evict, return without evicting anything
+	// This allows memory to temporarily exceed the limit to prevent data loss
+	if len(completeSNs) == 0 {
+		DebugLog("[VFS ChunkedFileWriter evictOldestChunks] No complete chunks to evict, skipping: fileID=%d, dataID=%d, currentCount=%d, targetCount=%d",
+			cw.fileID, cw.dataID, currentCount, targetCount)
+		return 0
+	}
+
 	// Sort SNs to evict oldest first
-	sort.Ints(allSNs)
+	sort.Ints(completeSNs)
 
 	// Select chunks to evict (oldest first, up to the excess count)
 	evictCount := currentCount - targetCount
-	if evictCount > len(allSNs) {
-		evictCount = len(allSNs)
+	if evictCount > len(completeSNs) {
+		evictCount = len(completeSNs)
 	}
-	chunksToEvict = allSNs[:evictCount]
+	chunksToEvict := completeSNs[:evictCount]
 
-	DebugLog("[VFS ChunkedFileWriter evictOldestChunks] Evicting %d oldest chunks to reduce memory: fileID=%d, dataID=%d, currentCount=%d, targetCount=%d, chunksToEvict=%v",
-		len(chunksToEvict), cw.fileID, cw.dataID, currentCount, targetCount, chunksToEvict)
+	DebugLog("[VFS ChunkedFileWriter evictOldestChunks] Evicting %d oldest COMPLETE chunks to reduce memory: fileID=%d, dataID=%d, currentCount=%d, targetCount=%d, completeCount=%d, chunksToEvict=%v",
+		len(chunksToEvict), cw.fileID, cw.dataID, currentCount, targetCount, len(completeSNs), chunksToEvict)
 
 	evicted := 0
 	for _, sn := range chunksToEvict {
