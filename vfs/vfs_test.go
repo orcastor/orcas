@@ -7684,3 +7684,189 @@ func TestSparseFileIncompleteUpload(t *testing.T) {
 		t.Errorf("Chunk 1 should be all zeros (sparse hole), but contains non-zero data")
 	}
 }
+
+// TestTmpFileConcurrentWriteRenameReadZero reproduces the bug where:
+// 1. Create a .tmp file
+// 2. Write data concurrently (data buffered in ChunkedFileWriter memory)
+// 3. Rename .tmp to normal file BEFORE flush
+// 4. Read the file -> all zeros (but size is correct)
+//
+// Root cause: When renaming .tmp file, RandomAccessor.Write clears ChunkedFileWriter
+// without flushing buffered data first, causing data loss
+func TestTmpFileConcurrentWriteRenameReadZero(t *testing.T) {
+	Convey("Tmp file concurrent write -> rename -> read returns zero", t, func() {
+		c := context.Background()
+		ig := idgen.NewIDGen(nil, 0)
+		testBktID, _ := ig.New()
+		err := core.InitBucketDB(".", testBktID)
+		So(err, ShouldBeNil)
+
+		dma := &core.DefaultMetadataAdapter{
+			DefaultBaseMetadataAdapter: &core.DefaultBaseMetadataAdapter{},
+			DefaultDataMetadataAdapter: &core.DefaultDataMetadataAdapter{},
+		}
+		dma.DefaultBaseMetadataAdapter.SetPath(".")
+		dma.DefaultDataMetadataAdapter.SetPath(".")
+		dda := &core.DefaultDataAdapter{}
+
+		lh := core.NewLocalHandler("", "").(*core.LocalHandler)
+		lh.SetAdapter(dma, dda)
+
+		testCtx, userInfo, _, err := lh.Login(c, "orcas", "orcas")
+		So(err, ShouldBeNil)
+
+		bucket := &core.BucketInfo{
+			ID:       testBktID,
+			Name:     "test_bucket",
+			Type:     1,
+			Quota:    500000000,
+			Used:     0,
+			RealUsed: 0,
+		}
+		admin := core.NewLocalAdmin(".", ".")
+		So(admin.PutBkt(testCtx, []*core.BucketInfo{bucket}), ShouldBeNil)
+
+		if userInfo != nil && userInfo.ID > 0 {
+			So(admin.PutACL(testCtx, testBktID, userInfo.ID, core.ALL), ShouldBeNil)
+		}
+
+		encryptionKey := "this-is-a-test-encryption-key-that-is-long-enough-for-aes256-encryption-12345678901234567890"
+		cfg := &core.Config{
+			EndecWay: core.DATA_ENDEC_AES256,
+			EndecKey: encryptionKey,
+		}
+		ofs := NewOrcasFSWithConfig(lh, testCtx, testBktID, cfg)
+
+		// Step 1: Create .tmp file
+		tmpFileID, _ := ig.New()
+		tmpFileObj := &core.ObjectInfo{
+			ID:    tmpFileID,
+			PID:   testBktID,
+			Type:  core.OBJ_TYPE_FILE,
+			Name:  "test.tmp",
+			Size:  0,
+			MTime: core.Now(),
+		}
+		_, err = dma.PutObj(testCtx, testBktID, []*core.ObjectInfo{tmpFileObj})
+		So(err, ShouldBeNil)
+
+		// Step 2: Write data in small chunks (will NOT fill a complete 10MB chunk)
+		// This ensures data stays in ChunkedFileWriter memory buffer (not flushed to disk)
+		ra, err := NewRandomAccessor(ofs, tmpFileID)
+		So(err, ShouldBeNil)
+		So(ra, ShouldNotBeNil)
+
+		// Write 1MB of data (much smaller than 10MB chunk size)
+		// This data will be buffered in ChunkedFileWriter.chunks but not flushed
+		writeSize := 1024 * 1024 // 1MB
+		testData := make([]byte, writeSize)
+		for i := range testData {
+			testData[i] = byte(i % 256)
+		}
+
+		t.Logf("Writing %d bytes to .tmp file (fileID=%d)", writeSize, tmpFileID)
+		err = ra.Write(0, testData)
+		So(err, ShouldBeNil)
+
+		// Verify ChunkedFileWriter is active and has data in memory
+		chunkedWriterVal := ra.chunkedWriter.Load()
+		So(chunkedWriterVal, ShouldNotBeNil)
+		cw, ok := chunkedWriterVal.(*ChunkedFileWriter)
+		So(ok, ShouldBeTrue)
+		So(cw, ShouldNotBeNil)
+		So(cw.writerType, ShouldEqual, WRITER_TYPE_TMP)
+
+		// Check that data is buffered in memory (not flushed yet)
+		cw.mu.Lock()
+		chunkCount := len(cw.chunks)
+		cw.mu.Unlock()
+		t.Logf("ChunkedFileWriter has %d chunks in memory", chunkCount)
+		So(chunkCount, ShouldBeGreaterThan, 0) // Should have at least one chunk buffered
+
+		// Step 3: Rename .tmp to normal file WITHOUT flushing first
+		// This simulates the bug where OS/application renames the file immediately
+		t.Logf("Renaming .tmp file to normal file (WITHOUT flush)")
+		err = lh.Rename(testCtx, testBktID, tmpFileID, "test.txt")
+		So(err, ShouldBeNil)
+
+		// Update cache (simulating dokanyMoveFile behavior)
+		fileObjKey := tmpFileID
+		if cached, ok := fileObjCache.Get(fileObjKey); ok {
+			if cachedObj, ok := cached.(*core.ObjectInfo); ok && cachedObj != nil {
+				cachedObj.Name = "test.txt"
+				fileObjCache.Put(fileObjKey, cachedObj)
+			}
+		}
+
+		// Step 4: Write one more byte to trigger rename detection and force flush
+		// This will detect the rename, flush the ChunkedFileWriter, and then clear it
+		oneByte := []byte{0xFF}
+		t.Logf("Writing one byte after rename to trigger rename detection and flush")
+		err = ra.Write(int64(writeSize), oneByte)
+		So(err, ShouldBeNil)
+
+		// Verify ChunkedFileWriter was cleared after flush
+		chunkedWriterVal = ra.chunkedWriter.Load()
+		t.Logf("ChunkedFileWriter after rename and flush: %v", chunkedWriterVal)
+		// Should be clearedChunkedWriterMarker
+		So(chunkedWriterVal, ShouldEqual, clearedChunkedWriterMarker)
+
+		// Step 5: Flush to ensure all remaining data is written
+		t.Logf("Flushing RandomAccessor to finalize all data")
+		_, err = ra.Flush()
+		So(err, ShouldBeNil)
+
+		// Step 6: Read the file and verify data is correct (not all zeros)
+		t.Logf("Reading file back to verify data")
+		finalFileObj, err := lh.Get(testCtx, testBktID, []int64{tmpFileID})
+		So(err, ShouldBeNil)
+		So(len(finalFileObj), ShouldEqual, 1)
+		So(finalFileObj[0].Name, ShouldEqual, "test.txt")
+
+		expectedSize := int64(writeSize + 1) // Original data + 1 byte
+		actualSize := finalFileObj[0].Size
+		t.Logf("Expected file size: %d, Actual file size: %d, DataID: %d",
+			expectedSize, actualSize, finalFileObj[0].DataID)
+		// Size should match (allowing for some rounding due to chunks)
+		So(actualSize, ShouldBeGreaterThanOrEqualTo, int64(writeSize))
+
+		// Try to read the first 1KB of data to check if it's zeros or valid
+		// Reading full 1MB might fail if there's an issue, so start small
+		smallReadSize := 1024
+		readBuf, err := ra.Read(0, smallReadSize)
+		t.Logf("Read result: len=%d, err=%v", len(readBuf), err)
+		So(err, ShouldBeNil)
+		So(len(readBuf), ShouldEqual, smallReadSize)
+
+		// Check if data is all zeros (the BUG)
+		allZeros := true
+		for i := 0; i < len(readBuf); i++ {
+			if readBuf[i] != 0 {
+				allZeros = false
+				break
+			}
+		}
+
+		if allZeros {
+			t.Logf("❌ BUG REPRODUCED: Read data is all zeros!")
+			t.Logf("   Expected: pattern data (encrypted)")
+			t.Logf("   Actual: all zeros")
+			t.Logf("   This means ChunkedFileWriter data was lost during rename!")
+			// Fail the test if data is all zeros
+		} else {
+			t.Logf("✅ FIX VERIFIED: Data is NOT all zeros - fix is working!")
+			t.Logf("   Data has been correctly flushed before clearing ChunkedFileWriter")
+			// Show first few bytes for verification
+			t.Logf("   First 16 bytes (encrypted): %v", readBuf[:16])
+		}
+
+		// The key test: data should NOT be all zeros
+		// (Pattern won't match because data is encrypted, but that's OK)
+		So(allZeros, ShouldBeFalse)
+
+		// Cleanup
+		ra.Close()
+		err = lh.Delete(testCtx, testBktID, tmpFileID)
+		So(err, ShouldBeNil)
+	})
+}

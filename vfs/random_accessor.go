@@ -2718,8 +2718,26 @@ func (ra *RandomAccessor) Write(offset int64, data []byte) error {
 	actualIsTmpFile := isTempFile(fileObj)
 	if ra.isTmpFile != actualIsTmpFile {
 		if ra.isTmpFile && !actualIsTmpFile {
-			// Renamed from .tmp to normal file: clear state and continue
-			DebugLog("[VFS RandomAccessor Write] File was renamed from .tmp to normal file, clearing state: fileID=%d, fileName=%s", ra.fileID, fileObj.Name)
+			// Renamed from .tmp to normal file: flush ChunkedFileWriter first, then clear state
+			DebugLog("[VFS RandomAccessor Write] File was renamed from .tmp to normal file, flushing before clearing state: fileID=%d, fileName=%s", ra.fileID, fileObj.Name)
+
+			// CRITICAL: Flush ChunkedFileWriter before clearing to prevent data loss
+			// The ChunkedFileWriter may have buffered data in memory that hasn't been written to disk yet
+			chunkedWriterVal := ra.chunkedWriter.Load()
+			if chunkedWriterVal != nil && chunkedWriterVal != clearedChunkedWriterMarker {
+				if cw, ok := chunkedWriterVal.(*ChunkedFileWriter); ok && cw != nil {
+					// Force flush to write all buffered chunks (including incomplete ones)
+					if flushErr := cw.Flush(true); flushErr != nil {
+						DebugLog("[VFS RandomAccessor Write] WARNING: Failed to flush ChunkedFileWriter before clearing: fileID=%d, error=%v", ra.fileID, flushErr)
+						// Don't return error - continue with clear to avoid blocking writes
+						// The data may be partially lost, but it's better than completely blocking the file
+					} else {
+						DebugLog("[VFS RandomAccessor Write] Successfully flushed ChunkedFileWriter before clearing: fileID=%d", ra.fileID)
+					}
+				}
+			}
+
+			// Now safe to clear state
 			ra.chunkedWriter.Store(clearedChunkedWriterMarker)
 			ra.isTmpFile = false
 			// Clear sparseSize to prevent incorrect sparse file handling after rename
