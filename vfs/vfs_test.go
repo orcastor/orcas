@@ -15,6 +15,7 @@ import (
 	"runtime"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -7298,4 +7299,388 @@ func TestVFSCase11OutOfOrderSparseWrite(t *testing.T) {
 		ofs.unregisterRandomAccessor(fileObj.ID, ra2)
 		So(ra2.Close(), ShouldBeNil)
 	})
+}
+
+// ============================================================================
+// Windows SMB Sparse File Upload Tests
+// ============================================================================
+// These tests verify the fix for Windows SMB sparse file upload issues where
+// files uploaded through SMB protocol had zero-filled regions instead of actual data.
+// The fix sets the DATA_SPARSE flag for sparse files to ensure proper handling
+// of unwritten chunks (holes) in sparse files.
+// ============================================================================
+
+// TestSparseFileUploadWithGaps tests non-sequential writes to sparse files
+func TestSparseFileUploadWithGaps(t *testing.T) {
+	SetDebugEnabled(true)
+	defer SetDebugEnabled(false)
+
+	testDir := testTmpDir("orcas_sparse_upload_test")
+	defer cleanupTestDir(t, testDir)
+
+	fs, bktID := setupTestFS(t, testDir)
+	defer cleanupFS(fs)
+
+	fileName := "test_sparse_file.bin"
+	fileID, err := createTestFile(t, fs, bktID, fileName)
+	if err != nil {
+		t.Fatalf("Failed to create test file: %v", err)
+	}
+
+	ra, err := getOrCreateRandomAccessor(fs, fileID)
+	if err != nil {
+		t.Fatalf("Failed to get RandomAccessor: %v", err)
+	}
+	defer ra.Close()
+
+	sparseSize := int64(30 << 20) // 30MB
+	atomic.StoreInt64(&ra.sparseSize, sparseSize)
+
+	chunkSize := int64(10 << 20) // 10MB
+	chunk0Data := make([]byte, chunkSize)
+	chunk1Data := make([]byte, chunkSize)
+	chunk2Data := make([]byte, chunkSize)
+
+	if _, err := rand.Read(chunk0Data); err != nil {
+		t.Fatalf("Failed to generate chunk 0 data: %v", err)
+	}
+	if _, err := rand.Read(chunk1Data); err != nil {
+		t.Fatalf("Failed to generate chunk 1 data: %v", err)
+	}
+	if _, err := rand.Read(chunk2Data); err != nil {
+		t.Fatalf("Failed to generate chunk 2 data: %v", err)
+	}
+
+	expectedData := make([]byte, 0, sparseSize)
+	expectedData = append(expectedData, chunk0Data...)
+	expectedData = append(expectedData, chunk1Data...)
+	expectedData = append(expectedData, chunk2Data...)
+
+	// Write in non-sequential order: 0, 2, 1
+	if err := ra.Write(0, chunk0Data); err != nil {
+		t.Fatalf("Failed to write chunk 0: %v", err)
+	}
+	if err := ra.Write(2*chunkSize, chunk2Data); err != nil {
+		t.Fatalf("Failed to write chunk 2: %v", err)
+	}
+	if err := ra.Write(chunkSize, chunk1Data); err != nil {
+		t.Fatalf("Failed to write chunk 1: %v", err)
+	}
+
+	if _, err := ra.Flush(); err != nil {
+		t.Fatalf("Failed to flush: %v", err)
+	}
+
+	readData, err := ra.Read(0, int(sparseSize))
+	if err != nil {
+		t.Fatalf("Failed to read file: %v", err)
+	}
+
+	if !bytes.Equal(readData, expectedData) {
+		diffCount := 0
+		for i := 0; i < len(readData) && i < len(expectedData); i++ {
+			if readData[i] != expectedData[i] {
+				diffCount++
+			}
+		}
+		t.Fatalf("Data corruption: %d bytes differ out of %d total (%.2f%%)",
+			diffCount, len(expectedData), float64(diffCount)*100/float64(len(expectedData)))
+	}
+}
+
+// TestSparseFileAllChunksWritten verifies all written chunks can be read correctly
+func TestSparseFileAllChunksWritten(t *testing.T) {
+	SetDebugEnabled(true)
+	defer SetDebugEnabled(false)
+
+	testDir := testTmpDir("orcas_sparse_all_chunks_test")
+	defer cleanupTestDir(t, testDir)
+
+	fs, bktID := setupTestFS(t, testDir)
+	defer cleanupFS(fs)
+
+	fileName := "test_sparse_all_chunks.bin"
+	fileID, err := createTestFile(t, fs, bktID, fileName)
+	if err != nil {
+		t.Fatalf("Failed to create test file: %v", err)
+	}
+
+	ra, err := getOrCreateRandomAccessor(fs, fileID)
+	if err != nil {
+		t.Fatalf("Failed to get RandomAccessor: %v", err)
+	}
+	defer ra.Close()
+
+	chunkSize := int64(10 << 20)
+	sparseSize := int64(30 << 20)
+	atomic.StoreInt64(&ra.sparseSize, sparseSize)
+
+	testData := make([]byte, sparseSize)
+	if _, err := rand.Read(testData); err != nil {
+		t.Fatalf("Failed to generate test data: %v", err)
+	}
+
+	// Write all chunks sequentially
+	for i := 0; i < 3; i++ {
+		offset := int64(i) * chunkSize
+		chunk := testData[offset : offset+chunkSize]
+		if err := ra.Write(offset, chunk); err != nil {
+			t.Fatalf("Failed to write chunk %d: %v", i, err)
+		}
+	}
+
+	if _, err := ra.Flush(); err != nil {
+		t.Fatalf("Failed to flush: %v", err)
+	}
+
+	readData, err := ra.Read(0, int(sparseSize))
+	if err != nil {
+		t.Fatalf("Failed to read file: %v", err)
+	}
+
+	if !bytes.Equal(readData, testData) {
+		diffCount := 0
+		for i := 0; i < len(readData) && i < len(testData); i++ {
+			if readData[i] != testData[i] {
+				diffCount++
+			}
+		}
+		t.Fatalf("FAIL: %d bytes differ out of %d total (%.2f%%)",
+			diffCount, len(testData), float64(diffCount)*100/float64(len(testData)))
+	}
+}
+
+// TestSparseFileUploadWithChunkEviction tests sparse file with chunk eviction
+func TestSparseFileUploadWithChunkEviction(t *testing.T) {
+	SetDebugEnabled(true)
+	defer SetDebugEnabled(false)
+
+	testDir := testTmpDir("orcas_sparse_eviction_test")
+	defer cleanupTestDir(t, testDir)
+
+	fs, bktID := setupTestFS(t, testDir)
+	defer cleanupFS(fs)
+
+	fileName := "test_sparse_eviction.bin"
+	fileID, err := createTestFile(t, fs, bktID, fileName)
+	if err != nil {
+		t.Fatalf("Failed to create test file: %v", err)
+	}
+
+	ra, err := getOrCreateRandomAccessor(fs, fileID)
+	if err != nil {
+		t.Fatalf("Failed to get RandomAccessor: %v", err)
+	}
+	defer ra.Close()
+
+	chunkSize := int64(10 << 20) // 10MB
+	numChunks := 15
+	sparseSize := int64(numChunks) * chunkSize // 150MB
+	atomic.StoreInt64(&ra.sparseSize, sparseSize)
+
+	testData := make([]byte, sparseSize)
+	if _, err := rand.Read(testData); err != nil {
+		t.Fatalf("Failed to generate test data: %v", err)
+	}
+
+	// Write even chunks first, then odd chunks
+	for i := 0; i < numChunks; i += 2 {
+		offset := int64(i) * chunkSize
+		chunk := testData[offset : offset+chunkSize]
+		if err := ra.Write(offset, chunk); err != nil {
+			t.Fatalf("Failed to write chunk %d: %v", i, err)
+		}
+	}
+
+	for i := 1; i < numChunks; i += 2 {
+		offset := int64(i) * chunkSize
+		chunk := testData[offset : offset+chunkSize]
+		if err := ra.Write(offset, chunk); err != nil {
+			t.Fatalf("Failed to write chunk %d: %v", i, err)
+		}
+	}
+
+	if _, err := ra.Flush(); err != nil {
+		t.Fatalf("Failed to flush: %v", err)
+	}
+
+	readData, err := ra.Read(0, int(sparseSize))
+	if err != nil {
+		t.Fatalf("Failed to read file: %v", err)
+	}
+
+	if !bytes.Equal(readData, testData) {
+		diffCount := 0
+		for i := 0; i < len(readData) && i < len(testData); i++ {
+			if readData[i] != testData[i] {
+				diffCount++
+			}
+		}
+		t.Fatalf("Data corruption: %d bytes differ out of %d total (%.2f%%)",
+			diffCount, len(testData), float64(diffCount)*100/float64(len(testData)))
+	}
+}
+
+// TestSparseFilePartialChunkWrite tests partial writes within chunks
+func TestSparseFilePartialChunkWrite(t *testing.T) {
+	SetDebugEnabled(true)
+	defer SetDebugEnabled(false)
+
+	testDir := testTmpDir("orcas_sparse_partial_test")
+	defer cleanupTestDir(t, testDir)
+
+	fs, bktID := setupTestFS(t, testDir)
+	defer cleanupFS(fs)
+
+	fileName := "test_sparse_partial.bin"
+	fileID, err := createTestFile(t, fs, bktID, fileName)
+	if err != nil {
+		t.Fatalf("Failed to create test file: %v", err)
+	}
+
+	ra, err := getOrCreateRandomAccessor(fs, fileID)
+	if err != nil {
+		t.Fatalf("Failed to get RandomAccessor: %v", err)
+	}
+	defer ra.Close()
+
+	chunkSize := int64(10 << 20)
+	sparseSize := int64(30 << 20)
+	atomic.StoreInt64(&ra.sparseSize, sparseSize)
+
+	testData := make([]byte, sparseSize)
+	if _, err := rand.Read(testData); err != nil {
+		t.Fatalf("Failed to generate test data: %v", err)
+	}
+
+	// Write partial chunks first, then fill gaps
+	if err := ra.Write(0, testData[0:5<<20]); err != nil {
+		t.Fatalf("Failed to write chunk 0 first half: %v", err)
+	}
+
+	offset1 := chunkSize + 5<<20
+	if err := ra.Write(offset1, testData[offset1:offset1+5<<20]); err != nil {
+		t.Fatalf("Failed to write chunk 1 second half: %v", err)
+	}
+
+	offset2 := 2*chunkSize + 2<<20 + 512<<10
+	if err := ra.Write(offset2, testData[offset2:offset2+5<<20]); err != nil {
+		t.Fatalf("Failed to write chunk 2 middle: %v", err)
+	}
+
+	// Fill gaps
+	if err := ra.Write(5<<20, testData[5<<20:chunkSize]); err != nil {
+		t.Fatalf("Failed to fill chunk 0 gap: %v", err)
+	}
+	if err := ra.Write(chunkSize, testData[chunkSize:chunkSize+5<<20]); err != nil {
+		t.Fatalf("Failed to fill chunk 1 gap: %v", err)
+	}
+	if err := ra.Write(2*chunkSize, testData[2*chunkSize:2*chunkSize+2<<20+512<<10]); err != nil {
+		t.Fatalf("Failed to fill chunk 2 first gap: %v", err)
+	}
+	offset2End := offset2 + 5<<20
+	if err := ra.Write(offset2End, testData[offset2End:3*chunkSize]); err != nil {
+		t.Fatalf("Failed to fill chunk 2 last gap: %v", err)
+	}
+
+	if _, err := ra.Flush(); err != nil {
+		t.Fatalf("Failed to flush: %v", err)
+	}
+
+	readData, err := ra.Read(0, int(sparseSize))
+	if err != nil {
+		t.Fatalf("Failed to read file: %v", err)
+	}
+
+	if !bytes.Equal(readData, testData) {
+		diffCount := 0
+		firstDiff := int64(-1)
+		for i := 0; i < len(readData) && i < len(testData); i++ {
+			if readData[i] != testData[i] {
+				diffCount++
+				if firstDiff == -1 {
+					firstDiff = int64(i)
+				}
+			}
+		}
+		t.Fatalf("Data corruption: %d bytes differ (first at offset %d)", diffCount, firstDiff)
+	}
+}
+
+// TestSparseFileIncompleteUpload tests incomplete sparse file uploads
+// This demonstrates sparse file semantics where unwritten chunks return zeros
+func TestSparseFileIncompleteUpload(t *testing.T) {
+	SetDebugEnabled(true)
+	defer SetDebugEnabled(false)
+
+	testDir := testTmpDir("orcas_sparse_incomplete_test")
+	defer cleanupTestDir(t, testDir)
+
+	fs, bktID := setupTestFS(t, testDir)
+	defer cleanupFS(fs)
+
+	fileName := "test_sparse_incomplete.bin"
+	fileID, err := createTestFile(t, fs, bktID, fileName)
+	if err != nil {
+		t.Fatalf("Failed to create test file: %v", err)
+	}
+
+	ra, err := getOrCreateRandomAccessor(fs, fileID)
+	if err != nil {
+		t.Fatalf("Failed to get RandomAccessor: %v", err)
+	}
+	defer ra.Close()
+
+	chunkSize := int64(10 << 20)
+	sparseSize := int64(30 << 20)
+	atomic.StoreInt64(&ra.sparseSize, sparseSize)
+
+	testData := make([]byte, sparseSize)
+	if _, err := rand.Read(testData); err != nil {
+		t.Fatalf("Failed to generate test data: %v", err)
+	}
+
+	// Write only chunks 0 and 2, skip chunk 1 (simulates incomplete upload)
+	if err := ra.Write(0, testData[0:chunkSize]); err != nil {
+		t.Fatalf("Failed to write chunk 0: %v", err)
+	}
+	if err := ra.Write(2*chunkSize, testData[2*chunkSize:3*chunkSize]); err != nil {
+		t.Fatalf("Failed to write chunk 2: %v", err)
+	}
+
+	if _, err := ra.Flush(); err != nil {
+		t.Fatalf("Failed to flush: %v", err)
+	}
+
+	readData, err := ra.Read(0, int(sparseSize))
+	if err != nil {
+		t.Fatalf("Failed to read file: %v", err)
+	}
+
+	// Verify chunk 0 and 2 are correct
+	chunk0Read := readData[0:chunkSize]
+	chunk0Expected := testData[0:chunkSize]
+	if !bytes.Equal(chunk0Read, chunk0Expected) {
+		t.Errorf("Chunk 0 data mismatch")
+	}
+
+	chunk2Read := readData[2*chunkSize : 3*chunkSize]
+	chunk2Expected := testData[2*chunkSize : 3*chunkSize]
+	if !bytes.Equal(chunk2Read, chunk2Expected) {
+		t.Errorf("Chunk 2 data mismatch")
+	}
+
+	// Chunk 1 was never written - with DATA_SPARSE flag, it should return zeros
+	// This is correct sparse file behavior (holes return zeros)
+	chunk1Read := readData[chunkSize : 2*chunkSize]
+	allZeros := true
+	for _, b := range chunk1Read {
+		if b != 0 {
+			allZeros = false
+			break
+		}
+	}
+	if !allZeros {
+		t.Errorf("Chunk 1 should be all zeros (sparse hole), but contains non-zero data")
+	}
 }

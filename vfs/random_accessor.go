@@ -1021,6 +1021,18 @@ func (ra *RandomAccessor) getOrCreateChunkedWriter(writerType WriterType) (*Chun
 		SHA256_3: 0,
 	}
 
+	// CRITICAL FIX: For sparse files (Windows SMB pre-allocated files), set DATA_SPARSE flag
+	// This ensures that missing chunks are treated as holes (zeros) during read operations
+	// Without this flag, reads of unwritten chunks will fail or return incorrect data
+	if writerType == WRITER_TYPE_SPARSE {
+		sparseSize := ra.getSparseSize()
+		if sparseSize > 0 {
+			dataInfo.Kind |= core.DATA_SPARSE
+			DebugLog("[VFS ChunkedFileWriter Create] Set DATA_SPARSE flag for sparse file: fileID=%d, sparseSize=%d, Kind=0x%x",
+				ra.fileID, sparseSize, dataInfo.Kind)
+		}
+	}
+
 	// For WRITER_TYPE_SEQ, set encryption flag from OrcasFS config
 	// Compression will be decided on first chunk based on file type detection
 	// This ensures ChunkedFileWriter processes data with correct flags from the start
