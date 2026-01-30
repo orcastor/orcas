@@ -2706,11 +2706,13 @@ func (ra *RandomAccessor) Write(offset int64, data []byte) error {
 	actualIsTmpFile := isTempFile(fileObj)
 	if ra.isTmpFile != actualIsTmpFile {
 		if ra.isTmpFile && !actualIsTmpFile {
-			// Renamed from .tmp to normal file: must recreate RandomAccessor
-			DebugLog("[VFS RandomAccessor Write] File was renamed from .tmp, RandomAccessor must be recreated: fileID=%d, fileName=%s", ra.fileID, fileObj.Name)
+			// Renamed from .tmp to normal file: clear state and continue
+			DebugLog("[VFS RandomAccessor Write] File was renamed from .tmp to normal file, clearing state: fileID=%d, fileName=%s", ra.fileID, fileObj.Name)
 			ra.chunkedWriter.Store(clearedChunkedWriterMarker)
-			ra.Close()
-			return fmt.Errorf("file was renamed from .tmp, RandomAccessor must be recreated: fileID=%d, fileName=%s", ra.fileID, fileObj.Name)
+			ra.isTmpFile = false
+			// Clear sparseSize to prevent incorrect sparse file handling after rename
+			atomic.StoreInt64(&ra.sparseSize, 0)
+			// Continue to normal write path (don't return error)
 		} else if !ra.isTmpFile && actualIsTmpFile {
 			// Renamed to .tmp (rare): must recreate RandomAccessor
 			DebugLog("[VFS RandomAccessor Write] File was renamed to .tmp, RandomAccessor must be recreated: fileID=%d, fileName=%s", ra.fileID, fileObj.Name)
