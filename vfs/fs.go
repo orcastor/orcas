@@ -5560,110 +5560,107 @@ func (n *OrcasNode) Statfs(ctx context.Context, out *fuse.StatfsOut) syscall.Err
 		}
 	}
 
-	// Cache miss: compute statfs result
+	// Cache miss: use singleflight to prevent duplicate concurrent queries
+	// (e.g. multiple du/df calls hitting Statfs at the same time)
+	sfKey := fmt.Sprintf("statfs_%d", n.fs.bktID)
+	result, err, _ := globalSingleFlight.Do(sfKey, func() (interface{}, error) {
+		// Double-check cache after acquiring singleflight
+		if cached, ok := statfsCache.Get(cacheKey); ok {
+			if cachedStatfs, ok := cached.(*fuse.StatfsOut); ok && cachedStatfs != nil {
+				return cachedStatfs, nil
+			}
+		}
+		return n.computeStatfs()
+	})
+	if err != nil {
+		DebugLog("[VFS Statfs] ERROR: computeStatfs failed: bktID=%d, error=%v", n.fs.bktID, err)
+		*out = fuse.StatfsOut{}
+		return 0
+	}
+	if statfsResult, ok := result.(*fuse.StatfsOut); ok && statfsResult != nil {
+		*out = *statfsResult
+	}
+	return 0
+}
+
+// computeStatfs does the actual statfs computation and caches the result.
+func (n *OrcasNode) computeStatfs() (*fuse.StatfsOut, error) {
 	DebugLog("[VFS Statfs] Cache miss: bktID=%d, computing statfs", n.fs.bktID)
 
 	// Get bucket information to determine quota and used space
 	bucket, err := n.fs.h.GetBktInfo(n.fs.c, n.fs.bktID)
 	if err != nil {
 		DebugLog("[VFS Statfs] ERROR: Failed to get bucket info: bktID=%d, error=%v, using defaults", n.fs.bktID, err)
-		// If we can't get bucket info, use default values
-		*out = fuse.StatfsOut{}
-		DebugLog("[VFS Statfs] Returning default (zeroed) statfs: objID=%d, bktID=%d, error=%v", n.objID, n.fs.bktID, err)
-		return 0
+		return &fuse.StatfsOut{}, nil
 	}
 
-	// Calculate filesystem statistics based on bucket quota and usage
-	// Block size: use 4KB (4096 bytes) as standard block size
+	// Block size: 4KB standard
 	blockSize := uint64(4096)
 
-	// Total blocks: use quota if set, otherwise use a large default value
-	// If quota is negative, it means unlimited, use a very large value
 	var totalBlocks uint64
 	if bucket.Quota > 0 {
-		// Quota is set, convert to blocks
 		totalBlocks = uint64(bucket.Quota) / blockSize
 		if totalBlocks == 0 {
-			totalBlocks = 1 // At least 1 block
+			totalBlocks = 1
 		}
 	} else {
-		// Unlimited quota, get actual disk size from DataPath
-		// Use syscall.Statfs to get filesystem statistics
+		// Unlimited quota: get actual disk size from DataPath via syscall.Statfs
+		// Skip os.Stat check — syscall.Statfs handles missing paths gracefully
 		var stat syscall.Statfs_t
 		dataPath := n.fs.GetDataPath()
-		if _, err := os.Stat(dataPath); os.IsNotExist(err) {
-			// Path doesn't exist, use parent directory
-			dataPath = filepath.Dir(dataPath)
-			// If parent also doesn't exist, use the path as-is (Statfs may still work)
-		}
 		if err := syscall.Statfs(dataPath, &stat); err == nil {
-			// Get total blocks from filesystem
-			// stat.Blocks is total data blocks in filesystem
-			// stat.Bsize is filesystem block size
 			fsBlockSize := uint64(stat.Bsize)
 			if fsBlockSize == 0 {
-				fsBlockSize = blockSize // Fallback to 4KB if bsize is 0
+				fsBlockSize = blockSize
 			}
-			// Calculate total size: stat.Blocks * stat.Bsize
-			totalSize := uint64(stat.Blocks) * fsBlockSize
-			// Convert to our block size (4KB)
-			totalBlocks = totalSize / blockSize
-			DebugLog("[VFS Statfs] Got disk size from DataPath: path=%s, fsBlocks=%d, fsBlockSize=%d, totalSize=%d, totalBlocks=%d",
-				dataPath, stat.Blocks, fsBlockSize, totalSize, totalBlocks)
+			totalBlocks = (uint64(stat.Blocks) * fsBlockSize) / blockSize
+			DebugLog("[VFS Statfs] Got disk size from DataPath: path=%s, totalBlocks=%d", dataPath, totalBlocks)
 		} else {
-			// Failed to get disk size, use a large default value (1TB in blocks)
-			totalBlocks = (1 << 40) / blockSize // 1TB / 4KB = 268435456 blocks
-			DebugLog("[VFS Statfs] WARNING: Failed to get disk size from DataPath: path=%s, error=%v, using default 1TB", dataPath, err)
+			// Try parent directory as fallback
+			parentPath := filepath.Dir(dataPath)
+			if err2 := syscall.Statfs(parentPath, &stat); err2 == nil {
+				fsBlockSize := uint64(stat.Bsize)
+				if fsBlockSize == 0 {
+					fsBlockSize = blockSize
+				}
+				totalBlocks = (uint64(stat.Blocks) * fsBlockSize) / blockSize
+			} else {
+				totalBlocks = (1 << 40) / blockSize // 1TB default
+				DebugLog("[VFS Statfs] WARNING: Failed to get disk size: path=%s, error=%v, using default 1TB", dataPath, err)
+			}
 		}
 	}
 
-	// Used blocks: convert RealUsed (actual physical usage) to blocks
 	usedBlocks := uint64(bucket.RealUsed) / blockSize
 	if usedBlocks > totalBlocks {
-		usedBlocks = totalBlocks // Cap at total
+		usedBlocks = totalBlocks
 	}
-
-	// Free blocks: total - used
 	freeBlocks := totalBlocks - usedBlocks
-
-	// Available blocks: same as free blocks (no reserved space for now)
 	availBlocks := freeBlocks
 
-	// File count: use LogicalUsed as a proxy for file count (rough estimate)
-	// This is not exact, but provides a reasonable estimate
-	// Assume average file size of 1MB for estimation
-	estimatedFiles := uint64(bucket.LogicalUsed) / (1 << 20) // 1MB
+	estimatedFiles := uint64(bucket.LogicalUsed) / (1 << 20)
 	if estimatedFiles == 0 {
-		estimatedFiles = 1 // At least 1 file
+		estimatedFiles = 1
 	}
-	freeFiles := estimatedFiles // Assume we can create as many files as we have
+	freeFiles := estimatedFiles
 
-	// Fill StatfsOut structure
-	out.Blocks = totalBlocks       // Total data blocks in filesystem
-	out.Bfree = freeBlocks         // Free blocks in filesystem
-	out.Bavail = availBlocks       // Free blocks available to unprivileged user
-	out.Files = estimatedFiles     // Total file nodes in filesystem
-	out.Ffree = freeFiles          // Free file nodes in filesystem
-	out.Bsize = uint32(blockSize)  // Block size
-	out.Frsize = uint32(blockSize) // Fragment size (same as block size)
+	result := &fuse.StatfsOut{
+		Blocks: totalBlocks,
+		Bfree:  freeBlocks,
+		Bavail: availBlocks,
+		Files:  estimatedFiles,
+		Ffree:  freeFiles,
+		Bsize:  uint32(blockSize),
+		Frsize: uint32(blockSize),
+	}
 
 	DebugLog("[VFS Statfs] Bucket stats: bktID=%d, quota=%d, used=%d, realUsed=%d, totalBlocks=%d, freeBlocks=%d, availBlocks=%d",
 		n.fs.bktID, bucket.Quota, bucket.Used, bucket.RealUsed, totalBlocks, freeBlocks, availBlocks)
 
-	// Store result in cache (create a copy to avoid issues with pointer reuse)
-	cachedResult := &fuse.StatfsOut{
-		Blocks: out.Blocks,
-		Bfree:  out.Bfree,
-		Bavail: out.Bavail,
-		Files:  out.Files,
-		Ffree:  out.Ffree,
-		Bsize:  out.Bsize,
-		Frsize: out.Frsize,
-	}
-	statfsCache.Put(cacheKey, cachedResult)
+	statfsCache.Put(n.fs.bktID, result)
 	DebugLog("[VFS Statfs] Cached result: bktID=%d", n.fs.bktID)
 
-	return 0
+	return result, nil
 }
 
 // Access implements NodeAccesser interface
