@@ -318,8 +318,11 @@ func (ofs *OrcasFS) Mount(mountPoint string, opts *fuse.MountOptions) (*fuse.Ser
 	// The caller must call server.Serve() to start the service
 	server, err := fs.Mount(mountPoint, ofs.root, &fs.Options{
 		MountOptions: *opts,
-		// Explicitly set to not auto-start the server
-		// The server will be started by the caller via server.Serve()
+		// Set default attribute/entry cache timeouts to reduce kernel→FUSE round-trips.
+		// This dramatically improves performance for tools like `du` that stat every node.
+		AttrTimeout:     &defaultAttrTimeout,
+		EntryTimeout:    &defaultEntryTimeout,
+		NegativeTimeout: &defaultEntryTimeout, // Cache ENOENT results too
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to mount: %w", err)
@@ -573,6 +576,8 @@ func (n *OrcasNode) Getattr(ctx context.Context, f fs.FileHandle, out *fuse.Attr
 	out.Ctime = out.Mtime
 	out.Atime = out.Mtime
 	out.Nlink = 1
+	// Let the kernel cache attributes to reduce FUSE round-trips (helps du, find, etc.)
+	out.SetTimeout(defaultAttrTimeout)
 	return 0
 }
 
@@ -856,6 +861,9 @@ func (n *OrcasNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut)
 	out.Ctime = out.Mtime
 	out.Atime = out.Mtime
 	out.Ino = uint64(matchedChild.ID)
+	// Let the kernel cache entry/attr to reduce FUSE round-trips (helps du, find, etc.)
+	out.SetEntryTimeout(defaultEntryTimeout)
+	out.SetAttrTimeout(defaultAttrTimeout)
 
 	return childInode, 0
 }

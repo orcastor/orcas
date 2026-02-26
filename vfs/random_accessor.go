@@ -103,6 +103,13 @@ var (
 	// Reduced from 32 to 16 to lower memory footprint during concurrent uploads
 )
 
+// FUSE kernel cache timeouts: let the kernel cache attr/entry results so tools
+// like `du` don't trigger a userspace round-trip for every single stat() call.
+var (
+	defaultAttrTimeout  = 1 * time.Second
+	defaultEntryTimeout = 1 * time.Second
+)
+
 var (
 	// Object pool: reuse write operation slices
 	writeOpsPool = sync.Pool{
