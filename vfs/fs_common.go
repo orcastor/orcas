@@ -112,6 +112,11 @@ type OrcasFS struct {
 
 	// MEMORY LEAK FIX: Track raRegistry cleanup state
 	raCleanupStopped atomic.Bool // Whether raRegistry cleanup worker has stopped
+
+	// Runtime key switching controls.
+	// endecKey is the lock-free read path for encryption key.
+	endecKey  atomic.Value // string
+	keySwitch sync.Mutex
 }
 
 type noKeyTempFile struct {
@@ -192,6 +197,7 @@ func NewOrcasFSWithConfig(h core.Handler, c core.Ctx, bktID int64, cfg *core.Con
 		noKeyTempByID:   make(map[int64]*noKeyTempFile),
 		noKeyTempByName: make(map[string]int64),
 	}
+	ofs.endecKey.Store(config.EndecKey)
 
 	// Initialize journal manager
 	journalConfig := DefaultJournalConfig()
@@ -305,17 +311,41 @@ func (fs *OrcasFS) GetEndecKey() string {
 	if fs == nil {
 		return ""
 	}
-	return fs.Config.EndecKey
+	return getEndecKeyForFS(fs)
 }
 
 // SetEndecKey dynamically sets the encryption key for data encryption/decryption
 // This allows changing the encryption key at runtime without recreating the filesystem
-// Note: This method is not thread-safe. If concurrent access is needed, external synchronization is required.
+// For strict write-drain semantics, use SetEndecKeySafe.
 func (fs *OrcasFS) SetEndecKey(key string) {
+	_ = fs.setEndecKeyInternal(key)
+}
+
+// SetEndecKeySafe switches key after draining in-flight writes.
+// timeout<=0 means 15s default.
+func (fs *OrcasFS) SetEndecKeySafe(key string, timeout time.Duration) error {
 	if fs == nil {
-		return
+		return nil
 	}
+	if timeout <= 0 {
+		timeout = 15 * time.Second
+	}
+	if err := fs.QuiesceWrites(timeout); err != nil {
+		return err
+	}
+	return fs.setEndecKeyInternal(key)
+}
+
+func (fs *OrcasFS) setEndecKeyInternal(key string) error {
+	if fs == nil {
+		return nil
+	}
+	fs.keySwitch.Lock()
+	defer fs.keySwitch.Unlock()
+
 	fs.Config.EndecKey = key
+	fs.endecKey.Store(key)
+
 	// When key is set, clear all no-key temporary in-memory files.
 	if key != "" {
 		fs.noKeyTempMu.Lock()
@@ -325,6 +355,95 @@ func (fs *OrcasFS) SetEndecKey(key string) {
 		fs.keyContent = ""
 	}
 	fs.root.invalidateDirListCache(fs.bktID)
+	return nil
+}
+
+// QuiesceWrites drains in-flight writes before sensitive operations (e.g. key switch/lock).
+func (fs *OrcasFS) QuiesceWrites(timeout time.Duration) error {
+	if fs == nil {
+		return nil
+	}
+	if timeout <= 0 {
+		timeout = 10 * time.Second
+	}
+	deadline := time.Now().Add(timeout)
+	var lastPending int
+	var lastErr error
+
+	for time.Now().Before(deadline) {
+		pending := 0
+		flushErrs := 0
+
+		fs.raRegistry.Range(func(_ interface{}, value interface{}) bool {
+			ra, ok := value.(*RandomAccessor)
+			if !ok || ra == nil {
+				return true
+			}
+
+			// Skip idle accessors to avoid unnecessary flush overhead and false errors.
+			if !hasPendingWriteState(ra) {
+				return true
+			}
+
+			// Cancel delayed flush and force flush all active write paths (including sparse/tmp).
+			ra.cancelDelayedFlush()
+			if _, err := ra.ForceFlush(); err != nil {
+				flushErrs++
+				lastErr = err
+			}
+			if hasPendingWriteState(ra) {
+				pending++
+			}
+			return true
+		})
+
+		lastPending = pending
+		if pending == 0 && flushErrs == 0 {
+			return nil
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	if lastErr != nil {
+		return fmt.Errorf("quiesce timeout with pending writes=%d: %w", lastPending, lastErr)
+	}
+	return fmt.Errorf("quiesce timeout with pending writes=%d", lastPending)
+}
+
+func hasPendingWriteState(ra *RandomAccessor) bool {
+	if ra == nil {
+		return false
+	}
+	if ra.buffer != nil {
+		if atomic.LoadInt64(&ra.buffer.writeIndex) > 0 || atomic.LoadInt64(&ra.buffer.totalSize) > 0 {
+			return true
+		}
+	}
+	if ra.seqBuffer != nil {
+		ra.seqBuffer.mu.Lock()
+		hasSeq := ra.seqBuffer.hasData || len(ra.seqBuffer.buffer) > 0
+		ra.seqBuffer.mu.Unlock()
+		if hasSeq {
+			return true
+		}
+	}
+	if val := ra.chunkedWriter.Load(); val != nil && val != clearedChunkedWriterMarker {
+		if cw, ok := val.(*ChunkedFileWriter); ok && cw != nil {
+			cw.mu.Lock()
+			hasChunks := len(cw.chunks) > 0
+			cw.mu.Unlock()
+			if hasChunks {
+				return true
+			}
+		}
+	}
+	ra.journalMu.RLock()
+	journal := ra.journal
+	ra.journalMu.RUnlock()
+	if journal != nil && journal.IsDirty() {
+		return true
+	}
+	return false
 }
 
 // getEndecKeyForFS returns the encryption key for a given OrcasFS
@@ -334,7 +453,20 @@ func getEndecKeyForFS(fs *OrcasFS) string {
 	if fs == nil {
 		return ""
 	}
-	return fs.Config.EndecKey
+	cfgKey := fs.Config.EndecKey
+	if v := fs.endecKey.Load(); v != nil {
+		if key, ok := v.(string); ok {
+			// Keep compatibility with direct field assignment (fs.EndecKey = "...").
+			// When external code updates embedded Config directly, refresh atomic cache.
+			if key != cfgKey {
+				fs.endecKey.Store(cfgKey)
+				return cfgKey
+			}
+			return key
+		}
+	}
+	fs.endecKey.Store(cfgKey)
+	return cfgKey
 }
 
 // getCmprWayForFS returns the compression method for a given OrcasFS
@@ -402,7 +534,7 @@ func (fs *OrcasFS) checkKey(dontUseFallback ...bool) syscall.Errno {
 		return 0 // Key not required
 	}
 	// Check if EndecKey exists in OrcasFS.Config
-	if fs.Config.EndecKey != "" {
+	if getEndecKeyForFS(fs) != "" {
 		return 0 // Key is present
 	}
 	// Key is required but not provided
@@ -484,7 +616,7 @@ func (fs *OrcasFS) shouldUseFallbackFiles() bool {
 	if !fs.requireKey {
 		return false
 	}
-	if fs.Config.EndecKey != "" {
+	if getEndecKeyForFS(fs) != "" {
 		return false
 	}
 	if fs.GetFallbackFiles == nil {

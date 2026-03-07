@@ -5,6 +5,7 @@ package vfs
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -538,7 +539,7 @@ func (n *OrcasNode) Getattr(ctx context.Context, f fs.FileHandle, out *fuse.Attr
 	// If filesystem is in "locked" state (RequireKey enabled but no key provided),
 	// force root mtime to "now" so SMB clients will refresh instead of caching.
 	// Also avoid touching DB while locked.
-	if n.isRoot && n.fs != nil && n.fs.requireKey && n.fs.Config.EndecKey == "" {
+	if n.isRoot && n.fs != nil && n.fs.requireKey && getEndecKeyForFS(n.fs) == "" {
 		out.Mode = syscall.S_IFDIR | 0o777
 		out.Size = 0
 		now := uint64(time.Now().Unix())
@@ -1563,16 +1564,12 @@ func (n *OrcasNode) Create(ctx context.Context, name string, flags uint32, mode 
 					}
 				}
 
-				// Create version before truncating
-				// This preserves file history for non-.tmp files
-				if lh, ok := n.fs.h.(*core.LocalHandler); ok {
-					err := lh.CreateVersionFromFile(n.fs.c, n.fs.bktID, existingFileID)
-					if err != nil {
-						// Log error but continue with truncate (don't fail the operation)
-						DebugLog("[VFS Create] WARNING: Failed to create version from existing file: fileID=%d, error=%v", existingFileID, err)
-					} else {
-						DebugLog("[VFS Create] Created version from existing file before truncate: fileID=%d", existingFileID)
-					}
+				// Create version before truncating. Best-effort with bounded retries.
+				// Keep truncate path available for SMB compatibility even on version failures.
+				if err := n.createVersionFromTargetWithRetry(existingFileID); err != nil {
+					DebugLog("[VFS Create] WARNING: Failed to create version from existing file after retries: fileID=%d, error=%v", existingFileID, err)
+				} else {
+					DebugLog("[VFS Create] Created version from existing file before truncate: fileID=%d", existingFileID)
 				}
 
 				// Truncate file to size 0
@@ -1683,7 +1680,7 @@ func (n *OrcasNode) Create(ctx context.Context, name string, flags uint32, mode 
 	ids, err := n.fs.h.Put(n.fs.c, n.fs.bktID, []*core.ObjectInfo{fileObj})
 	if err != nil {
 		// Check if it's a duplicate key error (concurrent create with same name)
-		if err == core.ERR_DUP_KEY {
+		if isUniqueConstraintError(err) {
 			DebugLog("[VFS Create] Duplicate key error (concurrent create), re-querying database: name=%s, parentID=%d", name, obj.ID)
 			// Re-query database to get the existing file
 			children, listErr := n.fs.listAllObjects(obj.ID, core.ListOptions{})
@@ -1961,16 +1958,12 @@ func (n *OrcasNode) Create(ctx context.Context, name string, flags uint32, mode 
 					}
 				}
 
-				// Create version before truncating
-				// This preserves file history for non-.tmp files
-				if lh, ok := n.fs.h.(*core.LocalHandler); ok {
-					err := lh.CreateVersionFromFile(n.fs.c, n.fs.bktID, existingFileID)
-					if err != nil {
-						// Log error but continue with truncate (don't fail the operation)
-						DebugLog("[VFS Create] WARNING: Failed to create version from existing file: fileID=%d, error=%v", existingFileID, err)
-					} else {
-						DebugLog("[VFS Create] Created version from existing file before truncate: fileID=%d", existingFileID)
-					}
+				// Create version before truncating. Best-effort with bounded retries.
+				// Keep truncate path available for SMB compatibility even on version failures.
+				if err := n.createVersionFromTargetWithRetry(existingFileID); err != nil {
+					DebugLog("[VFS Create] WARNING: Failed to create version from existing file after retries: fileID=%d, error=%v", existingFileID, err)
+				} else {
+					DebugLog("[VFS Create] Created version from existing file before truncate: fileID=%d", existingFileID)
 				}
 
 				// Truncate file to size 0
@@ -2943,113 +2936,84 @@ func (n *OrcasNode) Rename(ctx context.Context, name string, newParent fs.InodeE
 	// We call List but prioritize cache entries for each child
 	var sourceObj *core.ObjectInfo
 	if sourceID == 0 {
-		// Try to get from List result, but also check cache for each child
-		children, err := n.fs.listAllObjects(obj.ID, core.ListOptions{})
-		if err != nil {
-			DebugLog("[VFS Unlink] ERROR: Failed to list directory children: name=%s, parentID=%d, error=%v", name, obj.ID, err)
-			return syscall.EIO
+		candidateNames := buildRenameCandidateNames(name)
+		exactName := candidateNames[0]
+		fallbackName := ""
+		if len(candidateNames) > 1 {
+			fallbackName = candidateNames[1]
 		}
 
-		// First, try to find from cache for each child
-		// Also check if name matches with or without .tmp suffix (for files that may have been auto-renamed)
-		nameLower := strings.ToLower(name)
-		hasTmpSuffix := strings.HasSuffix(nameLower, ".tmp")
-		var nameWithoutTmp string
-		if hasTmpSuffix {
-			nameWithoutTmp = name[:len(name)-4] // Remove ".tmp" suffix
+		// First, try RandomAccessor registry in a single pass.
+		// This avoids directory list scans when source is actively written/opened.
+		sourceID, sourceObj = n.findSourceInRARegistryForRename(obj.ID, exactName, fallbackName)
+		if sourceID > 0 {
+			DebugLog("[VFS Rename] Found source file from RandomAccessor registry: sourceID=%d, name=%s, fallback=%s", sourceID, exactName, fallbackName)
 		}
 
-		// IMPORTANT: When searching for source file, prioritize exact match over name without .tmp suffix
-		// This ensures we find the .tmp file itself, not the target file with the same name (without .tmp)
-		// First pass: look for exact match (especially important for .tmp files)
-		for _, child := range children {
-			// Prioritize exact name match first
-			if child.Name == name {
-				// Found exact match, try to get from cache first
-				cacheKey := child.ID
-				if cached, ok := fileObjCache.Get(cacheKey); ok {
-					if cachedObj, ok := cached.(*core.ObjectInfo); ok && cachedObj != nil {
-						// Use cached object (may have more up-to-date information)
-						sourceID = cachedObj.ID
-						sourceObj = cachedObj
-						DebugLog("[VFS Rename] Found source file from List (exact match, cached): sourceID=%d, name=%s", sourceID, name)
-						break
-					}
-				}
-				// If cache miss, use child from List
-				if sourceID == 0 {
-					sourceID = child.ID
-					sourceObj = child
-					DebugLog("[VFS Rename] Found source file from List (exact match, from DB): sourceID=%d, name=%s", sourceID, name)
-					break
-				}
+		// Then, try directory list cache when available.
+		// This avoids extra DB round-trips on hot directories with valid cached listings.
+		if sourceID == 0 {
+			sourceID, sourceObj = n.findActiveObjectByNamesFromDirCache(obj.ID, candidateNames)
+			if sourceID > 0 {
+				DebugLog("[VFS Rename] Found source file from dir list cache: sourceID=%d, name=%s", sourceID, sourceObj.Name)
 			}
 		}
 
-		// Second pass: if exact match not found and source name has .tmp suffix,
-		// also check for name without .tmp suffix (for files that may have been auto-renamed)
-		// But only if we haven't found an exact match
-		if sourceID == 0 && hasTmpSuffix {
-			for _, child := range children {
-				if child.Name == nameWithoutTmp {
-					// Found match without .tmp suffix, try to get from cache first
+		// Then, try direct exact-name lookup in one DB round-trip.
+		// This avoids full directory list scans for the common active-file path.
+		if sourceID == 0 {
+			sourceByName := n.queryActiveObjectsByNamesDirectly(obj.ID, candidateNames)
+			for _, candidateName := range candidateNames {
+				candidateObj := sourceByName[candidateName]
+				if candidateObj == nil {
+					continue
+				}
+				if cached, ok := fileObjCache.Get(candidateObj.ID); ok {
+					if cachedObj, ok := cached.(*core.ObjectInfo); ok && cachedObj != nil {
+						sourceID = cachedObj.ID
+						sourceObj = cachedObj
+						DebugLog("[VFS Rename] Found source file from direct query (cached): sourceID=%d, name=%s", sourceID, candidateName)
+						break
+					}
+				}
+				sourceID = candidateObj.ID
+				sourceObj = candidateObj
+				DebugLog("[VFS Rename] Found source file from direct query: sourceID=%d, name=%s", sourceID, candidateName)
+				break
+			}
+		}
+
+		// Final fallback: scan directory children and prioritize cache entries.
+		// Keeps compatibility with edge cases where cache/DB visibility lags.
+		if sourceID == 0 {
+			children, err := n.fs.listAllObjects(obj.ID, core.ListOptions{})
+			if err != nil {
+				DebugLog("[VFS Unlink] ERROR: Failed to list directory children: name=%s, parentID=%d, error=%v", name, obj.ID, err)
+				return syscall.EIO
+			}
+
+			for _, candidateName := range candidateNames {
+				for _, child := range children {
+					if child.Name != candidateName {
+						continue
+					}
 					cacheKey := child.ID
 					if cached, ok := fileObjCache.Get(cacheKey); ok {
 						if cachedObj, ok := cached.(*core.ObjectInfo); ok && cachedObj != nil {
-							// Use cached object (may have more up-to-date information)
 							sourceID = cachedObj.ID
 							sourceObj = cachedObj
+							DebugLog("[VFS Rename] Found source file from List (cached): sourceID=%d, name=%s", sourceID, candidateName)
 							break
 						}
 					}
-					// If cache miss, use child from List
-					if sourceID == 0 {
-						sourceID = child.ID
-						sourceObj = child
-						break
-					}
+					sourceID = child.ID
+					sourceObj = child
+					DebugLog("[VFS Rename] Found source file from List: sourceID=%d, name=%s", sourceID, candidateName)
+					break
 				}
-			}
-		}
-
-		// If still not found, try to find from RandomAccessor registry
-		// This handles cases where file is being written and may not be in List yet
-		// IMPORTANT: Prioritize exact match over name without .tmp suffix
-		if sourceID == 0 {
-			// First pass: look for exact match in RandomAccessor registry
-			n.fs.raRegistry.Range(func(key, value interface{}) bool {
-				if ra, ok := value.(*RandomAccessor); ok && ra != nil {
-					fileObj, err := ra.getFileObj()
-					if err == nil && fileObj != nil && fileObj.PID == obj.ID {
-						// Prioritize exact name match first
-						if fileObj.Name == name {
-							sourceID = fileObj.ID
-							sourceObj = fileObj
-							DebugLog("[VFS Rename] Found source file from RandomAccessor registry (exact match): sourceID=%d, name=%s", sourceID, name)
-							return false // Stop iteration
-						}
-					}
+				if sourceID > 0 {
+					break
 				}
-				return true // Continue iteration
-			})
-
-			// Second pass: if exact match not found and source name has .tmp suffix,
-			// also check for name without .tmp suffix (for files that may have been auto-renamed)
-			if sourceID == 0 && hasTmpSuffix {
-				n.fs.raRegistry.Range(func(key, value interface{}) bool {
-					if ra, ok := value.(*RandomAccessor); ok && ra != nil {
-						fileObj, err := ra.getFileObj()
-						if err == nil && fileObj != nil && fileObj.PID == obj.ID {
-							// Match name without .tmp suffix
-							if fileObj.Name == nameWithoutTmp {
-								sourceID = fileObj.ID
-								sourceObj = fileObj
-								return false // Stop iteration
-							}
-						}
-					}
-					return true // Continue iteration
-				})
 			}
 		}
 	} else {
@@ -3134,58 +3098,44 @@ func (n *OrcasNode) Rename(ctx context.Context, name string, newParent fs.InodeE
 		isRemovingTmp = isTmpFile && !strings.HasSuffix(newNameLower, ".tmp")
 
 		if isRemovingTmp {
-			n.forceFlushTempFileBeforeRename(sourceID, sourceObj.Name, newName)
-			// Re-fetch source object after flush to ensure we have latest DataID
-			// Invalidate cache for source file (not current node)
-			cacheKey := sourceID
-			fileObjCache.Del(cacheKey)
-			// Re-fetch source object from database
-			objs, err := n.fs.h.Get(n.fs.c, n.fs.bktID, []int64{sourceID})
-			if err != nil || len(objs) == 0 {
-				DebugLog("[VFS Rename] ERROR: Failed to re-fetch source object after flush: fileID=%d, error=%v", sourceID, err)
+			flushedObj := n.forceFlushTempFileBeforeRename(sourceID, sourceObj.Name, newName)
+			if flushedObj == nil {
+				flushedObj = n.getFileObjForRename(sourceID, true)
+			}
+			if flushedObj == nil {
+				DebugLog("[VFS Rename] ERROR: Failed to get source object after .tmp flush: fileID=%d", sourceID)
 				return syscall.ENOENT
 			}
-			sourceObj = objs[0]
-			// Update cache with fresh data
-			fileObjCache.Put(cacheKey, sourceObj)
-			DebugLog("[VFS Rename] Re-fetched source object after flush: fileID=%d, dataID=%d, size=%d, name=%s", sourceID, sourceObj.DataID, sourceObj.Size, sourceObj.Name)
-			// For empty files (Size = 0), EmptyDataID is valid and should be allowed
-			// Only verify DataID for non-empty files
+
+			sourceObj = flushedObj
+			fileObjCache.Put(sourceID, sourceObj)
+			DebugLog("[VFS Rename] Source object after .tmp flush: fileID=%d, dataID=%d, size=%d, name=%s", sourceID, sourceObj.DataID, sourceObj.Size, sourceObj.Name)
+
+			// For empty files (Size = 0), EmptyDataID is valid and should be allowed.
 			if sourceObj.Size > 0 && (sourceObj.DataID == 0 || sourceObj.DataID == core.EmptyDataID) {
-				DebugLog("[VFS Rename] WARNING: Source file has data but no DataID after flush: fileID=%d, name=%s, size=%d", sourceID, sourceObj.Name, sourceObj.Size)
-				// Re-fetch again with retries (error case)
-				maxRetries := 10
-				for retry := 0; retry < maxRetries; retry++ {
-					fileObjCache.Del(cacheKey)
-					objs, err = n.fs.h.Get(n.fs.c, n.fs.bktID, []int64{sourceID})
-					if err == nil && len(objs) > 0 {
-						sourceObj = objs[0]
-						// Check if file is empty - if so, EmptyDataID is valid
-						if sourceObj.Size == 0 {
-							fileObjCache.Put(cacheKey, sourceObj)
-							DebugLog("[VFS Rename] Source file is empty (EmptyDataID is valid): fileID=%d, dataID=%d, size=%d", sourceID, sourceObj.DataID, sourceObj.Size)
-							break
-						}
-						if sourceObj.DataID > 0 && sourceObj.DataID != core.EmptyDataID {
-							fileObjCache.Put(cacheKey, sourceObj)
-							DebugLog("[VFS Rename] Successfully re-fetched source object after retry (retry %d/%d): fileID=%d, dataID=%d, size=%d, name=%s", retry+1, maxRetries, sourceID, sourceObj.DataID, sourceObj.Size, sourceObj.Name)
-							break
-						}
-					}
-					if retry < maxRetries-1 {
-						time.Sleep(50 * time.Millisecond) // Only wait on error retry
-					}
-				}
-				// Final check: only require DataID for non-empty files
-				if sourceObj.Size > 0 && (sourceObj.DataID == 0 || sourceObj.DataID == core.EmptyDataID) {
-					DebugLog("[VFS Rename] ERROR: Source file still has no DataID after wait: fileID=%d, name=%s, size=%d", sourceID, sourceObj.Name, sourceObj.Size)
-					return syscall.EIO
-				}
-			} else if sourceObj.Size == 0 {
-				// Empty file, EmptyDataID is valid
+				DebugLog("[VFS Rename] ERROR: Source file has data but no DataID after .tmp flush: fileID=%d, name=%s, size=%d", sourceID, sourceObj.Name, sourceObj.Size)
+				return syscall.EIO
+			}
+			if sourceObj.Size == 0 {
 				DebugLog("[VFS Rename] Source file is empty (EmptyDataID is valid): fileID=%d, dataID=%d, size=%d", sourceID, sourceObj.DataID, sourceObj.Size)
 			}
 		}
+	}
+
+	// Fast path for the common SMB/Office save pattern:
+	// .tmp -> final name within the same directory and no existing target.
+	// Try rename directly first; if a unique conflict exists, fall back to full conflict/merge flow below.
+	if isRemovingTmp && newParentObj.ID == obj.ID {
+		err = n.fs.h.Rename(n.fs.c, n.fs.bktID, sourceID, newName)
+		if err == nil {
+			DebugLog("[VFS Rename] Fast path success for .tmp rename: sourceID=%d, oldName=%s, newName=%s", sourceID, sourceObj.Name, newName)
+			return n.finalizeRenameSuccess(sourceID, 0, sourceObj, obj.ID, newParentNode, newParentObj.ID, newName, isRemovingTmp)
+		}
+		if !isUniqueConstraintError(err) {
+			DebugLog("[VFS Rename] ERROR: Fast path rename failed: sourceID=%d, oldName=%s, newName=%s, error=%v", sourceID, sourceObj.Name, newName, err)
+			return syscall.EIO
+		}
+		DebugLog("[VFS Rename] Fast path hit unique conflict, falling back to full rename flow: sourceID=%d, oldName=%s, newName=%s", sourceID, sourceObj.Name, newName)
 	}
 
 	// Get target parent directory
@@ -3206,61 +3156,42 @@ func (n *OrcasNode) Rename(ctx context.Context, name string, newParent fs.InodeE
 		}
 	}
 
-	// If not found in RandomAccessor, call List and check cache for each child
-	// Also check for files that may have had .tmp suffix removed by TempFileWriter.Flush()
+	// If not found in RandomAccessor, do direct exact-name DB lookup.
+	// Also check for files that may have had .tmp suffix removed by TempFileWriter.Flush().
 	if existingTargetID == 0 {
-		targetChildren, err := n.fs.listAllObjects(newParentObj.ID, core.ListOptions{})
-		if err != nil {
-			DebugLog("[VFS Unlink] ERROR: Failed to list directory children: name=%s, parentID=%d, error=%v", name, obj.ID, err)
-			return syscall.EIO
+		candidateNames := buildRenameCandidateNames(newName)
+
+		existingTargetID, existingTargetObj = n.findActiveObjectByNamesFromDirCache(newParentObj.ID, candidateNames)
+		if existingTargetID > 0 && existingTargetID != sourceID {
+			DebugLog("[VFS Rename] Found target object from dir list cache: targetID=%d, name=%s", existingTargetID, existingTargetObj.Name)
+		} else if existingTargetID == sourceID {
+			existingTargetID = 0
+			existingTargetObj = nil
 		}
 
-		// Check if newName has .tmp suffix - if so, also check for name without .tmp
-		// (in case old file had .tmp removed by TempFileWriter.Flush())
-		newNameLower := strings.ToLower(newName)
-		hasTmpSuffix := strings.HasSuffix(newNameLower, ".tmp")
-		var nameWithoutTmp string
-		if hasTmpSuffix {
-			nameWithoutTmp = newName[:len(newName)-4] // Remove ".tmp" suffix
-		}
-
-		// First, try to find from cache for each child
-		// IMPORTANT: Exclude source file itself (sourceID) when searching for existing target
-		// This ensures we find the actual target file, not the source file being renamed
-		for _, child := range targetChildren {
-			// Skip source file itself - we're looking for a different file with the same name
-			if child.ID == sourceID {
-				continue
-			}
-			// Match exact name or name without .tmp suffix (for files that may have been auto-renamed)
-			if child.Name == newName || (hasTmpSuffix && child.Name == nameWithoutTmp) {
-				// Found potential match, try to get from cache first
-				cacheKey := child.ID
-				if cached, ok := fileObjCache.Get(cacheKey); ok {
-					if cachedObj, ok := cached.(*core.ObjectInfo); ok && cachedObj != nil {
-						// Use cached object (may have more up-to-date information)
-						// Double-check it's not the source file
-						if cachedObj.ID != sourceID {
-							existingTargetID = cachedObj.ID
-							existingTargetObj = cachedObj
-							break
-						}
+		if existingTargetID > 0 {
+			// Already found in cache path.
+		} else {
+			targetByName := n.queryActiveObjectsByNamesDirectly(newParentObj.ID, candidateNames)
+			for _, candidateName := range candidateNames {
+				targetObj := targetByName[candidateName]
+				if targetObj == nil || targetObj.ID == sourceID {
+					continue
+				}
+				// Found potential match, try cache first.
+				if cached, ok := fileObjCache.Get(targetObj.ID); ok {
+					if cachedObj, ok := cached.(*core.ObjectInfo); ok && cachedObj != nil && cachedObj.ID != sourceID {
+						existingTargetID = cachedObj.ID
+						existingTargetObj = cachedObj
+						break
 					}
 				}
-				// If cache miss, use child from List
-				// Double-check it's not the source file
-				if existingTargetID == 0 && child.ID != sourceID {
-					existingTargetID = child.ID
-					existingTargetObj = child
-					break
-				}
+				existingTargetID = targetObj.ID
+				existingTargetObj = targetObj
+				break
 			}
 		}
 	}
-
-	// First, try to update cache from RandomAccessor for source file
-	// Check if source file has an open RandomAccessor and update its cache
-	n.updateFileObjCache(sourceID, newName, newParentObj.ID)
 
 	// Track if we need to delete target file (if it's a .tmp file)
 	var targetTmpFileID int64 = 0
@@ -3286,6 +3217,9 @@ func (n *OrcasNode) Rename(ctx context.Context, name string, newParent fs.InodeE
 					existingObj = existingObjs[0]
 				}
 			}
+		}
+		if existingObj != nil {
+			existingTargetObj = existingObj
 		}
 		// Check if target is a directory - cannot rename a file to a directory
 		if existingObj != nil && existingObj.Type == core.OBJ_TYPE_DIR {
@@ -3315,35 +3249,28 @@ func (n *OrcasNode) Rename(ctx context.Context, name string, newParent fs.InodeE
 				targetTmpFileID = existingTargetID
 				DebugLog("[VFS Rename] Target file is .tmp file (or old .tmp without suffix), will delete after rename: fileID=%d, name=%s, targetName=%s", existingTargetID, existingObj.Name, newName)
 
-				if n.fs != nil {
-					if targetRA := n.fs.getRandomAccessorByFileID(existingTargetID); targetRA != nil {
-						// Force flush before deletion
-						if _, err := targetRA.ForceFlush(); err != nil {
-							DebugLog("[VFS Rename] WARNING: Failed to flush target .tmp file before deletion: fileID=%d, error=%v", existingTargetID, err)
-						}
-						// Unregister RandomAccessor
-						n.fs.unregisterRandomAccessor(existingTargetID, targetRA)
-					}
+				if err := n.prepareFileForConflictDelete(existingTargetID, "target-tmp-pre-delete"); err != nil {
+					DebugLog("[VFS Rename] ERROR: Failed to prepare target .tmp file before deletion: fileID=%d, error=%v", existingTargetID, err)
+					return syscall.EIO
 				}
-
-				// Remove from file object cache immediately (before database delete)
-				targetCacheKey := existingTargetID
-				fileObjCache.Del(targetCacheKey)
 			} else {
 				// Target file is not a .tmp file
 				// If source is a .tmp file being renamed to this target, special handling is done above
 				// (merge version and delete .tmp file, so we skip the normal rename path)
 				if !isRemovingTmp {
+					// Ensure target writes are durable before creating a version and overwriting the target.
+					if err := n.prepareFileForConflictDelete(existingTargetID, "target-pre-version"); err != nil {
+						DebugLog("[VFS Rename] ERROR: Failed to prepare target file before version creation: targetID=%d, error=%v", existingTargetID, err)
+						return syscall.EIO
+					}
+
 					// Source is not a .tmp file, target is not a .tmp file
 					// Create version from existing file (non-.tmp files should preserve versions)
 					// Note: We need to check if handler supports CreateVersionFromFile
-					if lh, ok := n.fs.h.(*core.LocalHandler); ok {
-						err = lh.CreateVersionFromFile(n.fs.c, n.fs.bktID, existingTargetID)
-						if err != nil {
-							// Log error but continue with rename (don't fail the operation)
-							// The existing file will be overwritten
-							DebugLog("[VFS Rename] WARNING: Failed to create version from target file: targetID=%d, error=%v", existingTargetID, err)
-						}
+					if err = n.createVersionFromTargetWithRetry(existingTargetID); err != nil {
+						// Keep overwrite path available for SMB compatibility, but retry first to
+						// increase version preservation success under transient DB pressure.
+						DebugLog("[VFS Rename] WARNING: Failed to create version from target file after retries: targetID=%d, error=%v", existingTargetID, err)
 					}
 				}
 			}
@@ -3361,6 +3288,25 @@ func (n *OrcasNode) Rename(ctx context.Context, name string, newParent fs.InodeE
 		// 2. Update target file with source .tmp file's data
 		// 3. Delete source .tmp file
 		DebugLog("[VFS Rename] Merging .tmp file into existing target file: sourceID=%d, targetID=%d, targetName=%s", sourceID, existingTargetID, newName)
+
+		// Ensure writer-backed source RA is durably flushed before merge.
+		// This avoids merging stale metadata when the source still has in-memory data.
+		if n.fs != nil {
+			if sourceRA := n.fs.getRandomAccessorByFileID(sourceID); sourceRA != nil {
+				hadPendingWrites := hasPendingWriteState(sourceRA)
+				if err := n.forceFlushAccessorForRename(sourceRA, sourceID, "source-tmp-pre-merge"); err != nil {
+					DebugLog("[VFS Rename] ERROR: Failed to flush source .tmp file before merge: sourceID=%d, error=%v", sourceID, err)
+					return syscall.EIO
+				}
+				// Only force a DB refresh when there were pending writes before flush.
+				// This avoids extra DB round-trips on already-clean accessors.
+				if hadPendingWrites {
+					if refreshed := n.getFileObjForRename(sourceID, true); refreshed != nil {
+						sourceObj = refreshed
+					}
+				}
+			}
+		}
 
 		// For empty files (Size = 0), EmptyDataID is valid and should be handled specially
 		// Empty files don't need DataID, so we can skip the merge logic and just delete the source .tmp file
@@ -3389,29 +3335,10 @@ func (n *OrcasNode) Rename(ctx context.Context, name string, newParent fs.InodeE
 
 		// Verify source file has DataID before merging (only for non-empty files)
 		if sourceObj.DataID == 0 || sourceObj.DataID == core.EmptyDataID {
-			DebugLog("[VFS Rename] WARNING: Source .tmp file has no DataID before merge, retrying: sourceID=%d, targetID=%d, targetName=%s, size=%d", sourceID, existingTargetID, newName, sourceObj.Size)
-			// Try multiple times to get DataID (error retry case)
-			cacheKey := sourceID
-			maxRetries := 10
-			for retry := 0; retry < maxRetries; retry++ {
-				fileObjCache.Del(cacheKey)
-				objs, err := n.fs.h.Get(n.fs.c, n.fs.bktID, []int64{sourceID})
-				if err == nil && len(objs) > 0 && objs[0].DataID > 0 && objs[0].DataID != core.EmptyDataID {
-					sourceObj = objs[0]
-					fileObjCache.Put(cacheKey, sourceObj)
-					DebugLog("[VFS Rename] Successfully got DataID after retry (retry %d/%d): sourceID=%d, dataID=%d, size=%d",
-						retry+1, maxRetries, sourceID, sourceObj.DataID, sourceObj.Size)
-					break
-				} else {
-					DebugLog("[VFS Rename] Still no DataID after retry %d/%d: sourceID=%d, error=%v", retry+1, maxRetries, sourceID, err)
-				}
-				if retry < maxRetries-1 {
-					time.Sleep(50 * time.Millisecond) // Only wait on error retry
-				}
-			}
-			// Final check
+			DebugLog("[VFS Rename] WARNING: Source .tmp file has no DataID before merge, waiting for visibility: sourceID=%d, targetID=%d, targetName=%s, size=%d", sourceID, existingTargetID, newName, sourceObj.Size)
+			sourceObj = n.waitForValidDataIDAfterRenameFlush(sourceID, sourceObj)
 			if sourceObj.DataID == 0 || sourceObj.DataID == core.EmptyDataID {
-				DebugLog("[VFS Rename] ERROR: Source .tmp file still has no DataID after %d retries: sourceID=%d, size=%d", maxRetries, sourceID, sourceObj.Size)
+				DebugLog("[VFS Rename] ERROR: Source .tmp file still has no DataID after wait: sourceID=%d, size=%d", sourceID, sourceObj.Size)
 				return syscall.EIO
 			}
 		}
@@ -3483,14 +3410,10 @@ func (n *OrcasNode) Rename(ctx context.Context, name string, newParent fs.InodeE
 			sourceID, existingTargetID, newVersion.ID, sourceObj.DataID, sourceObj.Size)
 
 		// 3. Delete source .tmp file
-		// First, flush and unregister RandomAccessor if exists (similar to target .tmp file deletion)
+		// Unregister RandomAccessor if exists.
+		// Flush is already enforced before merge via forceFlushAccessorForRename.
 		if n.fs != nil {
 			if sourceRA := n.fs.getRandomAccessorByFileID(sourceID); sourceRA != nil {
-				// Force flush before deletion
-				if _, flushErr := sourceRA.ForceFlush(); flushErr != nil {
-					DebugLog("[VFS Rename] WARNING: Failed to flush source .tmp file before deletion: sourceID=%d, error=%v", sourceID, flushErr)
-				}
-				// Unregister RandomAccessor
 				n.fs.unregisterRandomAccessor(sourceID, sourceRA)
 			}
 		}
@@ -3515,16 +3438,10 @@ func (n *OrcasNode) Rename(ctx context.Context, name string, newParent fs.InodeE
 		if obj.ID != sourceObj.PID && obj.ID > 0 {
 			n.invalidateDirListCache(obj.ID)
 		}
-		// Update target file in new parent directory listing (if target exists)
-		// Note: Target file is updated with new data, so we need to update it in cache
-		targetObjs, err := n.fs.h.Get(n.fs.c, n.fs.bktID, []int64{existingTargetID})
-		if err == nil && len(targetObjs) > 0 {
-			// Invalidate directory listing cache
-			n.invalidateDirListCache(newParentObj.ID)
-			// Also update fileObjCache with latest data
-			targetCacheKey := existingTargetID
-			fileObjCache.Put(targetCacheKey, targetObjs[0])
-		}
+		// Update target cache and directory listing cache after successful merge.
+		fileObjCache.Put(existingTargetID, updateTargetFile)
+		existingTargetObj = updateTargetFile
+		n.invalidateDirListCache(newParentObj.ID)
 
 		return 0
 	}
@@ -3540,7 +3457,18 @@ func (n *OrcasNode) Rename(ctx context.Context, name string, newParent fs.InodeE
 		} else {
 			DebugLog("[VFS Rename] Successfully deleted target .tmp file before rename: fileID=%d", targetTmpFileID)
 		}
+		// Best-effort slot probe to reduce immediate unique-collision retries.
+		// Do not hard fail here; full conflict handling remains below.
+		if !n.waitForRenameTargetSlotFree(newParentObj.ID, sourceID, newName, 2) {
+			DebugLog("[VFS Rename] WARNING: Target slot still occupied after deleting target .tmp: sourceID=%d, targetName=%s", sourceID, newName)
+		}
 		// Cache already removed above, no need to remove again
+	}
+
+	// Best-effort pre-cleanup for deleted tombstones with the same target name.
+	// This avoids a guaranteed first rename failure followed by conflict retry.
+	if existingTargetID == 0 {
+		n.cleanupDeletedTargetTombstoneBeforeRename(newParentObj.ID, sourceID, newName)
 	}
 
 	DebugLog("[VFS Rename] Rename source file to target name: sourceID=%d, targetID=%d, targetName=%s", sourceID, existingTargetID, newName)
@@ -3550,71 +3478,81 @@ func (n *OrcasNode) Rename(ctx context.Context, name string, newParent fs.InodeE
 		// Check if error is due to unique constraint violation
 		// This can happen if target file still exists (race condition or delete failed)
 		// Note: err is guaranteed to be non-nil here, so err.Error() is safe
-		if err == core.ERR_DUP_KEY || strings.Contains(err.Error(), "UNIQUE constraint failed") {
+		if isUniqueConstraintError(err) {
 			DebugLog("[VFS Rename] Unique constraint violation detected, attempting to resolve: sourceID=%d, targetName=%s, error=%v", sourceID, newName, err)
 
 			// Directly query database to find the conflicting file (including deleted ones)
 			// We need to check all files with the same name in the parent directory, even if marked as deleted
 			// because unique constraint is based on (pid, name) and deleted files (PID < 0) can still conflict
-			var conflictFileID int64 = 0
+			var conflictFileID int64
+			var conflictObj *core.ObjectInfo
 
-			// First, try to get from List (non-deleted files)
-			conflictChildren, listErr := n.fs.listAllObjects(newParentObj.ID, core.ListOptions{})
-			if listErr == nil {
-				for _, child := range conflictChildren {
-					if child.Name == newName && child.Type == core.OBJ_TYPE_FILE && child.ID != sourceID {
-						conflictFileID = child.ID
-						DebugLog("[VFS Rename] Found conflicting file in List: fileID=%d, name=%s", conflictFileID, newName)
-						break
+			// First, check the original existingTargetID before doing a full directory scan.
+			// In most conflict cases we already know the candidate target ID.
+			if existingTargetID > 0 && existingTargetID != sourceID {
+				targetObj := existingTargetObj
+				if targetObj == nil {
+					// Check if the original target file still exists (might be marked as deleted but still in DB)
+					targetObjs, getErr := n.fs.h.Get(n.fs.c, n.fs.bktID, []int64{existingTargetID})
+					if getErr == nil && len(targetObjs) > 0 {
+						targetObj = targetObjs[0]
+					}
+				}
+				// Check if target file has the same name (regardless of PID, as unique constraint is on (pid, name))
+				// But we need to check if it's in the same parent directory
+				// If PID is negative, it means it's marked as deleted, but we still need to handle it
+				if targetObj != nil && targetObj.Name == newName {
+					// Check if it's in the same parent (original PID matches new parent, or it's marked as deleted)
+					originalPID := targetObj.PID
+					if originalPID < 0 {
+						originalPID = -originalPID // Get original PID from deleted file
+					}
+					if originalPID == newParentObj.ID || targetObj.PID == newParentObj.ID {
+						conflictFileID = existingTargetID
+						conflictObj = targetObj
+						DebugLog("[VFS Rename] Found conflicting file from existingTargetID: fileID=%d, name=%s, pid=%d (deleted=%v)", conflictFileID, newName, targetObj.PID, targetObj.PID < 0)
 					}
 				}
 			}
 
-			// If not found in List, check the original existingTargetID
-			// The target file might have been marked as deleted (PID < 0) but still exists in DB
-			// and still violates unique constraint
-			if conflictFileID == 0 && existingTargetID > 0 && existingTargetID != sourceID {
-				// Check if the original target file still exists (might be marked as deleted but still in DB)
-				targetObjs, getErr := n.fs.h.Get(n.fs.c, n.fs.bktID, []int64{existingTargetID})
-				if getErr == nil && len(targetObjs) > 0 {
-					targetObj := targetObjs[0]
-					// Check if target file has the same name (regardless of PID, as unique constraint is on (pid, name))
-					// But we need to check if it's in the same parent directory
-					// If PID is negative, it means it's marked as deleted, but we still need to handle it
-					if targetObj.Name == newName {
-						// Check if it's in the same parent (original PID matches new parent, or it's marked as deleted)
-						originalPID := targetObj.PID
-						if originalPID < 0 {
-							originalPID = -originalPID // Get original PID from deleted file
-						}
-						if originalPID == newParentObj.ID || targetObj.PID == newParentObj.ID {
-							conflictFileID = existingTargetID
-							DebugLog("[VFS Rename] Found conflicting file from existingTargetID: fileID=%d, name=%s, pid=%d (deleted=%v)", conflictFileID, newName, targetObj.PID, targetObj.PID < 0)
-						}
+			// If still not found, query directly by (pid,name) including deleted rows.
+			if conflictFileID == 0 {
+				directID, directObj := n.queryFileByNameDirectly(newParentObj.ID, newName)
+				if directID > 0 && directID != sourceID {
+					conflictFileID = directID
+					conflictObj = directObj
+					if directObj != nil {
+						DebugLog("[VFS Rename] Found conflicting file from direct query: fileID=%d, name=%s, pid=%d", conflictFileID, newName, directObj.PID)
+					} else {
+						DebugLog("[VFS Rename] Found conflicting file from direct query: fileID=%d, name=%s", conflictFileID, newName)
 					}
 				}
 			}
 
-			// If we found a conflicting file, delete it and retry
+			// Final fallback: query active object by exact name (any type).
+			// This handles the rare race where a new object appears after previous probes.
+			if conflictFileID == 0 {
+				activeID, activeObj := n.queryActiveObjectByNameDirectly(newParentObj.ID, newName)
+				if activeID > 0 && activeID != sourceID {
+					if activeObj != nil && activeObj.Type == core.OBJ_TYPE_DIR {
+						DebugLog("[VFS Rename] Conflict is a directory during rename retry: targetID=%d, name=%s", activeID, newName)
+						return syscall.EISDIR
+					}
+					conflictFileID = activeID
+					conflictObj = activeObj
+					DebugLog("[VFS Rename] Found conflicting active object from direct query: fileID=%d, name=%s", conflictFileID, newName)
+				}
+			}
+
+			// If we found a conflicting file, delete it and retry.
 			if conflictFileID > 0 {
-				// Check if it's a .tmp file - if so, flush and unregister RandomAccessor first
-				conflictNameLower := strings.ToLower(newName)
-				isConflictTmpFile := strings.HasSuffix(conflictNameLower, ".tmp")
-
-				if isConflictTmpFile {
-					// Flush and unregister RandomAccessor if exists
-					if n.fs != nil {
-						if conflictRA := n.fs.getRandomAccessorByFileID(conflictFileID); conflictRA != nil {
-							if _, flushErr := conflictRA.ForceFlush(); flushErr != nil {
-								DebugLog("[VFS Rename] WARNING: Failed to flush conflicting .tmp file: fileID=%d, error=%v", conflictFileID, flushErr)
-							}
-							n.fs.unregisterRandomAccessor(conflictFileID, conflictRA)
-						}
-					}
-
-					// Remove from cache
-					conflictCacheKey := conflictFileID
-					fileObjCache.Del(conflictCacheKey)
+				if conflictObj != nil && conflictObj.Type == core.OBJ_TYPE_DIR {
+					DebugLog("[VFS Rename] Conflict object is directory, cannot replace via rename: targetID=%d, name=%s", conflictFileID, newName)
+					return syscall.EISDIR
+				}
+				if err := n.prepareFileForConflictDelete(conflictFileID, "conflict-pre-delete"); err != nil {
+					DebugLog("[VFS Rename] ERROR: Failed to prepare conflicting file before deletion: fileID=%d, error=%v", conflictFileID, err)
+					return syscall.EIO
 				}
 
 				// Delete the conflicting file
@@ -3632,18 +3570,17 @@ func (n *OrcasNode) Rename(ctx context.Context, name string, newParent fs.InodeE
 						DebugLog("[VFS Rename] ERROR: Both Delete and Recycle failed, cannot proceed with rename: fileID=%d, deleteErr=%v, recycleErr=%v", conflictFileID, deleteErr, recycleErr)
 						return syscall.EIO
 					}
-					// Recycle succeeded, but file is still in DB (just marked as deleted)
-					// We need to wait longer and retry, or use a different approach
-					DebugLog("[VFS Rename] File marked as deleted via Recycle, waiting before retry: fileID=%d", conflictFileID)
-					time.Sleep(200 * time.Millisecond) // Wait longer for Recycle to take effect
+					DebugLog("[VFS Rename] File marked as deleted via Recycle, proceeding to rename retries: fileID=%d", conflictFileID)
 				} else {
 					DebugLog("[VFS Rename] Successfully permanently deleted conflicting file: fileID=%d", conflictFileID)
-					// Wait a brief moment for delete to complete
-					time.Sleep(100 * time.Millisecond)
+				}
+
+				if !n.waitForRenameTargetSlotFree(newParentObj.ID, sourceID, newName, 4) {
+					DebugLog("[VFS Rename] WARNING: Target slot still occupied after conflict delete, proceeding with retry loop: sourceID=%d, targetName=%s", sourceID, newName)
 				}
 
 				// Retry rename with retry loop
-				maxRetries := 3
+				maxRetries := 4
 				for retry := 0; retry < maxRetries; retry++ {
 					err = n.fs.h.Rename(n.fs.c, n.fs.bktID, sourceID, newName)
 					if err == nil {
@@ -3653,11 +3590,11 @@ func (n *OrcasNode) Rename(ctx context.Context, name string, newParent fs.InodeE
 
 					// Check if still unique constraint error
 					// Note: err cannot be nil here because we're in the else branch of if err == nil
-					isUniqueError := err == core.ERR_DUP_KEY || strings.Contains(err.Error(), "UNIQUE constraint failed")
+					isUniqueError := isUniqueConstraintError(err)
 					if isUniqueError {
 						if retry < maxRetries-1 {
 							DebugLog("[VFS Rename] Still unique constraint error after delete, retrying (retry %d/%d): sourceID=%d, targetName=%s", retry+1, maxRetries, sourceID, newName)
-							time.Sleep(100 * time.Millisecond * time.Duration(retry+1)) // Exponential backoff
+							time.Sleep(renameRetryBackoff(retry))
 							continue
 						} else {
 							DebugLog("[VFS Rename] ERROR: Still unique constraint error after %d retries: sourceID=%d, targetName=%s, error=%v", maxRetries, sourceID, newName, err)
@@ -3677,22 +3614,29 @@ func (n *OrcasNode) Rename(ctx context.Context, name string, newParent fs.InodeE
 				// Continue with normal flow
 			} else {
 				// No conflicting file found, but still got unique constraint error
-				// This might be a race condition - wait and retry once
-				DebugLog("[VFS Rename] Unique constraint error but no conflicting file found, retrying after brief wait: sourceID=%d, targetName=%s", sourceID, newName)
-				time.Sleep(100 * time.Millisecond)
-				err = n.fs.h.Rename(n.fs.c, n.fs.bktID, sourceID, newName)
+				// This is usually a race; retry with short bounded backoff.
+				if !n.waitForRenameTargetSlotFree(newParentObj.ID, sourceID, newName, 3) {
+					DebugLog("[VFS Rename] WARNING: Target slot not free during race retry probe, proceeding with bounded rename retries: sourceID=%d, targetName=%s", sourceID, newName)
+				}
+				maxRetries := 3
+				for retry := 0; retry < maxRetries; retry++ {
+					err = n.fs.h.Rename(n.fs.c, n.fs.bktID, sourceID, newName)
+					if err == nil {
+						DebugLog("[VFS Rename] Successfully renamed after race retry (retry %d/%d): sourceID=%d, targetName=%s", retry+1, maxRetries, sourceID, newName)
+						break
+					}
+					if !isUniqueConstraintError(err) {
+						DebugLog("[VFS Rename] ERROR: Failed to rename after race retry: sourceID=%d, targetName=%s, error=%v", sourceID, newName, err)
+						return syscall.EIO
+					}
+					if retry < maxRetries-1 {
+						time.Sleep(renameRetryBackoff(retry))
+					}
+				}
 				if err != nil {
-					DebugLog("[VFS Rename] ERROR: Failed to rename after retry: sourceID=%d, targetName=%s, error=%v", sourceID, newName, err)
+					DebugLog("[VFS Rename] ERROR: Failed to rename after race retries: sourceID=%d, targetName=%s, error=%v", sourceID, newName, err)
 					return syscall.EIO
 				}
-				DebugLog("[VFS Rename] Successfully renamed after retry: sourceID=%d, targetName=%s", sourceID, newName)
-				// Continue with normal flow
-			}
-			// Note: listErr check is handled above, if listErr != nil, we skip the conflict resolution
-			if listErr != nil {
-				// Failed to query database, return error
-				DebugLog("[VFS Rename] ERROR: Failed to query database for conflicting file: error=%v", listErr)
-				return syscall.EIO
 			}
 		} else {
 			// Other error, return it
@@ -3701,60 +3645,50 @@ func (n *OrcasNode) Rename(ctx context.Context, name string, newParent fs.InodeE
 		}
 	}
 
+	return n.finalizeRenameSuccess(sourceID, existingTargetID, sourceObj, obj.ID, newParentNode, newParentObj.ID, newName, isRemovingTmp)
+}
+
+func (n *OrcasNode) finalizeRenameSuccess(sourceID, existingTargetID int64, sourceObj *core.ObjectInfo, oldParentID int64, newParentNode *OrcasNode, newParentID int64, newName string, isRemovingTmp bool) syscall.Errno {
 	DebugLog("[VFS Rename] Successfully renamed source file to target name: sourceID=%d, targetID=%d, targetName=%s", sourceID, existingTargetID, newName)
 
-	// If moved to different directory, need to move
-	if newParentObj.ID != obj.ID {
-		err = n.fs.h.MoveTo(n.fs.c, n.fs.bktID, sourceID, newParentObj.ID)
-		if err != nil {
+	// If moved to different directory, need to move.
+	if newParentID != oldParentID {
+		if err := n.fs.h.MoveTo(n.fs.c, n.fs.bktID, sourceID, newParentID); err != nil {
 			DebugLog("[VFS Rename] ERROR: Failed to move source file to target directory: sourceID=%d, targetID=%d, targetName=%s, error=%v", sourceID, existingTargetID, newName, err)
 			return syscall.EIO
 		}
 	}
 
-	// Note: If source is .tmp file and target file exists, we already handled it above
-	// by merging the version and deleting the .tmp file, so no need to delete target file here
-
-	// If source file is a .tmp file being renamed away from .tmp
-	// Case 1: target doesn't exist (existingTargetID == 0) - just rename
-	// Case 2: target is the same file (existingTargetID == sourceID) - just rename (already handled above by skipping merge)
-	// Only process this if target file didn't exist (we already handled the merge case above for different files)
+	// If source file is a .tmp file being renamed away from .tmp.
 	if isRemovingTmp && (existingTargetID == 0 || existingTargetID == sourceID) {
 		DebugLog("[VFS Rename] Source .tmp file renamed to new name (target didn't exist): fileID=%d, oldName=%s, newName=%s", sourceID, sourceObj.Name, newName)
-
-		// Note: We don't delete the source file here because it has been renamed to the target name
-		// The source file ID now represents the renamed file, so we should not delete it
-		// The .tmp extension has been removed, so it's no longer a temporary file
 		DebugLog("[VFS Rename] .tmp extension removed (flush already performed): fileID=%d, oldName=%s, newName=%s", sourceID, sourceObj.Name, newName)
 	}
 
-	// Update cache after database operations
-	// Update source file cache with new name and parent
-	n.updateFileObjCache(sourceID, newName, newParentObj.ID)
+	// Update cache after database operations.
+	n.updateFileObjCache(sourceID, newName, newParentID)
 
-	// Invalidate DataInfo cache for source file to ensure fresh data after flush
-	// This is important for .tmp files that were just flushed
+	// Invalidate DataInfo cache for source file to ensure fresh data after flush.
 	if sourceObj.Type == core.OBJ_TYPE_FILE && sourceObj.DataID > 0 {
-		dataInfoCacheKey := sourceObj.DataID
-		dataInfoCache.Del(dataInfoCacheKey)
+		dataInfoCache.Del(sourceObj.DataID)
 		DebugLog("[VFS Rename] Invalidated DataInfo cache: fileID=%d, dataID=%d", sourceID, sourceObj.DataID)
 	}
 
-	// Update cached source object name for future logic
 	if sourceObj.Type == core.OBJ_TYPE_FILE {
 		sourceObj.Name = newName
 	}
 
-	// Invalidate directory listing cache for both old and new parent directories
-	if obj.ID != newParentObj.ID {
-		n.invalidateDirListCache(obj.ID)
+	// Invalidate directory listing cache for both old and new parent directories.
+	if oldParentID != newParentID {
+		n.invalidateDirListCache(oldParentID)
 	}
-	n.invalidateDirListCache(newParentObj.ID)
+	n.invalidateDirListCache(newParentID)
 
-	// Invalidate both directories' cache (for GetAttr)
+	// Invalidate both directories' cache (for GetAttr).
 	n.invalidateObj()
-	newParentNode.invalidateObj()
-
+	if newParentNode != nil {
+		newParentNode.invalidateObj()
+	}
 	return 0
 }
 
@@ -3782,7 +3716,7 @@ func (n *OrcasNode) readImpl(ctx context.Context, dest []byte, off int64) (fuse.
 
 	// Check if KEY is required
 	requireKey := n.fs.requireKey
-	hasEndecKey := n.fs.Config.EndecKey != ""
+	hasEndecKey := getEndecKeyForFS(n.fs) != ""
 	DebugLog("[VFS Read] 🔑 Step 2: Checking key requirement: objID=%d, requireKey=%v, hasEndecKey=%v", n.objID, requireKey, hasEndecKey)
 	errno := n.fs.checkKey(true)
 	if errno != 0 {
@@ -4964,56 +4898,18 @@ func (n *OrcasNode) updateFileObjCacheFromAccessor(ra *RandomAccessor, newName s
 	}
 }
 
-// forceFlushTempFileBeforeRename ensures .tmp files flush pending data before renaming away from .tmp
-// - If TempFileWriter: directly sync flush, no waiting
-// - Cache: strong consistency (always read from database and update cache)
-func (n *OrcasNode) forceFlushTempFileBeforeRename(fileID int64, oldName, newName string) {
+// forceFlushTempFileBeforeRename ensures .tmp files flush pending data before renaming away from .tmp.
+// It prefers cache after flush and only falls back to DB reads when DataID/size still look inconsistent.
+func (n *OrcasNode) forceFlushTempFileBeforeRename(fileID int64, oldName, newName string) *core.ObjectInfo {
 	DebugLog("[VFS Rename] .tmp file being renamed, forcing flush: fileID=%d, oldName=%s, newName=%s", fileID, oldName, newName)
 
-	// Ensure file has a DataID - if not, pre-allocate one
-	// This ensures the file always has a DataID even before flush completes
-	{
-		// Ensure file has a DataID - if not, pre-allocate one
-		// This ensures the file always has a DataID even before flush completes
-		cacheKey := fileID
-		fileObjCache.Del(cacheKey) // Invalidate cache to get fresh data
-		objs, err := n.fs.h.Get(n.fs.c, n.fs.bktID, []int64{fileID})
-		if err == nil && len(objs) > 0 {
-			fileObj := objs[0]
-			// For empty files (Size = 0), EmptyDataID is valid and should be preserved
-			// Only pre-allocate DataID if file has data (Size > 0) but no DataID
-			if (fileObj.DataID == 0 || fileObj.DataID == core.EmptyDataID) && fileObj.Size > 0 {
-				// File has data but no DataID, pre-allocate one
-				newDataID := core.NewID()
-				if newDataID > 0 {
-					DebugLog("[VFS Rename] Pre-allocating DataID for .tmp file: fileID=%d, dataID=%d, size=%d", fileID, newDataID, fileObj.Size)
-					// Update file object with pre-allocated DataID
-					updateFileObj := &core.ObjectInfo{
-						ID:     fileObj.ID,
-						PID:    fileObj.PID,
-						Type:   fileObj.Type,
-						Name:   fileObj.Name,
-						DataID: newDataID,
-						Size:   fileObj.Size, // Preserve existing size
-						MTime:  core.Now(),
-					}
-					_, putErr := n.fs.h.Put(n.fs.c, n.fs.bktID, []*core.ObjectInfo{updateFileObj})
-					if putErr == nil {
-						// Update cache
-						fileObjCache.Put(cacheKey, updateFileObj)
-						DebugLog("[VFS Rename] Successfully pre-allocated DataID: fileID=%d, dataID=%d", fileID, newDataID)
-					} else {
-						DebugLog("[VFS Rename] WARNING: Failed to pre-allocate DataID: fileID=%d, error=%v", fileID, putErr)
-					}
-				} else {
-					DebugLog("[VFS Rename] WARNING: Failed to generate DataID for pre-allocation: fileID=%d", fileID)
-				}
-			} else if fileObj.Size == 0 {
-				// Empty file, EmptyDataID is valid, no need to pre-allocate
-				DebugLog("[VFS Rename] Empty .tmp file (Size=0), EmptyDataID is valid, no pre-allocation needed: fileID=%d, dataID=%d", fileID, fileObj.DataID)
-			}
-		}
+	fileObj := n.getFileObjForRename(fileID, false)
+	if fileObj == nil {
+		fileObj = n.getFileObjForRename(fileID, true)
 	}
+
+	// Ensure non-empty .tmp files have DataID before flush to avoid rename-time gap.
+	fileObj = n.preallocateDataIDForRename(fileObj)
 
 	var raToFlush *RandomAccessor
 	if val := n.ra.Load(); val != nil && val != releasedMarker {
@@ -5025,306 +4921,185 @@ func (n *OrcasNode) forceFlushTempFileBeforeRename(fileID int64, oldName, newNam
 		raToFlush = n.fs.getRandomAccessorByFileID(fileID)
 	}
 
-	// Get file object to check size
-	cacheKey := fileID
-	fileObjCache.Del(cacheKey) // Invalidate cache to get fresh data
-	objs, err := n.fs.h.Get(n.fs.c, n.fs.bktID, []int64{fileID})
-	var fileObj *core.ObjectInfo
-	if err == nil && len(objs) > 0 {
-		fileObj = objs[0]
-	}
-
-	// Check if file is large (uses TempFileWriter) or empty (Size=0)
-	isLargeFile := false
-	isEmptyFile := false
-	if fileObj != nil {
-		isEmptyFile = fileObj.Size == 0
-		// Large file threshold: 1MB (files larger than this use TempFileWriter)
-		isLargeFile = fileObj.Size > 1<<20
-	}
-
-	// For large files or empty files, force flush to disk
-	shouldForceFlush := isLargeFile || isEmptyFile
-
-	// Check if file has TempFileWriter - if so, directly sync flush (no waiting)
-	if raToFlush != nil && raToFlush.hasTempFileWriter() {
-		DebugLog("[VFS Rename] File has TempFileWriter, directly syncing flush: fileID=%d, size=%d, isLargeFile=%v, isEmptyFile=%v", fileID, fileObj.Size, isLargeFile, isEmptyFile)
-		if err := raToFlush.flushTempFileWriter(); err != nil {
-			DebugLog("[VFS Rename] ERROR: Failed to flush TempFileWriter: fileID=%d, error=%v", fileID, err)
-		} else {
-			DebugLog("[VFS Rename] Successfully flushed TempFileWriter: fileID=%d", fileID)
-			// Strong consistency: invalidate cache and re-fetch from database
-			cacheKey := fileID
-			fileObjCache.Del(cacheKey)
-			objs, err := n.fs.h.Get(n.fs.c, n.fs.bktID, []int64{fileID})
-			if err == nil && len(objs) > 0 {
-				fileObj = objs[0]
-				// For empty files, ensure EmptyDataID is set
-				if fileObj.Size == 0 && fileObj.DataID != core.EmptyDataID {
-					DebugLog("[VFS Rename] Empty file detected, setting EmptyDataID: fileID=%d, currentDataID=%d", fileID, fileObj.DataID)
-					updateFileObj := &core.ObjectInfo{
-						ID:     fileObj.ID,
-						PID:    fileObj.PID,
-						Type:   fileObj.Type,
-						Name:   fileObj.Name,
-						DataID: core.EmptyDataID,
-						Size:   0,
-						MTime:  core.Now(),
-					}
-					_, putErr := n.fs.h.Put(n.fs.c, n.fs.bktID, []*core.ObjectInfo{updateFileObj})
-					if putErr == nil {
-						fileObj = updateFileObj
-						DebugLog("[VFS Rename] Successfully set EmptyDataID for empty file: fileID=%d", fileID)
-					} else {
-						DebugLog("[VFS Rename] WARNING: Failed to set EmptyDataID for empty file: fileID=%d, error=%v", fileID, putErr)
-					}
-				}
-				fileObjCache.Put(cacheKey, fileObj)
-				DebugLog("[VFS Rename] Strong consistency: re-fetched from database after TempFileWriter flush: fileID=%d, dataID=%d, size=%d", fileID, fileObj.DataID, fileObj.Size)
-				// After sync flush, append file to directory listing cache
-				if fileObj.PID > 0 {
-					dirNode := &OrcasNode{
-						fs:    n.fs,
-						objID: fileObj.PID,
-					}
-					dirNode.invalidateDirListCache(fileObj.PID)
-					DebugLog("[VFS Rename] Appended file to directory listing cache after sync flush: fileID=%d, dirID=%d, name=%s", fileID, fileObj.PID, fileObj.Name)
-				}
-			}
-		}
-		// IMPORTANT: Do NOT unregister RandomAccessor immediately after flush
-		// There may be concurrent writes still in progress that need to use the same TempFileWriter
-		// Unregistering too early can cause subsequent writes to create a new RandomAccessor
-		// without TempFileWriter, leading to random write mode and new dataID creation
-		// The RandomAccessor will be unregistered when the file is closed or when no longer needed
-		// DebugLog("[VFS Rename] Keeping RandomAccessor registered after TempFileWriter flush to allow concurrent writes: fileID=%d", fileID)
-		return
-	}
-
-	// For large files or empty files without TempFileWriter, force flush
-	if shouldForceFlush && raToFlush != nil {
-		DebugLog("[VFS Rename] Large file or empty file detected, forcing flush: fileID=%d, size=%d, isLargeFile=%v, isEmptyFile=%v", fileID, fileObj.Size, isLargeFile, isEmptyFile)
-		if _, err := raToFlush.ForceFlush(); err != nil {
-			DebugLog("[VFS Rename] ERROR: Failed to force flush: fileID=%d, error=%v", fileID, err)
-		} else {
-			DebugLog("[VFS Rename] Successfully force flushed: fileID=%d", fileID)
-			// Get updated object from cache first (ForceFlush already updated it)
-			// Only read from database if cache is empty (to avoid WAL stale read)
-			cacheKey := fileID
-			var fileObj *core.ObjectInfo
-			if cached, ok := fileObjCache.Get(cacheKey); ok {
-				if obj, ok := cached.(*core.ObjectInfo); ok && obj != nil {
-					fileObj = obj
-					DebugLog("[VFS Rename] Got file object from cache after flush: fileID=%d, size=%d, dataID=%d", fileID, fileObj.Size, fileObj.DataID)
-				}
-			}
-			if fileObj == nil {
-				DebugLog("[VFS Rename] WARNING: File object not in cache after flush, reading from database: fileID=%d", fileID)
-				objs, err := n.fs.h.Get(n.fs.c, n.fs.bktID, []int64{fileID})
-				if err == nil && len(objs) > 0 {
-					fileObj = objs[0]
-				}
-			}
-			if fileObj != nil {
-				// For empty files, ensure EmptyDataID is set
-				if fileObj.Size == 0 && fileObj.DataID != core.EmptyDataID {
-					DebugLog("[VFS Rename] Empty file detected after flush, setting EmptyDataID: fileID=%d, currentDataID=%d", fileID, fileObj.DataID)
-					updateFileObj := &core.ObjectInfo{
-						ID:     fileObj.ID,
-						PID:    fileObj.PID,
-						Type:   fileObj.Type,
-						Name:   fileObj.Name,
-						DataID: core.EmptyDataID,
-						Size:   0,
-						MTime:  core.Now(),
-					}
-					_, putErr := n.fs.h.Put(n.fs.c, n.fs.bktID, []*core.ObjectInfo{updateFileObj})
-					if putErr == nil {
-						fileObj = updateFileObj
-						DebugLog("[VFS Rename] Successfully set EmptyDataID for empty file: fileID=%d", fileID)
-					} else {
-						DebugLog("[VFS Rename] WARNING: Failed to set EmptyDataID for empty file: fileID=%d, error=%v", fileID, putErr)
-					}
-				}
-				fileObjCache.Put(cacheKey, fileObj)
-				DebugLog("[VFS Rename] Re-fetched after force flush: fileID=%d, dataID=%d, size=%d", fileID, fileObj.DataID, fileObj.Size)
-			}
-		}
-	}
-
-	// If RandomAccessor exists but no TempFileWriter, flush its buffer first
-	// This handles the case where data is in RandomAccessor's buffer but not yet flushed
-	if raToFlush != nil && !raToFlush.hasTempFileWriter() {
-		// Check if RandomAccessor has pending writes
-		writeIndex := atomic.LoadInt64(&raToFlush.buffer.writeIndex)
-		totalSize := atomic.LoadInt64(&raToFlush.buffer.totalSize)
-		if writeIndex > 0 || totalSize > 0 {
-			DebugLog("[VFS Rename] RandomAccessor has pending writes, flushing: fileID=%d, writeIndex=%d, totalSize=%d", fileID, writeIndex, totalSize)
-			if _, err := raToFlush.ForceFlush(); err != nil {
-				DebugLog("[VFS Rename] WARNING: Failed to flush RandomAccessor buffer: fileID=%d, error=%v", fileID, err)
-			} else {
-				DebugLog("[VFS Rename] Successfully flushed RandomAccessor buffer: fileID=%d", fileID)
-			}
-		}
-	}
-
-	// If RandomAccessor exists but no TempFileWriter, flush its buffer first
-	// This handles the case where data is in RandomAccessor's buffer but not yet flushed
-	if raToFlush != nil && !raToFlush.hasTempFileWriter() {
-		// Check if RandomAccessor has pending writes
-		writeIndex := atomic.LoadInt64(&raToFlush.buffer.writeIndex)
-		totalSize := atomic.LoadInt64(&raToFlush.buffer.totalSize)
-		if writeIndex > 0 || totalSize > 0 {
-			DebugLog("[VFS Rename] RandomAccessor has pending writes, flushing: fileID=%d, writeIndex=%d, totalSize=%d", fileID, writeIndex, totalSize)
-			if _, err := raToFlush.ForceFlush(); err != nil {
-				DebugLog("[VFS Rename] WARNING: Failed to flush RandomAccessor buffer: fileID=%d, error=%v", fileID, err)
-			} else {
-				DebugLog("[VFS Rename] Successfully flushed RandomAccessor buffer: fileID=%d", fileID)
-			}
-		}
-	}
-
-	// If RandomAccessor exists, flush it
+	flushed := false
 	if raToFlush != nil {
-		DebugLog("[VFS Rename] Flushing RandomAccessor: fileID=%d", fileID)
-		if _, err := raToFlush.ForceFlush(); err != nil {
-			DebugLog("[VFS Rename] WARNING: Failed to flush RandomAccessor: fileID=%d, error=%v", fileID, err)
-		}
-
-		// Get updated object from cache first (ForceFlush already updated it)
-		// Only read from database if cache is empty (to avoid WAL stale read)
-		cacheKey := fileID
-		var fileObj *core.ObjectInfo
-		if cached, ok := fileObjCache.Get(cacheKey); ok {
-			if obj, ok := cached.(*core.ObjectInfo); ok && obj != nil {
-				fileObj = obj
-				DebugLog("[VFS Rename] Got file object from cache after flush: fileID=%d, size=%d, dataID=%d", fileID, fileObj.Size, fileObj.DataID)
-			}
-		}
-		if fileObj == nil {
-			DebugLog("[VFS Rename] WARNING: File object not in cache after flush, reading from database: fileID=%d", fileID)
-			objs, err := n.fs.h.Get(n.fs.c, n.fs.bktID, []int64{fileID})
-			if err == nil && len(objs) > 0 {
-				fileObj = objs[0]
-			}
-		}
-		if fileObj != nil {
-			// For empty files (Size = 0), EmptyDataID is valid
-			if fileObj.Size == 0 {
-				fileObjCache.Put(cacheKey, fileObj)
-				DebugLog("[VFS Rename] Empty file after batch flush (EmptyDataID is valid): fileID=%d, dataID=%d, size=%d", fileID, fileObj.DataID, fileObj.Size)
+		if raToFlush.hasTempFileWriter() {
+			if err := raToFlush.flushTempFileWriter(); err != nil {
+				DebugLog("[VFS Rename] ERROR: Failed to flush TempFileWriter: fileID=%d, error=%v", fileID, err)
 			} else {
-				// Retry only if DataID is missing (error case) and file is not empty
-				DebugLog("[VFS Rename] WARNING: No DataID after batch flush, retrying: fileID=%d, size=%d", fileID, fileObj.Size)
-				maxRetries := 10
-				for retry := 0; retry < maxRetries; retry++ {
-					fileObjCache.Del(cacheKey)
-					objs, err = n.fs.h.Get(n.fs.c, n.fs.bktID, []int64{fileID})
-					if err == nil && len(objs) > 0 {
-						fileObj = objs[0]
-						// Check if file is empty - if so, EmptyDataID is valid
-						if fileObj.Size == 0 {
-							fileObjCache.Put(cacheKey, fileObj)
-							DebugLog("[VFS Rename] Empty file after retry (EmptyDataID is valid): fileID=%d, dataID=%d, size=%d", fileID, fileObj.DataID, fileObj.Size)
-							break
-						}
-						if fileObj.DataID > 0 && fileObj.DataID != core.EmptyDataID {
-							fileObjCache.Put(cacheKey, fileObj)
-							DebugLog("[VFS Rename] Successfully got DataID after retry (retry %d/%d): fileID=%d, dataID=%d, size=%d", retry+1, maxRetries, fileID, fileObj.DataID, fileObj.Size)
-							break
-						}
-					}
-					if retry < maxRetries-1 {
-						time.Sleep(50 * time.Millisecond) // Only wait on error retry
-					}
-				}
-			}
-		}
-
-		// For empty files (Size = 0), EmptyDataID is valid
-		if fileObj != nil {
-			if fileObj.Size == 0 || (fileObj.DataID > 0 && fileObj.DataID != core.EmptyDataID) {
-				// Update file object with new name (will be updated by Rename operation later)
-				// For now, just ensure it's in cache with current name
-				// The Rename operation will update the name in database and cache
-				fileObjCache.Put(cacheKey, fileObj)
-				DebugLog("[VFS Rename] File flushed and cached (name will be updated by Rename): fileID=%d, dataID=%d, size=%d, currentName=%s, newName=%s", fileID, fileObj.DataID, fileObj.Size, fileObj.Name, newName)
-				// Note: Directory listing cache will be updated by Rename operation after database update
-			} else {
-				DebugLog("[VFS Rename] WARNING: File still has no DataID after batch flush and retries: fileID=%d, size=%d", fileID, fileObj.Size)
-			}
-		}
-
-		// IMPORTANT: Do NOT unregister RandomAccessor immediately after batch flush
-		// There may be concurrent writes still in progress that need to use the same RandomAccessor
-		// Unregistering too early can cause subsequent writes to create a new RandomAccessor
-		// without TempFileWriter, leading to random write mode and new dataID creation
-		// The RandomAccessor will be unregistered when the file is closed or when no longer needed
-		// DebugLog("[VFS Rename] Keeping RandomAccessor registered after batch flush to allow concurrent writes: fileID=%d", fileID)
-		return
-	}
-
-	// If no RandomAccessor found (raToFlush is nil at this point), try to create a temporary RandomAccessor to flush any pending data
-	DebugLog("[VFS Rename] No RandomAccessor found, trying to create temporary RandomAccessor to flush: fileID=%d", fileID)
-	tempRA, err := NewRandomAccessor(n.fs, fileID)
-	if err == nil && tempRA != nil {
-		// Check if it has TempFileWriter
-		if tempRA.hasTempFileWriter() {
-			// Directly sync flush TempFileWriter
-			if err := tempRA.flushTempFileWriter(); err != nil {
-				DebugLog("[VFS Rename] WARNING: Failed to flush temporary TempFileWriter: fileID=%d, error=%v", fileID, err)
-			} else {
-				DebugLog("[VFS Rename] Successfully flushed temporary TempFileWriter: fileID=%d", fileID)
+				flushed = true
+				DebugLog("[VFS Rename] Successfully flushed TempFileWriter: fileID=%d", fileID)
 			}
 		} else {
-			// Try to flush any pending data
-			if _, flushErr := tempRA.ForceFlush(); flushErr != nil {
-				DebugLog("[VFS Rename] WARNING: Failed to flush temporary RandomAccessor: fileID=%d, error=%v", fileID, flushErr)
+			writeIndex := atomic.LoadInt64(&raToFlush.buffer.writeIndex)
+			totalSize := atomic.LoadInt64(&raToFlush.buffer.totalSize)
+			hasPendingWrites := writeIndex > 0 || totalSize > 0
+			needsForceFlush := hasPendingWrites
+			if fileObj == nil {
+				needsForceFlush = true
 			} else {
-				DebugLog("[VFS Rename] Successfully flushed temporary RandomAccessor: fileID=%d", fileID)
+				needsForceFlush = needsForceFlush || fileObj.Size == 0 || fileObj.Size > 1<<20
+				needsForceFlush = needsForceFlush || (fileObj.Size > 0 && (fileObj.DataID == 0 || fileObj.DataID == core.EmptyDataID))
 			}
-		}
-		// Strong consistency: invalidate cache and re-fetch from database
-		cacheKey := fileID
-		fileObjCache.Del(cacheKey)
-		objs, err := n.fs.h.Get(n.fs.c, n.fs.bktID, []int64{fileID})
-		if err == nil && len(objs) > 0 {
-			fileObj := objs[0]
-			// For empty files, ensure EmptyDataID is set
-			if fileObj.Size == 0 && fileObj.DataID != core.EmptyDataID {
-				DebugLog("[VFS Rename] Empty file detected after temporary flush, setting EmptyDataID: fileID=%d, currentDataID=%d", fileID, fileObj.DataID)
-				updateFileObj := &core.ObjectInfo{
-					ID:     fileObj.ID,
-					PID:    fileObj.PID,
-					Type:   fileObj.Type,
-					Name:   fileObj.Name,
-					DataID: core.EmptyDataID,
-					Size:   0,
-					MTime:  core.Now(),
-				}
-				_, putErr := n.fs.h.Put(n.fs.c, n.fs.bktID, []*core.ObjectInfo{updateFileObj})
-				if putErr == nil {
-					fileObj = updateFileObj
-					DebugLog("[VFS Rename] Successfully set EmptyDataID for empty file: fileID=%d", fileID)
+
+			if needsForceFlush {
+				if _, err := raToFlush.ForceFlush(); err != nil {
+					DebugLog("[VFS Rename] WARNING: Failed to force flush RandomAccessor: fileID=%d, error=%v", fileID, err)
 				} else {
-					DebugLog("[VFS Rename] WARNING: Failed to set EmptyDataID for empty file: fileID=%d, error=%v", fileID, putErr)
+					flushed = true
+					DebugLog("[VFS Rename] Successfully force flushed RandomAccessor: fileID=%d, writeIndex=%d, totalSize=%d", fileID, writeIndex, totalSize)
 				}
-			}
-			fileObjCache.Put(cacheKey, fileObj)
-			DebugLog("[VFS Rename] Strong consistency: re-fetched from database after temporary flush: fileID=%d, dataID=%d, size=%d", fileID, fileObj.DataID, fileObj.Size)
-			// Update directory listing cache
-			if fileObj.PID > 0 {
-				dirNode := &OrcasNode{
-					fs:    n.fs,
-					objID: fileObj.PID,
-				}
-				dirNode.invalidateDirListCache(fileObj.PID)
-				DebugLog("[VFS Rename] Updated directory listing cache after temporary flush: fileID=%d, dirID=%d, name=%s", fileID, fileObj.PID, fileObj.Name)
 			}
 		}
 	} else {
-		DebugLog("[VFS Rename] WARNING: Unable to create temporary RandomAccessor for .tmp file flush: fileID=%d, error=%v", fileID, err)
+		needsTempRA := fileObj == nil || (fileObj.Size > 0 && (fileObj.DataID == 0 || fileObj.DataID == core.EmptyDataID))
+		if needsTempRA {
+			DebugLog("[VFS Rename] No RandomAccessor found, creating temporary RandomAccessor for rename flush: fileID=%d", fileID)
+			tempRA, err := NewRandomAccessor(n.fs, fileID)
+			if err != nil || tempRA == nil {
+				DebugLog("[VFS Rename] WARNING: Unable to create temporary RandomAccessor for rename flush: fileID=%d, error=%v", fileID, err)
+			} else if tempRA.hasTempFileWriter() {
+				if err := tempRA.flushTempFileWriter(); err != nil {
+					DebugLog("[VFS Rename] WARNING: Failed to flush temporary TempFileWriter: fileID=%d, error=%v", fileID, err)
+				} else {
+					flushed = true
+					DebugLog("[VFS Rename] Successfully flushed temporary TempFileWriter: fileID=%d", fileID)
+				}
+			} else {
+				if _, flushErr := tempRA.ForceFlush(); flushErr != nil {
+					DebugLog("[VFS Rename] WARNING: Failed to flush temporary RandomAccessor: fileID=%d, error=%v", fileID, flushErr)
+				} else {
+					flushed = true
+					DebugLog("[VFS Rename] Successfully flushed temporary RandomAccessor: fileID=%d", fileID)
+				}
+			}
+		}
 	}
+
+	if cached, ok := fileObjCache.Get(fileID); ok {
+		if cachedObj, ok := cached.(*core.ObjectInfo); ok && cachedObj != nil {
+			fileObj = cachedObj
+		}
+	}
+	if fileObj == nil || (fileObj.Size > 0 && (fileObj.DataID == 0 || fileObj.DataID == core.EmptyDataID)) {
+		refreshed := n.getFileObjForRename(fileID, true)
+		if refreshed != nil {
+			fileObj = refreshed
+		}
+	}
+
+	fileObj = n.ensureEmptyDataIDForRename(fileObj)
+	fileObj = n.waitForValidDataIDAfterRenameFlush(fileID, fileObj)
+
+	if fileObj != nil {
+		fileObjCache.Put(fileID, fileObj)
+		DebugLog("[VFS Rename] .tmp flush completed: fileID=%d, dataID=%d, size=%d, flushed=%v", fileID, fileObj.DataID, fileObj.Size, flushed)
+		if flushed && fileObj.PID > 0 {
+			n.invalidateDirListCache(fileObj.PID)
+		}
+	}
+	return fileObj
+}
+
+func (n *OrcasNode) getFileObjForRename(fileID int64, forceDB bool) *core.ObjectInfo {
+	if !forceDB {
+		if cached, ok := fileObjCache.Get(fileID); ok {
+			if cachedObj, ok := cached.(*core.ObjectInfo); ok && cachedObj != nil {
+				return cachedObj
+			}
+		}
+	}
+
+	if forceDB {
+		fileObjCache.Del(fileID)
+	}
+
+	objs, err := n.fs.h.Get(n.fs.c, n.fs.bktID, []int64{fileID})
+	if err != nil || len(objs) == 0 {
+		return nil
+	}
+	fileObj := objs[0]
+	fileObjCache.Put(fileID, fileObj)
+	return fileObj
+}
+
+func (n *OrcasNode) preallocateDataIDForRename(fileObj *core.ObjectInfo) *core.ObjectInfo {
+	if fileObj == nil || fileObj.Size == 0 {
+		return fileObj
+	}
+	if fileObj.DataID > 0 && fileObj.DataID != core.EmptyDataID {
+		return fileObj
+	}
+
+	newDataID := core.NewID()
+	if newDataID <= 0 {
+		DebugLog("[VFS Rename] WARNING: Failed to generate DataID for pre-allocation: fileID=%d", fileObj.ID)
+		return fileObj
+	}
+
+	updateFileObj := &core.ObjectInfo{
+		ID:     fileObj.ID,
+		PID:    fileObj.PID,
+		Type:   fileObj.Type,
+		Name:   fileObj.Name,
+		DataID: newDataID,
+		Size:   fileObj.Size,
+		MTime:  core.Now(),
+	}
+	if _, err := n.fs.h.Put(n.fs.c, n.fs.bktID, []*core.ObjectInfo{updateFileObj}); err != nil {
+		DebugLog("[VFS Rename] WARNING: Failed to pre-allocate DataID: fileID=%d, error=%v", fileObj.ID, err)
+		return fileObj
+	}
+	fileObjCache.Put(updateFileObj.ID, updateFileObj)
+	DebugLog("[VFS Rename] Pre-allocated DataID for .tmp file: fileID=%d, dataID=%d, size=%d", updateFileObj.ID, updateFileObj.DataID, updateFileObj.Size)
+	return updateFileObj
+}
+
+func (n *OrcasNode) ensureEmptyDataIDForRename(fileObj *core.ObjectInfo) *core.ObjectInfo {
+	if fileObj == nil || fileObj.Size != 0 || fileObj.DataID == core.EmptyDataID {
+		return fileObj
+	}
+
+	updateFileObj := &core.ObjectInfo{
+		ID:     fileObj.ID,
+		PID:    fileObj.PID,
+		Type:   fileObj.Type,
+		Name:   fileObj.Name,
+		DataID: core.EmptyDataID,
+		Size:   0,
+		MTime:  core.Now(),
+	}
+	if _, err := n.fs.h.Put(n.fs.c, n.fs.bktID, []*core.ObjectInfo{updateFileObj}); err != nil {
+		DebugLog("[VFS Rename] WARNING: Failed to set EmptyDataID for empty file: fileID=%d, error=%v", fileObj.ID, err)
+		return fileObj
+	}
+	fileObjCache.Put(updateFileObj.ID, updateFileObj)
+	DebugLog("[VFS Rename] Set EmptyDataID for empty file: fileID=%d", updateFileObj.ID)
+	return updateFileObj
+}
+
+func (n *OrcasNode) waitForValidDataIDAfterRenameFlush(fileID int64, fileObj *core.ObjectInfo) *core.ObjectInfo {
+	if fileObj == nil || fileObj.Size == 0 {
+		return fileObj
+	}
+	if fileObj.DataID > 0 && fileObj.DataID != core.EmptyDataID {
+		return fileObj
+	}
+
+	const maxRetries = 4
+	for retry := 0; retry < maxRetries; retry++ {
+		if retry > 0 {
+			time.Sleep(25 * time.Millisecond)
+		}
+		refreshed := n.getFileObjForRename(fileID, true)
+		if refreshed == nil {
+			continue
+		}
+		if refreshed.Size == 0 || (refreshed.DataID > 0 && refreshed.DataID != core.EmptyDataID) {
+			return refreshed
+		}
+	}
+	return fileObj
 }
 
 // Release releases file handle (closes file)
@@ -5493,6 +5268,10 @@ func (n *OrcasNode) releaseImpl(ctx context.Context) syscall.Errno {
 // This includes deleted files (PID < 0) which may still cause unique constraint conflicts
 // Returns (fileID, fileObj) or (0, nil) if not found
 func (n *OrcasNode) queryFileByNameDirectly(parentID int64, fileName string) (int64, *core.ObjectInfo) {
+	if n == nil || n.fs == nil || parentID == 0 || fileName == "" {
+		return 0, nil
+	}
+
 	// Query database directly using handler's metadata adapter
 	// We need to access the metadata adapter to query directly
 	// Since handler doesn't expose direct SQL query, we'll use GetReadDB from core
@@ -5505,40 +5284,391 @@ func (n *OrcasNode) queryFileByNameDirectly(parentID int64, fileName string) (in
 	}
 	// Note: Don't close the connection, it's from the pool
 
-	// Query for file with matching name and parent ID (including deleted files)
-	// Unique constraint is on (pid, name), so we need to check:
-	// 1. pid = parentID (non-deleted file)
-	// 2. pid = -parentID (deleted file, if parentID > 0)
-	// 3. pid = -bktID (deleted file from root, if parentID == bktID)
-	var objs []core.ObjectInfo
-	var whereConds []interface{}
-	if parentID == n.fs.bktID {
-		// Root directory: check pid = bktID and pid = -bktID
-		whereConds = []interface{}{
-			b.Eq("name", fileName),
-			b.Eq("type", core.OBJ_TYPE_FILE),
-			b.Or(b.Eq("pid", n.fs.bktID), b.Eq("pid", -n.fs.bktID)),
+	queryByPID := func(pid int64) (*core.ObjectInfo, error) {
+		var objs []core.ObjectInfo
+		_, qErr := b.TableContext(n.fs.c, db, core.OBJ_TBL).Select(
+			&objs,
+			b.Where(
+				b.Eq("n", fileName),
+				b.Eq("t", core.OBJ_TYPE_FILE),
+				b.Eq("pid", pid),
+			),
+			b.Limit(1),
+		)
+		if qErr != nil {
+			return nil, qErr
 		}
-	} else {
-		// Non-root: check pid = parentID and pid = -parentID
-		whereConds = []interface{}{
-			b.Eq("name", fileName),
-			b.Eq("type", core.OBJ_TYPE_FILE),
-			b.Or(b.Eq("pid", parentID), b.Eq("pid", -parentID)),
+		if len(objs) == 0 {
+			return nil, nil
 		}
-	}
-	_, err = b.TableContext(n.fs.c, db, core.OBJ_TBL).Select(&objs, b.Where(whereConds...), b.Limit(1))
-	if err != nil {
-		DebugLog("[VFS queryFileByNameDirectly] ERROR: Failed to query database: %v", err)
-		return 0, nil
+		return &objs[0], nil
 	}
 
-	if len(objs) > 0 {
-		// Found file, return it (even if deleted)
-		return objs[0].ID, &objs[0]
+	// 1) Active row first (exact parent). This avoids returning old deleted tombstones
+	// when a same-name active file has already been recreated.
+	obj, err := queryByPID(parentID)
+	if err != nil {
+		DebugLog("[VFS queryFileByNameDirectly] ERROR: Failed active query: parentID=%d, name=%s, error=%v", parentID, fileName, err)
+		return 0, nil
+	}
+	if obj != nil {
+		return obj.ID, obj
+	}
+
+	// 2) Deleted row fallback.
+	deletedPID := -parentID
+	if deletedPID == 0 {
+		deletedPID = -1
+	}
+	if parentID == n.fs.bktID {
+		deletedPID = -n.fs.bktID
+	}
+	obj, err = queryByPID(deletedPID)
+	if err != nil {
+		DebugLog("[VFS queryFileByNameDirectly] ERROR: Failed deleted query: parentID=%d, deletedPID=%d, name=%s, error=%v", parentID, deletedPID, fileName, err)
+		return 0, nil
+	}
+	if obj != nil {
+		return obj.ID, obj
 	}
 
 	return 0, nil
+}
+
+// queryActiveObjectByNameDirectly queries active object (pid==parentID) by exact name.
+// Returns (objID, obj) or (0, nil) if not found.
+func (n *OrcasNode) queryActiveObjectByNameDirectly(parentID int64, objectName string) (int64, *core.ObjectInfo) {
+	if objectName == "" {
+		return 0, nil
+	}
+	objByName := n.queryActiveObjectsByNamesDirectly(parentID, []string{objectName})
+	obj := objByName[objectName]
+	if obj == nil {
+		return 0, nil
+	}
+	return obj.ID, obj
+}
+
+// queryActiveObjectsByNamesDirectly queries active objects by exact names in one DB round-trip.
+// Returns a map keyed by object name. Missing names are omitted.
+func (n *OrcasNode) queryActiveObjectsByNamesDirectly(parentID int64, objectNames []string) map[string]*core.ObjectInfo {
+	result := make(map[string]*core.ObjectInfo)
+	if n == nil || n.fs == nil || parentID == 0 || len(objectNames) == 0 {
+		return result
+	}
+
+	uniqNames := make([]string, 0, len(objectNames))
+	seen := make(map[string]struct{}, len(objectNames))
+	for _, name := range objectNames {
+		if name == "" {
+			continue
+		}
+		if _, ok := seen[name]; ok {
+			continue
+		}
+		seen[name] = struct{}{}
+		uniqNames = append(uniqNames, name)
+	}
+	if len(uniqNames) == 0 {
+		return result
+	}
+
+	bktDirPath := filepath.Join(n.fs.DataPath, fmt.Sprint(n.fs.bktID))
+	db, err := core.GetReadDB(bktDirPath)
+	if err != nil {
+		DebugLog("[VFS queryActiveObjectsByNamesDirectly] ERROR: Failed to get database connection: %v", err)
+		return result
+	}
+
+	var objs []core.ObjectInfo
+	_, err = b.TableContext(n.fs.c, db, core.OBJ_TBL).Select(
+		&objs,
+		b.Where(
+			b.Eq("pid", parentID),
+			b.In("n", uniqNames),
+		),
+		b.Limit(len(uniqNames)+2),
+	)
+	if err != nil {
+		DebugLog("[VFS queryActiveObjectsByNamesDirectly] ERROR: Failed to query objects: parentID=%d, names=%v, error=%v", parentID, uniqNames, err)
+		return result
+	}
+
+	for i := range objs {
+		obj := &objs[i]
+		if _, exists := result[obj.Name]; exists {
+			continue
+		}
+		result[obj.Name] = obj
+	}
+	return result
+}
+
+// cleanupDeletedTargetTombstoneBeforeRename removes deleted tombstones that still conflict on (pid,name).
+// Best-effort only: failures are logged and normal rename conflict handling can still recover.
+func (n *OrcasNode) cleanupDeletedTargetTombstoneBeforeRename(parentID, sourceID int64, targetName string) {
+	if n == nil || n.fs == nil || parentID == 0 || targetName == "" {
+		return
+	}
+
+	conflictID, conflictObj := n.queryFileByNameDirectly(parentID, targetName)
+	if conflictID == 0 || conflictID == sourceID || conflictObj == nil || conflictObj.PID >= 0 {
+		return
+	}
+
+	DebugLog("[VFS Rename] Pre-cleaning deleted tombstone before rename: conflictID=%d, parentID=%d, name=%s, pid=%d",
+		conflictID, parentID, targetName, conflictObj.PID)
+	if err := n.fs.h.Delete(n.fs.c, n.fs.bktID, conflictID); err != nil {
+		DebugLog("[VFS Rename] WARNING: Failed to pre-delete tombstone before rename: conflictID=%d, name=%s, error=%v",
+			conflictID, targetName, err)
+		return
+	}
+
+	fileObjCache.Del(conflictID)
+	if ra := n.fs.getRandomAccessorByFileID(conflictID); ra != nil {
+		n.fs.unregisterRandomAccessor(conflictID, ra)
+	}
+	DebugLog("[VFS Rename] Pre-deleted tombstone before rename: conflictID=%d, name=%s", conflictID, targetName)
+}
+
+// prepareFileForConflictDelete flushes/unregisters tracked accessor (if any) and drops object cache entry.
+// Used before deleting an object during rename conflict resolution.
+func (n *OrcasNode) prepareFileForConflictDelete(fileID int64, stage string) error {
+	if fileID == 0 {
+		return nil
+	}
+	if n == nil || n.fs == nil {
+		fileObjCache.Del(fileID)
+		return nil
+	}
+
+	if ra := n.fs.getRandomAccessorByFileID(fileID); ra != nil {
+		if err := n.forceFlushAccessorForRename(ra, fileID, stage); err != nil {
+			return err
+		}
+		n.fs.unregisterRandomAccessor(fileID, ra)
+	}
+	fileObjCache.Del(fileID)
+	return nil
+}
+
+func renameRetryBackoff(attempt int) time.Duration {
+	switch attempt {
+	case 0:
+		return 5 * time.Millisecond
+	case 1:
+		return 15 * time.Millisecond
+	case 2:
+		return 35 * time.Millisecond
+	default:
+		return 60 * time.Millisecond
+	}
+}
+
+// buildRenameCandidateNames returns ordered name candidates used by rename source/target probes.
+// The exact name is always first. For ".tmp" names, the second candidate removes the suffix.
+func buildRenameCandidateNames(name string) []string {
+	if name == "" {
+		return []string{""}
+	}
+	candidates := []string{name}
+	nameLower := strings.ToLower(name)
+	if strings.HasSuffix(nameLower, ".tmp") && len(name) > 4 {
+		withoutTmp := name[:len(name)-4]
+		if withoutTmp != "" && withoutTmp != name {
+			candidates = append(candidates, withoutTmp)
+		}
+	}
+	return candidates
+}
+
+// findActiveObjectByNamesFromDirCache checks cached directory listing for matching active object names.
+// Returns the first match in candidate order (exact name should be passed first).
+func (n *OrcasNode) findActiveObjectByNamesFromDirCache(parentID int64, candidateNames []string) (int64, *core.ObjectInfo) {
+	if n == nil || n.fs == nil || parentID == 0 || len(candidateNames) == 0 {
+		return 0, nil
+	}
+	cacheKey := n.getDirListCacheKey(parentID)
+	cached, ok := dirListCache.Get(cacheKey)
+	if !ok {
+		return 0, nil
+	}
+	children, ok := cached.([]*core.ObjectInfo)
+	if !ok || len(children) == 0 {
+		return 0, nil
+	}
+
+	for _, candidateName := range candidateNames {
+		if candidateName == "" {
+			continue
+		}
+		for _, child := range children {
+			if child == nil || child.PID != parentID || child.Name != candidateName {
+				continue
+			}
+			if cachedObjAny, ok := fileObjCache.Get(child.ID); ok {
+				if cachedObj, ok := cachedObjAny.(*core.ObjectInfo); ok && cachedObj != nil {
+					return cachedObj.ID, cachedObj
+				}
+			}
+			return child.ID, child
+		}
+	}
+	return 0, nil
+}
+
+// findSourceInRARegistryForRename finds source object in one registry scan.
+// exactName is preferred; fallbackName is only used when exactName is not found.
+func (n *OrcasNode) findSourceInRARegistryForRename(parentID int64, exactName, fallbackName string) (int64, *core.ObjectInfo) {
+	if n == nil || n.fs == nil || parentID == 0 || exactName == "" {
+		return 0, nil
+	}
+
+	var exactID int64
+	var exactObj *core.ObjectInfo
+	var fallbackID int64
+	var fallbackObj *core.ObjectInfo
+	n.fs.raRegistry.Range(func(key, value interface{}) bool {
+		ra, ok := value.(*RandomAccessor)
+		if !ok || ra == nil {
+			return true
+		}
+		// Keep registry scan lightweight: do not trigger DB fetches here.
+		// If object is not in RA/file cache, follow-up direct query/list fallback handles it.
+		var fileObj *core.ObjectInfo
+		if fileObjVal := ra.fileObj.Load(); fileObjVal != nil {
+			if obj, ok := fileObjVal.(*core.ObjectInfo); ok && obj != nil {
+				fileObj = obj
+			}
+		}
+		if fileObj == nil {
+			if cachedObjAny, ok := fileObjCache.Get(ra.fileObjKey); ok {
+				if cachedObj, ok := cachedObjAny.(*core.ObjectInfo); ok && cachedObj != nil {
+					fileObj = cachedObj
+					ra.fileObj.Store(cachedObj)
+				}
+			}
+		}
+		if fileObj == nil || fileObj.PID != parentID {
+			return true
+		}
+		if fileObj.Name == exactName {
+			exactID = fileObj.ID
+			exactObj = fileObj
+			return false
+		}
+		if fallbackName != "" && fallbackID == 0 && fileObj.Name == fallbackName {
+			fallbackID = fileObj.ID
+			fallbackObj = fileObj
+		}
+		return true
+	})
+	if exactID > 0 {
+		return exactID, exactObj
+	}
+	return fallbackID, fallbackObj
+}
+
+func isUniqueConstraintError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if err == core.ERR_DUP_KEY || errors.Is(err, core.ERR_DUP_KEY) {
+		return true
+	}
+	errMsg := err.Error()
+	return strings.Contains(errMsg, "UNIQUE constraint failed") || strings.Contains(errMsg, core.ERR_DUP_KEY.Error())
+}
+
+// createVersionFromTargetWithRetry performs best-effort version preservation before overwrite rename.
+func (n *OrcasNode) createVersionFromTargetWithRetry(targetFileID int64) error {
+	if n == nil || n.fs == nil || targetFileID == 0 {
+		return nil
+	}
+	lh, ok := n.fs.h.(*core.LocalHandler)
+	if !ok {
+		return nil
+	}
+
+	const maxAttempts = 3
+	var lastErr error
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		if err := lh.CreateVersionFromFile(n.fs.c, n.fs.bktID, targetFileID); err == nil {
+			return nil
+		} else {
+			lastErr = err
+		}
+		if attempt < maxAttempts-1 {
+			time.Sleep(renameRetryBackoff(attempt))
+		}
+	}
+	return lastErr
+}
+
+// waitForRenameTargetSlotFree verifies the target (pid,name) slot is available before retrying rename.
+func (n *OrcasNode) waitForRenameTargetSlotFree(parentID, sourceID int64, targetName string, maxAttempts int) bool {
+	if n == nil || n.fs == nil || parentID == 0 || targetName == "" {
+		return true
+	}
+	if maxAttempts < 1 {
+		maxAttempts = 1
+	}
+
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		conflictID, conflictObj := n.queryFileByNameDirectly(parentID, targetName)
+		if conflictID == 0 || conflictID == sourceID {
+			return true
+		}
+
+		// A deleted tombstone can still trigger duplicate-key collisions in some backend states.
+		// Try to physically remove it before the next retry.
+		if conflictObj != nil && conflictObj.PID < 0 {
+			if err := n.fs.h.Delete(n.fs.c, n.fs.bktID, conflictID); err != nil {
+				DebugLog("[VFS Rename] WARNING: Failed to cleanup tombstone while waiting target slot: conflictID=%d, name=%s, attempt=%d/%d, error=%v",
+					conflictID, targetName, attempt+1, maxAttempts, err)
+			} else {
+				fileObjCache.Del(conflictID)
+				if ra := n.fs.getRandomAccessorByFileID(conflictID); ra != nil {
+					n.fs.unregisterRandomAccessor(conflictID, ra)
+				}
+				// Re-check immediately so a single-attempt caller can still observe success.
+				if nextID, _ := n.queryFileByNameDirectly(parentID, targetName); nextID == 0 || nextID == sourceID {
+					return true
+				}
+			}
+		}
+
+		if attempt < maxAttempts-1 {
+			time.Sleep(renameRetryBackoff(attempt))
+		}
+	}
+	return false
+}
+
+func (n *OrcasNode) forceFlushAccessorForRename(ra *RandomAccessor, fileID int64, stage string) error {
+	if ra == nil {
+		return nil
+	}
+	// Avoid duplicate expensive flushes when accessor is already clean.
+	if !hasPendingWriteState(ra) {
+		return nil
+	}
+
+	const maxAttempts = 4
+	var lastErr error
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		if _, err := ra.ForceFlush(); err == nil {
+			return nil
+		} else {
+			lastErr = err
+			DebugLog("[VFS Rename] WARNING: ForceFlush failed (%s), retrying: fileID=%d, attempt=%d/%d, error=%v",
+				stage, fileID, attempt+1, maxAttempts, err)
+		}
+		if attempt < maxAttempts-1 {
+			time.Sleep(renameRetryBackoff(attempt))
+		}
+	}
+	return fmt.Errorf("force flush failed after %d attempts (%s): %w", maxAttempts, stage, lastErr)
 }
 
 // ============================================================================

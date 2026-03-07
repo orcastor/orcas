@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"fmt"
+	"hash"
 	"io"
 	"os"
 	"path/filepath"
@@ -49,6 +50,59 @@ func putJournalBuffer(buf []byte) {
 	journalBytePool.Put(buf[:0])
 }
 
+const (
+	// Enable hysteresis only for reasonably large limits.
+	// Small limits are typically used by tests and should keep strict behavior.
+	journalMemoryHysteresisMinLimitBytes = int64(8 << 20) // 8MB
+	// Allow up to +20% burst above limit under cooldown.
+	journalMemoryHysteresisDivisor = int64(5)
+	// For large limits, reserve at least 4MB burst headroom.
+	journalMemoryMinBurstBytes = int64(4 << 20)
+	// Cooldown window to avoid repeated forced flush/reclaim thrashing.
+	journalMemoryFlushCooldown = 250 * time.Millisecond
+)
+
+func memoryLimitHardCeiling(limit int64) int64 {
+	if limit <= 0 {
+		return limit
+	}
+	if limit < journalMemoryHysteresisMinLimitBytes {
+		return limit
+	}
+
+	burst := limit / journalMemoryHysteresisDivisor
+	if burst < journalMemoryMinBurstBytes {
+		burst = journalMemoryMinBurstBytes
+	}
+	return limit + burst
+}
+
+func shouldForceMemoryLimitFlush(projected, limit, lastFlushNs, nowNs int64) bool {
+	if projected <= limit {
+		return false
+	}
+
+	hardCeiling := memoryLimitHardCeiling(limit)
+	if hardCeiling <= limit {
+		// Strict mode (no hysteresis) for small limits.
+		return true
+	}
+	if projected >= hardCeiling {
+		// Always force flush once hard ceiling is reached.
+		return true
+	}
+	if lastFlushNs <= 0 {
+		return true
+	}
+
+	elapsed := nowNs - lastFlushNs
+	if elapsed < 0 {
+		// Clock moved backwards, keep conservative behavior.
+		return true
+	}
+	return elapsed >= journalMemoryFlushCooldown.Nanoseconds()
+}
+
 // JournalEntry represents a single random write operation in the journal
 // Entries are stored in a way that allows merging and efficient reads
 type JournalEntry struct {
@@ -86,6 +140,10 @@ type Journal struct {
 	baseVersionID int64 // Base version ID this journal is based on
 	// WAL support
 	wal *JournalWAL // Write-Ahead Log for crash recovery
+
+	// Timestamp (unix nano) of the last forced flush triggered by memory limit.
+	// Used for memory-limit hysteresis to reduce forced-flush thrashing.
+	lastMemLimitFlushNs int64
 }
 
 // JournalManager manages all active journals
@@ -95,6 +153,10 @@ type JournalManager struct {
 	config      JournalConfig      // Configuration
 	fs          *OrcasFS           // Reference to VFS
 	totalMemory int64              // Total memory used by all journals (atomic)
+
+	// Timestamp (unix nano) of the last global memory reclaim attempt.
+	// Used for memory-limit hysteresis to reduce reclaim thrashing.
+	lastGlobalReclaimNs int64
 }
 
 // JournalConfig defines the configuration for journal management
@@ -122,14 +184,15 @@ type JournalConfig struct {
 // DefaultJournalConfig returns default configuration
 func DefaultJournalConfig() JournalConfig {
 	return JournalConfig{
-		Enabled:             true,
-		SmallFileThreshold:  10 << 20, // 10MB
-		MergeInterval:       30 * time.Second,
-		MaxEntriesSmall:     500,  // Increased from 100 to reduce journal count
-		MaxEntriesLarge:     5000, // Increased from 1000 to reduce journal count
-		EnableAutoMerge:     true,
-		MaxMemoryPerJournal: 50 << 20,  // 50MB per journal
-		MaxTotalMemory:      200 << 20, // 200MB total
+		Enabled:            true,
+		SmallFileThreshold: 10 << 20, // 10MB
+		MergeInterval:      30 * time.Second,
+		MaxEntriesSmall:    500,  // Increased from 100 to reduce journal count
+		MaxEntriesLarge:    5000, // Increased from 1000 to reduce journal count
+		EnableAutoMerge:    true,
+		// Raised to reduce frequent forced flushes under SMB sparse/random large-file uploads.
+		MaxMemoryPerJournal: 96 << 20,  // 96MB per journal
+		MaxTotalMemory:      768 << 20, // 768MB total
 		EnableMemoryLimit:   true,
 		// Snapshot configuration - increased thresholds to reduce journal snapshots
 		SnapshotEntryCount:   500,              // Increased from 100 to reduce snapshot frequency
@@ -417,9 +480,6 @@ func (jm *JournalManager) tryFreeMemory(needed int64) {
 		needed, atomic.LoadInt64(&jm.totalMemory))
 
 	jm.mu.RLock()
-	defer jm.mu.RUnlock()
-
-	// Build list of journals sorted by memory usage (largest first)
 	type journalMem struct {
 		journal *Journal
 		memory  int64
@@ -432,6 +492,7 @@ func (jm *JournalManager) tryFreeMemory(needed int64) {
 			journals = append(journals, journalMem{journal: j, memory: mem})
 		}
 	}
+	jm.mu.RUnlock()
 
 	// Sort by memory usage (descending)
 	sort.Slice(journals, func(i, k int) bool {
@@ -903,43 +964,58 @@ func (j *Journal) Write(offset int64, data []byte) error {
 	if j.fs.journalMgr.config.EnableMemoryLimit {
 		currentMem := atomic.LoadInt64(&j.memoryUsage)
 		newEntrySize := int64(len(data))
+		nowNs := time.Now().UnixNano()
+		cfg := j.fs.journalMgr.config
 
 		// Check per-journal memory limit
-		if currentMem+newEntrySize > j.fs.journalMgr.config.MaxMemoryPerJournal {
-			// Force flush before adding this entry
-			DebugLog("[Journal Write] Memory limit exceeded, forcing flush: fileID=%d, current=%d, adding=%d, limit=%d",
-				j.fileID, currentMem, newEntrySize, j.fs.journalMgr.config.MaxMemoryPerJournal)
+		projectedMem := currentMem + newEntrySize
+		if projectedMem > cfg.MaxMemoryPerJournal {
+			lastForced := atomic.LoadInt64(&j.lastMemLimitFlushNs)
+			if shouldForceMemoryLimitFlush(projectedMem, cfg.MaxMemoryPerJournal, lastForced, nowNs) {
+				DebugLog("[Journal Write] Memory limit exceeded, forcing flush: fileID=%d, current=%d, adding=%d, limit=%d",
+					j.fileID, currentMem, newEntrySize, cfg.MaxMemoryPerJournal)
 
-			// Unlock before flush (flush needs to lock)
-			j.entriesMu.Unlock()
-			_, _, err := j.Flush()
-			j.entriesMu.Lock()
+				// Unlock before flush (flush needs to lock)
+				j.entriesMu.Unlock()
+				_, _, err := j.Flush()
+				j.entriesMu.Lock()
 
-			if err != nil {
-				DebugLog("[Journal Write] ERROR: Forced flush failed: %v", err)
-				return fmt.Errorf("forced flush failed due to memory limit: %w", err)
+				if err != nil {
+					DebugLog("[Journal Write] ERROR: Forced flush failed: %v", err)
+					return fmt.Errorf("forced flush failed due to memory limit: %w", err)
+				}
+				atomic.StoreInt64(&j.lastMemLimitFlushNs, time.Now().UnixNano())
+				DebugLog("[Journal Write] Forced flush completed, continuing with write")
+			} else {
+				DebugLog("[Journal Write] Memory limit exceeded but flush deferred by hysteresis: fileID=%d, current=%d, adding=%d, limit=%d, hardCeiling=%d",
+					j.fileID, currentMem, newEntrySize, cfg.MaxMemoryPerJournal, memoryLimitHardCeiling(cfg.MaxMemoryPerJournal))
 			}
-
-			// After flush, memory should be cleared
-			DebugLog("[Journal Write] Forced flush completed, continuing with write")
 		}
 
 		// Check global memory limit
 		totalMem := atomic.LoadInt64(&j.fs.journalMgr.totalMemory)
-		if totalMem+newEntrySize > j.fs.journalMgr.config.MaxTotalMemory {
-			// Try to flush other journals first
-			DebugLog("[Journal Write] Global memory limit exceeded: total=%d, adding=%d, limit=%d",
-				totalMem, newEntrySize, j.fs.journalMgr.config.MaxTotalMemory)
+		projectedTotal := totalMem + newEntrySize
+		if projectedTotal > cfg.MaxTotalMemory {
+			lastReclaim := atomic.LoadInt64(&j.fs.journalMgr.lastGlobalReclaimNs)
+			if shouldForceMemoryLimitFlush(projectedTotal, cfg.MaxTotalMemory, lastReclaim, nowNs) {
+				// Try to flush other journals first
+				DebugLog("[Journal Write] Global memory limit exceeded: total=%d, adding=%d, limit=%d",
+					totalMem, newEntrySize, cfg.MaxTotalMemory)
 
-			// Unlock and try to free memory from other journals
-			j.entriesMu.Unlock()
-			j.fs.journalMgr.tryFreeMemory(newEntrySize)
-			j.entriesMu.Lock()
+				// Unlock and try to free memory from other journals
+				j.entriesMu.Unlock()
+				j.fs.journalMgr.tryFreeMemory(newEntrySize)
+				j.entriesMu.Lock()
+				atomic.StoreInt64(&j.fs.journalMgr.lastGlobalReclaimNs, time.Now().UnixNano())
+			} else {
+				DebugLog("[Journal Write] Global memory limit exceeded but reclaim deferred by hysteresis: total=%d, adding=%d, limit=%d, hardCeiling=%d",
+					totalMem, newEntrySize, cfg.MaxTotalMemory, memoryLimitHardCeiling(cfg.MaxTotalMemory))
+			}
 		}
 	}
 
 	// Create new entry
-	entryCopy := make([]byte, len(data))
+	entryCopy := getJournalBuffer(len(data))
 	copy(entryCopy, data)
 
 	// Write to WAL FIRST for crash recovery
@@ -1046,7 +1122,7 @@ func (j *Journal) mergeEntriesLocked() {
 			mergeLength := mergeEnd - mergeStart
 
 			// Create merged data buffer
-			mergedData := make([]byte, mergeLength)
+			mergedData := getJournalBuffer(int(mergeLength))
 
 			// Copy current data
 			copy(mergedData[0:current.Length], current.Data)
@@ -1054,6 +1130,10 @@ func (j *Journal) mergeEntriesLocked() {
 			// Overlay next data
 			nextOffsetInMerged := next.Offset - mergeStart
 			copy(mergedData[nextOffsetInMerged:nextOffsetInMerged+next.Length], next.Data)
+
+			// The old buffers are fully replaced by mergedData and can be recycled.
+			putJournalBuffer(current.Data)
+			putJournalBuffer(next.Data)
 
 			current = JournalEntry{
 				Offset: mergeStart,
@@ -1148,7 +1228,7 @@ func (j *Journal) Read(offset, length int64, baseReader func(offset, length int6
 		baseDataLen := int64(len(baseData))
 		gapStart := offset + baseDataLen
 		gapEnd := offset + length
-		
+
 		// Check if gap is beyond baseSize (file has grown)
 		if j.baseSize > 0 && gapStart >= j.baseSize {
 			// Gap is beyond baseSize, safe to fill with zeros (journal entries will overlay)
@@ -1164,7 +1244,7 @@ func (j *Journal) Read(offset, length int64, baseReader func(offset, length int6
 			DebugLog("[Journal Read] WARNING: baseReader returned partial data within currentSize: fileID=%d, offset=%d, requestedLength=%d, actualLength=%d, gapStart=%d, gapEnd=%d, currentSize=%d, baseSize=%d - checking journal entries",
 				j.fileID, offset, length, len(baseData), gapStart, gapEnd, currentSize, j.baseSize)
 		}
-		
+
 		// Create extended buffer for journal entries to overlay
 		extended := make([]byte, length)
 		copy(extended, baseData)
@@ -1190,10 +1270,10 @@ func (j *Journal) Read(offset, length int64, baseReader func(offset, length int6
 
 	// Apply journal entries on top of base data
 	readEnd := offset + length
-	
+
 	// Track which regions are covered by journal entries
 	coveredRanges := make([]struct{ start, end int64 }, 0, len(j.entries))
-	
+
 	for i := range j.entries {
 		entry := &j.entries[i]
 		entryEnd := entry.Offset + entry.Length
@@ -1245,7 +1325,7 @@ func (j *Journal) Read(offset, length int64, baseReader func(offset, length int6
 		baseDataLen := int64(len(baseData))
 		gapStart := offset + baseDataLen
 		gapEnd := offset + length
-		
+
 		// Check if gap is covered by journal entries
 		gapCovered := false
 		for _, r := range coveredRanges {
@@ -1254,7 +1334,7 @@ func (j *Journal) Read(offset, length int64, baseReader func(offset, length int6
 				break
 			}
 		}
-		
+
 		if !gapCovered {
 			currentSize := atomic.LoadInt64(&j.currentSize)
 			if gapStart < currentSize && currentSize > 0 {
@@ -1542,7 +1622,7 @@ func (j *Journal) flushSmallFile(newSize int64) (int64, int64, error) {
 
 	// Determine if compression/encryption is needed
 	needsCompress := j.fs.CmprWay > 0 && core.ShouldCompressFileByName(fileObj[0].Name)
-	needsEncrypt := j.fs.EndecWay > 0 && j.fs.EndecKey != ""
+	needsEncrypt := j.fs.EndecWay > 0 && getEndecKeyForFS(j.fs) != ""
 
 	// Set compression kind based on VFS config
 	if needsCompress && j.fs.CmprWay > 0 {
@@ -1732,6 +1812,149 @@ func (j *Journal) calculateModifiedBytes() int64 {
 	return totalModified
 }
 
+var checksumZeroBlock = make([]byte, 32*1024)
+
+// chunkCopyChecksum incrementally computes checksums for the same logical copy
+// semantics as `copy(finalData[offset:], chunkData)` with a zero-initialized file.
+// It avoids allocating a full `newSize` buffer during large-file flush.
+type chunkCopyChecksum struct {
+	totalSize int64
+	written   int64
+	carry     []byte
+	headerBuf []byte
+	fullXXH3  hash.Hash64
+	sha256Sum hash.Hash
+}
+
+func newChunkCopyChecksum(totalSize int64) *chunkCopyChecksum {
+	c := &chunkCopyChecksum{
+		totalSize: totalSize,
+		fullXXH3:  xxh3.New(),
+		sha256Sum: sha256.New(),
+	}
+	if totalSize > 0 {
+		hdrCap := core.DefaultHdrSize
+		if totalSize < int64(hdrCap) {
+			hdrCap = int(totalSize)
+		}
+		c.headerBuf = make([]byte, 0, hdrCap)
+	}
+	return c
+}
+
+func (c *chunkCopyChecksum) appendBytes(data []byte) {
+	if len(data) == 0 {
+		return
+	}
+	if cap(c.headerBuf) > len(c.headerBuf) {
+		need := cap(c.headerBuf) - len(c.headerBuf)
+		if need > len(data) {
+			need = len(data)
+		}
+		c.headerBuf = append(c.headerBuf, data[:need]...)
+	}
+	_, _ = c.fullXXH3.Write(data)
+	_, _ = c.sha256Sum.Write(data)
+}
+
+func (c *chunkCopyChecksum) appendZeros(n int) {
+	for n > 0 {
+		step := n
+		if step > len(checksumZeroBlock) {
+			step = len(checksumZeroBlock)
+		}
+		c.appendBytes(checksumZeroBlock[:step])
+		n -= step
+	}
+}
+
+func buildNextCarry(prevCarry, chunkData []byte, logicalLen int) []byte {
+	var prevTail []byte
+	if logicalLen < len(prevCarry) {
+		prevTail = prevCarry[logicalLen:]
+	}
+	var chunkTail []byte
+	if logicalLen < len(chunkData) {
+		chunkTail = chunkData[logicalLen:]
+	}
+
+	switch {
+	case len(prevTail) == 0 && len(chunkTail) == 0:
+		return nil
+	case len(chunkTail) == 0:
+		next := make([]byte, len(prevTail))
+		copy(next, prevTail)
+		return next
+	case len(prevTail) == 0:
+		next := make([]byte, len(chunkTail))
+		copy(next, chunkTail)
+		return next
+	default:
+		if len(chunkTail) >= len(prevTail) {
+			next := make([]byte, len(chunkTail))
+			copy(next, chunkTail)
+			return next
+		}
+		next := make([]byte, len(prevTail))
+		copy(next, prevTail)
+		copy(next, chunkTail)
+		return next
+	}
+}
+
+func (c *chunkCopyChecksum) absorbRegion(logicalLen int64, chunkData []byte) {
+	if logicalLen <= 0 {
+		return
+	}
+
+	n := int(logicalLen)
+	chunkPrefix := len(chunkData)
+	if chunkPrefix > n {
+		chunkPrefix = n
+	}
+	if chunkPrefix > 0 {
+		c.appendBytes(chunkData[:chunkPrefix])
+	}
+
+	if chunkPrefix < n {
+		carryEnd := len(c.carry)
+		if carryEnd > n {
+			carryEnd = n
+		}
+		if carryEnd > chunkPrefix {
+			c.appendBytes(c.carry[chunkPrefix:carryEnd])
+		}
+		filled := chunkPrefix
+		if carryEnd > filled {
+			filled = carryEnd
+		}
+		if filled < n {
+			c.appendZeros(n - filled)
+		}
+	}
+
+	c.carry = buildNextCarry(c.carry, chunkData, n)
+	c.written += logicalLen
+}
+
+func (c *chunkCopyChecksum) sum() (int64, int64, int64, int64, int64, int64) {
+	if c.totalSize == 0 {
+		return core.CalculateChecksums(nil)
+	}
+
+	fullXXH3 := int64(c.fullXXH3.Sum64())
+	hdrXXH3 := fullXXH3
+	if len(c.headerBuf) > 0 {
+		hdrXXH3 = int64(xxh3.Hash(c.headerBuf))
+	}
+	sha256Digest := c.sha256Sum.Sum(nil)
+	sha256_0 := int64(binary.BigEndian.Uint64(sha256Digest[0:8]))
+	sha256_1 := int64(binary.BigEndian.Uint64(sha256Digest[8:16]))
+	sha256_2 := int64(binary.BigEndian.Uint64(sha256Digest[16:24]))
+	sha256_3 := int64(binary.BigEndian.Uint64(sha256Digest[24:32]))
+	return hdrXXH3, fullXXH3, sha256_0, sha256_1, sha256_2, sha256_3
+}
+
 // flushLargeFileChunked flushes large file using Copy-on-Write at chunk level
 // Only modified chunks are written, unmodified chunks reference the original DataID
 func (j *Journal) flushLargeFileChunked(newSize int64) (int64, int64, error) {
@@ -1791,8 +2014,9 @@ func (j *Journal) flushLargeFileChunked(newSize int64) (int64, int64, error) {
 	}
 
 	// Determine if compression/encryption is needed BEFORE writing chunks
+	endecKey := getEndecKeyForFS(j.fs)
 	needsCompress := j.fs.CmprWay > 0 && core.ShouldCompressFileByName(fileObj[0].Name)
-	needsEncrypt := j.fs.EndecWay > 0 && j.fs.EndecKey != ""
+	needsEncrypt := j.fs.EndecWay > 0 && endecKey != ""
 
 	// Prepare kind for ProcessData (will be modified by ProcessData if compression is ineffective)
 	processKind := core.DATA_NORMAL
@@ -1804,194 +2028,164 @@ func (j *Journal) flushLargeFileChunked(newSize int64) (int64, int64, error) {
 	}
 
 	DebugLog("[Journal flushLargeFileChunked] Processing config: needsCompress=%v, needsEncrypt=%v, processKind=0x%x, endecKey length=%d",
-		needsCompress, needsEncrypt, processKind, len(j.fs.EndecKey))
+		needsCompress, needsEncrypt, processKind, len(endecKey))
+	modifiedWritten := 0
+	unmodifiedCopied := 0
+	sparseHoleZeroFilled := 0
+	newSparseZeroFilled := 0
+	checksum := newChunkCopyChecksum(newSize)
 
-	// 3. Process each modified chunk
-	for chunkIdx := range modifiedChunks {
-		chunkOffset := int64(chunkIdx) * chunkSize
-		chunkLength := chunkSize
-		if chunkOffset+chunkLength > newSize {
-			chunkLength = newSize - chunkOffset
-		}
-
-		// Generate chunk data (read base + apply journal entries)
-		chunkData, err := j.generateChunkData(chunkOffset, chunkLength)
-		if err != nil {
-			return 0, 0, fmt.Errorf("failed to generate chunk %d data: %w", chunkIdx, err)
-		}
-
-		// CRITICAL: Process chunk data (compress + encrypt) before writing
-		// This is the fix for the decryption error - data must be processed before storage
-		if needsCompress || needsEncrypt {
-			chunkKind := processKind // Copy kind for each chunk (ProcessData may modify it)
-			processedChunk, procErr := core.ProcessData(chunkData, &chunkKind, j.fs.CmprQlty, j.fs.EndecKey, chunkIdx == 0)
-			if procErr != nil {
-				return 0, 0, fmt.Errorf("failed to process chunk %d: %w", chunkIdx, procErr)
-			}
-			chunkData = processedChunk
-			DebugLog("[Journal flushLargeFileChunked] Processed chunk %d: original=%d, processed=%d, kind=0x%x",
-				chunkIdx, chunkLength, len(chunkData), chunkKind)
-		}
-
-		// Write chunk to new DataID
-		if err := da.Write(j.fs.c, j.fs.bktID, newDataID, chunkIdx, chunkData); err != nil {
-			return 0, 0, fmt.Errorf("failed to write chunk %d: %w", chunkIdx, err)
-		}
-
-		DebugLog("[Journal flushLargeFileChunked] Wrote chunk %d: offset=%d, length=%d",
-			chunkIdx, chunkOffset, len(chunkData))
-	}
-
-	// 4. For unmodified chunks, copy reference from original DataID
-	// This implements Copy-on-Write at chunk level
-	// NOTE: For unmodified chunks from encrypted files, we need to:
-	// 1. Read the encrypted chunk data directly (not decrypted)
-	// 2. Write it as-is to maintain encryption consistency
+	var originalDataInfo *core.DataInfo
 	if j.dataID > 0 && j.dataID != core.EmptyDataID {
 		DebugLog("[Journal flushLargeFileChunked] Processing unmodified chunks: fileID=%d, baseDataID=%d, totalChunks=%d",
 			j.fileID, j.dataID, totalChunks)
-
-		for chunkIdx := 0; chunkIdx < totalChunks; chunkIdx++ {
-			if modifiedChunks[chunkIdx] {
-				continue // Already written
-			}
-
-			chunkOffset := int64(chunkIdx) * chunkSize
-			chunkLength := chunkSize
-			if chunkOffset+chunkLength > j.baseSize {
-				chunkLength = j.baseSize - chunkOffset
-			}
-			if chunkLength <= 0 {
-				continue // Beyond original file size
-			}
-
-			DebugLog("[Journal flushLargeFileChunked] Reading unmodified chunk %d: fileID=%d, baseDataID=%d, offset=%d, length=%d",
-				chunkIdx, j.fileID, j.dataID, chunkOffset, chunkLength)
-
-			// Read raw chunk from original DataID (encrypted data if original was encrypted)
-			// NOTE: GetData returns encrypted data, we need to decrypt then re-encrypt for consistency
-			// OR we could copy raw bytes if encryption settings are the same
-
-			// Get original DataInfo to check if it was encrypted
-			originalDataInfo, err := lh.GetDataInfo(j.fs.c, j.fs.bktID, j.dataID)
-			if err != nil {
-				return 0, 0, fmt.Errorf("failed to get original DataInfo: %w", err)
-			}
-
-			// Read raw encrypted chunk data directly using DataAdapter
-			rawChunkData, err := da.Read(j.fs.c, j.fs.bktID, j.dataID, chunkIdx)
-			if err != nil {
-				// For sparse files with existing dataID, missing chunks are normal (sparse holes)
-				// Fill with zeros and continue
-				if j.isSparse {
-					DebugLog("[Journal flushLargeFileChunked] Sparse file: base chunk %d read failed (filling with zeros): fileID=%d, err=%v",
-						chunkIdx, j.fileID, err)
-
-					// Create zero-filled data for this chunk
-					zeroData := make([]byte, chunkLength)
-
-					// Process (compress/encrypt) if needed
-					if needsCompress || needsEncrypt {
-						chunkKind := processKind
-						processedChunk, procErr := core.ProcessData(zeroData, &chunkKind, j.fs.CmprQlty, j.fs.EndecKey, false)
-						if procErr != nil {
-							return 0, 0, fmt.Errorf("failed to process zero chunk %d for sparse file: %w", chunkIdx, procErr)
-						}
-						zeroData = processedChunk
-					}
-
-					// Write zero-filled chunk
-					if err := da.Write(j.fs.c, j.fs.bktID, newDataID, chunkIdx, zeroData); err != nil {
-						return 0, 0, fmt.Errorf("failed to write zero chunk %d for sparse file: %w", chunkIdx, err)
-					}
-
-					DebugLog("[Journal flushLargeFileChunked] Wrote zero chunk %d for sparse file: offset=%d, length=%d",
-						chunkIdx, chunkOffset, len(zeroData))
-					continue
-				}
-
-				// CRITICAL FIX:
-				// For unmodified chunks, we must not silently replace missing/unreadable base chunks
-				// with zeros for non-sparse files. Doing so corrupts data (and matches the observed
-				// behavior where a valid range becomes all-zero at offset 5.8MB).
-				//
-				// If we're within baseSize, this is an error. Only allow zero-fill when:
-				// - the chunk is beyond baseSize (shouldn't reach here due to chunkLength<=0 check), or
-				// - the file is sparse (handled above).
-				return 0, 0, fmt.Errorf("failed to read unmodified base chunk %d from dataID=%d (fileID=%d, baseSize=%d, chunkOffset=%d, chunkLength=%d): %w",
-					chunkIdx, j.dataID, j.fileID, j.baseSize, chunkOffset, chunkLength, err)
-			} else {
-				// If original was encrypted with same settings, copy as-is
-				// Otherwise, decrypt and re-encrypt
-				originalEncrypted := originalDataInfo.Kind&core.DATA_ENDEC_MASK != 0
-				if originalEncrypted && needsEncrypt {
-					// Same encryption, copy raw data as-is
-					DebugLog("[Journal flushLargeFileChunked] Copying encrypted chunk %d as-is", chunkIdx)
-				} else if originalEncrypted && !needsEncrypt {
-					// Original was encrypted but new doesn't need encryption - decrypt it
-					decrypted, decErr := core.UnprocessData(rawChunkData, originalDataInfo.Kind, j.fs.EndecKey)
-					if decErr != nil {
-						return 0, 0, fmt.Errorf("failed to decrypt original chunk %d: %w", chunkIdx, decErr)
-					}
-					rawChunkData = decrypted
-				} else if !originalEncrypted && needsEncrypt {
-					// Original was not encrypted but new needs encryption - encrypt it
-					chunkKind := processKind
-					processedChunk, procErr := core.ProcessData(rawChunkData, &chunkKind, j.fs.CmprQlty, j.fs.EndecKey, false)
-					if procErr != nil {
-						return 0, 0, fmt.Errorf("failed to encrypt unmodified chunk %d: %w", chunkIdx, procErr)
-					}
-					rawChunkData = processedChunk
-				}
-				// If neither was encrypted, copy as-is
-			}
-
-			// Write to new DataID (Copy-on-Write)
-			if err := da.Write(j.fs.c, j.fs.bktID, newDataID, chunkIdx, rawChunkData); err != nil {
-				return 0, 0, fmt.Errorf("failed to copy chunk %d: %w", chunkIdx, err)
-			}
+		originalDataInfo, err = lh.GetDataInfo(j.fs.c, j.fs.bktID, j.dataID)
+		if err != nil {
+			return 0, 0, fmt.Errorf("failed to get original DataInfo: %w", err)
 		}
 	} else if j.isSparse {
-		// FIX: Handle new sparse files (dataID=0) - write zero-filled chunks for unmodified regions
-		// This fixes the bug where hash calculation fails because unmodified chunks don't exist
-		// See: https://github.com/orcastor/orcas/issues/XXX
 		DebugLog("[Journal flushLargeFileChunked] New sparse file detected (dataID=0), writing zero chunks for unmodified regions")
+	}
 
-		for chunkIdx := 0; chunkIdx < totalChunks; chunkIdx++ {
-			if modifiedChunks[chunkIdx] {
-				continue // Already written
+	for chunkIdx := 0; chunkIdx < totalChunks; chunkIdx++ {
+		chunkOffset := int64(chunkIdx) * chunkSize
+		logicalChunkLength := chunkSize
+		if chunkOffset+logicalChunkLength > newSize {
+			logicalChunkLength = newSize - chunkOffset
+		}
+		if logicalChunkLength <= 0 {
+			continue
+		}
+
+		var chunkDataForChecksum []byte
+
+		if modifiedChunks[chunkIdx] {
+			// Generate chunk data (read base + apply journal entries)
+			chunkData, genErr := j.generateChunkData(chunkOffset, logicalChunkLength)
+			if genErr != nil {
+				return 0, 0, fmt.Errorf("failed to generate chunk %d data: %w", chunkIdx, genErr)
 			}
 
-			chunkOffset := int64(chunkIdx) * chunkSize
-			chunkLength := chunkSize
-			if chunkOffset+chunkLength > newSize {
-				chunkLength = newSize - chunkOffset
-			}
-			if chunkLength <= 0 {
-				continue // Beyond file size
+			// CRITICAL: Process chunk data (compress + encrypt) before writing
+			if needsCompress || needsEncrypt {
+				chunkKind := processKind // Copy kind for each chunk (ProcessData may modify it)
+				processedChunk, procErr := core.ProcessData(chunkData, &chunkKind, j.fs.CmprQlty, endecKey, chunkIdx == 0)
+				if procErr != nil {
+					return 0, 0, fmt.Errorf("failed to process chunk %d: %w", chunkIdx, procErr)
+				}
+				chunkData = processedChunk
+				DebugLog("[Journal flushLargeFileChunked] Processed chunk %d: original=%d, processed=%d, kind=0x%x",
+					chunkIdx, logicalChunkLength, len(chunkData), chunkKind)
 			}
 
-			// Create zero-filled data for this chunk
-			zeroData := make([]byte, chunkLength)
+			// Write chunk to new DataID
+			if err := da.Write(j.fs.c, j.fs.bktID, newDataID, chunkIdx, chunkData); err != nil {
+				return 0, 0, fmt.Errorf("failed to write chunk %d: %w", chunkIdx, err)
+			}
+			chunkDataForChecksum = chunkData
+			modifiedWritten++
 
-			// Process (compress/encrypt) if needed
+			DebugLog("[Journal flushLargeFileChunked] Wrote chunk %d: offset=%d, length=%d",
+				chunkIdx, chunkOffset, len(chunkData))
+		} else if j.dataID > 0 && j.dataID != core.EmptyDataID {
+			baseChunkLength := logicalChunkLength
+			if chunkOffset+baseChunkLength > j.baseSize {
+				baseChunkLength = j.baseSize - chunkOffset
+			}
+			if baseChunkLength > 0 {
+				DebugLog("[Journal flushLargeFileChunked] Reading unmodified chunk %d: fileID=%d, baseDataID=%d, offset=%d, length=%d",
+					chunkIdx, j.fileID, j.dataID, chunkOffset, baseChunkLength)
+
+				// Read raw encrypted chunk data directly using DataAdapter
+				rawChunkData, readErr := da.Read(j.fs.c, j.fs.bktID, j.dataID, chunkIdx)
+				if readErr != nil {
+					// For sparse files with existing dataID, missing chunks are normal sparse holes.
+					// Distinguish sparse-hole (ENOENT) from real IO/decode errors.
+					if j.isSparse && os.IsNotExist(readErr) {
+						DebugLog("[Journal flushLargeFileChunked] Sparse hole detected: filling zero chunk %d: fileID=%d, err=%v",
+							chunkIdx, j.fileID, readErr)
+
+						zeroData := make([]byte, baseChunkLength)
+						if needsCompress || needsEncrypt {
+							chunkKind := processKind
+							processedChunk, procErr := core.ProcessData(zeroData, &chunkKind, j.fs.CmprQlty, endecKey, false)
+							if procErr != nil {
+								return 0, 0, fmt.Errorf("failed to process zero chunk %d for sparse file: %w", chunkIdx, procErr)
+							}
+							zeroData = processedChunk
+						}
+
+						if err := da.Write(j.fs.c, j.fs.bktID, newDataID, chunkIdx, zeroData); err != nil {
+							return 0, 0, fmt.Errorf("failed to write zero chunk %d for sparse file: %w", chunkIdx, err)
+						}
+						chunkDataForChecksum = zeroData
+						sparseHoleZeroFilled++
+						unmodifiedCopied++
+
+						DebugLog("[Journal flushLargeFileChunked] Wrote zero chunk %d for sparse file: offset=%d, length=%d",
+							chunkIdx, chunkOffset, len(zeroData))
+					} else if j.isSparse {
+						DebugLog("[Journal flushLargeFileChunked] ERROR: Sparse file base chunk read failed with non-hole error: fileID=%d, chunk=%d, err=%v",
+							j.fileID, chunkIdx, readErr)
+						return 0, 0, fmt.Errorf("failed to read sparse base chunk %d from dataID=%d (fileID=%d): %w",
+							chunkIdx, j.dataID, j.fileID, readErr)
+					} else {
+						DebugLog("[Journal flushLargeFileChunked] ERROR: Non-sparse base chunk missing: fileID=%d, baseDataID=%d, chunk=%d, offset=%d, length=%d, err=%v",
+							j.fileID, j.dataID, chunkIdx, chunkOffset, baseChunkLength, readErr)
+						return 0, 0, fmt.Errorf("failed to read unmodified base chunk %d from dataID=%d (fileID=%d, baseSize=%d, chunkOffset=%d, chunkLength=%d): %w",
+							chunkIdx, j.dataID, j.fileID, j.baseSize, chunkOffset, baseChunkLength, readErr)
+					}
+				} else {
+					// If original was encrypted with same settings, copy as-is
+					// Otherwise, decrypt and re-encrypt
+					originalEncrypted := originalDataInfo.Kind&core.DATA_ENDEC_MASK != 0
+					if originalEncrypted && needsEncrypt {
+						DebugLog("[Journal flushLargeFileChunked] Copying encrypted chunk %d as-is", chunkIdx)
+					} else if originalEncrypted && !needsEncrypt {
+						decrypted, decErr := core.UnprocessData(rawChunkData, originalDataInfo.Kind, endecKey)
+						if decErr != nil {
+							return 0, 0, fmt.Errorf("failed to decrypt original chunk %d: %w", chunkIdx, decErr)
+						}
+						rawChunkData = decrypted
+					} else if !originalEncrypted && needsEncrypt {
+						chunkKind := processKind
+						processedChunk, procErr := core.ProcessData(rawChunkData, &chunkKind, j.fs.CmprQlty, endecKey, false)
+						if procErr != nil {
+							return 0, 0, fmt.Errorf("failed to encrypt unmodified chunk %d: %w", chunkIdx, procErr)
+						}
+						rawChunkData = processedChunk
+					}
+
+					if err := da.Write(j.fs.c, j.fs.bktID, newDataID, chunkIdx, rawChunkData); err != nil {
+						return 0, 0, fmt.Errorf("failed to copy chunk %d: %w", chunkIdx, err)
+					}
+					chunkDataForChecksum = rawChunkData
+					unmodifiedCopied++
+				}
+			}
+		} else if j.isSparse {
+			zeroData := make([]byte, logicalChunkLength)
 			if needsCompress || needsEncrypt {
 				chunkKind := processKind
-				processedChunk, procErr := core.ProcessData(zeroData, &chunkKind, j.fs.CmprQlty, j.fs.EndecKey, false)
+				processedChunk, procErr := core.ProcessData(zeroData, &chunkKind, j.fs.CmprQlty, endecKey, false)
 				if procErr != nil {
 					return 0, 0, fmt.Errorf("failed to process zero chunk %d for new sparse file: %w", chunkIdx, procErr)
 				}
 				zeroData = processedChunk
 			}
-
-			// Write zero-filled chunk
 			if err := da.Write(j.fs.c, j.fs.bktID, newDataID, chunkIdx, zeroData); err != nil {
 				return 0, 0, fmt.Errorf("failed to write zero chunk %d for new sparse file: %w", chunkIdx, err)
 			}
+			chunkDataForChecksum = zeroData
+			newSparseZeroFilled++
+			unmodifiedCopied++
 
 			DebugLog("[Journal flushLargeFileChunked] Wrote zero chunk %d for new sparse file: offset=%d, length=%d",
 				chunkIdx, chunkOffset, len(zeroData))
 		}
+
+		// Preserve old logical copy semantics while avoiding large temporary buffers.
+		checksum.absorbRegion(logicalChunkLength, chunkDataForChecksum)
 	}
 
 	// 5. Prepare DataInfo (use the processKind determined earlier)
@@ -2011,20 +2205,10 @@ func (j *Journal) flushLargeFileChunked(newSize int64) (int64, int64, error) {
 	DebugLog("[Journal flushLargeFileChunked] DataInfo prepared: Kind=0x%x, needsCompress=%v, needsEncrypt=%v",
 		dataInfo.Kind, needsCompress, needsEncrypt)
 
-	// Calculate hash for the entire file
-	// Note: For chunked flush, we need to read all chunks to calculate hash
-	// This is a tradeoff: COW saves write time but hash calculation still needs full read
-	finalData := make([]byte, newSize)
-	for chunkIdx := 0; chunkIdx < totalChunks; chunkIdx++ {
-		chunkOffset := int64(chunkIdx) * chunkSize
-		chunkData, err := j.fs.h.GetData(j.fs.c, j.fs.bktID, newDataID, chunkIdx)
-		if err != nil {
-			return 0, 0, fmt.Errorf("failed to read back chunk %d for hashing: %w", chunkIdx, err)
-		}
-		copy(finalData[chunkOffset:], chunkData)
-	}
-
-	dataInfo.HdrXXH3, dataInfo.XXH3, dataInfo.SHA256_0, dataInfo.SHA256_1, dataInfo.SHA256_2, dataInfo.SHA256_3 = core.CalculateChecksums(finalData)
+	// Calculate hash for the entire file using buffered written chunks.
+	DebugLog("[Journal flushLargeFileChunked] Chunk audit: fileID=%d, modifiedWritten=%d, unmodifiedCopied=%d, sparseHoleZeroFilled=%d, newSparseZeroFilled=%d, totalChunks=%d",
+		j.fileID, modifiedWritten, unmodifiedCopied, sparseHoleZeroFilled, newSparseZeroFilled, totalChunks)
+	dataInfo.HdrXXH3, dataInfo.XXH3, dataInfo.SHA256_0, dataInfo.SHA256_1, dataInfo.SHA256_2, dataInfo.SHA256_3 = checksum.sum()
 
 	// Write DataInfo
 	_, err = lh.PutDataInfo(j.fs.c, j.fs.bktID, []*core.DataInfo{dataInfo})
@@ -2275,7 +2459,7 @@ func (j *Journal) readBaseData(offset, length int64) ([]byte, error) {
 
 		// CRITICAL: Decrypt and decompress the raw chunk data
 		// Use UnprocessData to handle encryption/compression (same as RandomAccessor.readBaseData)
-		chunkData, err := core.UnprocessData(rawChunk, dataInfo.Kind, j.fs.EndecKey)
+		chunkData, err := core.UnprocessData(rawChunk, dataInfo.Kind, getEndecKeyForFS(j.fs))
 		if err != nil {
 			return nil, fmt.Errorf("failed to unprocess chunk %d: %w", sn, err)
 		}

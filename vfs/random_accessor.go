@@ -38,6 +38,7 @@ const (
 	SmallChunkPoolCap   = 64 << 10 // 64KB - capacity for small file chunk pool
 	LargeChunkPoolCap   = 4 << 20  // 4MB - capacity for large file chunk pool
 	DefaultChunkPoolCap = 10 << 20 // 10MB - default chunk buffer pool capacity
+	ChunkBufferPoolMax  = 8        // Keep at most 8 reusable 10MB chunk buffers (~80MB cap)
 	ZeroSliceSize       = 64 << 10 // 64KB - zero slice size for efficient clearing
 	// Sequential buffer tiered pool configuration
 	// Three tiers: 128KB (small), 1MB (medium), 10MB (large)
@@ -164,6 +165,20 @@ var (
 		},
 	}
 
+	// Reuse chunk buffers on hot write/flush paths to reduce 10MB allocation churn.
+	// Capacity is strictly bounded to avoid memory-retention regressions.
+	chunkBufferPool = &limitedPool{
+		pool: sync.Pool{
+			New: func() interface{} {
+				return &chunkBuffer{
+					data: make([]byte, 0, DefaultChunkPoolCap),
+				}
+			},
+		},
+		maxCount: ChunkBufferPoolMax,
+		count:    0,
+	}
+
 	// Zero slice for efficient zero-filling (reused to avoid allocations)
 	zeroSlice = make([]byte, ZeroSliceSize) // 64KB zero slice
 
@@ -222,15 +237,90 @@ func allocChunkData(size int) []byte {
 	return make([]byte, size)
 }
 
+func zeroBytes(dst []byte) {
+	for cleared := 0; cleared < len(dst); {
+		chunk := len(dst) - cleared
+		if chunk > len(zeroSlice) {
+			chunk = len(zeroSlice)
+		}
+		copy(dst[cleared:cleared+chunk], zeroSlice[:chunk])
+		cleared += chunk
+	}
+}
+
 func allocChunkBuffer(size int64) *chunkBuffer {
 	if size <= 0 {
 		return &chunkBuffer{data: nil}
 	}
+	need := int(size)
+
+	if need <= DefaultChunkPoolCap {
+		if pooled := chunkBufferPool.Get(); pooled != nil {
+			if buf, ok := pooled.(*chunkBuffer); ok && buf != nil {
+				if cap(buf.data) < need {
+					buf.data = make([]byte, need, DefaultChunkPoolCap)
+				} else {
+					buf.data = buf.data[:need]
+					zeroBytes(buf.data)
+				}
+				buf.offsetInChunk = 0
+				if buf.ranges != nil {
+					buf.ranges = buf.ranges[:0]
+				}
+				return buf
+			}
+		}
+	}
+
+	if need <= DefaultChunkPoolCap {
+		return &chunkBuffer{
+			data:          make([]byte, need, DefaultChunkPoolCap),
+			offsetInChunk: 0,
+			ranges:        nil,
+		}
+	}
+
 	return &chunkBuffer{
-		data:          make([]byte, size),
+		data:          make([]byte, need),
 		offsetInChunk: 0,
 		ranges:        nil,
 	}
+}
+
+// releaseChunkBuffer resets a chunk buffer and returns it to the bounded pool if eligible.
+// To preserve correctness, callers can require a "complete chunk" invariant before pooling.
+func releaseChunkBuffer(buf *chunkBuffer, chunkSize int64, requireComplete bool) bool {
+	if buf == nil {
+		return false
+	}
+
+	buf.mu.Lock()
+
+	if requireComplete && !buf.isChunkComplete(chunkSize) {
+		buf.data = nil
+		buf.offsetInChunk = 0
+		buf.ranges = nil
+		buf.mu.Unlock()
+		return false
+	}
+
+	if cap(buf.data) <= 0 || cap(buf.data) > DefaultChunkPoolCap {
+		buf.data = nil
+		buf.offsetInChunk = 0
+		buf.ranges = nil
+		buf.mu.Unlock()
+		return false
+	}
+
+	buf.data = buf.data[:0]
+	buf.offsetInChunk = 0
+	if buf.ranges != nil {
+		buf.ranges = buf.ranges[:0]
+	}
+	buf.mu.Unlock()
+
+	chunkBufferPool.Put(buf)
+	return true
 }
 
 var (
@@ -300,9 +390,9 @@ var (
 	cacheEvictToPool atomic.Bool
 
 	// Memory pressure monitoring
-	memoryPressureThreshold uint64 = 512 << 20 // 512MB - trigger cleanup when heap exceeds this
-	lastMemoryCheck         atomic.Int64       // Unix timestamp of last memory check
-	memoryCheckInterval     int64 = 5          // Check memory every 5 seconds
+	memoryPressureThreshold uint64       = 512 << 20 // 512MB - trigger cleanup when heap exceeds this
+	lastMemoryCheck         atomic.Int64             // Unix timestamp of last memory check
+	memoryCheckInterval     int64        = 5         // Check memory every 5 seconds
 )
 
 func init() {
@@ -662,6 +752,8 @@ type ChunkedFileWriter struct {
 	flushing        int32                // Atomic flag: 1 if currently flushing, 0 otherwise (prevents writes during flush)
 	writerType      WriterType           // Type of writer: .tmp file or sparse file
 	ra              *RandomAccessor      // Reference to parent RandomAccessor for cache updates
+	writeEpoch      uint64               // Atomic counter incremented after successful writes
+	syncedEpoch     uint64               // Atomic counter of last metadata-synced writeEpoch
 }
 
 // ReadAt reads plaintext file data from ChunkedFileWriter's in-memory buffers.
@@ -1554,9 +1646,9 @@ func (cw *ChunkedFileWriter) Write(offset int64, data []byte) error {
 			// For sequential writes, synchronous flushing prevents memory accumulation
 			// by freeing the buffer immediately after flush
 
-			// CRITICAL: Extract chunk buffer before deleting from map to ensure we can clean it up
+			// Extract chunk buffer before deleting from map.
 			cw.mu.Lock()
-			bufToDelete := cw.chunks[sn]
+			flushBuf := cw.chunks[sn]
 			delete(cw.chunks, sn) // Remove immediately to prevent concurrent writes
 			cw.mu.Unlock()
 
@@ -1567,63 +1659,9 @@ func (cw *ChunkedFileWriter) Write(offset int64, data []byte) error {
 			// Flush synchronously (using singleflight to prevent duplicate flushes)
 			_, err, _ := globalSingleFlight.Do(flushKey, func() (interface{}, error) {
 				// Flush the chunk using the buffer (no copy needed for synchronous flush)
-				// IMPORTANT: Must flush BEFORE clearing buffer data
-				flushErr := cw.flushChunkWithBuffer(sn, buf)
+				flushErr := cw.flushChunkWithBuffer(sn, flushBuf)
 				if flushErr != nil {
 					return nil, flushErr
-				}
-
-				// MEMORY LEAK FIX: Explicitly clear chunk buffer data to help GC
-				// This prevents 10MB buffers from accumulating in memory during continuous uploads
-				// IMPORTANT: Clear buffer AFTER flush completes to ensure data is written
-				if bufToDelete != nil {
-					bufToDelete.mu.Lock()
-					if cap(bufToDelete.data) > 0 {
-						// Clear the entire underlying array to allow GC to reclaim memory
-						// Set to nil instead of just clearing to ensure immediate release
-						bufToDelete.data = nil
-					}
-					bufToDelete.ranges = nil
-					bufToDelete.mu.Unlock()
-				}
-
-				// CRITICAL: Only return chunk buffer to pool if chunk is completely written
-				// In Write(), we only flush when chunkComplete is true, which means:
-				// - offsetInChunk >= chunkSize
-				// - ranges cover entire chunk (0 to chunkSize)
-				// So it's safe to return to pool after successful flush
-				// Double-check to be extra safe
-				buf.mu.Lock()
-				isComplete := buf.isChunkComplete(chunkSize)
-				buf.mu.Unlock()
-				if isComplete {
-					// Chunk is complete, safe to return to pool
-					if cap(buf.data) <= 10<<20 {
-						// CRITICAL: Clear entire buffer capacity before returning to pool
-						// This prevents data corruption when buffer is reused
-						// Clear the entire capacity, not just the length
-						clearLen := cap(buf.data)
-						if clearLen > 0 {
-							// Extend to full capacity for clearing
-							buf.data = buf.data[:clearLen]
-							for cleared := 0; cleared < clearLen; {
-								chunk := clearLen - cleared
-								if chunk > len(zeroSlice) {
-									chunk = len(zeroSlice)
-								}
-								copy(buf.data[cleared:cleared+chunk], zeroSlice[:chunk])
-								cleared += chunk
-							}
-						}
-						buf.data = buf.data[:0] // Reset length, keep capacity
-						buf.offsetInChunk = 0
-						buf.ranges = buf.ranges[:0] // Reset ranges
-						// no chunk buffer pool: allow GC to reclaim
-					}
-				} else {
-					// This should not happen if chunkComplete check is correct
-					DebugLog("[VFS ChunkedFileWriter Write] WARNING: Not returning incomplete chunk to pool: fileID=%d, dataID=%d, sn=%d, offsetInChunk=%d, chunkSize=%d",
-						cw.fileID, cw.dataID, sn, buf.offsetInChunk, chunkSize)
 				}
 
 				currentFileSize := atomic.LoadInt64(&cw.size)
@@ -1632,6 +1670,7 @@ func (cw *ChunkedFileWriter) Write(offset int64, data []byte) error {
 
 				return nil, nil
 			})
+			_ = releaseChunkBuffer(flushBuf, chunkSize, false)
 
 			if err != nil {
 				DebugLog("[VFS ChunkedFileWriter Write] ERROR: Failed to flush chunk synchronously: fileID=%d, dataID=%d, sn=%d, error=%v", cw.fileID, cw.dataID, sn, err)
@@ -1664,6 +1703,9 @@ func (cw *ChunkedFileWriter) Write(offset int64, data []byte) error {
 		}
 		// CAS failed, retry (another concurrent write may have updated size)
 	}
+
+	// Mark metadata as dirty after a successful write path.
+	atomic.AddUint64(&cw.writeEpoch, 1)
 
 	return nil
 }
@@ -1735,16 +1777,9 @@ func (cw *ChunkedFileWriter) evictOldestChunks(targetCount int) int {
 			if flushErr != nil {
 				return nil, flushErr
 			}
-
-			// Clean up buffer
-			if buf != nil {
-				buf.mu.Lock()
-				buf.data = nil
-				buf.ranges = nil
-				buf.mu.Unlock()
-			}
 			return nil, nil
 		})
+		_ = releaseChunkBuffer(buf, chunkSize, false)
 
 		if err != nil {
 			DebugLog("[VFS ChunkedFileWriter evictOldestChunks] ERROR: Failed to evict chunk: fileID=%d, dataID=%d, sn=%d, error=%v",
@@ -2175,12 +2210,24 @@ func (cw *ChunkedFileWriter) Flush(force bool) error {
 
 	size := atomic.LoadInt64(&cw.size)
 	origSize := atomic.LoadInt64(&cw.dataInfo.OrigSize)
+	startEpoch := atomic.LoadUint64(&cw.writeEpoch)
+	lastSyncedEpoch := atomic.LoadUint64(&cw.syncedEpoch)
 	DebugLog("[VFS ChunkedFileWriter Flush] Starting flush for large file: fileID=%d, dataID=%d, cw.size=%d, dataInfo.OrigSize=%d, writerType=%d",
 		cw.fileID, cw.dataID, size, origSize, cw.writerType)
 
 	if size == 0 {
 		// No data written, nothing to flush
 		DebugLog("[VFS ChunkedFileWriter Flush] No data written, skipping flush: fileID=%d, dataID=%d", cw.fileID, cw.dataID)
+		return nil
+	}
+
+	// Fast path: nothing new to persist and no pending chunk in memory.
+	cw.mu.Lock()
+	pendingChunkCount := len(cw.chunks)
+	cw.mu.Unlock()
+	if pendingChunkCount == 0 && startEpoch == lastSyncedEpoch {
+		DebugLog("[VFS ChunkedFileWriter Flush] Skipping flush (already synced): fileID=%d, dataID=%d, size=%d, writeEpoch=%d",
+			cw.fileID, cw.dataID, size, startEpoch)
 		return nil
 	}
 
@@ -2277,16 +2324,8 @@ func (cw *ChunkedFileWriter) Flush(force bool) error {
 			// Flush chunk concurrently
 			wg.Add(1)
 			go func(chunkSN int, buf *chunkBuffer) {
-				// MEMORY LEAK FIX: Clean up buffer after flush completes
 				defer func() {
-					if buf != nil {
-						buf.mu.Lock()
-						if cap(buf.data) > 0 {
-							buf.data = nil // Explicitly release 10MB buffer
-						}
-						buf.ranges = nil
-						buf.mu.Unlock()
-					}
+					_ = releaseChunkBuffer(buf, cw.chunkSize, false)
 					wg.Done()
 				}()
 
@@ -2299,35 +2338,6 @@ func (cw *ChunkedFileWriter) Flush(force bool) error {
 					flushErr := cw.flushChunkWithBuffer(chunkSN, buf)
 					if flushErr != nil {
 						return nil, flushErr
-					}
-
-					// CRITICAL: Only return chunk buffer to pool if chunk is completely written
-					chunkSize := cw.chunkSize
-					buf.mu.Lock()
-					isComplete := buf.isChunkComplete(chunkSize)
-					buf.mu.Unlock()
-
-					// Return chunk buffer to pool only if chunk is completely written
-					if isComplete && cap(buf.data) <= 10<<20 {
-						// CRITICAL: Clear entire buffer capacity before returning to pool
-						// This prevents data corruption when buffer is reused
-						clearLen := cap(buf.data)
-						if clearLen > 0 {
-							// Extend to full capacity for clearing
-							buf.data = buf.data[:clearLen]
-							for cleared := 0; cleared < clearLen; {
-								chunk := clearLen - cleared
-								if chunk > len(zeroSlice) {
-									chunk = len(zeroSlice)
-								}
-								copy(buf.data[cleared:cleared+chunk], zeroSlice[:chunk])
-								cleared += chunk
-							}
-						}
-						buf.data = buf.data[:0] // Reset length, keep capacity
-						buf.offsetInChunk = 0
-						buf.ranges = buf.ranges[:0] // Reset ranges
-						// no chunk buffer pool: allow GC to reclaim
 					}
 
 					return nil, nil
@@ -2425,6 +2435,7 @@ func (cw *ChunkedFileWriter) Flush(force bool) error {
 		DebugLog("[VFS ChunkedFileWriter Flush] ERROR: Failed to upload DataInfo and ObjectInfo: fileID=%d, dataID=%d, error=%v", cw.fileID, cw.dataID, err)
 		return err
 	}
+	atomic.StoreUint64(&cw.syncedEpoch, startEpoch)
 
 	// OPTIMIZATION: No need to re-fetch from database after PutDataInfoAndObj
 	// We already have the updated object (obj) with correct DataID, Size, MTime
@@ -2735,9 +2746,10 @@ func (ra *RandomAccessor) Write(offset int64, data []byte) error {
 				if cw, ok := chunkedWriterVal.(*ChunkedFileWriter); ok && cw != nil {
 					// Force flush to write all buffered chunks (including incomplete ones)
 					if flushErr := cw.Flush(true); flushErr != nil {
-						DebugLog("[VFS RandomAccessor Write] WARNING: Failed to flush ChunkedFileWriter before clearing: fileID=%d, error=%v", ra.fileID, flushErr)
-						// Don't return error - continue with clear to avoid blocking writes
-						// The data may be partially lost, but it's better than completely blocking the file
+						DebugLog("[VFS RandomAccessor Write] ERROR: Failed to flush ChunkedFileWriter before clearing: fileID=%d, error=%v", ra.fileID, flushErr)
+						// Flush failure here means buffered tmp data may still be in memory.
+						// Keep tmp writer state untouched and fail fast to avoid silent data loss.
+						return fmt.Errorf("failed to flush tmp writer after rename detection: %w", flushErr)
 					} else {
 						DebugLog("[VFS RandomAccessor Write] Successfully flushed ChunkedFileWriter before clearing: fileID=%d", ra.fileID)
 					}
@@ -6481,7 +6493,7 @@ func (ra *RandomAccessor) applyAppendWithSDK(lh *core.LocalHandler, fileObj *cor
 
 		// Process chunk (compress + encrypt)
 		processKind := oldDataInfo.Kind // Inherit kind from old data
-		processedChunk, err := core.ProcessData(chunkData, &processKind, ra.fs.CmprQlty, ra.fs.EndecKey, false)
+		processedChunk, err := core.ProcessData(chunkData, &processKind, ra.fs.CmprQlty, getEndecKeyForFS(ra.fs), false)
 		if err != nil {
 			DebugLog("[VFS applyAppendWithSDK] Failed to process new chunk %d: %v", chunkIdx, err)
 			return 0, fmt.Errorf("failed to process new chunk %d: %w", chunkIdx, err)
@@ -7309,7 +7321,7 @@ func (ra *RandomAccessor) debugSampleOffset(tag string, dataID int64, origSize i
 			tag, ra.fileID, dataID, sn, offset, err, len(raw))
 		return
 	}
-	plain, err := core.UnprocessData(raw, di.Kind, ra.fs.EndecKey)
+	plain, err := core.UnprocessData(raw, di.Kind, getEndecKeyForFS(ra.fs))
 	if err != nil || len(plain) == 0 {
 		DebugLog("[VFS DEBUG_SAMPLE] %s: fileID=%d, dataID=%d, sn=%d, offset=%d, Unprocess err=%v, plainLen=%d",
 			tag, ra.fileID, dataID, sn, offset, err, len(plain))
@@ -9916,7 +9928,7 @@ func (ra *RandomAccessor) shouldUseJournalOld(fileObj *core.ObjectInfo, offset, 
 	// PRIORITY CHECK 2: Files that need encryption or compression
 	// But only for existing files with data (not after truncate(0))
 	// For new files or after truncate, sequential buffer handles encryption/compression efficiently
-	needsEncrypt := ra.fs.EndecWay > 0 && ra.fs.EndecKey != ""
+	needsEncrypt := ra.fs.EndecWay > 0 && getEndecKeyForFS(ra.fs) != ""
 	needsCompress := ra.fs.CmprWay > 0 && core.ShouldCompressFileByName(fileObj.Name)
 	if (needsEncrypt || needsCompress) && fileObj.DataID != 0 && fileObj.DataID != core.EmptyDataID && fileObj.Size > 0 {
 		DebugLog("[VFS shouldUseJournal] Using journal for encryption/compression on existing file: fileID=%d, needsEncrypt=%v, needsCompress=%v",
@@ -10237,7 +10249,7 @@ func (ra *RandomAccessor) readBaseDataFromDataID(dataID int64, baseSize int64, o
 			return nil, fmt.Errorf("failed to read base chunk %d for dataID=%d (offset=%d, baseSize=%d): %w", sn, dataID, offset, baseSize, err)
 		}
 
-		chunkData, err := core.UnprocessData(rawChunk, dataInfo.Kind, ra.fs.EndecKey)
+		chunkData, err := core.UnprocessData(rawChunk, dataInfo.Kind, getEndecKeyForFS(ra.fs))
 		if err != nil {
 			return nil, fmt.Errorf("failed to unprocess chunk %d: %w", sn, err)
 		}
@@ -10429,7 +10441,7 @@ func (ra *RandomAccessor) readBaseData(offset, length int64) ([]byte, error) {
 
 		// CRITICAL: Decrypt and decompress the raw chunk data
 		// Use UnprocessData to handle encryption/compression (same as chunkReader.getChunk)
-		chunkData, err := core.UnprocessData(rawChunk, dataInfo.Kind, ra.fs.EndecKey)
+		chunkData, err := core.UnprocessData(rawChunk, dataInfo.Kind, getEndecKeyForFS(ra.fs))
 		if err != nil {
 			return nil, fmt.Errorf("failed to unprocess chunk %d: %w", sn, err)
 		}

@@ -1001,7 +1001,7 @@ func (n *OrcasNode) UnlinkBatch(ctx context.Context, names []string) syscall.Err
 // batchMode: if true, uses batch optimizations for multiple files
 func (n *OrcasNode) unlinkInternal(ctx context.Context, names []string, batchMode bool) syscall.Errno {
 	DebugLog("[VFS Unlink] Entry: names=%v, parentID=%d, batchMode=%v", names, n.objID, batchMode)
-	
+
 	// Check if KEY is required
 	if errno := n.fs.checkKey(); errno != 0 {
 		DebugLog("[VFS Unlink] ERROR: checkKey failed: names=%v, parentID=%d, errno=%d", names, n.objID, errno)
@@ -1689,6 +1689,6 @@ func (n *OrcasNode) getDataReader(offset int64) (dataReader, syscall.Errno) {
 	}
 
 	// Create chunk reader
-	reader := newChunkReader(n.fs.c, n.fs.h, n.fs.bktID, dataInfo, n.fs.EndecKey, chunkSize)
+	reader := newChunkReader(n.fs.c, n.fs.h, n.fs.bktID, dataInfo, getEndecKeyForFS(n.fs), chunkSize)
 	return reader, 0
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -13,6 +14,7 @@ import (
 
 // BucketStatsDelta incremental update for bucket space statistics and bucket info cache
 type BucketStatsDelta struct {
+	mu sync.RWMutex
 	// Bucket info cache (may be nil if not loaded yet)
 	BucketInfo *BucketInfo `json:"-"` // Full bucket info, cached from database
 	// Incremental changes (atomic)
@@ -129,6 +131,7 @@ func flushBucketStats(bktID int64, delta *BucketStatsDelta) {
 	}
 
 	// Update cached bucket info after flush
+	delta.mu.Lock()
 	if delta.BucketInfo != nil {
 		// Apply the deltas to cached bucket info (they were already applied to DB)
 		delta.BucketInfo.Used = max(0, delta.BucketInfo.Used+used)
@@ -136,6 +139,7 @@ func flushBucketStats(bktID int64, delta *BucketStatsDelta) {
 		delta.BucketInfo.LogicalUsed = max(0, delta.BucketInfo.LogicalUsed+logicalUsed)
 		delta.BucketInfo.DedupSavings = max(0, delta.BucketInfo.DedupSavings+dedupSavings)
 	}
+	delta.mu.Unlock()
 }
 
 // max returns the maximum of two int64 values
@@ -187,9 +191,15 @@ func updateBucketStatsCache(bktID int64, dataPath string, used, realUsed, logica
 // This function reads current delta values without resetting them
 func getBucketInfoFromCache(bktID int64) *BucketInfo {
 	if v, ok := bucketStatsCache.Get(bktID); ok {
-		if delta, ok := v.(*BucketStatsDelta); ok && delta != nil && delta.BucketInfo != nil {
+		if delta, ok := v.(*BucketStatsDelta); ok && delta != nil {
+			delta.mu.RLock()
+			if delta.BucketInfo == nil {
+				delta.mu.RUnlock()
+				return nil
+			}
 			// Return a copy to avoid race conditions
 			bkt := *delta.BucketInfo
+			delta.mu.RUnlock()
 			// Read current delta values without resetting (using LoadInt64)
 			used := atomic.LoadInt64(&delta.Used)
 			realUsed := atomic.LoadInt64(&delta.RealUsed)
@@ -209,6 +219,8 @@ func getBucketInfoFromCache(bktID int64) *BucketInfo {
 // updateBucketInfoInCache updates or sets bucket info in cache
 func updateBucketInfoInCache(bktID int64, dataPath string, bucketInfo *BucketInfo) {
 	delta := getOrCreateBucketStatsDelta(bktID, dataPath)
+	delta.mu.Lock()
+	defer delta.mu.Unlock()
 	if bucketInfo != nil {
 		// Create a copy to avoid race conditions
 		bktCopy := *bucketInfo
@@ -220,7 +232,9 @@ func updateBucketInfoInCache(bktID int64, dataPath string, bucketInfo *BucketInf
 func invalidateBucketInfoCache(bktID int64) {
 	if v, ok := bucketStatsCache.Get(bktID); ok {
 		if delta, ok := v.(*BucketStatsDelta); ok && delta != nil {
+			delta.mu.Lock()
 			delta.BucketInfo = nil
+			delta.mu.Unlock()
 		}
 	}
 }
