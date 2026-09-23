@@ -369,7 +369,6 @@ var (
 	_ fs.NodeReleaser       = (*OrcasNode)(nil)
 	_ fs.NodeAllocater      = (*OrcasNode)(nil)
 	_ fs.NodeCopyFileRanger = (*OrcasNode)(nil)
-	_ fs.NodeStatxer        = (*OrcasNode)(nil)
 	_ fs.NodeLseeker        = (*OrcasNode)(nil)
 	_ fs.NodeGetlker        = (*OrcasNode)(nil)
 	_ fs.NodeSetlker        = (*OrcasNode)(nil)
@@ -559,11 +558,11 @@ func (n *OrcasNode) Getattr(ctx context.Context, f fs.FileHandle, out *fuse.Attr
 
 	obj, err := n.getObj()
 	if err != nil {
-		if n.fs.OnKeyFileContent != nil {
-			return 0
-		}
 		DebugLog("[VFS Getattr] ERROR: Failed to get object: objID=%d, error=%v", n.objID, err)
-		return syscall.ENOENT
+		if errors.Is(err, syscall.ENOENT) {
+			return syscall.ENOENT
+		}
+		return syscall.EIO
 	}
 
 	// For root directory, use 777 permissions
@@ -5999,15 +5998,6 @@ func (n *OrcasNode) CopyFileRange(ctx context.Context, fhIn fs.FileHandle, offIn
 	// Default implementation: return ENOTSUP (not supported)
 	DebugLog("[VFS CopyFileRange] ERROR: Not supported: objID=%d", n.objID)
 	return 0, syscall.ENOTSUP
-}
-
-// Statx implements NodeStatxer interface
-func (n *OrcasNode) Statx(ctx context.Context, f fs.FileHandle, flags uint32, mask uint32, out *fuse.StatxOut) syscall.Errno {
-	DebugLog("[VFS Statx] Entry: objID=%d, FileHandle=%v, flags=0x%x, mask=0x%x", n.objID, f, flags, mask)
-	// Default implementation: return ENOTSUP (not supported)
-	// Statx is a Linux-specific extension
-	DebugLog("[VFS Statx] ERROR: Not supported: objID=%d", n.objID)
-	return syscall.ENOTSUP
 }
 
 // Lseek implements NodeLseeker interface
