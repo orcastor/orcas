@@ -670,6 +670,7 @@ func (n *OrcasNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut)
 					out.Ctime = out.Mtime
 					out.Atime = out.Mtime
 					out.Ino = uint64(fallbackFileID)
+					out.Nlink = 1
 
 					return childInode, 0
 				}
@@ -696,6 +697,7 @@ func (n *OrcasNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut)
 					out.Ctime = out.Mtime
 					out.Atime = out.Mtime
 					out.Ino = uint64(obj.ID)
+					out.Nlink = 1
 					return childInode, 0
 				}
 			}
@@ -726,6 +728,7 @@ func (n *OrcasNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut)
 					out.Ctime = out.Mtime
 					out.Atime = out.Mtime
 					out.Ino = uint64(obj.ID)
+					out.Nlink = 1
 					return childInode, 0
 				}
 			}
@@ -861,6 +864,7 @@ func (n *OrcasNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut)
 	out.Ctime = out.Mtime
 	out.Atime = out.Mtime
 	out.Ino = uint64(matchedChild.ID)
+	out.Nlink = 1
 	// Let the kernel cache entry/attr to reduce FUSE round-trips (helps du, find, etc.)
 	out.SetEntryTimeout(defaultEntryTimeout)
 	out.SetAttrTimeout(defaultAttrTimeout)
@@ -1343,6 +1347,7 @@ func (n *OrcasNode) Create(ctx context.Context, name string, flags uint32, mode 
 						out.Ctime = out.Mtime
 						out.Atime = out.Mtime
 						out.Ino = uint64(obj.ID)
+						out.Nlink = 1
 						return fileInode, fileNode, 0, 0
 					}
 				}
@@ -1368,6 +1373,7 @@ func (n *OrcasNode) Create(ctx context.Context, name string, flags uint32, mode 
 			out.Ctime = out.Mtime
 			out.Atime = out.Mtime
 			out.Ino = uint64(obj.ID)
+			out.Nlink = 1
 			return fileInode, fileNode, 0, 0
 		}
 	}
@@ -1609,6 +1615,7 @@ func (n *OrcasNode) Create(ctx context.Context, name string, flags uint32, mode 
 			out.Ctime = out.Mtime
 			out.Atime = out.Mtime
 			out.Ino = uint64(existingFileObj.ID)
+			out.Nlink = 1
 
 			return fileInode, fileNode, 0, 0
 		}
@@ -2003,6 +2010,7 @@ func (n *OrcasNode) Create(ctx context.Context, name string, flags uint32, mode 
 			out.Ctime = out.Mtime
 			out.Atime = out.Mtime
 			out.Ino = uint64(existingFileObj.ID)
+			out.Nlink = 1
 
 			return fileInode, fileNode, 0, 0
 		}
@@ -2068,6 +2076,7 @@ func (n *OrcasNode) Create(ctx context.Context, name string, flags uint32, mode 
 	out.Ctime = out.Mtime
 	out.Atime = out.Mtime
 	out.Ino = uint64(fileObj.ID)
+	out.Nlink = 1
 
 	// Invalidate parent directory cache (object metadata may change later)
 	n.invalidateObj()
@@ -2323,6 +2332,7 @@ func (n *OrcasNode) Mkdir(ctx context.Context, name string, mode uint32, out *fu
 	out.Ctime = out.Mtime
 	out.Atime = out.Mtime
 	out.Ino = uint64(dirObj.ID)
+	out.Nlink = 1
 
 	// Invalidate parent directory cache (metadata may be updated later)
 	n.invalidateObj()
@@ -4507,6 +4517,7 @@ func (n *OrcasNode) Setattr(ctx context.Context, f fs.FileHandle, in *fuse.SetAt
 	out.Mode = getModeFromObj(obj)
 	out.Size = uint64(obj.Size)
 	out.Mtime = uint64(obj.MTime)
+	out.Nlink = 1
 
 	// Set ctime and atime
 	if in.Valid&fuse.FATTR_CTIME != 0 {
