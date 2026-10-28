@@ -11,8 +11,6 @@ import (
 	"sync"
 
 	"github.com/h2non/filetype"
-	"github.com/klauspost/compress/zstd"
-	"github.com/mholt/archiver/v3"
 	"github.com/mkmueller/aes256"
 	"github.com/tjfoc/gmsm/sm4"
 	"github.com/zeebo/xxh3"
@@ -134,36 +132,36 @@ func ShouldCompressFileByName(fileName string) bool {
 
 // CreateCompressor creates a compressor based on compression type and quality
 // Returns nil if compression is disabled (cmprWay == 0)
-func CreateCompressor(cmprWay uint32, cmprQlty uint32) archiver.Compressor {
+func CreateCompressor(cmprWay uint32, cmprQlty uint32) Compressor {
 	if cmprWay == 0 {
 		return nil
 	}
 	if cmprWay&DATA_CMPR_SNAPPY != 0 {
-		return &archiver.Snappy{}
+		return snappyCompressor()
 	} else if cmprWay&DATA_CMPR_ZSTD != 0 {
-		return &archiver.Zstd{EncoderOptions: []zstd.EOption{zstd.WithEncoderLevel(zstd.EncoderLevelFromZstd(int(cmprQlty)))}}
+		return zstdCompressor(int(cmprQlty))
 	} else if cmprWay&DATA_CMPR_GZIP != 0 {
-		return &archiver.Gz{CompressionLevel: int(cmprQlty)}
+		return gzipCompressor(int(cmprQlty))
 	} else if cmprWay&DATA_CMPR_BR != 0 {
-		return &archiver.Brotli{Quality: int(cmprQlty)}
+		return brotliCompressor(int(cmprQlty))
 	}
 	return nil
 }
 
 // CreateDecompressor creates a decompressor based on compression flags in kind
 // Returns nil if no compression is present
-func CreateDecompressor(kind uint32) archiver.Decompressor {
+func CreateDecompressor(kind uint32) Decompressor {
 	if kind&DATA_CMPR_MASK == 0 {
 		return nil
 	}
 	if kind&DATA_CMPR_SNAPPY != 0 {
-		return &archiver.Snappy{}
+		return snappyDecompressor()
 	} else if kind&DATA_CMPR_ZSTD != 0 {
-		return &archiver.Zstd{}
+		return zstdDecompressor()
 	} else if kind&DATA_CMPR_GZIP != 0 {
-		return &archiver.Gz{}
+		return gzipDecompressor()
 	} else if kind&DATA_CMPR_BR != 0 {
-		return &archiver.Brotli{}
+		return brotliDecompressor()
 	}
 	return nil
 }
@@ -171,7 +169,7 @@ func CreateDecompressor(kind uint32) archiver.Decompressor {
 // CompressData compresses data using the specified compressor
 // Returns compressed data if compression succeeds and reduces size, otherwise returns original data
 // The kind parameter will be modified to remove compression flag if compression fails or doesn't reduce size
-func CompressData(data []byte, cmpr archiver.Compressor, kind *uint32) ([]byte, error) {
+func CompressData(data []byte, cmpr Compressor, kind *uint32) ([]byte, error) {
 	if cmpr == nil || len(data) == 0 {
 		return data, nil
 	}
@@ -186,7 +184,7 @@ func CompressData(data []byte, cmpr archiver.Compressor, kind *uint32) ([]byte, 
 }
 
 // DecompressData decompresses data using the specified decompressor
-func DecompressData(data []byte, decompr archiver.Decompressor) ([]byte, error) {
+func DecompressData(data []byte, decompr Decompressor) ([]byte, error) {
 	if decompr == nil || len(data) == 0 {
 		return data, nil
 	}
@@ -201,7 +199,7 @@ func DecompressData(data []byte, decompr archiver.Decompressor) ([]byte, error) 
 }
 
 // CompressReader compresses data from reader to writer
-func CompressReader(reader io.Reader, writer io.Writer, cmpr archiver.Compressor) error {
+func CompressReader(reader io.Reader, writer io.Writer, cmpr Compressor) error {
 	if cmpr == nil {
 		// No compression, copy directly
 		_, err := io.Copy(writer, reader)
@@ -211,7 +209,7 @@ func CompressReader(reader io.Reader, writer io.Writer, cmpr archiver.Compressor
 }
 
 // DecompressReader decompresses data from reader to writer
-func DecompressReader(reader io.Reader, writer io.Writer, decompr archiver.Decompressor) error {
+func DecompressReader(reader io.Reader, writer io.Writer, decompr Decompressor) error {
 	if decompr == nil {
 		// No decompression, copy directly
 		_, err := io.Copy(writer, reader)
