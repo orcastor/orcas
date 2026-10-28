@@ -19,7 +19,6 @@ import (
 	"time"
 
 	"github.com/h2non/filetype"
-	"github.com/mholt/archiver/v3"
 	"github.com/mkmueller/aes256"
 	"github.com/orca-zhang/ecache2"
 	"github.com/orcastor/orcas/core"
@@ -6883,7 +6882,7 @@ func (ra *RandomAccessor) processWritesStreaming(
 	endecWay := getEndecWayForFS(ra.fs)
 
 	// Initialize compressor (if smart compression is enabled)
-	var cmpr archiver.Compressor
+	var cmpr core.Compressor
 	var hasCmpr bool
 	if cmprWay > 0 {
 		// Compressor will be determined when processing the first chunk (needs to check file type)

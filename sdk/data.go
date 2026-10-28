@@ -14,7 +14,6 @@ import (
 	"sort"
 
 	"github.com/h2non/filetype"
-	"github.com/mholt/archiver/v3"
 	"github.com/orcastor/orcas/core"
 	"github.com/zeebo/xxh3"
 )
@@ -41,7 +40,7 @@ type listener struct {
 	once       bool
 	sn, cnt    int
 	cmprBuf    bytes.Buffer
-	cmpr       archiver.Compressor
+	cmpr       core.Compressor
 	chunkSize  int64 // Chunk size obtained from bucket configuration
 }
 
