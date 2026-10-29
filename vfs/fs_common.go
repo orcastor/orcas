@@ -114,9 +114,9 @@ type OrcasFS struct {
 	raCleanupStopped atomic.Bool // Whether raRegistry cleanup worker has stopped
 
 	// Runtime key switching controls.
-	// endecKey is the lock-free read path for encryption key.
+	// keySwitch protects both the embedded config and its atomic cache.
 	endecKey  atomic.Value // string
-	keySwitch sync.Mutex
+	keySwitch sync.RWMutex
 }
 
 type noKeyTempFile struct {
@@ -453,10 +453,14 @@ func getEndecKeyForFS(fs *OrcasFS) string {
 	if fs == nil {
 		return ""
 	}
+	fs.keySwitch.RLock()
+	defer fs.keySwitch.RUnlock()
 	cfgKey := fs.Config.EndecKey
 	if v := fs.endecKey.Load(); v != nil {
 		if key, ok := v.(string); ok {
 			// Keep compatibility with direct field assignment (fs.EndecKey = "...").
+			// Direct assignments must happen while the filesystem is quiescent;
+			// concurrent runtime changes must use SetEndecKey/SetEndecKeySafe.
 			// When external code updates embedded Config directly, refresh atomic cache.
 			if key != cfgKey {
 				fs.endecKey.Store(cfgKey)
