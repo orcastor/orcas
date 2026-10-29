@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Linux ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: amd64
+          - runner: ubuntu-24.04-arm
+            arch: arm64
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.3'
+
+      - name: Build and run regression tests
+        run: bash scripts/ci.sh
+
+      - name: Package CLI
+        run: |
+          tar -czf "dist/orcas_linux_${{ matrix.arch }}.tar.gz" \
+            -C dist orcas -C "$GITHUB_WORKSPACE" LICENSE README.md README.zh.md \
+            -C "$GITHUB_WORKSPACE/cmd" config.example.json
+
+      - name: Upload CLI archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: orcas-linux-${{ matrix.arch }}
+          path: dist/*.tar.gz
+          if-no-files-found: error

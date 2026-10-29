@@ -16,8 +16,8 @@
   <a href="https://app.fossa.com/projects/git%2Bgithub.com%2Forcastor%2Forcas?ref=badge_shield" alt="FOSSA Status">
     <img src="https://app.fossa.com/api/projects/git%2Bgithub.com%2Forcastor%2Forcas.svg?type=shield"/>
   </a>
-  <a href='https://orca-zhang.semaphoreci.com/branches/733643c4-54d7-4cc4-9b1e-c3c77c8ff7db' alt='Build Status'>
-    <img src='https://orca-zhang.semaphoreci.com/badges/orcas/branches/master.svg?style=shields&key=78c39699-2da0-4322-9372-0839f9dcde76'>
+  <a href="https://github.com/orcastor/orcas/actions/workflows/ci.yml" alt="Build Status">
+    <img src="https://github.com/orcastor/orcas/actions/workflows/ci.yml/badge.svg?branch=master">
   </a>
   <a href="https://github.com/orcastor/orcas/blob/master/LICENSE" alt='MIT license'>
     <img src="https://img.shields.io/badge/license-MIT-blue.svg?style=flat">

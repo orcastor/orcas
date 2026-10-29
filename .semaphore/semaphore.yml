@@ -1,22 +1,15 @@
 version: v1.0
-name: Go
+name: Build and regression tests
 agent:
   machine:
     type: e1-standard-2
-    os_image: ubuntu2004
+    os_image: ubuntu2204
 blocks:
-  - name: Test
+  - name: Build and test
     task:
       jobs:
-        - name: go test
+        - name: Linux amd64
           commands:
-            - sem-version go 1.18
-            - export GO111MODULE=on
-            - export GOPATH=~/go
-            - 'export PATH=/home/semaphore/go/bin:$PATH'
-            - rm -fr /home/semaphore/go/pkg/mod/cache
+            - sem-version go 1.27.3
             - checkout
-            - go get ./...
-            - go test -coverprofile=coverage.txt -covermode=atomic -v ./...
-            - 'bash <(curl -s https://codecov.io/bash) -t 8c2bdd22-0aab-4cc1-a473-cd6db39aed9b || echo "Codecov did not collect coverage reports"'
-            - du -hcs /tmp/test/*
+            - bash scripts/ci.sh
