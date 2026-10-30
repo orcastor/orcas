@@ -314,11 +314,13 @@ func (ofs *OrcasFS) Mount(mountPoint string, opts *fuse.MountOptions) (*fuse.Ser
 		}
 	}
 
-	// Mount filesystem, directly use root node as root Inode
-	// Note: fs.Mount() does NOT automatically start the server
-	// The caller must call server.Serve() to start the service
+	// fs.Mount starts the FUSE server and uses root as the root inode.
 	server, err := fs.Mount(mountPoint, ofs.root, &fs.Options{
 		MountOptions: *opts,
+		// Objects do not store Unix ownership. Use the mounting process's
+		// identity so default_permissions permits its writes to new directories.
+		UID: uint32(os.Getuid()),
+		GID: uint32(os.Getgid()),
 		// Set default attribute/entry cache timeouts to reduce kernel→FUSE round-trips.
 		// This dramatically improves performance for tools like `du` that stat every node.
 		AttrTimeout:     &defaultAttrTimeout,

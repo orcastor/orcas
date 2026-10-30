@@ -2,11 +2,55 @@ package vfs
 
 import (
 	"bytes"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/orcastor/orcas/core"
 )
+
+func TestConcurrentEndecKeyReadsAndSwitches(t *testing.T) {
+	testDir := testTmpDir("orcas_endec_key_race_test")
+	defer cleanupTestDir(t, testDir)
+
+	fs, _ := setupTestFS(t, testDir)
+	defer cleanupFS(fs)
+	fs.requireKey = true
+	fs.GetFallbackFiles = func() map[string]string { return map[string]string{"unlock.html": "locked"} }
+
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for reader := 0; reader < 4; reader++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			for i := 0; i < 2000; i++ {
+				if key := fs.GetEndecKey(); key != "" && key != "runtime-key" {
+					t.Errorf("unexpected encryption key: %q", key)
+				}
+				if errno := fs.checkKey(); errno != 0 {
+					t.Errorf("key or fallback files should allow access: %v", errno)
+				}
+			}
+		}()
+	}
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		<-start
+		for i := 0; i < 1000; i++ {
+			fs.SetEndecKey("runtime-key")
+			fs.SetEndecKey("")
+		}
+	}()
+	close(start)
+	wg.Wait()
+	fs.SetEndecKey("final-key")
+	if got := fs.GetEndecKey(); got != "final-key" {
+		t.Fatalf("key switch lost: got %q", got)
+	}
+}
 
 func TestQuiesceWritesFlushesPendingRandomAccessor(t *testing.T) {
 	testDir := testTmpDir("orcas_quiesce_writes_test")
