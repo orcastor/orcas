@@ -2,418 +2,181 @@ package util
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"runtime"
 	"sync"
-	"sync/atomic"
 	"time"
-	"unsafe"
 
 	"github.com/orcastor/orcas/core"
 )
 
-// PackagedFileInfo packaged file information
+// PackagedFileInfo describes one independently encoded file in a package.
 type PackagedFileInfo struct {
-	ObjectID  int64  // Object ID
-	DataID    int64  // Data ID
-	Offset    int64  // Offset position in buffer
-	PkgOffset uint32 // Offset position in packaged data block
-	Size      int64  // Data size (processed/compressed)
-	OrigSize  int64  // Original data size (before processing)
-	PID       int64  // Parent directory ID
-	Name      string // Object name
-	Kind      uint32 // Compression/encryption flags (DATA_CMPR_*, DATA_ENDEC_*)
+	ObjectID  int64
+	DataID    int64
+	Offset    int64
+	PkgOffset uint32
+	Size      int64
+	OrigSize  int64
+	PID       int64
+	Name      string
+	Kind      uint32
 }
 
-// BatchWriterBuffer encapsulates buffer, offset, and file infos for double-buffering
+// A buffer is writable only while it is current. FlushAll exclusively owns the
+// background buffer until both data and metadata have been persisted.
 type BatchWriterBuffer struct {
-	buffer      []byte              // Buffer data
-	writeOffset int64               // Current write position (atomic operation, use atomic.LoadInt64/StoreInt64/AddInt64)
-	fileInfos   []*PackagedFileInfo // File info list
-	fileIndex   int64               // Current file info index (atomic operation, use atomic.LoadInt64/StoreInt64/AddInt64)
+	buffer    []byte
+	fileInfos []*PackagedFileInfo
 }
 
-// BatchWriter manages batch writes for small files
-// Uses double-buffering to avoid data copying and allocation
-// Double-buffer: when current buffer is full, swap to bg buffer and flush current
+type pendingFile struct {
+	info   *PackagedFileInfo
+	buffer *BatchWriterBuffer
+}
+
+// BatchWriter batches small files. mu protects reservations, pending reads and
+// publication; flushMu serializes disk writes without blocking the next buffer.
 type BatchWriter struct {
-	// Current buffer pointer (atomically swapped using unsafe.Pointer) - for writing
-	currentBuffer unsafe.Pointer // *BatchWriterBuffer
-
-	// Background buffer pointer (atomically swapped using unsafe.Pointer) - for flushing
-	bgBuffer unsafe.Pointer // *BatchWriterBuffer
-
-	bufferSize   int64 // Buffer size
-	maxFileInfos int64 // Maximum number of file infos
-
-	// Flush control
-	flushWindow    time.Duration
-	maxPackageSize int64 // Maximum packaged data block size
-
-	// S3-specific fields
-	handler core.Handler
-	bktID   int64 // Bucket ID - one BatchWriter per bucket
-
-	// Configuration
-	enabled bool
-
-	// Pending objects cache (for visibility before flush)
-	// Maps fileID -> fileInfo for objects that are in buffer but not yet flushed
-	pendingObjects sync.Map // map[int64]interface{} - fileID -> fileInfo
-
-	// Periodic flush control
-	lastFlushTime int64        // Last flush time (UnixNano, atomic access)
-	flushTimer    atomic.Value // *time.Timer for periodic flush
-	flushCtx      atomic.Value // Stored context for scheduled flushes
-	flushUID      atomic.Value // Stored UID for scheduled flushes (int64, fallback if context doesn't have UID)
-
-	// Callback function to update dirListCache after flush (optional, set by VFS layer)
-	onFlushComplete func(objectInfos []*core.ObjectInfo)
+	mu              sync.Mutex
+	flushMu         sync.Mutex
+	currentBuffer   *BatchWriterBuffer
+	bgBuffer        *BatchWriterBuffer
+	bufferSize      int64
+	maxFileInfos    int64
+	flushWindow     time.Duration
+	handler         core.Handler
+	bktID           int64
+	pendingObjects  map[int64]pendingFile
+	flushTimer      *time.Timer
+	timerGeneration uint64
+	flushCtx        context.Context
+	onFlushComplete func([]*core.ObjectInfo)
 }
 
 var (
-	// Default configuration
-	// Aggressively optimized for small files (< 64KB) - large scale small file writes
-	// Balanced: increased buffer size for better batching while maintaining responsiveness
-	defaultBufferSize     = int64(24 << 20) // 24MB - balanced increase for better batching of many small files
-	defaultMaxFileInfos   = int64(3 << 10)  // 3072 - balanced increase for more files per batch
-	defaultFlushWindow    = 1 * time.Second // 1s - default flush window for batch writer
-	defaultMaxPackageSize = int64(24 << 20) // 24MB - balanced for larger packages
-
-	// Threshold for determining if a file is too large for batch write
-	// If a single file exceeds this percentage of buffer size, it should be written directly
-	// Balanced: slightly increased threshold to allow larger files in batch write
-	maxFileSizeRatio = 0.35 // 35% of buffer size (balanced between 30% and 40%)
-
-	// batchWriters stores batch writers for each bucket
-	// key: bktID (int64), value: *BatchWriter
-	// One writer per bucket, managed globally by SDK
-	batchWriters sync.Map
+	maxFileSizeRatio = 0.35
+	batchWriters     sync.Map
 )
 
-// GetBatchWriterForBucket gets or creates batch writer for a bucket
-// Returns nil if batch write is disabled
-// Thread-safe: uses sync.Map for concurrent access
 func GetBatchWriterForBucket(handler core.Handler, bktID int64) *BatchWriter {
-	// Try to get existing writer
 	if val, ok := batchWriters.Load(bktID); ok {
-		if mgr, ok := val.(*BatchWriter); ok {
-			return mgr
-		}
+		return val.(*BatchWriter)
 	}
-
-	// Create new writer for this bucket
 	mgr := createBatchWriter(handler, bktID)
 	if mgr == nil {
 		return nil
 	}
-
-	// Store writer (use LoadOrStore to handle race condition)
 	actual, _ := batchWriters.LoadOrStore(bktID, mgr)
-	if actualMgr, ok := actual.(*BatchWriter); ok && actualMgr != mgr {
-		// Another goroutine created it first, return the existing one
-		return actualMgr
-	}
-
-	return mgr
+	return actual.(*BatchWriter)
 }
 
-// FlushBatchWriterForBucket flushes batch writer for a bucket
-func FlushBatchWriterForBucket(ctx context.Context, bktID int64) {
+func FlushBatchWriterForBucket(ctx context.Context, bktID int64) error {
 	if val, ok := batchWriters.Load(bktID); ok {
-		if mgr, ok := val.(*BatchWriter); ok {
-			mgr.FlushAll(ctx)
-		}
+		return val.(*BatchWriter).FlushAll(ctx)
 	}
+	return nil
 }
 
-// FlushAllBatchWriters flushes all batch writers for all buckets
-func FlushAllBatchWriters(ctx context.Context) {
-	batchWriters.Range(func(key, value interface{}) bool {
-		if mgr, ok := value.(*BatchWriter); ok {
-			mgr.FlushAll(ctx)
+func FlushAllBatchWriters(ctx context.Context) error {
+	var errs []error
+	batchWriters.Range(func(_, value interface{}) bool {
+		if err := value.(*BatchWriter).FlushAll(ctx); err != nil {
+			errs = append(errs, err)
 		}
 		return true
 	})
+	return errors.Join(errs...)
 }
 
-// GetBatchWriteManager creates a new batch writer for a bucket
-// Deprecated: Use GetBatchWriterForBucket instead
-// This function is kept for backward compatibility but should not be used directly
-// The writer should be stored in a sync.Map by the caller (e.g., s3 package)
-// key: bktID, value: *BatchWriter
+// Deprecated: use GetBatchWriterForBucket to share a writer for a bucket.
 func GetBatchWriteManager(handler core.Handler, bktID int64) *BatchWriter {
 	return createBatchWriter(handler, bktID)
 }
 
-// createBatchWriter creates a new batch writer instance
-// This is an internal function that creates the writer without storing it
 func createBatchWriter(handler core.Handler, bktID int64) *BatchWriter {
-	// Check if batch write is enabled
 	config := core.GetWriteBufferConfig()
 	if !config.BatchWriteEnabled {
 		return nil
 	}
-
-	// Get configuration from environment or use defaults
-	bufferSize := defaultBufferSize
-	if config.MaxBufferSize > 0 {
-		bufferSize = config.MaxBufferSize
+	return &BatchWriter{
+		bufferSize: config.MaxBufferSize, maxFileInfos: config.MaxBufferWrites,
+		flushWindow: config.BufferWindow, handler: handler, bktID: bktID,
+		pendingObjects: make(map[int64]pendingFile),
 	}
-
-	maxFileInfos := defaultMaxFileInfos
-	if config.MaxBufferWrites > 0 {
-		maxFileInfos = config.MaxBufferWrites
-	}
-
-	flushWindow := defaultFlushWindow
-	if config.BufferWindow > 0 {
-		flushWindow = config.BufferWindow
-	}
-
-	maxPackageSize := defaultMaxPackageSize
-	if bufferSize > maxPackageSize {
-		maxPackageSize = bufferSize
-	}
-
-	// Create new writer with double-buffering
-	// Allocate two buffers and file info lists upfront
-	buf1 := &BatchWriterBuffer{
-		buffer:    make([]byte, bufferSize),
-		fileInfos: make([]*PackagedFileInfo, maxFileInfos),
-	}
-	buf2 := &BatchWriterBuffer{
-		buffer:    make([]byte, bufferSize),
-		fileInfos: make([]*PackagedFileInfo, maxFileInfos),
-	}
-
-	mgr := &BatchWriter{
-		bufferSize:     bufferSize,
-		maxFileInfos:   maxFileInfos,
-		flushWindow:    flushWindow,
-		maxPackageSize: maxPackageSize,
-		handler:        handler,
-		bktID:          bktID,
-		enabled:        true,
-	}
-
-	// Initialize lastFlushTime to current time
-	atomic.StoreInt64(&mgr.lastFlushTime, time.Now().UnixNano())
-
-	// Initialize flushTimer with nil
-	mgr.flushTimer.Store((*time.Timer)(nil))
-
-	// Start with buf1 as current, buf2 as background
-	// Use atomic.StorePointer for atomic pointer assignment
-	atomic.StorePointer(&mgr.currentBuffer, unsafe.Pointer(buf1))
-	atomic.StorePointer(&mgr.bgBuffer, unsafe.Pointer(buf2))
-
-	return mgr
 }
 
-// FlushAll flushes all pending write data
-func (bwm *BatchWriter) FlushAll(ctx context.Context) {
+// FlushAll persists every file accepted before this call acquires flushMu.
+// On failure the detached buffer remains readable and is retried first. At most
+// two buffers are drained so continuous producers cannot starve a flush caller.
+func (bwm *BatchWriter) FlushAll(ctx context.Context) (err error) {
 	if ctx != nil {
 		bwm.SetFlushContext(ctx)
+	} else {
+		ctx = bwm.getFlushContext()
 	}
-	bwm.flush(ctx)
-}
-
-// ensureContextWithUID ensures the context has a valid UID for permission checks
-// If the context doesn't have UID, uses the stored UID from SetFlushContext
-func (bwm *BatchWriter) ensureContextWithUID(ctx context.Context) context.Context {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-
-	// Check if context already has UID
-	if v, ok := ctx.Value("o").(map[string]interface{}); ok {
-		if uid, okk := v["uid"].(int64); okk && uid > 0 {
-			// Context already has valid UID
-			return ctx
+	bwm.flushMu.Lock()
+	var completed []*core.ObjectInfo
+	defer func() {
+		bwm.mu.Lock()
+		bwm.schedulePeriodicFlushLocked()
+		callback := bwm.onFlushComplete
+		bwm.mu.Unlock()
+		bwm.flushMu.Unlock()
+		if callback != nil && len(completed) > 0 {
+			callback(completed)
 		}
-	}
-
-	// Context doesn't have UID, try to use stored UID from SetFlushContext
-	if val := bwm.flushUID.Load(); val != nil {
-		if uid, ok := val.(int64); ok && uid > 0 {
-			// Create context with stored UID
-			o := map[string]interface{}{
-				"uid": uid,
+	}()
+	for batch := 0; batch < 2; batch++ {
+		bwm.mu.Lock()
+		bwm.cancelFlushTimerLocked()
+		buf := bwm.bgBuffer
+		if buf == nil {
+			buf = bwm.currentBuffer
+			if buf == nil || len(buf.fileInfos) == 0 {
+				bwm.mu.Unlock()
+				return nil
 			}
-			// Preserve other context values if they exist
-			if v, ok := ctx.Value("o").(map[string]interface{}); ok {
-				for k, val := range v {
-					if k != "uid" {
-						o[k] = val
-					}
-				}
-			}
-			return context.WithValue(ctx, "o", o)
+			bwm.currentBuffer = nil
+			bwm.bgBuffer = buf
 		}
-	}
+		infos := make([]*PackagedFileInfo, 0, len(buf.fileInfos))
+		for _, info := range buf.fileInfos {
+			pending, ok := bwm.pendingObjects[info.ObjectID]
+			if !ok || pending.info != info || pending.buffer != buf {
+				continue
+			}
+			copyInfo := *info
+			// Deleted files leave holes; offsets refer to the original package bytes.
+			copyInfo.PkgOffset = uint32(info.Offset)
+			infos = append(infos, &copyInfo)
+		}
+		bwm.mu.Unlock()
 
-	// If we can't get UID, return original context
-	// The permission check will fail, but at least we tried
-	return ctx
-}
+		objects, flushErr := bwm.flushPackage(ctx, infos, int64(len(buf.buffer)), buf.buffer)
+		if flushErr != nil {
+			return flushErr
+		}
 
-// flush flushes all pending write data (lock-free)
-// Atomically gets current write position and file info, then packages and writes
-func (bwm *BatchWriter) flush(ctx context.Context) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-
-	// Ensure context has UID before flushing
-	ctx = bwm.ensureContextWithUID(ctx)
-	// Get current buffer (for writing) - atomic load
-	currentBuf := (*BatchWriterBuffer)(atomic.LoadPointer(&bwm.currentBuffer))
-
-	// Get old offset and index from current buffer, atomically reset to 0
-	oldOffset := atomic.SwapInt64(&currentBuf.writeOffset, 0)
-	oldIndex := atomic.SwapInt64(&currentBuf.fileIndex, 0)
-
-	if oldOffset == 0 || oldIndex == 0 {
-		return // No pending write data
-	}
-
-	// Cancel existing timer and reset
-	bwm.cancelFlushTimer()
-
-	// Memory barrier: ensure all writes to old buffer are visible
-	runtime.Gosched()
-
-	// Atomically swap: currentBuffer <-> bgBuffer
-	// Get background buffer (will become new current) - atomic load
-	bgBuf := (*BatchWriterBuffer)(atomic.LoadPointer(&bwm.bgBuffer))
-
-	// Check if bgBuffer is ready (already flushed and reset to 0)
-	// If bgBuffer still has data (writeOffset > 0), it means previous flush is still in progress
-	// In this case, we cannot swap - both buffers are in use
-	bgOffset := atomic.LoadInt64(&bgBuf.writeOffset)
-	if bgOffset > 0 {
-		// bgBuffer is still being flushed, cannot swap
-		// Both buffers are in use: currentBuffer is full and bgBuffer is flushing
-		// Restore currentBuffer offset/index and return (caller should use direct write)
-		atomic.StoreInt64(&currentBuf.writeOffset, oldOffset)
-		atomic.StoreInt64(&currentBuf.fileIndex, oldIndex)
-		return
-	}
-
-	// Atomically swap currentBuffer with bgBuffer using atomic.SwapPointer
-	// This is a true atomic swap operation
-	oldCurrentBuf := (*BatchWriterBuffer)(atomic.SwapPointer(&bwm.currentBuffer, unsafe.Pointer(bgBuf)))
-	atomic.StorePointer(&bwm.bgBuffer, unsafe.Pointer(oldCurrentBuf))
-
-	// After swapping, next writes use the new current buffer
-	// Collect file infos from the just-flushed buffer (now bgBuffer)
-	// Optimized: pre-allocate with known capacity and combine loops
-	fileInfos := make([]*PackagedFileInfo, 0, oldIndex)
-	var lastOffset int64
-	var lastSize int64
-
-	// Single pass: collect file infos and find buffer size simultaneously
-	for i := int64(0); i < oldIndex; i++ {
-		if i < int64(len(currentBuf.fileInfos)) && currentBuf.fileInfos[i] != nil {
-			fileInfo := currentBuf.fileInfos[i]
-			fileInfos = append(fileInfos, fileInfo)
-
-			// Track last offset and size for buffer size calculation
-			offset, size := bwm.getFileInfoOffsetSize(fileInfo)
-			if size > 0 {
-				totalOffset := offset + size
-				if totalOffset > lastOffset+lastSize {
-					lastOffset = offset
-					lastSize = size
-				}
+		bwm.mu.Lock()
+		for _, info := range buf.fileInfos {
+			if pending, ok := bwm.pendingObjects[info.ObjectID]; ok && pending.info == info && pending.buffer == buf {
+				delete(bwm.pendingObjects, info.ObjectID)
 			}
 		}
+		bwm.bgBuffer = nil // Release idle backing arrays rather than pinning 16 MiB per bucket.
+		bwm.mu.Unlock()
+		completed = append(completed, objects...)
 	}
-
-	if len(fileInfos) == 0 || lastSize == 0 {
-		return
-	}
-
-	// Create packaged file infos for all files in buffer
-	bufferSize := lastOffset + lastSize
-	pkgFileInfos := make([]*PackagedFileInfo, 0, len(fileInfos))
-
-	var currentOffset uint32 = 0
-	for _, fileInfo := range fileInfos {
-		_, size := bwm.getFileInfoOffsetSize(fileInfo)
-		if size <= 0 {
-			continue
-		}
-
-		// Create packaged file info with pkgOffset
-		pkgFileInfo := bwm.createPackagedFileInfo(*fileInfo, currentOffset)
-		pkgFileInfos = append(pkgFileInfos, pkgFileInfo)
-		currentOffset += uint32(size)
-	}
-
-	// Flush package to disk (uses buffer slice directly, no data copying)
-	objectInfos, err := bwm.flushPackage(ctx, pkgFileInfos, bufferSize, currentBuf.buffer)
-	if err != nil {
-		fmt.Printf("Error flushing package: %v\n", err)
-		// If flush failed, restore the offset and index to the buffer that was swapped
-		// Note: currentBuf is now bgBuffer after swap, but we need to restore to the original currentBuffer
-		// Since we already swapped, we need to restore to oldCurrentBuf (which is now bgBuffer)
-		// Actually, we should restore to the buffer that contains the data, which is currentBuf (old currentBuffer, now bgBuffer)
-		atomic.StoreInt64(&currentBuf.writeOffset, oldOffset)
-		atomic.StoreInt64(&currentBuf.fileIndex, oldIndex)
-		// Reschedule periodic flush
-		bwm.schedulePeriodicFlush()
-		return
-	}
-
-	// Update last flush time only after successful flush
-	atomic.StoreInt64(&bwm.lastFlushTime, time.Now().UnixNano())
-
-	// Clear the old buffer and file infos for reuse (zero out metadata)
-	// The actual buffer content will be overwritten on next writes
-	// Also remove from pending objects cache since they're now flushed
-	for i := int64(0); i < oldIndex; i++ {
-		if i < int64(len(currentBuf.fileInfos)) && currentBuf.fileInfos[i] != nil {
-			fileInfo := currentBuf.fileInfos[i]
-			// Remove from pending objects cache
-			if fileID := bwm.getFileIDFromFileInfo(fileInfo); fileID > 0 {
-				bwm.pendingObjects.Delete(fileID)
-			}
-			currentBuf.fileInfos[i] = nil
-		}
-	}
-
-	// Call callback to update dirListCache (if set by VFS layer)
-	// This ensures flushed objects are immediately added to dirListCache
-	// instead of requiring getDirListWithCache to merge from pendingObjects
-	if bwm.onFlushComplete != nil && len(objectInfos) > 0 {
-		bwm.onFlushComplete(objectInfos)
-	}
-
-	// Reset bgBuffer's offset to 0 to indicate it's ready for next swap
-	// Note: currentBuf is now bgBuffer after swap
-	atomic.StoreInt64(&currentBuf.writeOffset, 0)
-	atomic.StoreInt64(&currentBuf.fileIndex, 0)
-
-	// Schedule next periodic flush if there's pending data
-	bwm.schedulePeriodicFlush()
+	return nil
 }
 
-// getFileInfoOffsetSize extracts offset and size from file info
-func (bwm *BatchWriter) getFileInfoOffsetSize(fileInfo *PackagedFileInfo) (int64, int64) {
-	return fileInfo.Offset, fileInfo.Size
-}
-
-// SetOnFlushComplete sets a callback function to be called after flush completes successfully
-// This allows VFS layer to update dirListCache when objects are flushed
-func (bwm *BatchWriter) SetOnFlushComplete(callback func(objectInfos []*core.ObjectInfo)) {
+func (bwm *BatchWriter) SetOnFlushComplete(callback func([]*core.ObjectInfo)) {
+	bwm.mu.Lock()
+	defer bwm.mu.Unlock()
 	bwm.onFlushComplete = callback
 }
 
-// flushPackage flushes a single packaged data block
-// Uses buffer slice directly, no data copying
-// Returns objectInfos for successfully flushed objects
 func (bwm *BatchWriter) flushPackage(ctx context.Context, fileInfos []*PackagedFileInfo, bufferSize int64, buffer []byte) ([]*core.ObjectInfo, error) {
 	if len(fileInfos) == 0 || bufferSize == 0 {
 		return nil, nil
@@ -501,321 +264,161 @@ func (bwm *BatchWriter) flushPackage(ctx context.Context, fileInfos []*PackagedF
 	return objectInfos, nil
 }
 
-// AddFile adds file data to batch write buffer
-// Returns (success, dataID, error)
-// dataID is returned immediately for API compatibility
-// kind: compression/encryption flags (DATA_CMPR_*, DATA_ENDEC_*)
+// AddFile reserves bytes and metadata together. A rejected write leaves both
+// capacities unchanged. A successful return means buffered, not yet durable.
 func (bwm *BatchWriter) AddFile(fileID int64, data []byte, pid int64, name string, origSize int64, kind uint32) (bool, int64, error) {
 	if len(data) == 0 {
 		return true, 0, nil
 	}
-
-	if origSize <= 0 {
-		origSize = int64(len(data))
-	}
-
-	processedSize := int64(len(data))
-
-	// Smart decision: if file is too large relative to buffer size, skip batch write
-	// This prevents large files from causing frequent flushes and performance degradation
-	// For files larger than 30% of buffer, direct write is more efficient
-	maxFileSize := int64(float64(bwm.bufferSize) * maxFileSizeRatio)
-	if processedSize > maxFileSize {
-		// File is too large for batch write, return false to indicate direct write should be used
+	size := int64(len(data))
+	if size > int64(float64(bwm.bufferSize)*maxFileSizeRatio) {
 		return false, 0, nil
 	}
-
-	// Generate DataID upfront
+	if origSize <= 0 {
+		origSize = size
+	}
 	dataID := core.NewID()
 	if dataID <= 0 {
 		return false, 0, fmt.Errorf("failed to generate DataID")
 	}
-
-	// Get current buffer (atomic load with memory barrier)
-	currentBuf := (*BatchWriterBuffer)(atomic.LoadPointer(&bwm.currentBuffer))
-
-	// Check current buffer space
-	currOffset := atomic.LoadInt64(&currentBuf.writeOffset)
-	if currOffset+processedSize > bwm.bufferSize {
-		// Current buffer is full
-		// Check if the background buffer is also full
-		bgBuf := (*BatchWriterBuffer)(atomic.LoadPointer(&bwm.bgBuffer))
-		bgOff := atomic.LoadInt64(&bgBuf.writeOffset)
-		if bgOff+processedSize > bwm.bufferSize {
-			// Both buffers are full, cannot use batch write
-			// Caller should write directly to storage, not use batch writer
-			return false, 0, nil
-		}
-		// One buffer full, need to flush the current buffer
-		// Let caller know to flush before retrying
+	bwm.mu.Lock()
+	defer bwm.mu.Unlock()
+	if _, exists := bwm.pendingObjects[fileID]; exists {
+		return false, 0, fmt.Errorf("file %d already buffered", fileID)
+	}
+	buf := bwm.currentBuffer
+	if buf != nil && (int64(len(buf.buffer))+size > bwm.bufferSize || int64(len(buf.fileInfos)) >= bwm.maxFileInfos) {
 		return false, 0, nil
 	}
-
-	// Reserve space in current buffer (atomic operation)
-	oldOffset := atomic.LoadInt64(&currentBuf.writeOffset)
-	newOffset := atomic.AddInt64(&currentBuf.writeOffset, processedSize)
-
-	// Check again if exceeds buffer size (race condition check)
-	if newOffset > bwm.bufferSize {
-		// Space insufficient after reservation, return false
+	if bwm.maxFileInfos <= 0 || size > bwm.bufferSize || size > int64(^uint32(0)) {
 		return false, 0, nil
 	}
-
-	// Memory barrier: atomic.AddInt64 already provides memory barrier
-
-	// Write data to current buffer
-	copy(currentBuf.buffer[oldOffset:newOffset], data)
-
-	// Get file info index
-	idx := atomic.AddInt64(&currentBuf.fileIndex, 1) - 1
-	if idx >= bwm.maxFileInfos {
-		// File info list is full, return false
-		return false, 0, nil
+	if buf == nil {
+		buf = &BatchWriterBuffer{}
+		bwm.currentBuffer = buf
 	}
-
-	// Create file info
-	fileInfo := bwm.createFileInfo(fileID, dataID, oldOffset, processedSize, origSize, kind, pid, name)
-	currentBuf.fileInfos[idx] = fileInfo
-
-	// Store in pending objects cache for visibility before flush
-	bwm.pendingObjects.Store(fileID, fileInfo)
-
-	// Schedule periodic flush if not already scheduled (optimized: only schedule if needed)
-	// Check if timer already exists first to avoid unnecessary work
-	if timerVal := bwm.flushTimer.Load(); timerVal == nil {
-		// Only schedule if no timer exists (optimization for high concurrency)
-		bwm.schedulePeriodicFlush()
-	}
-
+	offset := int64(len(buf.buffer))
+	info := &PackagedFileInfo{ObjectID: fileID, DataID: dataID, Offset: offset, Size: size, OrigSize: origSize, PID: pid, Name: name, Kind: kind}
+	buf.buffer = append(buf.buffer, data...)
+	buf.fileInfos = append(buf.fileInfos, info)
+	bwm.pendingObjects[fileID] = pendingFile{info, buf}
+	bwm.schedulePeriodicFlushLocked()
 	return true, dataID, nil
 }
 
-// GetPendingObject gets a pending object from the buffer (before flush)
-// Returns the file info if the object is in the buffer but not yet flushed
+// Pending metadata and data are snapshots: callers may retain them across flushes.
 func (bwm *BatchWriter) GetPendingObject(fileID int64) (*PackagedFileInfo, bool) {
-	if fileInfo, ok := bwm.pendingObjects.Load(fileID); ok {
-		if pkgInfo, ok := fileInfo.(*PackagedFileInfo); ok {
-			return pkgInfo, true
-		}
+	bwm.mu.Lock()
+	defer bwm.mu.Unlock()
+	pending, ok := bwm.pendingObjects[fileID]
+	if !ok {
+		return nil, false
 	}
-	return nil, false
+	info := *pending.info
+	return &info, true
 }
 
-// GetPendingObjects gets all pending objects from pendingObjects cache
-// Returns a map of fileID -> fileInfo for objects that are in buffers but not yet flushed
 func (bwm *BatchWriter) GetPendingObjects() map[int64]*PackagedFileInfo {
-	result := make(map[int64]*PackagedFileInfo)
-	bwm.pendingObjects.Range(func(key, value interface{}) bool {
-		if fileID, ok := key.(int64); ok {
-			if pkgInfo, ok := value.(*PackagedFileInfo); ok {
-				result[fileID] = pkgInfo
-			}
-		}
-		return true
-	})
+	bwm.mu.Lock()
+	defer bwm.mu.Unlock()
+	result := make(map[int64]*PackagedFileInfo, len(bwm.pendingObjects))
+	for id, pending := range bwm.pendingObjects {
+		info := *pending.info
+		result[id] = &info
+	}
 	return result
 }
 
-// UpdatePendingObject updates a pending object in the cache
-// This is useful for updating metadata (e.g., name) before flushing
+// UpdatePendingObject may change metadata until its buffer is detached for I/O.
 func (bwm *BatchWriter) UpdatePendingObject(fileID int64, updateFn func(*PackagedFileInfo)) bool {
-	if pkgInfo, ok := bwm.GetPendingObject(fileID); ok && pkgInfo != nil {
-		// Update the file info using the provided function
-		updateFn(pkgInfo)
-		// Store the updated file info back to cache
-		bwm.pendingObjects.Store(fileID, pkgInfo)
-		return true
+	bwm.mu.Lock()
+	defer bwm.mu.Unlock()
+	pending, ok := bwm.pendingObjects[fileID]
+	if !ok || pending.buffer == bwm.bgBuffer {
+		return false
 	}
-	return false
+	info := *pending.info
+	updateFn(&info)
+	// Storage identity and byte reservations are immutable.
+	info.ObjectID, info.DataID, info.Offset, info.Size = pending.info.ObjectID, pending.info.DataID, pending.info.Offset, pending.info.Size
+	*pending.info = info
+	return true
 }
 
-// RemovePendingObject removes a pending object from the cache
-// This is useful when a file is deleted or renamed before flush
 func (bwm *BatchWriter) RemovePendingObject(fileID int64) bool {
-	if _, ok := bwm.GetPendingObject(fileID); ok {
-		bwm.pendingObjects.Delete(fileID)
-		return true
+	bwm.mu.Lock()
+	defer bwm.mu.Unlock()
+	pending, ok := bwm.pendingObjects[fileID]
+	if !ok || pending.buffer == bwm.bgBuffer {
+		return false
 	}
-	return false
+	delete(bwm.pendingObjects, fileID)
+	return true
 }
 
-// getFileIDFromFileInfo extracts fileID from file info
-func (bwm *BatchWriter) getFileIDFromFileInfo(fileInfo *PackagedFileInfo) int64 {
-	return fileInfo.ObjectID
-}
-
-// ReadPendingData reads data from buffer for a pending object
-// Returns data if object is in buffer, nil otherwise
 func (bwm *BatchWriter) ReadPendingData(fileID int64) []byte {
-	// Get file info first to determine which buffer it's in
-	fileInfo, ok := bwm.GetPendingObject(fileID)
-	if !ok || fileInfo == nil {
+	bwm.mu.Lock()
+	defer bwm.mu.Unlock()
+	pending, ok := bwm.pendingObjects[fileID]
+	if !ok {
 		return nil
 	}
-
-	// Get current buffer (atomic load with memory barrier)
-	currentBuf := (*BatchWriterBuffer)(atomic.LoadPointer(&bwm.currentBuffer))
-	// Check if file is in current buffer (check offset range)
-	currentOffset := atomic.LoadInt64(&currentBuf.writeOffset)
-	if fileInfo.Offset < currentOffset {
-		// File is in current buffer
-		if fileInfo.Offset+fileInfo.Size <= int64(len(currentBuf.buffer)) {
-			return currentBuf.buffer[fileInfo.Offset : fileInfo.Offset+fileInfo.Size]
-		}
-	}
-
-	// Check background buffer
-	bgBuf := (*BatchWriterBuffer)(atomic.LoadPointer(&bwm.bgBuffer))
-	bgOffset := atomic.LoadInt64(&bgBuf.writeOffset)
-	if fileInfo.Offset < bgOffset {
-		// File is in background buffer
-		if fileInfo.Offset+fileInfo.Size <= int64(len(bgBuf.buffer)) {
-			return bgBuf.buffer[fileInfo.Offset : fileInfo.Offset+fileInfo.Size]
-		}
-	}
-
-	return nil
+	info := pending.info
+	return append([]byte(nil), pending.buffer.buffer[info.Offset:info.Offset+info.Size]...)
 }
 
-// createFileInfo creates a file info from the given parameters
-func (bwm *BatchWriter) createFileInfo(fileID, dataID, offset, size, origSize int64, kind uint32, pid int64, name string) *PackagedFileInfo {
-	return &PackagedFileInfo{
-		ObjectID:  fileID,
-		DataID:    dataID,
-		Offset:    offset,
-		PkgOffset: 0,
-		Size:      size,
-		OrigSize:  origSize,
-		PID:       pid,
-		Name:      name,
-		Kind:      kind, // Include compression/encryption flags
-	}
-}
-
-// createPackagedFileInfo creates packaged file info from file info
-func (bwm *BatchWriter) createPackagedFileInfo(fileInfo PackagedFileInfo, pkgOffset uint32) *PackagedFileInfo {
-	return &PackagedFileInfo{
-		ObjectID:  fileInfo.ObjectID,
-		DataID:    fileInfo.DataID,
-		Offset:    fileInfo.Offset,
-		PkgOffset: pkgOffset,
-		Size:      fileInfo.Size,
-		OrigSize:  fileInfo.OrigSize,
-		PID:       fileInfo.PID,
-		Name:      fileInfo.Name,
-		Kind:      fileInfo.Kind, // Include compression/encryption flags
-	}
-}
-
-// cancelFlushTimer cancels the existing flush timer
 func (bwm *BatchWriter) cancelFlushTimer() {
-	oldTimer := bwm.flushTimer.Swap((*time.Timer)(nil))
-	if oldTimer != nil {
-		if timer, ok := oldTimer.(*time.Timer); ok && timer != nil {
-			timer.Stop()
-		}
+	bwm.mu.Lock()
+	defer bwm.mu.Unlock()
+	bwm.cancelFlushTimerLocked()
+}
+
+func (bwm *BatchWriter) cancelFlushTimerLocked() {
+	bwm.timerGeneration++
+	if bwm.flushTimer != nil {
+		bwm.flushTimer.Stop()
+		bwm.flushTimer = nil
 	}
 }
 
-// schedulePeriodicFlush schedules a periodic flush based on BufferWindow
-// It ensures that if the last flush was recent (due to count threshold),
-// the timer will wait for the remaining time until BufferWindow expires
-// Optimized for high concurrency: minimize time.Now() calls and timer creation
-func (bwm *BatchWriter) schedulePeriodicFlush() {
-	// Check if timer already exists first (fast path for high concurrency)
-	if timerVal := bwm.flushTimer.Load(); timerVal != nil {
-		if timer, ok := timerVal.(*time.Timer); ok && timer != nil {
-			// Timer already exists, don't create a new one
-			return
-		}
-	}
-
-	// Check if there's pending data to flush
-	currentBuf := (*BatchWriterBuffer)(atomic.LoadPointer(&bwm.currentBuffer))
-	currOffset := atomic.LoadInt64(&currentBuf.writeOffset)
-	currIndex := atomic.LoadInt64(&currentBuf.fileIndex)
-
-	// If no pending data, don't schedule
-	if currOffset == 0 || currIndex == 0 {
+func (bwm *BatchWriter) schedulePeriodicFlushLocked() {
+	if bwm.flushTimer != nil || len(bwm.pendingObjects) == 0 {
 		return
 	}
-
-	// Get last flush time and current time (minimize time.Now() calls)
-	lastFlushNano := atomic.LoadInt64(&bwm.lastFlushTime)
-	now := time.Now()
-	lastFlushTime := time.Unix(0, lastFlushNano)
-
-	// Calculate time elapsed since last flush
-	elapsed := now.Sub(lastFlushTime)
-
-	// Calculate remaining time until BufferWindow expires
-	var delay time.Duration
-	if elapsed >= bwm.flushWindow {
-		// Already exceeded BufferWindow, flush immediately (with minimal delay)
-		delay = 10 * time.Millisecond
-	} else {
-		// Wait for remaining time
-		delay = bwm.flushWindow - elapsed
+	delay := bwm.flushWindow
+	if delay <= 0 {
+		delay = time.Second
 	}
-
-	// Create new timer
-	newTimer := time.AfterFunc(delay, func() {
-		// Clear timer atomically
-		bwm.flushTimer.Store((*time.Timer)(nil))
-
-		// Check if we should flush
-		// Get last flush time again to ensure we haven't flushed recently
-		lastFlushNano := atomic.LoadInt64(&bwm.lastFlushTime)
-		lastFlushTime := time.Unix(0, lastFlushNano)
-		now := time.Now()
-		elapsed := now.Sub(lastFlushTime)
-
-		// Only flush if BufferWindow has elapsed since last flush
-		if elapsed >= bwm.flushWindow {
-			ctx := bwm.getFlushContext()
-			// Async flush, non-blocking
-			go func() {
-				bwm.flush(ctx)
-			}()
-		} else {
-			// Reschedule for remaining time
-			bwm.schedulePeriodicFlush()
+	generation := bwm.timerGeneration
+	bwm.flushTimer = time.AfterFunc(delay, func() {
+		bwm.mu.Lock()
+		if generation != bwm.timerGeneration {
+			bwm.mu.Unlock()
+			return
+		}
+		bwm.flushTimer = nil
+		bwm.mu.Unlock()
+		if err := bwm.FlushAll(nil); err != nil {
+			fmt.Printf("Error flushing package: %v\n", err)
 		}
 	})
-
-	// Store new timer atomically (use CompareAndSwap to handle race condition)
-	// If another goroutine already created a timer, cancel this one
-	if !bwm.flushTimer.CompareAndSwap(nil, newTimer) {
-		// Another goroutine created a timer first, cancel this one
-		newTimer.Stop()
-	}
 }
 
-// SetFlushContext stores the context used for asynchronous flush operations
-// Also extracts and stores UID from context as fallback for permission checks
 func (bwm *BatchWriter) SetFlushContext(ctx context.Context) {
 	if bwm == nil || ctx == nil {
 		return
 	}
-	bwm.flushCtx.Store(ctx)
-
-	// Extract UID from context and store it separately as fallback
-	// This ensures we have UID even if context is lost or doesn't have UID
-	if v, ok := ctx.Value("o").(map[string]interface{}); ok {
-		if uid, okk := v["uid"].(int64); okk && uid > 0 {
-			bwm.flushUID.Store(uid)
-		}
-	}
+	bwm.mu.Lock()
+	defer bwm.mu.Unlock()
+	// Scheduled persistence must survive the request that accepted the data.
+	bwm.flushCtx = context.WithoutCancel(ctx)
 }
 
 func (bwm *BatchWriter) getFlushContext() context.Context {
-	if bwm == nil {
-		return context.Background()
-	}
-	if val := bwm.flushCtx.Load(); val != nil {
-		if ctx, ok := val.(context.Context); ok && ctx != nil {
-			return ctx
-		}
+	bwm.mu.Lock()
+	defer bwm.mu.Unlock()
+	if bwm.flushCtx != nil {
+		return bwm.flushCtx
 	}
 	return context.Background()
 }

@@ -3,6 +3,7 @@ package s3
 import (
 	"context"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -227,13 +228,6 @@ func getBucketByName(c *gin.Context, name string) (*core.BucketInfo, error) {
 // getBucketsByUser gets buckets for a user (with cache)
 func getBucketsByUser(c *gin.Context, uid int64) ([]*core.BucketInfo, error) {
 	ctx := c.Request.Context()
-
-	// Try cache first
-	if cached, ok := bucketListCache.Get(uid); ok {
-		if buckets, ok := cached.([]*core.BucketInfo); ok {
-			return buckets, nil
-		}
-	}
 
 	// Query from database using ACL + GetBkt combination
 	// Create adapter with default paths (handler's paths are set via SetHandlerPaths)
@@ -1360,7 +1354,7 @@ func PutObject(c *gin.Context) {
 	// Read request body
 	data, err := io.ReadAll(c.Request.Body)
 	if err != nil {
-		util.S3ErrorResponse(c, http.StatusBadRequest, "InvalidRequest", err.Error())
+		requestBodyError(c, err)
 		return
 	}
 
@@ -1466,103 +1460,38 @@ func PutObject(c *gin.Context) {
 	config := core.GetWriteBufferConfig()
 	// Use MaxBatchWriteFileSize from config (default 64KB) instead of MaxBufferSize (8MB)
 	// Only use batch write for new files (not updates) to avoid complexity
-	useBatchWrite := config.BatchWriteEnabled &&
-		dataSize <= config.MaxBatchWriteFileSize &&
-		!isUpdate // Only for new files, not updates
+	useBatchWrite := config.BatchWriteEnabled && dataSize > 0 && dataID == 0 &&
+		dataSize <= config.MaxBatchWriteFileSize && !isUpdate
 
 	if useBatchWrite {
-		// Try to use batch writer
 		batchMgr := util.GetBatchWriterForBucket(handler, bktID)
-		if batchMgr != nil {
+		if batchMgr == nil {
+			useBatchWrite = false
+		} else {
 			batchMgr.SetFlushContext(ctx)
-			added, batchDataID, err := batchMgr.AddFile(objID, data, pid, fileName, dataSize, 0) // kind=0: S3 API data is raw, no compression/encryption
-			if err == nil && added {
-				// Successfully added to batch write manager
-				// For S3 API, we flush immediately to ensure data is available
-				// The batch write still provides benefits through:
-				// 1. Batch metadata writes (DataInfo and ObjectInfo)
-				// 2. Reduced database transactions
-				// 3. Better I/O patterns for small files
-				dataID = batchDataID
-				// First check memory cache (pending objects) for better performance
-				if fileInfo, ok := batchMgr.GetPendingObject(objID); ok {
-					objInfo = &core.ObjectInfo{
-						ID:     fileInfo.ObjectID,
-						PID:    fileInfo.PID,
-						Name:   fileInfo.Name,
-						Type:   core.OBJ_TYPE_FILE,
-						DataID: fileInfo.DataID,
-						Size:   fileInfo.Size,
-						MTime:  core.Now(),
-					}
-				} else {
-					// If not in memory cache, query database
-					objs, err := handler.Get(ctx, bktID, []int64{objID})
-					if err == nil && len(objs) > 0 {
-						objInfo = objs[0]
-					}
-					// If still no objInfo, we'll create it from metadata below
-					// Don't fallback to normal write here, as data is already in batch buffer
+			added, batchDataID, addErr := batchMgr.AddFile(objID, data, pid, fileName, dataSize, 0)
+			if addErr == nil && !added {
+				if err := batchMgr.FlushAll(ctx); err != nil {
+					util.S3ErrorResponse(c, http.StatusInternalServerError, "InternalError", err.Error())
+					return
 				}
-
-				// If objInfo is still nil, create it from metadata
-				if objInfo == nil {
-					objInfo = &core.ObjectInfo{
-						ID:     objID,
-						PID:    pid,
-						Name:   fileName,
-						Type:   core.OBJ_TYPE_FILE,
-						DataID: dataID,
-						Size:   dataSize,
-						MTime:  core.Now(),
-					}
-				}
-			} else if err != nil {
-				// Error occurred, fallback to normal write
+				added, batchDataID, addErr = batchMgr.AddFile(objID, data, pid, fileName, dataSize, 0)
+			}
+			if addErr != nil || !added {
 				useBatchWrite = false
 			} else {
-				// Buffer full or other issue, flush existing data and retry once
-				batchMgr.FlushAll(ctx)
-				added, batchDataID, err = batchMgr.AddFile(objID, data, pid, fileName, dataSize, 0) // kind=0: S3 API data is raw, no compression/encryption
-				if err == nil && added {
-					dataID = batchDataID
-					// First check memory cache (pending objects) for better performance
-					if fileInfo, ok := batchMgr.GetPendingObject(objID); ok {
-						objInfo = &core.ObjectInfo{
-							ID:     fileInfo.ObjectID,
-							PID:    fileInfo.PID,
-							Name:   fileInfo.Name,
-							Type:   core.OBJ_TYPE_FILE,
-							DataID: fileInfo.DataID,
-							Size:   fileInfo.Size,
-							MTime:  core.Now(),
-						}
-					} else {
-						// If not in memory cache, query database
-						objs, err := handler.Get(ctx, bktID, []int64{objID})
-						if err == nil && len(objs) > 0 {
-							objInfo = objs[0]
-						}
-						// If still no objInfo, create it from metadata
-						if objInfo == nil {
-							objInfo = &core.ObjectInfo{
-								ID:     objID,
-								PID:    pid,
-								Name:   fileName,
-								Type:   core.OBJ_TYPE_FILE,
-								DataID: dataID,
-								Size:   dataSize,
-								MTime:  core.Now(),
-							}
-						}
-					}
-				} else {
-					// Still failed after flush, fallback to normal write
-					useBatchWrite = false
+				// S3 success must wait for package data and metadata persistence.
+				// Concurrent requests already in the buffers share this flush.
+				if err := batchMgr.FlushAll(ctx); err != nil {
+					util.S3ErrorResponse(c, http.StatusInternalServerError, "InternalError", err.Error())
+					return
+				}
+				dataID = batchDataID
+				objInfo = &core.ObjectInfo{
+					ID: objID, PID: pid, Name: fileName, Type: core.OBJ_TYPE_FILE,
+					DataID: dataID, Size: dataSize, MTime: core.Now(),
 				}
 			}
-		} else {
-			useBatchWrite = false
 		}
 	}
 
@@ -2476,7 +2405,7 @@ func UploadPart(c *gin.Context) {
 	// Read part data
 	partData, err := io.ReadAll(c.Request.Body)
 	if err != nil {
-		util.S3ErrorResponse(c, http.StatusBadRequest, "InvalidRequest", err.Error())
+		requestBodyError(c, err)
 		return
 	}
 
@@ -3084,4 +3013,13 @@ func ListParts(c *gin.Context) {
 
 	c.Header("Content-Type", "application/xml")
 	c.XML(http.StatusOK, result)
+}
+
+func requestBodyError(c *gin.Context, err error) {
+	var tooLarge *http.MaxBytesError
+	if errors.As(err, &tooLarge) {
+		util.S3ErrorResponse(c, http.StatusRequestEntityTooLarge, "EntityTooLarge", "Request body exceeds the configured limit")
+		return
+	}
+	util.S3ErrorResponse(c, http.StatusBadRequest, "InvalidRequest", "Could not read request body")
 }

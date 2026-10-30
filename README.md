@@ -8,7 +8,7 @@
 
 <p align="center">
   <a href="/go.mod#L3" alt="go version">
-    <img src="https://img.shields.io/badge/go%20version-%3E=1.18-brightgreen?style=flat"/>
+    <img src="https://img.shields.io/badge/go%20version-%3E=1.26.10-brightgreen?style=flat"/>
   </a>
   <a href="https://goreportcard.com/badge/github.com/orcastor/orcas" alt="goreport">
     <img src="https://goreportcard.com/badge/github.com/orcastor/orcas?v=20220901">
@@ -28,6 +28,7 @@
 </p>
 
 - [English](README.md) | [中文](README.zh.md)
+- [Security configuration and verification / 安全配置与验证](docs/security-hardening.md)
 
 ## 🚀 What is OrcaS?
 

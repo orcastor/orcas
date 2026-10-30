@@ -114,23 +114,26 @@ type JournalEntry struct {
 // Journal represents a collection of random writes that can be merged and applied
 // It supports both small and large file strategies
 type Journal struct {
-	fileID      int64          // File ID this journal belongs to
-	dataID      int64          // Base DataID this journal is based on
-	baseSize    int64          // Base file size before any journal writes
-	virtualSize int64          // Virtual size for sparse files (0 if not sparse)
-	entries     []JournalEntry // List of write entries
-	entriesMu   sync.RWMutex   // Mutex for entries
-	currentSize int64          // Current size including journal writes (atomic)
-	memoryUsage int64          // Current memory usage in bytes (atomic)
-	isLargeFile bool           // Whether this is a large file (different strategy)
-	isSparse    bool           // Whether this is a sparse file
-	threshold   int64          // Threshold for large/small file distinction
-	mergeCount  int32          // Number of times entries have been merged (atomic)
-	lastMerge   int64          // Last merge timestamp (atomic)
-	isDirty     int32          // Whether journal has uncommitted changes (atomic)
-	fs          *OrcasFS       // Reference to VFS
-	created     int64          // Creation timestamp
-	modified    int64          // Last modification timestamp (atomic)
+	fileID          int64          // File ID this journal belongs to
+	dataID          int64          // Base DataID this journal is based on
+	baseSize        int64          // Base file size before any journal writes
+	virtualSize     int64          // Virtual size for sparse files (0 if not sparse)
+	entries         []JournalEntry // List of write entries
+	entryIndex      []journalSpan
+	indexEntryCount int
+	indexValid      bool
+	entriesMu       sync.RWMutex // Mutex for entries
+	currentSize     int64        // Current size including journal writes (atomic)
+	memoryUsage     int64        // Current memory usage in bytes (atomic)
+	isLargeFile     bool         // Whether this is a large file (different strategy)
+	isSparse        bool         // Whether this is a sparse file
+	threshold       int64        // Threshold for large/small file distinction
+	mergeCount      int32        // Number of times entries have been merged (atomic)
+	lastMerge       int64        // Last merge timestamp (atomic)
+	isDirty         int32        // Whether journal has uncommitted changes (atomic)
+	fs              *OrcasFS     // Reference to VFS
+	created         int64        // Creation timestamp
+	modified        int64        // Last modification timestamp (atomic)
 	// Performance stats
 	flushCount    int32 // Number of times flushed (atomic)
 	lastFlush     int64 // Last flush timestamp (atomic)
@@ -956,6 +959,9 @@ func (j *Journal) Write(offset int64, data []byte) error {
 	if len(data) == 0 {
 		return nil
 	}
+	if offset < 0 || int64(len(data)) > int64(^uint64(0)>>1)-offset {
+		return fmt.Errorf("invalid journal write range")
+	}
 
 	j.entriesMu.Lock()
 	defer j.entriesMu.Unlock()
@@ -1022,6 +1028,7 @@ func (j *Journal) Write(offset int64, data []byte) error {
 	if j.wal != nil {
 		if err := j.wal.WriteEntry(offset, int64(len(data)), entryCopy); err != nil {
 			DebugLog("[Journal Write] ERROR: Failed to write WAL entry: fileID=%d, error=%v", j.fileID, err)
+			putJournalBuffer(entryCopy)
 			return fmt.Errorf("failed to write WAL entry: %w", err)
 		}
 	}
@@ -1034,6 +1041,7 @@ func (j *Journal) Write(offset int64, data []byte) error {
 
 	// Add to entries
 	j.entries = append(j.entries, entry)
+	j.indexEntriesLocked()
 
 	// Update memory usage
 	entryMemory := int64(len(data)) + 16 // data + overhead (offset + length)
@@ -1073,7 +1081,9 @@ func (j *Journal) Write(offset int64, data []byte) error {
 	// For small files or when entry count exceeds threshold, trigger merge
 	if !j.isLargeFile || entryCount >= maxEntries {
 		if entryCount >= maxEntries/2 { // Merge at 50% threshold
-			j.mergeEntriesLocked()
+			if err := j.mergeEntriesLocked(); err != nil {
+				return err
+			}
 		}
 	}
 
@@ -1085,314 +1095,140 @@ func (j *Journal) Write(offset int64, data []byte) error {
 
 // mergeEntriesLocked merges overlapping or adjacent entries
 // Must be called with entriesMu locked
-func (j *Journal) mergeEntriesLocked() {
-	if len(j.entries) <= 1 {
-		return
+func (j *Journal) mergeEntriesLocked() error {
+	if len(j.entries) == 0 {
+		return nil
 	}
-
-	// Calculate old memory usage
-	oldMemory := int64(0)
-	for i := range j.entries {
-		oldMemory += int64(len(j.entries[i].Data)) + 16
-	}
-
-	// Sort entries by offset using stable sort to preserve write order
-	// This is critical: when two entries have the same offset, the later write
-	// (higher index) must come after the earlier write so it correctly overwrites
-	sort.SliceStable(j.entries, func(i, k int) bool {
-		return j.entries[i].Offset < j.entries[k].Offset
-	})
-
-	merged := make([]JournalEntry, 0, len(j.entries))
-	current := j.entries[0]
-
-	for i := 1; i < len(j.entries); i++ {
-		next := j.entries[i]
-		currentEnd := current.Offset + current.Length
-		nextEnd := next.Offset + next.Length
-
-		// Check if entries overlap or are adjacent
-		if next.Offset <= currentEnd {
-			// Merge entries
-			mergeStart := current.Offset
-			mergeEnd := nextEnd
-			if currentEnd > nextEnd {
-				mergeEnd = currentEnd
-			}
-			mergeLength := mergeEnd - mergeStart
-
-			// Create merged data buffer
-			mergedData := getJournalBuffer(int(mergeLength))
-
-			// Copy current data
-			copy(mergedData[0:current.Length], current.Data)
-
-			// Overlay next data
-			nextOffsetInMerged := next.Offset - mergeStart
-			copy(mergedData[nextOffsetInMerged:nextOffsetInMerged+next.Length], next.Data)
-
-			// The old buffers are fully replaced by mergedData and can be recycled.
-			putJournalBuffer(current.Data)
-			putJournalBuffer(next.Data)
-
-			current = JournalEntry{
-				Offset: mergeStart,
-				Length: mergeLength,
-				Data:   mergedData,
-			}
-		} else {
-			// No overlap, save current and move to next
-			merged = append(merged, current)
-			current = next
-		}
-	}
-
-	// Add last entry
-	merged = append(merged, current)
-
-	// Calculate new memory usage
+	j.indexEntriesLocked()
+	oldMemory := atomic.LoadInt64(&j.memoryUsage)
+	merged := make([]JournalEntry, 0, len(j.entryIndex))
 	newMemory := int64(0)
-	for i := range merged {
-		newMemory += int64(len(merged[i].Data)) + 16
+	// Allocate once per connected interval, then overlay only the surviving
+	// spans. Sorting the original writes would reverse last-write precedence.
+	for lo := 0; lo < len(j.entryIndex); {
+		hi := lo + 1
+		start, end := j.entryIndex[lo].start, j.entryIndex[lo].end
+		for hi < len(j.entryIndex) && j.entryIndex[hi].start == end {
+			end = j.entryIndex[hi].end
+			hi++
+		}
+		data := getJournalBuffer(int(end - start))
+		if err := j.overlaySpans(data, start, j.entryIndex[lo:hi]); err != nil {
+			putJournalBuffer(data)
+			for _, entry := range merged {
+				putJournalBuffer(entry.Data)
+			}
+			return err
+		}
+		merged = append(merged, JournalEntry{Offset: start, Length: end - start, Data: data})
+		newMemory += int64(len(data)) + 16
+		lo = hi
 	}
-
-	// Update memory counters
-	memoryDiff := newMemory - oldMemory
-	atomic.AddInt64(&j.memoryUsage, memoryDiff)
-	atomic.AddInt64(&j.fs.journalMgr.totalMemory, memoryDiff)
-
-	// Update entries
-	oldCount := len(j.entries)
+	for _, entry := range j.entries {
+		putJournalBuffer(entry.Data)
+	}
 	j.entries = merged
+	j.indexValid = false
+	j.indexEntriesLocked()
+	diff := newMemory - oldMemory
+	atomic.AddInt64(&j.memoryUsage, diff)
+	if j.fs != nil && j.fs.journalMgr != nil {
+		atomic.AddInt64(&j.fs.journalMgr.totalMemory, diff)
+	}
 	atomic.AddInt32(&j.mergeCount, 1)
 	atomic.StoreInt64(&j.lastMerge, time.Now().Unix())
-
-	DebugLog("[Journal Merge] Merged entries: fileID=%d, before=%d, after=%d, mergeCount=%d, oldMem=%d, newMem=%d, saved=%d",
-		j.fileID, oldCount, len(merged), atomic.LoadInt32(&j.mergeCount), oldMemory, newMemory, oldMemory-newMemory)
+	return nil
 }
 
 // MergeEntries merges overlapping or adjacent entries (public API)
-func (j *Journal) MergeEntries() {
+func (j *Journal) MergeEntries() error {
 	j.entriesMu.Lock()
 	defer j.entriesMu.Unlock()
-	j.mergeEntriesLocked()
+	return j.mergeEntriesLocked()
 }
 
 // Read reads data from the journal, applying journal entries on top of base data
 func (j *Journal) Read(offset, length int64, baseReader func(offset, length int64) ([]byte, error)) ([]byte, error) {
-	j.entriesMu.RLock()
+	if offset < 0 || length < 0 {
+		return nil, fmt.Errorf("negative journal read range")
+	}
+	j.lockIndexedEntries()
 	defer j.entriesMu.RUnlock()
-
-	currentSize := atomic.LoadInt64(&j.currentSize)
-	if offset >= currentSize {
-		DebugLog("[Journal Read] Offset beyond current size: fileID=%d, offset=%d, currentSize=%d, isSparse=%v",
-			j.fileID, offset, currentSize, j.isSparse)
+	size := atomic.LoadInt64(&j.currentSize)
+	if offset >= size {
 		return nil, io.EOF
 	}
-
-	// Adjust length if reading beyond current size
-	if offset+length > currentSize {
-		length = currentSize - offset
-		DebugLog("[Journal Read] Adjusted length: fileID=%d, offset=%d, requestedLength=%d, adjustedLength=%d, currentSize=%d, isSparse=%v",
-			j.fileID, offset, length, length, currentSize, j.isSparse)
+	length = journalMin(length, size-offset)
+	if length == 0 {
+		return []byte{}, nil
 	}
-
-	// Read base data first
-	baseData, err := baseReader(offset, length)
+	base, err := baseReader(offset, length)
 	if err != nil && err != io.EOF {
-		DebugLog("[Journal Read] baseReader error: fileID=%d, offset=%d, length=%d, error=%v", j.fileID, offset, length, err)
 		return nil, err
 	}
-
-	// If baseReader returned no data:
-	// - This is OK when reading beyond the base snapshot (offset >= baseSize). Journal entries
-	//   may extend the file and Journal.Read will synthesize the extension semantics.
-	// - This is NOT OK when reading inside the base snapshot (offset < baseSize) for non-sparse files.
-	if len(baseData) == 0 {
-		if length > 0 &&
-			!j.isSparse &&
-			j.dataID != 0 && j.dataID != core.EmptyDataID &&
-			offset < j.baseSize {
-			DebugLog("[Journal Read] ERROR: baseReader returned empty within base snapshot: fileID=%d, dataID=%d, baseSize=%d, currentSize=%d, offset=%d, length=%d, err=%v",
-				j.fileID, j.dataID, j.baseSize, currentSize, offset, length, err)
-			return nil, fmt.Errorf("journal baseReader returned empty within base snapshot: fileID=%d, dataID=%d, baseSize=%d, currentSize=%d, offset=%d, length=%d, err=%v",
-				j.fileID, j.dataID, j.baseSize, currentSize, offset, length, err)
-		}
-
-		DebugLog("[Journal Read] baseReader returned empty, filling with zeros: fileID=%d, offset=%d, length=%d, baseSize=%d, currentSize=%d, isSparse=%v",
-			j.fileID, offset, length, j.baseSize, currentSize, j.isSparse)
-		baseData = make([]byte, length)
-	} else if int64(len(baseData)) < length {
-		// Extend base data if needed
-		// CRITICAL: Check if gap is beyond baseSize before zero-filling
-		baseDataLen := int64(len(baseData))
-		gapStart := offset + baseDataLen
-		gapEnd := offset + length
-
-		// Check if gap is beyond baseSize (file has grown)
-		if j.baseSize > 0 && gapStart >= j.baseSize {
-			// Gap is beyond baseSize, safe to fill with zeros (journal entries will overlay)
-			DebugLog("[Journal Read] baseReader returned partial data beyond baseSize, will extend with zeros: fileID=%d, offset=%d, requestedLength=%d, actualLength=%d, gapStart=%d, gapEnd=%d, baseSize=%d",
-				j.fileID, offset, length, len(baseData), gapStart, gapEnd, j.baseSize)
-		} else if j.isSparse {
-			// Sparse file, gaps are expected
-			DebugLog("[Journal Read] baseReader returned partial data in sparse file, will extend with zeros: fileID=%d, offset=%d, requestedLength=%d, actualLength=%d",
-				j.fileID, offset, length, len(baseData))
-		} else {
-			// Gap is within currentSize - check if journal entries cover it
-			// If not covered, this is an error (baseReader returned incomplete data)
-			DebugLog("[Journal Read] WARNING: baseReader returned partial data within currentSize: fileID=%d, offset=%d, requestedLength=%d, actualLength=%d, gapStart=%d, gapEnd=%d, currentSize=%d, baseSize=%d - checking journal entries",
-				j.fileID, offset, length, len(baseData), gapStart, gapEnd, currentSize, j.baseSize)
-		}
-
-		// Create extended buffer for journal entries to overlay
-		extended := make([]byte, length)
-		copy(extended, baseData)
-		// Note: We always create extended buffer (initialized with zeros)
-		// Journal entries will overlay on top, filling any gaps
-		baseData = extended
-	} else {
-		// Check if baseData is all zeros (suspicious)
-		if len(baseData) > 100 {
-			allZeros := true
-			for i := 0; i < len(baseData) && i < 1024; i++ {
-				if baseData[i] != 0 {
-					allZeros = false
-					break
-				}
-			}
-			if allZeros && offset < j.baseSize-100 {
-				DebugLog("[Journal Read] WARNING: baseReader returned all-zero data within base range: fileID=%d, offset=%d, length=%d, baseSize=%d",
-					j.fileID, offset, length, j.baseSize)
-			}
-		}
-	}
-
-	// Apply journal entries on top of base data
-	readEnd := offset + length
-
-	// Track which regions are covered by journal entries
-	coveredRanges := make([]struct{ start, end int64 }, 0, len(j.entries))
-
-	for i := range j.entries {
-		entry := &j.entries[i]
-		entryEnd := entry.Offset + entry.Length
-
-		// Skip entries that don't overlap with read range
-		if entry.Offset >= readEnd || entryEnd <= offset {
-			continue
-		}
-
-		// Calculate overlap region
-		overlapStart := entry.Offset
-		if overlapStart < offset {
-			overlapStart = offset
-		}
-
-		overlapEnd := entryEnd
-		if overlapEnd > readEnd {
-			overlapEnd = readEnd
-		}
-
-		// Copy overlapping data from entry to result
-		srcOffset := overlapStart - entry.Offset
-		dstOffset := overlapStart - offset
-		copyLength := overlapEnd - overlapStart
-
-		// Ensure dstOffset is within baseData bounds
-		if dstOffset < int64(len(baseData)) && dstOffset+copyLength <= int64(len(baseData)) {
-			copy(baseData[dstOffset:dstOffset+copyLength], entry.Data[srcOffset:srcOffset+copyLength])
-		} else if dstOffset >= int64(len(baseData)) {
-			// Journal entry extends beyond baseData - extend baseData
-			if int64(len(baseData)) < length {
-				extended := make([]byte, length)
-				copy(extended, baseData)
-				baseData = extended
-			}
-			if dstOffset+copyLength <= int64(len(baseData)) {
-				copy(baseData[dstOffset:dstOffset+copyLength], entry.Data[srcOffset:srcOffset+copyLength])
-			}
-		}
-
-		// Track covered range
-		coveredRanges = append(coveredRanges, struct{ start, end int64 }{overlapStart, overlapEnd})
-	}
-
-	// CRITICAL FIX: After applying journal entries, check if there are gaps not covered
-	// If gap is within baseSize and not covered by journal entries, this indicates
-	// baseReader returned incomplete data, which should not happen
-	if int64(len(baseData)) < length {
-		baseDataLen := int64(len(baseData))
-		gapStart := offset + baseDataLen
-		gapEnd := offset + length
-
-		// Check if gap is covered by journal entries
-		gapCovered := false
-		for _, r := range coveredRanges {
-			if r.start <= gapStart && r.end >= gapEnd {
-				gapCovered = true
+	spans := j.overlappingSpans(offset, offset+length)
+	// A short base read inside an existing non-sparse snapshot is only valid
+	// where newer journal writes cover every missing byte.
+	if !j.isSparse && j.dataID != 0 && j.dataID != core.EmptyDataID {
+		missing := offset + journalMin(int64(len(base)), length)
+		requiredEnd := journalMin(offset+length, j.baseSize)
+		for _, span := range spans {
+			if span.start > missing {
 				break
 			}
-		}
-
-		if !gapCovered {
-			currentSize := atomic.LoadInt64(&j.currentSize)
-			if gapStart < currentSize && currentSize > 0 {
-				// Gap is within currentSize but not covered by journal entries
-				// This means baseReader returned incomplete data, which is an error
-				// Return error to prevent returning all-zero data
-				DebugLog("[Journal Read] ERROR: Gap within currentSize not covered by journal entries: fileID=%d, offset=%d, length=%d, baseDataLen=%d, gapStart=%d, gapEnd=%d, currentSize=%d, baseSize=%d",
-					j.fileID, offset, length, baseDataLen, gapStart, gapEnd, currentSize, j.baseSize)
-				return nil, fmt.Errorf("journal read gap not covered: fileID=%d, offset=%d, length=%d, baseDataLen=%d, gapStart=%d, gapEnd=%d, currentSize=%d, baseSize=%d - baseReader returned incomplete data within currentSize",
-					j.fileID, offset, length, baseDataLen, gapStart, gapEnd, currentSize, j.baseSize)
-			} else {
-				// Gap is beyond currentSize - this is OK, zeros are expected
-				// Journal entries should have covered it if there were writes
-				DebugLog("[Journal Read] Gap beyond currentSize not covered by journal entries (expected): fileID=%d, offset=%d, length=%d, baseDataLen=%d, gapStart=%d, gapEnd=%d, currentSize=%d, baseSize=%d",
-					j.fileID, offset, length, baseDataLen, gapStart, gapEnd, currentSize, j.baseSize)
+			if span.end > missing {
+				missing = span.end
 			}
 		}
+		if missing < requiredEnd {
+			return nil, fmt.Errorf("journal baseReader returned incomplete data within base snapshot at offset %d", missing)
+		}
 	}
-
-	return baseData, nil
+	result := make([]byte, length)
+	copy(result, base)
+	if err := j.overlaySpans(result, offset, spans); err != nil {
+		return nil, err
+	}
+	return result, nil
 }
 
 // Truncate truncates the journal to the specified size
 func (j *Journal) Truncate(size int64) error {
+	if size < 0 {
+		return fmt.Errorf("negative journal size")
+	}
 	j.entriesMu.Lock()
 	defer j.entriesMu.Unlock()
 
-	oldSize := atomic.LoadInt64(&j.currentSize)
-	atomic.StoreInt64(&j.currentSize, size)
-
-	// Remove or truncate entries beyond new size
 	validEntries := make([]JournalEntry, 0, len(j.entries))
-	for i := range j.entries {
-		entry := j.entries[i]
-		entryEnd := entry.Offset + entry.Length
-
+	newMemory := int64(0)
+	for _, entry := range j.entries {
 		if entry.Offset >= size {
-			// Entry is completely beyond new size, skip it
+			putJournalBuffer(entry.Data)
 			continue
-		} else if entryEnd > size {
-			// Entry needs truncation
-			newLength := size - entry.Offset
-			truncatedData := make([]byte, newLength)
-			copy(truncatedData, entry.Data[:newLength])
-			entry.Length = newLength
-			entry.Data = truncatedData
 		}
-
+		if entry.Offset+entry.Length > size {
+			entry.Length = size - entry.Offset
+			if entry.Data != nil {
+				data := getJournalBuffer(int(entry.Length))
+				copy(data, entry.Data[:entry.Length])
+				putJournalBuffer(entry.Data)
+				entry.Data = data
+			}
+		}
+		newMemory += int64(len(entry.Data)) + 16
 		validEntries = append(validEntries, entry)
 	}
-
 	j.entries = validEntries
+	j.indexValid = false
+	j.indexEntriesLocked()
+	diff := newMemory - atomic.SwapInt64(&j.memoryUsage, newMemory)
+	if j.fs != nil && j.fs.journalMgr != nil {
+		atomic.AddInt64(&j.fs.journalMgr.totalMemory, diff)
+	}
+	atomic.StoreInt64(&j.currentSize, size)
 	atomic.StoreInt32(&j.isDirty, 1)
 	atomic.StoreInt64(&j.modified, time.Now().Unix())
-
-	DebugLog("[Journal Truncate] Truncated journal: fileID=%d, oldSize=%d, newSize=%d, entries=%d",
-		j.fileID, oldSize, size, len(j.entries))
-
 	return nil
 }
 
@@ -1450,7 +1286,9 @@ func (j *Journal) Flush() (newDataID int64, newSize int64, err error) {
 		j.fileID, entryCount, j.dataID, j.baseSize)
 
 	// Merge entries first to optimize
-	j.mergeEntriesLocked()
+	if err := j.mergeEntriesLocked(); err != nil {
+		return 0, 0, err
+	}
 
 	// Calculate new size based on entries and baseSize
 	// CRITICAL: newSize must be calculated from actual entries to ensure no data loss
@@ -1723,6 +1561,9 @@ func (j *Journal) flushSmallFile(newSize int64) (int64, int64, error) {
 	// Clear journal entries and mark as clean
 	// MEMORY OPTIMIZATION: Set to nil instead of [:0] to release underlying array
 	j.entries = nil
+	j.entryIndex = nil
+	j.indexEntryCount = 0
+	j.indexValid = true
 	j.dataID = newDataID
 	j.baseSize = newSize
 	// CRITICAL: Reset currentSize to newSize after flush
@@ -1776,40 +1617,13 @@ func (j *Journal) flushLargeFile(newSize int64) (int64, int64, error) {
 }
 
 // calculateModifiedBytes calculates total bytes modified by journal entries
+// Caller holds entriesMu and has refreshed the interval index.
 func (j *Journal) calculateModifiedBytes() int64 {
-	if len(j.entries) == 0 {
-		return 0
+	var total int64
+	for _, span := range j.entryIndex {
+		total += span.end - span.start
 	}
-
-	// Sort entries by offset
-	sortedEntries := make([]JournalEntry, len(j.entries))
-	copy(sortedEntries, j.entries)
-	sort.Slice(sortedEntries, func(i, k int) bool {
-		return sortedEntries[i].Offset < sortedEntries[k].Offset
-	})
-
-	// Calculate total modified bytes, considering overlaps
-	totalModified := int64(0)
-	lastEnd := int64(-1)
-
-	for i := range sortedEntries {
-		entry := &sortedEntries[i]
-		start := entry.Offset
-		end := entry.Offset + entry.Length
-
-		if start > lastEnd {
-			// No overlap with previous
-			totalModified += entry.Length
-			lastEnd = end
-		} else if end > lastEnd {
-			// Partial overlap
-			totalModified += end - lastEnd
-			lastEnd = end
-		}
-		// else: completely overlapped, no additional bytes
-	}
-
-	return totalModified
+	return total
 }
 
 var checksumZeroBlock = make([]byte, 32*1024)
@@ -2234,6 +2048,9 @@ func (j *Journal) flushLargeFileChunked(newSize int64) (int64, int64, error) {
 	// Clear journal entries and mark as clean
 	// MEMORY OPTIMIZATION: Set to nil instead of [:0] to release underlying array
 	j.entries = nil
+	j.entryIndex = nil
+	j.indexEntryCount = 0
+	j.indexValid = true
 	j.dataID = newDataID
 	j.baseSize = newSize
 	// CRITICAL: Reset currentSize to newSize after flush
@@ -2320,69 +2137,10 @@ func (j *Journal) generateChunkData(offset, length int64) ([]byte, error) {
 		}
 	}
 
-	// 3. Apply all journal entries that overlap this chunk
-	chunkEnd := offset + length
-	for i := range j.entries {
-		entry := &j.entries[i]
-		entryEnd := entry.Offset + entry.Length
-
-		// Check if entry overlaps with this chunk
-		if entry.Offset >= chunkEnd || entryEnd <= offset {
-			continue // No overlap
-		}
-
-		// Calculate overlap region
-		overlapStart := entry.Offset
-		if overlapStart < offset {
-			overlapStart = offset
-		}
-
-		overlapEnd := entryEnd
-		if overlapEnd > chunkEnd {
-			overlapEnd = chunkEnd
-		}
-
-		// Copy data from entry to chunk
-		chunkCopyStart := overlapStart - offset
-		chunkCopyEnd := overlapEnd - offset
-
-		entryCopyStart := overlapStart - entry.Offset
-		entryCopyEnd := overlapEnd - entry.Offset
-
-		// DEBUG: Log entry details and check for zero data
-		if entry.Data == nil {
-			DebugLog("[Journal generateChunkData] ERROR: entry.Data is nil: fileID=%d, entryIdx=%d, entryOffset=%d, entryLength=%d",
-				j.fileID, i, entry.Offset, entry.Length)
-			continue
-		}
-		if int64(len(entry.Data)) < entryCopyEnd {
-			DebugLog("[Journal generateChunkData] ERROR: entry.Data too short: fileID=%d, entryIdx=%d, entryOffset=%d, entryLength=%d, dataLen=%d, entryCopyEnd=%d",
-				j.fileID, i, entry.Offset, entry.Length, len(entry.Data), entryCopyEnd)
-			continue
-		}
-
-		// Check if entry data is all zeros (potential data corruption)
-		isAllZero := true
-		checkLen := entryCopyEnd - entryCopyStart
-		if checkLen > 1024 {
-			checkLen = 1024 // Only check first 1KB for performance
-		}
-		for k := entryCopyStart; k < entryCopyStart+checkLen; k++ {
-			if entry.Data[k] != 0 {
-				isAllZero = false
-				break
-			}
-		}
-		if isAllZero && checkLen > 0 {
-			DebugLog("[Journal generateChunkData] WARNING: entry.Data appears to be all zeros: fileID=%d, entryIdx=%d, entryOffset=%d, entryLength=%d, checkLen=%d",
-				j.fileID, i, entry.Offset, entry.Length, checkLen)
-		}
-
-		DebugLog("[Journal generateChunkData] Applying entry: fileID=%d, entryIdx=%d, entryOffset=%d, entryLength=%d, chunkOffset=%d, chunkLength=%d, overlapStart=%d, overlapEnd=%d, chunkCopyStart=%d, chunkCopyEnd=%d, entryCopyStart=%d, entryCopyEnd=%d",
-			j.fileID, i, entry.Offset, entry.Length, offset, length, overlapStart, overlapEnd, chunkCopyStart, chunkCopyEnd, entryCopyStart, entryCopyEnd)
-
-		copy(chunkData[chunkCopyStart:chunkCopyEnd],
-			entry.Data[entryCopyStart:entryCopyEnd])
+	// Only visit intervals that intersect this chunk.
+	j.indexEntriesLocked()
+	if err := j.overlaySpans(chunkData, offset, j.overlappingSpans(offset, offset+length)); err != nil {
+		return nil, err
 	}
 
 	return chunkData, nil
@@ -2492,7 +2250,7 @@ func (j *Journal) readBaseData(offset, length int64) ([]byte, error) {
 
 // GetStats returns statistics about the journal
 func (j *Journal) GetStats() map[string]interface{} {
-	j.entriesMu.RLock()
+	j.lockIndexedEntries()
 	defer j.entriesMu.RUnlock()
 
 	flushCount := atomic.LoadInt32(&j.flushCount)
@@ -2539,6 +2297,9 @@ func (j *Journal) Clear() {
 		j.entries[i].Data = nil
 	}
 	j.entries = nil
+	j.entryIndex = nil
+	j.indexEntryCount = 0
+	j.indexValid = true
 	atomic.StoreInt32(&j.isDirty, 0)
 	atomic.StoreInt64(&j.currentSize, j.baseSize)
 
@@ -2723,10 +2484,13 @@ func (j *Journal) DeserializeJournal(data []byte) error {
 		return fmt.Errorf("failed to read current size: %w", err)
 	}
 
-	atomic.StoreInt64(&j.currentSize, currentSize)
+	if entryCount < 0 || currentSize < 0 || entryCount > int64(buf.Len()/16) {
+		return fmt.Errorf("invalid journal header")
+	}
 
 	// Read entries
-	j.entries = make([]JournalEntry, 0, entryCount)
+	entries := make([]JournalEntry, 0, entryCount)
+	newMemory := int64(0)
 	for i := int64(0); i < entryCount; i++ {
 		var offset, length int64
 		if err := binary.Read(buf, binary.LittleEndian, &offset); err != nil {
@@ -2736,17 +2500,32 @@ func (j *Journal) DeserializeJournal(data []byte) error {
 			return fmt.Errorf("failed to read entry length: %w", err)
 		}
 
+		if offset < 0 || length < 0 || offset > currentSize || length > currentSize-offset || length > int64(buf.Len()) {
+			return fmt.Errorf("invalid journal entry range")
+		}
 		entryData := make([]byte, length)
 		if _, err := io.ReadFull(buf, entryData); err != nil {
 			return fmt.Errorf("failed to read entry data: %w", err)
 		}
 
-		j.entries = append(j.entries, JournalEntry{
+		newMemory += length + 16
+		entries = append(entries, JournalEntry{
 			Offset: offset,
 			Length: length,
 			Data:   entryData,
 		})
 	}
+
+	for _, entry := range j.entries {
+		putJournalBuffer(entry.Data)
+	}
+	j.entries = entries
+	j.indexValid = false
+	diff := newMemory - atomic.SwapInt64(&j.memoryUsage, newMemory)
+	if j.fs != nil && j.fs.journalMgr != nil {
+		atomic.AddInt64(&j.fs.journalMgr.totalMemory, diff)
+	}
+	atomic.StoreInt64(&j.currentSize, currentSize)
 
 	DebugLog("[Journal Deserialize] Loaded journal: fileID=%d, entries=%d, size=%d",
 		j.fileID, len(j.entries), currentSize)

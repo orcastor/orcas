@@ -1,9 +1,10 @@
 package main
 
 import (
-	"os"
+	"time"
 
 	"github.com/gotomicro/ego"
+	"github.com/gotomicro/ego/core/econf"
 	"github.com/gotomicro/ego/core/elog"
 	"github.com/gotomicro/ego/server/egin"
 
@@ -12,14 +13,22 @@ import (
 	"github.com/orcastor/orcas/s3/middleware"
 )
 
-// EGO_DEBUG=true EGO_LOG_EXTRA_KEYS=uid ORCAS_SECRET=xxxxxxxx egoctl run --runargs --config=config.toml
-// EGO_DEBUG=true EGO_LOG_EXTRA_KEYS=uid ORCAS_SECRET=xxxxxxxx go run ./... --config=config.toml
 // Note: ORCAS_BASE and ORCAS_DATA are no longer used as environment variables.
 // Paths are configured via context using Path2Ctx or Config2Ctx, defaulting to current directory (.)
 func main() {
-	core.InitDB(os.Getenv("ORCAS_BASE"), "")
+	if err := core.InitDB(".", ""); err != nil {
+		elog.Panic("startup", elog.Any("err", err))
+	}
 	if err := ego.New().Serve(func() *egin.Component {
-		server := egin.Load("server.http").Build()
+		headerTimeout := econf.GetDuration("server.http.serverReadHeaderTimeout")
+		if headerTimeout <= 0 {
+			headerTimeout = 10 * time.Second
+		}
+		readTimeout := econf.GetDuration("server.http.serverReadTimeout")
+		if readTimeout <= 0 {
+			readTimeout = 2 * time.Minute
+		}
+		server := egin.Load("server.http").Build(egin.WithServerReadHeaderTimeout(headerTimeout), egin.WithServerReadTimeout(readTimeout))
 
 		server.Use(middleware.Metrics())
 		server.Use(middleware.CORS())

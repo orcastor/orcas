@@ -4,20 +4,18 @@ import (
 	"errors"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/golang-jwt/jwt"
+	"github.com/golang-jwt/jwt/v4"
 	"github.com/gotomicro/ego/core/elog"
 	"github.com/orcastor/orcas/core"
 	"github.com/orcastor/orcas/rpc/util"
 )
 
 var noAuthPath = map[string]bool{
-	"":                 true,
-	"/":                true,
-	"/api/login":       true,
-	"/admin/api/login": true,
+	"/api/login": true,
 }
 
 var ORCAS_SECRET = os.Getenv("ORCAS_SECRET")
@@ -32,7 +30,16 @@ var (
 	ErrTokenExpired   = errors.New("token expired")
 	ErrTokenMalformed = errors.New("not a token")
 	ErrTokenInvalid   = errors.New("token invalid")
+	ErrSecretInvalid  = errors.New("ORCAS_SECRET must contain at least 32 bytes")
 )
+
+// ValidateSecret rejects missing or trivially short JWT signing keys.
+func ValidateSecret() error {
+	if len(ORCAS_SECRET) < 32 {
+		return ErrSecretInvalid
+	}
+	return nil
+}
 
 type Claims struct {
 	User string `json:"u"`
@@ -41,6 +48,12 @@ type Claims struct {
 }
 
 func GenerateToken(user string, uid int64, role uint32) (string, int64, error) {
+	if err := ValidateSecret(); err != nil {
+		return "", 0, err
+	}
+	if uid <= 0 {
+		return "", 0, ErrTokenInvalid
+	}
 	expireTime := time.Now().Add(24 * time.Hour).Unix()
 	token, err := jwt.NewWithClaims(jwt.SigningMethodHS256, Claims{
 		user,
@@ -55,9 +68,15 @@ func GenerateToken(user string, uid int64, role uint32) (string, int64, error) {
 }
 
 func ParseToken(token string) (*Claims, error) {
+	if err := ValidateSecret(); err != nil {
+		return nil, err
+	}
+	if len(token) > 8192 {
+		return nil, ErrTokenMalformed
+	}
 	tokenClaims, err := jwt.ParseWithClaims(token, &Claims{}, func(token *jwt.Token) (interface{}, error) {
 		return []byte(ORCAS_SECRET), nil
-	})
+	}, jwt.WithValidMethods([]string{jwt.SigningMethodHS256.Alg()}))
 
 	if err != nil {
 		if ve, ok := err.(*jwt.ValidationError); ok {
@@ -71,7 +90,17 @@ func ParseToken(token string) (*Claims, error) {
 		return nil, err
 	}
 
-	return tokenClaims.Claims.(*Claims), nil
+	if tokenClaims == nil || !tokenClaims.Valid {
+		return nil, ErrTokenInvalid
+	}
+	claims, ok := tokenClaims.Claims.(*Claims)
+	if !ok || claims.Issuer != MOD_NAME || claims.ExpiresAt <= time.Now().Unix() {
+		return nil, ErrTokenInvalid
+	}
+	if uid, err := strconv.ParseInt(claims.Audience, 10, 64); err != nil || uid <= 0 {
+		return nil, ErrTokenInvalid
+	}
+	return claims, nil
 }
 
 func JWT() gin.HandlerFunc {
@@ -104,18 +133,7 @@ func JWT() gin.HandlerFunc {
 }
 
 func GetToken(c *gin.Context) (token string) {
-	token = c.GetHeader("Authorization")
-	if token != "" {
-		return
-	}
-	// get
-	token = c.Query("token")
-	if token != "" {
-		return
-	}
-	// postform
-	token = c.PostForm("token")
-	return
+	return strings.TrimSpace(strings.TrimPrefix(c.GetHeader("Authorization"), "Bearer "))
 }
 
 func GetUID(c *gin.Context) int64 {

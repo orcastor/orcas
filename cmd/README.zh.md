@@ -27,7 +27,7 @@ go build -o orcas-cli cmd/main.go
 
 ```bash
 # 使用命令行参数
-orcas-cli -action upload -local /path/to/local/file -remote /remote/path -user orcas -pass orcas
+orcas-cli -action upload -local /path/to/local/file -remote /remote/path -user orcas
 
 # 使用配置文件
 orcas-cli -action upload -local /path/to/local/file -remote /remote/path -config config.json
@@ -37,7 +37,7 @@ orcas-cli -action upload -local /path/to/local/file -remote /remote/path -config
 
 ```bash
 # 使用命令行参数
-orcas-cli -action download -local /path/to/save -remote /remote/path -user orcas -pass orcas
+orcas-cli -action download -local /path/to/save -remote /remote/path -user orcas
 
 # 使用配置文件
 orcas-cli -action download -local /path/to/save -remote /remote/path -config config.json
@@ -157,7 +157,7 @@ orcas-cli -action upload -local /path/to/directory -remote /my/directory -config
 ### 示例 2: 下载文件（使用命令行参数）
 
 ```bash
-orcas-cli -action download -local ./downloads -remote /my/file.txt -user orcas -pass orcas -reflevel FULL
+orcas-cli -action download -local ./downloads -remote /my/file.txt -user orcas -reflevel FULL
 ```
 
 ### 示例 3: 上传并启用加密
@@ -167,7 +167,7 @@ orcas-cli -action upload \
   -local /path/to/file \
   -remote /encrypted/file \
   -user orcas \
-  -pass orcas \
+  \
   -endecway AES256 \
   -endeckey "my-very-long-encryption-key-here"
 ```
@@ -317,16 +317,16 @@ orcas-cli -action add-user -config config.json -newuser testuser -newpass testpa
 
 ```bash
 # 创建无限制配额的桶
-orcas-cli -action create-bucket -user orcas -pass orcas -bucketname mybucket
+orcas-cli -action create-bucket -user orcas -bucketname mybucket
 
 # 创建指定配额的桶（10GB）
-orcas-cli -action create-bucket -user orcas -pass orcas -bucketname mybucket -quota 10737418240
+orcas-cli -action create-bucket -user orcas -bucketname mybucket -quota 10737418240
 
 # 创建桶并指定所有者（通过用户名）
-orcas-cli -action create-bucket -user orcas -pass orcas -bucketname mybucket -owner testuser
+orcas-cli -action create-bucket -user orcas -bucketname mybucket -owner testuser
 
 # 创建桶并指定所有者（通过用户ID）
-orcas-cli -action create-bucket -user orcas -pass orcas -bucketname mybucket -owner 123456
+orcas-cli -action create-bucket -user orcas -bucketname mybucket -owner 123456
 
 # 使用配置文件
 orcas-cli -action create-bucket -config config.json -bucketname mybucket
@@ -342,7 +342,7 @@ orcas-cli -action create-bucket -config config.json -bucketname mybucket
 ### 删除桶 (delete-bucket)
 
 ```bash
-orcas-cli -action delete-bucket -user orcas -pass orcas -bucket 123456
+orcas-cli -action delete-bucket -user orcas -bucket 123456
 ```
 
 **参数说明：**
@@ -353,7 +353,7 @@ orcas-cli -action delete-bucket -user orcas -pass orcas -bucket 123456
 ### 列出所有桶 (list-buckets)
 
 ```bash
-orcas-cli -action list-buckets -user orcas -pass orcas
+orcas-cli -action list-buckets -user orcas
 ```
 
 **参数说明：**
@@ -402,5 +402,5 @@ orcas-cli -action create-bucket -config config.json -bucketname mybucket
 6. **用户管理功能需要管理员权限**，只有角色为 `ADMIN` 的用户才能执行用户管理操作
 7. 创建用户时，密码会使用 PBKDF2 算法进行加密存储
 8. 用户名必须唯一，如果尝试创建已存在的用户名，会返回错误
-9. **系统首次初始化时会自动创建默认管理员账户**（用户名：`orcas`，密码：`orcas`），请尽快修改密码
+9. **首次初始化必须设置 `ORCAS_ADMIN_PASSWORD`**，用于创建用户名为 `orcas` 的管理员。已有账号不会被重置，详见[安全配置](../docs/security-hardening.md)。
 

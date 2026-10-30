@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -29,132 +30,168 @@ type CredentialStore interface {
 
 // InMemoryCredentialStore is a simple in-memory credential store
 type InMemoryCredentialStore struct {
-	credentials map[string]*AWSCredential
+	mu          sync.RWMutex
+	credentials map[string]AWSCredential
 }
 
 // NewInMemoryCredentialStore creates a new in-memory credential store
 func NewInMemoryCredentialStore() *InMemoryCredentialStore {
 	return &InMemoryCredentialStore{
-		credentials: make(map[string]*AWSCredential),
+		credentials: make(map[string]AWSCredential),
 	}
 }
 
 // GetCredential retrieves a credential by access key ID
 func (s *InMemoryCredentialStore) GetCredential(accessKeyID string) (*AWSCredential, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	if cred, ok := s.credentials[accessKeyID]; ok {
-		return cred, nil
+		return &cred, nil
 	}
 	return nil, fmt.Errorf("credential not found")
 }
 
 // PutCredential stores a credential
 func (s *InMemoryCredentialStore) PutCredential(credential *AWSCredential) error {
-	s.credentials[credential.AccessKeyID] = credential
+	if credential == nil || credential.AccessKeyID == "" || credential.SecretAccessKey == "" || credential.UserID <= 0 {
+		return fmt.Errorf("invalid credential")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.credentials[credential.AccessKeyID] = *credential
 	return nil
 }
 
 // Global credential store (can be replaced with database-backed implementation)
 var credentialStore CredentialStore = NewInMemoryCredentialStore()
+var credentialStoreMu sync.RWMutex
 
 // SetCredentialStore sets the global credential store
 func SetCredentialStore(store CredentialStore) {
+	credentialStoreMu.Lock()
+	defer credentialStoreMu.Unlock()
 	credentialStore = store
 }
 
-// VerifyAWSV4Signature verifies AWS Signature Version 4
-func VerifyAWSV4Signature(r *http.Request, credential *AWSCredential) error {
-	// Parse Authorization header
-	authHeader := r.Header.Get("Authorization")
-	if !strings.HasPrefix(authHeader, "AWS4-HMAC-SHA256 ") {
-		return fmt.Errorf("invalid authorization header format")
-	}
+type awsAuthorization struct {
+	accessKeyID, date, region, service, signedHeaders, signature string
+}
 
-	// Extract components from Authorization header
-	// Format: AWS4-HMAC-SHA256 Credential=accessKeyId/date/region/service/aws4_request, SignedHeaders=..., Signature=...
-	authParts := strings.TrimPrefix(authHeader, "AWS4-HMAC-SHA256 ")
-
-	var accessKeyID, date, region, service, signedHeaders, signature string
-
-	// Parse Credential
-	credentialStart := strings.Index(authParts, "Credential=")
-	if credentialStart == -1 {
-		return fmt.Errorf("missing Credential in authorization header")
+func parseAWSAuthorization(r *http.Request) (*awsAuthorization, error) {
+	const algorithm = "AWS4-HMAC-SHA256 "
+	header := r.Header.Get("Authorization")
+	if !strings.HasPrefix(header, algorithm) {
+		return nil, fmt.Errorf("invalid authorization header")
 	}
-	credentialEnd := strings.Index(authParts[credentialStart:], ",")
-	if credentialEnd == -1 {
-		return fmt.Errorf("invalid Credential format")
+	fields := make(map[string]string)
+	for _, part := range strings.Split(strings.TrimPrefix(header, algorithm), ",") {
+		pair := strings.SplitN(strings.TrimSpace(part), "=", 2)
+		if len(pair) != 2 || pair[1] == "" || fields[pair[0]] != "" {
+			return nil, fmt.Errorf("invalid authorization fields")
+		}
+		fields[pair[0]] = pair[1]
 	}
-	credentialStr := authParts[credentialStart+11 : credentialStart+credentialEnd]
-	credParts := strings.Split(credentialStr, "/")
-	if len(credParts) != 5 {
-		return fmt.Errorf("invalid Credential format")
+	scope := strings.Split(fields["Credential"], "/")
+	if len(fields) != 3 || len(scope) != 5 || scope[0] == "" || scope[2] == "" || scope[3] != "s3" || scope[4] != "aws4_request" {
+		return nil, fmt.Errorf("invalid credential scope")
 	}
-	accessKeyID = credParts[0]
-	date = credParts[1]
-	region = credParts[2]
-	service = credParts[3]
-
-	// Verify access key ID matches
-	if accessKeyID != credential.AccessKeyID {
-		return fmt.Errorf("access key ID mismatch")
+	signature, err := hex.DecodeString(fields["Signature"])
+	if err != nil || len(signature) != sha256.Size {
+		return nil, fmt.Errorf("invalid signature")
 	}
-
-	// Parse SignedHeaders
-	signedHeadersStart := strings.Index(authParts, "SignedHeaders=")
-	if signedHeadersStart == -1 {
-		return fmt.Errorf("missing SignedHeaders in authorization header")
-	}
-	signedHeadersEnd := strings.Index(authParts[signedHeadersStart:], ",")
-	if signedHeadersEnd == -1 {
-		signedHeadersEnd = len(authParts) - signedHeadersStart
-	}
-	signedHeaders = authParts[signedHeadersStart+14 : signedHeadersStart+signedHeadersEnd]
-
-	// Parse Signature
-	signatureStart := strings.Index(authParts, "Signature=")
-	if signatureStart == -1 {
-		return fmt.Errorf("missing Signature in authorization header")
-	}
-	signature = authParts[signatureStart+10:]
-
-	// Get X-Amz-Date header (required for V4)
 	amzDate := r.Header.Get("X-Amz-Date")
-	if amzDate == "" {
-		return fmt.Errorf("missing X-Amz-Date header")
+	requestTime, err := time.Parse("20060102T150405Z", amzDate)
+	if err != nil || requestTime.Format("20060102") != scope[1] {
+		return nil, fmt.Errorf("invalid request date")
 	}
-
-	// Verify date matches
-	if len(amzDate) >= 8 && amzDate[:8] != date {
-		return fmt.Errorf("date mismatch")
+	if skew := time.Since(requestTime); skew < -15*time.Minute || skew > 15*time.Minute {
+		return nil, fmt.Errorf("request time out of range")
 	}
-
-	// Build canonical request
-	// Note: We need to ensure the request URL is properly set
-	// Gin may modify the request, so we ensure Host is set correctly
-	if r.Host == "" && r.Header.Get("Host") != "" {
-		r.Host = r.Header.Get("Host")
+	signedHeaders := fields["SignedHeaders"]
+	names := strings.Split(signedHeaders, ";")
+	signed := make(map[string]bool)
+	for i, name := range names {
+		if name == "" || name != strings.ToLower(name) || strings.TrimSpace(name) != name || (i > 0 && names[i-1] >= name) {
+			return nil, fmt.Errorf("invalid signed headers")
+		}
+		if name == "host" {
+			if r.Host == "" {
+				return nil, fmt.Errorf("missing host")
+			}
+		} else if r.Header.Get(name) == "" {
+			return nil, fmt.Errorf("missing signed header")
+		}
+		signed[name] = true
 	}
+	if !signed["host"] || !signed["x-amz-date"] {
+		return nil, fmt.Errorf("host and x-amz-date must be signed")
+	}
+	// All S3 operation and metadata headers must be authenticated. The payload
+	// hash is already included separately in the canonical request.
+	for name := range r.Header {
+		lower := strings.ToLower(name)
+		if strings.HasPrefix(lower, "x-amz-") && lower != "x-amz-content-sha256" && !signed[lower] {
+			return nil, fmt.Errorf("unsigned S3 header")
+		}
+	}
+	return &awsAuthorization{scope[0], scope[1], scope[2], scope[3], signedHeaders, fields["Signature"]}, nil
+}
 
-	canonicalRequest, err := buildCanonicalRequest(r, signedHeaders)
+// VerifyAWSV4Signature validates scope, timestamp, signed headers and body.
+func VerifyAWSV4Signature(r *http.Request, credential *AWSCredential) error {
+	auth, err := parseAWSAuthorization(r)
 	if err != nil {
-		return fmt.Errorf("failed to build canonical request: %v", err)
+		return err
+	}
+	if credential == nil || credential.AccessKeyID != auth.accessKeyID || credential.SecretAccessKey == "" || credential.UserID <= 0 {
+		return fmt.Errorf("invalid credential")
+	}
+	canonical, err := buildCanonicalRequest(r, auth.signedHeaders)
+	if err != nil {
+		return err
+	}
+	toSign := buildStringToSign(r.Header.Get("X-Amz-Date"), auth.date, auth.region, auth.service, canonical)
+	expected, _ := hex.DecodeString(calculateSignature(credential.SecretAccessKey, auth.date, auth.region, auth.service, toSign))
+	actual, _ := hex.DecodeString(auth.signature)
+	if !hmac.Equal(actual, expected) {
+		return fmt.Errorf("signature mismatch")
 	}
 
-	// Build string to sign
-	stringToSign := buildStringToSign(amzDate, date, region, service, canonicalRequest)
-
-	// Calculate signature
-	expectedSignature := calculateSignature(credential.SecretAccessKey, date, region, service, stringToSign)
-
-	// Compare signatures
-	if signature != expectedSignature {
-		// Debug: log signature mismatch details (can be removed in production)
-		// This helps identify what's wrong with the signature calculation
-		// Log canonical request for debugging
-		return fmt.Errorf("signature mismatch: expected %s, got %s (canonical: %q)", expectedSignature, signature, canonicalRequest)
+	body, err := readAWSBody(r)
+	if err != nil {
+		return err
 	}
-
+	if payloadHash := r.Header.Get("X-Amz-Content-Sha256"); payloadHash != "" && payloadHash != "UNSIGNED-PAYLOAD" {
+		expectedHash, err := hex.DecodeString(payloadHash)
+		actualHash := sha256.Sum256(body)
+		if err != nil || len(expectedHash) != sha256.Size || !hmac.Equal(expectedHash, actualHash[:]) {
+			return fmt.Errorf("payload hash mismatch")
+		}
+	}
 	return nil
+}
+
+// readAWSBody bounds buffering even when AuthenticateAWSV4 is used without Gin.
+// It restores the body for the storage handler and propagates read failures.
+func readAWSBody(r *http.Request) ([]byte, error) {
+	if r.Body == nil {
+		return nil, nil
+	}
+	limit := maxRequestBytes()
+	if r.ContentLength > limit {
+		return nil, &http.MaxBytesError{Limit: limit}
+	}
+	original := r.Body
+	body, err := io.ReadAll(io.LimitReader(original, limit+1))
+	original.Close()
+	if err != nil {
+		return nil, fmt.Errorf("read request body: %w", err)
+	}
+	if int64(len(body)) > limit {
+		return nil, &http.MaxBytesError{Limit: limit}
+	}
+	r.Body = io.NopCloser(bytes.NewReader(body))
+	return body, nil
 }
 
 // buildCanonicalRequest builds the canonical request string
@@ -188,25 +225,16 @@ func buildCanonicalRequest(r *http.Request, signedHeaders string) (string, error
 	// Payload hash (for S3, this is usually the SHA256 of the request body)
 	payloadHash := r.Header.Get("X-Amz-Content-Sha256")
 	if payloadHash == "" {
-		// If no payload hash header, calculate from body
-		if r.ContentLength == 0 {
-			payloadHash = "UNSIGNED-PAYLOAD"
-		} else {
-			// Read body and calculate SHA256
-			// Use TeeReader to read body without consuming it
-			var bodyBytes []byte
-			if r.Body != nil {
-				bodyBytes, _ = io.ReadAll(r.Body)
-				r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
-			}
-
-			if len(bodyBytes) == 0 {
-				payloadHash = "UNSIGNED-PAYLOAD"
-			} else {
-				hasher := sha256.New()
-				hasher.Write(bodyBytes)
-				payloadHash = hex.EncodeToString(hasher.Sum(nil))
-			}
+		body, err := readAWSBody(r)
+		if err != nil {
+			return "", err
+		}
+		sum := sha256.Sum256(body)
+		payloadHash = hex.EncodeToString(sum[:])
+	} else if payloadHash != "UNSIGNED-PAYLOAD" {
+		decoded, err := hex.DecodeString(payloadHash)
+		if err != nil || len(decoded) != sha256.Size {
+			return "", fmt.Errorf("unsupported payload hash")
 		}
 	}
 
@@ -216,7 +244,6 @@ func buildCanonicalRequest(r *http.Request, signedHeaders string) (string, error
 		canonicalURI,
 		canonicalQueryString,
 		canonicalHeaders,
-		"",
 		signedHeadersList,
 		payloadHash,
 	}, "\n")
@@ -226,49 +253,21 @@ func buildCanonicalRequest(r *http.Request, signedHeaders string) (string, error
 
 // buildCanonicalQueryString builds the canonical query string
 func buildCanonicalQueryString(query url.Values) string {
-	if len(query) == 0 {
-		return ""
-	}
-
-	// Sort query parameters by name
-	keys := make([]string, 0, len(query))
-	for k := range query {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-
-	// Build canonical query string
-	parts := make([]string, 0, len(keys))
-	for _, k := range keys {
-		// URL encode key - AWS requires RFC 3986 encoding
-		encodedKey := url.QueryEscape(k)
-		encodedKey = strings.ReplaceAll(encodedKey, "+", "%20")
-		// Also encode ~ which QueryEscape doesn't encode but AWS requires
-		encodedKey = strings.ReplaceAll(encodedKey, "~", "%7E")
-
-		// Get values
-		values := query[k]
+	var parts []string
+	for key, values := range query {
 		if len(values) == 0 {
-			// No values - AWS requires "key=" format
-			parts = append(parts, encodedKey+"=")
-		} else {
-			// Sort values if multiple
-			sort.Strings(values)
-			for _, v := range values {
-				if v == "" {
-					// Empty value - still need "key=" format
-					parts = append(parts, encodedKey+"=")
-				} else {
-					encodedValue := url.QueryEscape(v)
-					encodedValue = strings.ReplaceAll(encodedValue, "+", "%20")
-					encodedValue = strings.ReplaceAll(encodedValue, "~", "%7E")
-					parts = append(parts, encodedKey+"="+encodedValue)
-				}
-			}
+			values = []string{""}
+		}
+		for _, value := range values {
+			parts = append(parts, awsEncode(key)+"="+awsEncode(value))
 		}
 	}
-
+	sort.Strings(parts)
 	return strings.Join(parts, "&")
+}
+
+func awsEncode(value string) string {
+	return strings.ReplaceAll(url.QueryEscape(value), "+", "%20")
 }
 
 // buildCanonicalHeaders builds the canonical headers string
@@ -293,20 +292,7 @@ func buildCanonicalHeaders(r *http.Request, signedHeaders string) string {
 			} else {
 				value = r.Header.Get("Host")
 			}
-			// AWS Signature V4: Host header must be lowercase
-			// For non-standard ports, port MUST be included
-			// Only remove standard ports: 80 for http, 443 for https
-			value = strings.ToLower(value)
-			// Check if it's http or https based on URL scheme or port
-			isHTTPS := r.URL.Scheme == "https" || strings.HasSuffix(value, ":443")
-			if strings.HasSuffix(value, ":80") && !isHTTPS {
-				// HTTP on standard port 80 - remove port
-				value = strings.TrimSuffix(value, ":80")
-			} else if strings.HasSuffix(value, ":443") && isHTTPS {
-				// HTTPS on standard port 443 - remove port
-				value = strings.TrimSuffix(value, ":443")
-			}
-			// For all other ports (including 9000), keep the port
+
 		} else {
 			value = r.Header.Get(name)
 			if value == "" {
@@ -425,67 +411,24 @@ func urlEncodePath(path string) string {
 	return result
 }
 
-// AuthenticateAWSV4 authenticates a request using AWS Signature V4
+// AuthenticateAWSV4 authenticates a request using AWS Signature V4.
 func AuthenticateAWSV4(r *http.Request) (*AWSCredential, error) {
-	// Parse Authorization header to get access key ID
-	authHeader := r.Header.Get("Authorization")
-	if !strings.HasPrefix(authHeader, "AWS4-HMAC-SHA256 ") {
-		return nil, fmt.Errorf("invalid authorization header")
-	}
-
-	// Extract access key ID from Credential
-	credentialStart := strings.Index(authHeader, "Credential=")
-	if credentialStart == -1 {
-		return nil, fmt.Errorf("missing Credential in authorization header")
-	}
-	credentialEnd := strings.Index(authHeader[credentialStart:], ",")
-	if credentialEnd == -1 {
-		return nil, fmt.Errorf("invalid Credential format")
-	}
-	credentialStr := authHeader[credentialStart+11 : credentialStart+credentialEnd]
-	credParts := strings.Split(credentialStr, "/")
-	if len(credParts) < 1 {
-		return nil, fmt.Errorf("invalid Credential format")
-	}
-	accessKeyID := credParts[0]
-
-	// Get credential from store
-	credential, err := credentialStore.GetCredential(accessKeyID)
+	auth, err := parseAWSAuthorization(r)
 	if err != nil {
-		return nil, fmt.Errorf("credential not found: %v", err)
+		return nil, err
 	}
-
-	// Create a copy of the request to avoid modifying the original
-	// This is important because we may need to read the body
-	reqCopy := r.Clone(r.Context())
-	if r.Body != nil {
-		// Read body once and create new readers for both original and copy
-		bodyBytes, _ := io.ReadAll(r.Body)
-		r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
-		reqCopy.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+	credentialStoreMu.RLock()
+	store := credentialStore
+	credentialStoreMu.RUnlock()
+	if store == nil {
+		return nil, fmt.Errorf("credential store unavailable")
 	}
-
-	// Verify signature using the copy
-	if err := VerifyAWSV4Signature(reqCopy, credential); err != nil {
-		return nil, fmt.Errorf("signature verification failed: %v", err)
+	credential, err := store.GetCredential(auth.accessKeyID)
+	if err != nil {
+		return nil, fmt.Errorf("credential not found")
 	}
-
-	// Check request time (prevent replay attacks)
-	amzDate := r.Header.Get("X-Amz-Date")
-	if amzDate != "" {
-		// Parse date (format: YYYYMMDDTHHMMSSZ)
-		if len(amzDate) >= 15 {
-			requestTime, err := time.Parse("20060102T150405Z", amzDate[:15])
-			if err == nil {
-				// Allow 15 minutes clock skew
-				now := time.Now().UTC()
-				diff := now.Sub(requestTime)
-				if diff < -15*time.Minute || diff > 15*time.Minute {
-					return nil, fmt.Errorf("request time out of range")
-				}
-			}
-		}
+	if err := VerifyAWSV4Signature(r, credential); err != nil {
+		return nil, err
 	}
-
 	return credential, nil
 }

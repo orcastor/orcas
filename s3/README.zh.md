@@ -113,8 +113,7 @@ curl -X POST "http://localhost:7983/my-bucket/large-file.zip?uploadId=abc123" \
 
 1. **JWT Token 认证**
    - 通过 `Authorization` header: `Bearer <token>`
-   - 或通过 query 参数: `?token=<token>`
-   - 或通过 form 参数: `token=<token>`
+   - 不再接受 query 或 form 参数中的令牌，详见[安全配置](../docs/security-hardening.md)。
 
 2. **AWS Signature V4 认证** (已实现)
    - 通过 `Authorization` header: `AWS4-HMAC-SHA256 Credential=...`
@@ -170,18 +169,20 @@ aws --endpoint-url=http://localhost:7983 s3 cp file.txt s3://my-bucket/file.txt
 
 ```bash
 # 设置环境变量
-export EGO_DEBUG=true
+export EGO_DEBUG=false
 export EGO_LOG_EXTRA_KEYS=uid
 # 注意：ORCAS_BASE 和 ORCAS_DATA 不再作为环境变量使用。
 # 路径可以通过 context 使用 Path2Ctx 或 Config2Ctx 进行配置。
-export ORCAS_SECRET=xxxxxxxx
+export ORCAS_SECRET="$(openssl rand -hex 32)"
+# First initialization only / 仅首次初始化需要
+export ORCAS_ADMIN_PASSWORD="$(openssl rand -hex 24)"
 
 # 使用egoctl运行
 cd s3
 egoctl run --runargs --config=config.toml
 
 # 或直接使用go run
-go run . --config=config.toml
+go run ./cmd --config=config.toml
 ```
 
 ## API 使用示例

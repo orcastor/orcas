@@ -601,6 +601,18 @@ func (dr *dataReader) Read(p []byte) (n int, err error) {
 }
 
 func (osi *OrcasSDKImpl) downloadFile(c core.Ctx, bktID int64, o *core.ObjectInfo, lpath string) (err error) {
+	if err := os.MkdirAll(filepath.Dir(lpath), 0o700); err != nil {
+		return err
+	}
+	root, err := os.OpenRoot(filepath.Dir(lpath))
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+	return osi.downloadFileInRoot(c, bktID, o, root, filepath.Base(lpath))
+}
+
+func (osi *OrcasSDKImpl) downloadFileInRoot(c core.Ctx, bktID int64, o *core.ObjectInfo, root *os.Root, lpath string) (err error) {
 	if o.Type != core.OBJ_TYPE_FILE {
 		return nil
 	}
@@ -616,7 +628,10 @@ func (osi *OrcasSDKImpl) downloadFile(c core.Ctx, bktID int64, o *core.ObjectInf
 		if listErr != nil || len(os) < 1 {
 			fmt.Println(runtime.Caller(0))
 			fmt.Println(listErr)
-			return listErr
+			if listErr != nil {
+				return listErr
+			}
+			return fmt.Errorf("remote file has no data version: %d", o.ID)
 		}
 		dataID = os[0].DataID
 	}
@@ -633,16 +648,9 @@ func (osi *OrcasSDKImpl) downloadFile(c core.Ctx, bktID int64, o *core.ObjectInf
 		}
 	}
 
-	os.MkdirAll(filepath.Dir(lpath), 0o766)
-
-	f, err := os.OpenFile(lpath, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0o666)
-	if err != nil {
-		return err
+	if d == nil {
+		return fmt.Errorf("missing remote data metadata: %d", dataID)
 	}
-	defer f.Close()
-	b := bufio.NewWriter(f)
-	defer b.Flush()
-
 	// Get encryption key from SDK config
 	// EndecKey is no longer stored in bucket config, should be provided via SDK config
 	endecKey := osi.cfg.EndecKey
@@ -651,6 +659,26 @@ func (osi *OrcasSDKImpl) downloadFile(c core.Ctx, bktID int64, o *core.ObjectInf
 	if d.Kind&core.DATA_ENDEC_MASK != 0 && endecKey == "" {
 		return fmt.Errorf("encryption key is required for encrypted data (DataID: %d, Kind: 0x%x) but not provided in SDK config or bucket config", dataID, d.Kind)
 	}
+
+	if err := root.MkdirAll(filepath.Dir(lpath), 0o700); err != nil {
+		return err
+	}
+
+	f, err := root.OpenFile(lpath, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0o600)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if closeErr := f.Close(); err == nil {
+			err = closeErr
+		}
+	}()
+	b := bufio.NewWriter(f)
+	defer func() {
+		if flushErr := b.Flush(); err == nil {
+			err = flushErr
+		}
+	}()
 
 	_, err = io.CopyN(b, NewDataReader(c, osi.h, bktID, d, endecKey), d.OrigSize)
 	if err != nil {

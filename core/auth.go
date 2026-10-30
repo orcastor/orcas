@@ -1,11 +1,6 @@
 package core
 
-import (
-	"context"
-	"time"
-
-	"github.com/orca-zhang/ecache2"
-)
+import "context"
 
 const (
 	NA  = 0
@@ -37,10 +32,6 @@ type AccessCtrlMgr interface {
 	CheckOwn(c Ctx, bktID int64) error
 }
 
-// cache for bucket ownership: key [2]int64{1, bktID}, value: ownerUID (int64)
-// cache for user role: key [2]int64{2, uid}, value: role (int64)
-var cache = ecache2.NewLRUCache[[2]int64](16, 256, 30*time.Second)
-
 type DefaultAccessCtrlMgr struct {
 	ma MetadataAdapter
 }
@@ -60,9 +51,6 @@ func (dacm *DefaultAccessCtrlMgr) CheckPermission(c Ctx, action int, bktID int64
 		return err
 	}
 	if hasPermission {
-		// Cache the permission check result
-		bk := [2]int64{1, bktID} // Type 1 = bucket access
-		cache.Put(bk, uid)
 		return nil
 	}
 	return ERR_NO_PERM
@@ -74,29 +62,13 @@ func (dacm *DefaultAccessCtrlMgr) CheckRole(c Ctx, role uint32) error {
 		return ERR_NEED_LOGIN
 	}
 
-	// First check if role is already in context (for benchmark/testing)
-	if v, ok := c.Value("o").(map[string]interface{}); ok {
-		if ctxRole, okk := v["role"].(uint32); okk {
-			if ctxRole == role {
-				return nil
-			}
-		}
-	}
-
-	rk := [2]int64{2, uid} // Type 2 = user role
-	if v, ok := cache.Get(rk); ok {
-		if r, ok := v.(int64); ok && uint32(r) == role {
-			return nil
-		} else {
-			return ERR_NO_ROLE
-		}
-	}
+	// Resolve current roles from this adapter's database. Context claims and
+	// process-wide caches can outlive demotion/deletion or belong to another DB.
 	u, err := dacm.ma.GetUsr(c, []int64{uid})
 	if err != nil {
 		return err
 	}
 	if len(u) > 0 {
-		cache.Put(rk, int64(u[0].Role))
 		if u[0].Role == role {
 			return nil
 		}
@@ -117,15 +89,15 @@ func (dacm *DefaultAccessCtrlMgr) CheckOwn(c Ctx, bktID int64) error {
 		return err
 	}
 	if hasPermission {
-		// Cache the permission check result
-		bk := [2]int64{1, bktID} // Type 1 = bucket access
-		cache.Put(bk, uid)
 		return nil
 	}
 	return ERR_NO_PERM
 }
 
 func UserInfo2Ctx(c Ctx, u *UserInfo) Ctx {
+	if u == nil {
+		return c
+	}
 	o := map[string]interface{}{
 		"uid": u.ID,
 	}

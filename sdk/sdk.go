@@ -12,6 +12,7 @@ import (
 	"sync"
 
 	"github.com/orcastor/orcas/core"
+	"golang.org/x/sync/errgroup"
 )
 
 // Re-export constants and types from core package for backward compatibility
@@ -324,60 +325,79 @@ func (osi *OrcasSDKImpl) Upload(c core.Ctx, bktID, pid int64, lpath string) erro
 	return nil
 }
 
-func (osi *OrcasSDKImpl) Download(c core.Ctx, bktID, id int64, lpath string) error {
-	o, err := osi.h.Get(c, bktID, []int64{id})
+func (osi *OrcasSDKImpl) Download(c core.Ctx, bktID, id int64, lpath string) (err error) {
+	objects, err := osi.h.Get(c, bktID, []int64{id})
 	if err != nil {
-		return fmt.Errorf("open remote object error(id:%d): %+v", id, err)
+		return fmt.Errorf("open remote object error(id:%d): %w", id, err)
 	}
-	if len(o) <= 0 {
+	if len(objects) == 0 {
 		return fmt.Errorf("remote object does not exist, id:%d", id)
 	}
-
-	if o[0].Type == core.OBJ_TYPE_FILE {
-		return osi.downloadFile(c, bktID, o[0], lpath)
-	} else if o[0].Type != core.OBJ_TYPE_DIR {
-		return fmt.Errorf("remote object type error, id:%d type:%d", id, o[0].Type)
+	object := objects[0]
+	if object.Type == core.OBJ_TYPE_FILE {
+		return osi.downloadFile(c, bktID, object, lpath)
 	}
+	if object.Type != core.OBJ_TYPE_DIR {
+		return fmt.Errorf("remote object type error, id:%d type:%d", id, object.Type)
+	}
+	if err := validateDownloadName(object.Name); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(lpath, 0o700); err != nil {
+		return err
+	}
+	root, err := os.OpenRoot(lpath)
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+	var downloads errgroup.Group
+	downloads.SetLimit(16)
+	defer func() {
+		if downloadErr := downloads.Wait(); err == nil {
+			err = downloadErr
+		}
+	}()
 
-	// Traverse remote directory
-	q := []elem{{id: id, path: filepath.Join(lpath, o[0].Name)}}
+	q := []elem{{id: id, path: object.Name}}
 	var delim string
 	for len(q) > 0 {
-		os.MkdirAll(q[0].path, 0o766)
-		o, _, d, err := osi.h.List(c, bktID, q[0].id, core.ListOptions{
-			Delim: delim,
-			Count: 1000,
-			Order: "type",
-		})
-		if err != nil {
-			fmt.Println(runtime.Caller(0))
-			fmt.Println(err)
+		if err := root.MkdirAll(q[0].path, 0o700); err != nil {
 			return err
 		}
-
-		for _, x := range o {
-			if osi.skip(x.Name) {
+		children, _, next, err := osi.h.List(c, bktID, q[0].id, core.ListOptions{Delim: delim, Count: 1000, Order: "type"})
+		if err != nil {
+			return err
+		}
+		for _, child := range children {
+			if err := validateDownloadName(child.Name); err != nil {
+				return err
+			}
+			if osi.skip(child.Name) {
 				continue
 			}
-			path := filepath.Join(q[0].path, x.Name)
-			switch x.Type {
+			path := filepath.Join(q[0].path, child.Name)
+			switch child.Type {
 			case core.OBJ_TYPE_DIR:
-				q = append(q, elem{id: x.ID, path: path})
+				q = append(q, elem{id: child.ID, path: path})
 			case core.OBJ_TYPE_FILE:
-				f := x
-				osi.f.MustDo(c, func(c core.Ctx) {
-					osi.downloadFile(c, bktID, f, path)
-				})
+				downloads.Go(func() error { return osi.downloadFileInRoot(c, bktID, child, root, path) })
 			}
 		}
-
-		if len(o) <= 0 {
+		if len(children) == 0 {
 			q = q[1:]
 			delim = ""
 		} else {
-			delim = d
+			delim = next
 		}
 	}
-	osi.f.Wait()
+	return nil
+}
+
+// Remote object names are single filesystem components, never local paths.
+func validateDownloadName(name string) error {
+	if name == "." || !filepath.IsLocal(name) || strings.ContainsAny(name, "/\\:\x00") {
+		return fmt.Errorf("unsafe remote object name: %q", name)
+	}
 	return nil
 }

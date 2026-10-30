@@ -128,6 +128,22 @@ func (dp *DBPool) getDatabasePool(dirPath string) (*DatabasePool, error) {
 	}
 	dbPool.writePool = writeDB
 
+	// Existing buckets are not necessarily passed through InitBucketDB again.
+	// Upgrade their query indexes once, before publishing this pool.
+	var hasObjects bool
+	if err := writeDB.QueryRow(`SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='obj')`).Scan(&hasObjects); err != nil {
+		readDB.Close()
+		writeDB.Close()
+		return nil, err
+	}
+	if hasObjects {
+		if err := ensureObjectIndexes(writeDB); err != nil {
+			readDB.Close()
+			writeDB.Close()
+			return nil, err
+		}
+	}
+
 	// Store pool
 	dp.pools.Store(poolKey, dbPool)
 
@@ -143,8 +159,9 @@ func (dp *DBPool) createConnection(dbPath string, readOnly bool) (*sql.DB, error
 	// 3. WAL mode provides excellent read concurrency without blocking writes
 	param := "?_journal=WAL&cache=shared&mode=rwc&_busy_timeout=10000&_txlock=immediate"
 
-	// Ensure directory exists
-	os.MkdirAll(filepath.Dir(dbPath), 0o766)
+	if err := prepareDatabaseFile(dbPath); err != nil {
+		return nil, err
+	}
 
 	db, err := sql.Open("sqlite3", dbPath+param)
 	if err != nil {
@@ -167,6 +184,19 @@ func (dp *DBPool) createConnection(dbPath string, readOnly bool) (*sql.DB, error
 	}
 
 	return db, nil
+}
+
+// Create new databases privately; SQLite derives journal permissions from the
+// database file. Existing files retain their explicitly configured permissions.
+func prepareDatabaseFile(dbPath string) error {
+	if err := os.MkdirAll(filepath.Dir(dbPath), 0o700); err != nil {
+		return err
+	}
+	f, err := os.OpenFile(dbPath, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return err
+	}
+	return f.Close()
 }
 
 // GetDB gets a database connection from the pool

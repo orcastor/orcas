@@ -18,6 +18,9 @@ jobs:
     permissions:
       contents: write
     steps:
+      - name: Checkout release notes
+        uses: actions/checkout@v4
+
       - name: Download CLI archives
         uses: actions/download-artifact@v4
         with:
@@ -36,4 +39,4 @@ jobs:
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
           gh release create "$RELEASE_TAG" --verify-tag --title "$RELEASE_TAG" \
-            --generate-notes dist/*.tar.gz dist/SHA256SUMS
+            --notes-file "docs/releases/$RELEASE_TAG.md" dist/*.tar.gz dist/SHA256SUMS

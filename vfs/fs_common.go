@@ -831,7 +831,8 @@ func listAllObjects(ctx core.Ctx, h core.Handler, bktID, pid int64, opt core.Lis
 	}
 
 	pageOpt := opt
-	pageOpt.Delim = "" // Start from first page
+	pageOpt.SkipCount = true // Totals are unused while draining pages.
+	pageOpt.Delim = ""       // Start from first page
 
 	var all []*core.ObjectInfo
 

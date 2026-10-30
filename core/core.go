@@ -1,25 +1,20 @@
 package core
 
 import (
-	"crypto/rand"
-	"crypto/sha1"
-	"encoding/base64"
-	"encoding/binary"
 	"fmt"
 	"io"
 	"os"
 	"strconv"
-	"strings"
 	"sync"
 
 	"github.com/orca-zhang/idgen"
-	"golang.org/x/crypto/pbkdf2"
 )
 
 // Global ID generator instance
 var (
 	globalIDGen     *idgen.IDGen
 	globalIDGenOnce sync.Once
+	globalIDGenMu   sync.Mutex
 )
 
 // InitIDGen initializes the global ID generator
@@ -46,6 +41,10 @@ func getIDGen() *idgen.IDGen {
 
 // NewID generates a new ID using the global ID generator
 func NewID() int64 {
+	// idgen publishes its first counter before returning it. Serialize calls so
+	// another caller cannot modify that counter while the first call reads it.
+	globalIDGenMu.Lock()
+	defer globalIDGenMu.Unlock()
 	id, _ := getIDGen().New()
 	return id
 }
@@ -57,6 +56,9 @@ type ListOptions struct {
 	Count int    `json:"c,omitempty"` // 查询个数
 	Order string `json:"o,omitempty"` // 排序方式，id/mtime/name/size/type 前缀 +: 升序（默认） -: 降序
 	Brief int    `json:"e,omitempty"` // 显示更少内容(只在网络传输层，节省流量时有效)，0: FULL(default), 1: without EXT, 2:only ID
+
+	SkipCount bool `json:"-"` // Internal pagination: total is unused; adapters may omit COUNT.
+
 	// 可以考虑改用FieldMask实现 https://mp.weixin.qq.com/s/L7He7M4JWi84z1emuokjbQ
 }
 
@@ -365,19 +367,23 @@ func (lh *LocalHandler) Login(c Ctx, usr, pwd string) (Ctx, *UserInfo, []*Bucket
 		return c, nil, nil, ERR_INCORRECT_PWD
 	}
 
-	// pbkdf2 check
-	vs := strings.Split(u.Pwd, ":")
-	if len(vs) < 3 {
-		return c, nil, nil, ERR_AUTH_FAILED
-	}
-
-	// iter/salt/hash
-	iter, _ := strconv.Atoi(vs[0])
-	salt, _ := base64.URLEncoding.DecodeString(vs[1])
-	dk := pbkdf2.Key([]byte(pwd), salt, iter, 16, sha1.New)
-	d := base64.URLEncoding.EncodeToString(dk)
-	if d != vs[2] {
+	valid, legacy := verifyPassword(pwd, u.Pwd)
+	if !valid {
 		return c, nil, nil, ERR_INCORRECT_PWD
+	}
+	if legacy {
+		upgraded, err := HashPassword(pwd)
+		if err != nil {
+			return c, nil, nil, err
+		}
+		// A concurrent password reset must not be overwritten by migration.
+		if upgrader, ok := lh.ma.(interface {
+			UpgradePassword(Ctx, int64, string, string) error
+		}); ok {
+			if err := upgrader.UpgradePassword(c, u.ID, u.Pwd, upgraded); err != nil {
+				return c, nil, nil, err
+			}
+		}
 	}
 
 	// list buckets
@@ -404,29 +410,6 @@ func (lh *LocalHandler) Login(c Ctx, usr, pwd string) (Ctx, *UserInfo, []*Bucket
 	// For now, paths are stored in Handler and accessed directly when needed
 
 	return c, u, b, nil
-}
-
-// HashPassword encrypts password using PBKDF2
-// Returns format: iter:salt:hash
-// iter is randomly generated iteration count (between 1000-10000), increases password hash diversity
-func HashPassword(password string) (string, error) {
-	// Generate random iteration count (between 1000-10000)
-	iterBytes := make([]byte, 2)
-	if _, err := rand.Read(iterBytes); err != nil {
-		return "", err
-	}
-	// Convert 2 bytes to uint16, then map to 1000-10000 range
-	iterRand := binary.BigEndian.Uint16(iterBytes)
-	iter := 1000 + int(iterRand)%9001 // 1000 + (0-9000) = 1000-10000
-
-	salt := make([]byte, 16)
-	if _, err := rand.Read(salt); err != nil {
-		return "", err
-	}
-	dk := pbkdf2.Key([]byte(password), salt, iter, 16, sha1.New)
-	saltStr := base64.URLEncoding.EncodeToString(salt)
-	hashStr := base64.URLEncoding.EncodeToString(dk)
-	return fmt.Sprintf("%d:%s:%s", iter, saltStr, hashStr), nil
 }
 
 // Ref performs pre-ref: only file length and HdrXXH3 are pre-ref, returns new DataID on success, 0 on failure
@@ -809,6 +792,14 @@ func (lh *LocalHandler) List(c Ctx, bktID, pid int64, opt ListOptions) ([]*Objec
 	if err := lh.acm.CheckPermission(c, MDR, bktID); err != nil {
 		return nil, 0, "", err
 	}
+	if opt.SkipCount {
+		if pager, ok := lh.ma.(interface {
+			ListObjPage(Ctx, int64, int64, string, string, string, int) ([]*ObjectInfo, int64, string, error)
+		}); ok {
+			return pager.ListObjPage(c, bktID, pid, opt.Word, opt.Delim, opt.Order, opt.Count)
+		}
+	}
+
 	return lh.ma.ListObj(c, bktID, pid, opt.Word, opt.Delim, opt.Order, opt.Count)
 }
 

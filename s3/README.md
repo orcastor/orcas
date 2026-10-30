@@ -113,8 +113,7 @@ Two authentication methods are supported:
 
 1. **JWT Token Authentication**
    - Via `Authorization` header: `Bearer <token>`
-   - Or via query parameter: `?token=<token>`
-   - Or via form parameter: `token=<token>`
+   - Query and form tokens are rejected. See [security configuration](../docs/security-hardening.md).
 
 2. **AWS Signature V4 Authentication** (Implemented)
    - Via `Authorization` header: `AWS4-HMAC-SHA256 Credential=...`
@@ -170,9 +169,11 @@ Configuration file `config.toml`:
 
 ```bash
 # Set environment variables
-export EGO_DEBUG=true
+export EGO_DEBUG=false
 export EGO_LOG_EXTRA_KEYS=uid
-export ORCAS_SECRET=xxxxxxxx
+export ORCAS_SECRET="$(openssl rand -hex 32)"
+# First initialization only / 仅首次初始化需要
+export ORCAS_ADMIN_PASSWORD="$(openssl rand -hex 24)"
 # Note: ORCAS_BASE and ORCAS_DATA are no longer used as environment variables.
 # Paths can be configured via context using Path2Ctx or Config2Ctx.
 
@@ -181,7 +182,7 @@ cd s3
 egoctl run --runargs --config=config.toml
 
 # Or run directly with go run
-go run . --config=config.toml
+go run ./cmd --config=config.toml
 ```
 
 ## API Usage Examples

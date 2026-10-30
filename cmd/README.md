@@ -27,7 +27,7 @@ go build -o orcas-cli cmd/main.go
 
 ```bash
 # Using command line parameters
-orcas-cli -action upload -local /path/to/local/file -remote /remote/path -user orcas -pass orcas
+orcas-cli -action upload -local /path/to/local/file -remote /remote/path -user orcas
 
 # Using configuration file
 orcas-cli -action upload -local /path/to/local/file -remote /remote/path -config config.json
@@ -37,7 +37,7 @@ orcas-cli -action upload -local /path/to/local/file -remote /remote/path -config
 
 ```bash
 # Using command line parameters
-orcas-cli -action download -local /path/to/save -remote /remote/path -user orcas -pass orcas
+orcas-cli -action download -local /path/to/save -remote /remote/path -user orcas
 
 # Using configuration file
 orcas-cli -action download -local /path/to/save -remote /remote/path -config config.json
@@ -157,7 +157,7 @@ orcas-cli -action upload -local /path/to/directory -remote /my/directory -config
 ### Example 2: Download File (Using Command Line Parameters)
 
 ```bash
-orcas-cli -action download -local ./downloads -remote /my/file.txt -user orcas -pass orcas -reflevel FULL
+orcas-cli -action download -local ./downloads -remote /my/file.txt -user orcas -reflevel FULL
 ```
 
 ### Example 3: Upload with Encryption Enabled
@@ -167,7 +167,7 @@ orcas-cli -action upload \
   -local /path/to/file \
   -remote /encrypted/file \
   -user orcas \
-  -pass orcas \
+  \
   -endecway AES256 \
   -endeckey "my-very-long-encryption-key-here"
 ```
@@ -317,16 +317,16 @@ Bucket management functions require administrator privileges. After logging in w
 
 ```bash
 # Create bucket with unlimited quota
-orcas-cli -action create-bucket -user orcas -pass orcas -bucketname mybucket
+orcas-cli -action create-bucket -user orcas -bucketname mybucket
 
 # Create bucket with specified quota (10GB)
-orcas-cli -action create-bucket -user orcas -pass orcas -bucketname mybucket -quota 10737418240
+orcas-cli -action create-bucket -user orcas -bucketname mybucket -quota 10737418240
 
 # Create bucket and specify owner (by username)
-orcas-cli -action create-bucket -user orcas -pass orcas -bucketname mybucket -owner testuser
+orcas-cli -action create-bucket -user orcas -bucketname mybucket -owner testuser
 
 # Create bucket and specify owner (by user ID)
-orcas-cli -action create-bucket -user orcas -pass orcas -bucketname mybucket -owner 123456
+orcas-cli -action create-bucket -user orcas -bucketname mybucket -owner 123456
 
 # Using configuration file
 orcas-cli -action create-bucket -config config.json -bucketname mybucket
@@ -342,7 +342,7 @@ orcas-cli -action create-bucket -config config.json -bucketname mybucket
 ### Delete Bucket (delete-bucket)
 
 ```bash
-orcas-cli -action delete-bucket -user orcas -pass orcas -bucket 123456
+orcas-cli -action delete-bucket -user orcas -bucket 123456
 ```
 
 **Parameters:**
@@ -353,7 +353,7 @@ orcas-cli -action delete-bucket -user orcas -pass orcas -bucket 123456
 ### List All Buckets (list-buckets)
 
 ```bash
-orcas-cli -action list-buckets -user orcas -pass orcas
+orcas-cli -action list-buckets -user orcas
 ```
 
 **Parameters:**
@@ -402,5 +402,5 @@ orcas-cli -action create-bucket -config config.json -bucketname mybucket
 6. **User management functions require administrator privileges** - only users with `ADMIN` role can perform user management operations
 7. When creating users, passwords are encrypted using PBKDF2 algorithm before storage
 8. Usernames must be unique - attempting to create a user with an existing username will return an error
-9. **A default administrator account is automatically created on first system initialization** (username: `orcas`, password: `orcas`) - please change the password as soon as possible
+9. **First initialization requires `ORCAS_ADMIN_PASSWORD`** to create the `orcas` administrator. Existing accounts are not reset; see [security configuration](../docs/security-hardening.md).
 

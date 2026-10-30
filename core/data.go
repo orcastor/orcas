@@ -46,9 +46,11 @@ func toFilePath(path string, bcktID, dataID int64, sn int) string {
 func (dda *DefaultDataAdapter) Write(c Ctx, bktID, dataID int64, sn int, buf []byte) error {
 	path := toFilePath(dda.dataPath, bktID, dataID, sn)
 	// No need to check if it exists or if creation succeeds; if it fails, an error will be reported before writing the file below
-	os.MkdirAll(filepath.Dir(path), 0o766)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
 
-	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o666)
+	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		return ERR_OPEN_FILE
 	}

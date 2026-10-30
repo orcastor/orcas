@@ -99,7 +99,7 @@ var (
 	StatfsCacheTTL       = 30 * time.Second // Cache TTL for statfs results (df -h doesn't need real-time data)
 	ChunkCacheTTL        = 10 * time.Second // Cache TTL for chunks
 	ChunkCacheSize       = 8                // Number of chunks to cache per reader (reduced from hardcoded 64 to save memory)
-	GlobalChunkCacheSize = 16               // Total number of chunks to cache globally (approx 160MB at 10MB/chunk)
+	GlobalChunkCacheSize = 16               // Global entry limit, additionally bounded by bytes
 	// Reduced from 32 to 16 to lower memory footprint during concurrent uploads
 )
 
@@ -331,19 +331,17 @@ var (
 	// key: fileID (int64), value: *core.ObjectInfo (fileID is globally unique)
 	fileObjCache = ecache2.NewLRUCache[int64](uint16(CacheShardCount), uint16(FileCacheSize), CacheTTL)
 
-	// ecache cache: cache directory listing to reduce database queries
+	// Byte-budgeted immutable directory snapshots.
 	// key: dirID (int64), value: []*core.ObjectInfo (dirID is globally unique)
-	dirListCache = ecache2.NewLRUCache[int64](uint16(CacheShardCount), uint16(DirCacheSize), CacheTTL)
+	dirListCache = &directoryCache{cache: newBudgetCache[int64, *directorySnapshot](
+		cacheBudgetFromEnv("ORCAS_DIR_CACHE_BYTES", 64<<20), CacheShardCount*DirCacheSize, CacheTTL,
+		func(snapshot *directorySnapshot) int64 { return snapshot.bytes },
+	)}
 
 	// ecache cache: cache Readdir entries (DirStream) to avoid rebuilding entries every time
 	// key: dirID (int64), value: *cachedDirStream (dirID is globally unique)
 	// This cache stores the final DirStream entries, avoiding data merging on every Readdir call
 	readdirCache = ecache2.NewLRUCache[int64](uint16(CacheShardCount), uint16(DirCacheSize), CacheTTL)
-
-	// Per-directory mutexes for thread-safe directory listing cache operations
-	// key: dirID (int64), value: *sync.RWMutex
-	// Used to synchronize cache reads and writes for directory listings
-	dirListCacheMu sync.Map
 
 	// Map to track directories that need delayed cache refresh
 	// key: "<dirID>", value: true (if true, cache needs refresh on next access)
@@ -360,15 +358,18 @@ var (
 	// TTL is short (5 seconds) but will be refreshed on access (LRU behavior)
 	statfsCache = ecache2.NewLRUCache[int64](uint16(CacheShardCount/4), uint16(StatfsCacheSize), StatfsCacheTTL)
 
-	// ecache cache: global cache for chunks (plain or decompressed/decrypted)
+	// Byte-budgeted global cache for chunks (plain or decompressed/decrypted).
 	// key: [2]int64{dataID, sn}, value: []byte
 	// Global limit controls total memory usage for cached chunks
-	globalChunkCache = ecache2.NewLRUCache[[2]int64](uint16(CacheShardCount), uint16(GlobalChunkCacheSize), ChunkCacheTTL)
+	globalChunkCache = newBudgetCache[[2]int64, []byte](
+		cacheBudgetFromEnv("ORCAS_CHUNK_CACHE_BYTES", 160<<20), GlobalChunkCacheSize, ChunkCacheTTL,
+		func(data []byte) int64 { return int64(cap(data)) },
+	)
 
 	// singleflight group: prevent duplicate concurrent operations globally.
 	//
 	// Key prefixes MUST remain unique per operation type to avoid cross-talk:
-	// - dir list: "<dirID>"
+	// - dir list: "dir_<dirID>"
 	// - chunk read: "chunk_<dataID>_<sn>"
 	// - chunk flush: "flush_<dataID>_<sn>"
 	// - package decode: "decode_pkg_<dataID>"
@@ -384,10 +385,6 @@ var (
 )
 
 var (
-	// ORCAS_CACHE_EVICT_TO_POOL=0 disables returning evicted cached []byte to tier pools.
-	// Default is ON.
-	cacheEvictToPool atomic.Bool
-
 	// Memory pressure monitoring
 	memoryPressureThreshold uint64       = 512 << 20 // 512MB - trigger cleanup when heap exceeds this
 	lastMemoryCheck         atomic.Int64             // Unix timestamp of last memory check
@@ -395,26 +392,16 @@ var (
 )
 
 func init() {
-	// Default ON; allow emergency disable.
-	cacheEvictToPool.Store(true)
-	if os.Getenv("ORCAS_CACHE_EVICT_TO_POOL") == "0" {
-		cacheEvictToPool.Store(false)
-	}
-
-	// Attach low-overhead probes to memory-heavy caches.
-	// NOTE: ecache2 signals eviction by calling inspector with action=PUT, status=-1,
-	// passing the evicted item's key/value.
-	globalChunkCache.Inspect(func(action int, _ [2]int64, iface *interface{}, _ []byte, status int) {
-		if !cacheEvictToPool.Load() {
-			return
+	// Idle expiry releases cache ownership, but never recycles bytes that an
+	// active reader may still hold after eviction.
+	go func() {
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
+		for range ticker.C {
+			globalChunkCache.purgeExpired()
+			dirListCache.cache.purgeExpired()
 		}
-		if action != ecache2.PUT || status != -1 || iface == nil || *iface == nil {
-			return
-		}
-		if b, ok := (*iface).([]byte); ok && len(b) > 0 {
-			putBufferToTier(b)
-		}
-	})
+	}()
 }
 
 // checkMemoryPressure checks if memory usage is high and triggers cleanup if needed
@@ -8214,8 +8201,8 @@ func (cr *chunkReader) getChunk(sn int) ([]byte, error) {
 	// Check cache first (fast path)
 	cacheKey := [2]int64{cr.dataID, int64(sn)}
 	if cached, ok := globalChunkCache.Get(cacheKey); ok {
-		if chunkData, ok := cached.([]byte); ok && len(chunkData) > 0 {
-			return chunkData, nil
+		if len(cached) > 0 {
+			return cached, nil
 		}
 	}
 
@@ -8227,8 +8214,8 @@ func (cr *chunkReader) getChunk(sn int) ([]byte, error) {
 		// Double-check cache after acquiring singleflight lock
 		// Another goroutine might have already loaded it
 		if cached, ok := globalChunkCache.Get(cacheKey); ok {
-			if chunkData, ok := cached.([]byte); ok && len(chunkData) > 0 {
-				return chunkData, nil
+			if len(cached) > 0 {
+				return cached, nil
 			}
 		}
 

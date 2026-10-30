@@ -2100,6 +2100,8 @@ func max(a, b int) int {
 // Helper functions
 
 func setupTestFS(t *testing.T, testDir string) (*OrcasFS, int64) {
+	const testPassword = "journal-test-password"
+	t.Setenv("ORCAS_ADMIN_PASSWORD", testPassword)
 	// Create test directory
 	if err := os.MkdirAll(testDir, 0o755); err != nil {
 		t.Fatalf("Failed to create test directory: %v", err)
@@ -2123,9 +2125,11 @@ func setupTestFS(t *testing.T, testDir string) (*OrcasFS, int64) {
 	// Create test bucket using LocalAdmin
 	ctx := context.Background()
 
-	// Set ADMIN role in context for PutBkt (no login needed for LocalAdmin)
-	uid := core.NewID()
-	ctx = core.UserInfo2Ctx(ctx, &core.UserInfo{ID: uid, Role: core.ADMIN})
+	// Authenticate the administrator actually stored in this fixture's DB.
+	ctx, _, _, err := lh.Login(ctx, "orcas", testPassword)
+	if err != nil {
+		t.Fatalf("Failed to authenticate test administrator: %v", err)
+	}
 
 	bktID := core.NewID()
 
@@ -6410,18 +6414,19 @@ func TestLogBasedReadWritePatternWithNode(t *testing.T) {
 // where a second flush fails to decrypt chunk 1 when reading base data
 //
 // Usage:
-//   # Run test without debug logs
-//   go test -v -run TestJournalDecryptionErrorOnSecondFlush ./vfs
 //
-//   # Run test with debug logs (recommended for debugging)
-//   ORCAS_DEBUG=1 go test -v -run TestJournalDecryptionErrorOnSecondFlush ./vfs
+//	# Run test without debug logs
+//	go test -v -run TestJournalDecryptionErrorOnSecondFlush ./vfs
 //
-//   # The ORCAS_DEBUG environment variable enables detailed VFS debug logging:
-//   # - Journal operations (write, flush, read)
-//   # - RandomAccessor operations
-//   # - Chunk read/write operations
-//   # - Encryption/decryption operations
-//   # - File object updates
+//	# Run test with debug logs (recommended for debugging)
+//	ORCAS_DEBUG=1 go test -v -run TestJournalDecryptionErrorOnSecondFlush ./vfs
+//
+//	# The ORCAS_DEBUG environment variable enables detailed VFS debug logging:
+//	# - Journal operations (write, flush, read)
+//	# - RandomAccessor operations
+//	# - Chunk read/write operations
+//	# - Encryption/decryption operations
+//	# - File object updates
 func TestJournalDecryptionErrorOnSecondFlush(t *testing.T) {
 	// Enable debug logging for this test if ORCAS_DEBUG is set
 	if os.Getenv("ORCAS_DEBUG") != "" && os.Getenv("ORCAS_DEBUG") != "0" {
@@ -6454,7 +6459,7 @@ func TestJournalDecryptionErrorOnSecondFlush(t *testing.T) {
 	// Step 1: Create initial file with size 11575808 bytes (matching logs)
 	// This file has 2 chunks: chunk 0 (10485760 bytes) and chunk 1 (1090048 bytes)
 	fileSize := int64(11575808)
-	chunk0Size := int64(10485760)  // 10MB
+	chunk0Size := int64(10485760)       // 10MB
 	chunk1Size := fileSize - chunk0Size // 1090048 bytes
 
 	// Write initial data to create the base file
@@ -6532,12 +6537,12 @@ func TestJournalDecryptionErrorOnSecondFlush(t *testing.T) {
 	if err == nil && len(fileObj) > 0 {
 		t.Logf("  File state: fileID=%d, dataID=%d, size=%d", fileID, fileObj[0].DataID, fileObj[0].Size)
 	}
-	
+
 	_, err = ra.Flush()
 	if err != nil {
 		t.Fatalf("Failed to flush after first write: %v", err)
 	}
-	
+
 	t.Logf("[DEBUG] After first flush:")
 	fileObj, err = fs.h.Get(fs.c, bktID, []int64{fileID})
 	if err == nil && len(fileObj) > 0 {
@@ -6565,12 +6570,12 @@ func TestJournalDecryptionErrorOnSecondFlush(t *testing.T) {
 		t.Logf("  Base dataID (from first flush): %d", baseDataID)
 		t.Logf("  This dataID will be used by generateChunkData to read base data")
 	}
-	
+
 	_, err = ra.Flush()
 	if err != nil {
 		t.Fatalf("Failed to flush after second write: %v", err)
 	}
-	
+
 	t.Logf("[DEBUG] After second flush:")
 	fileObj, err = fs.h.Get(fs.c, bktID, []int64{fileID})
 	if err == nil && len(fileObj) > 0 {
@@ -6581,39 +6586,39 @@ func TestJournalDecryptionErrorOnSecondFlush(t *testing.T) {
 
 	// Step 7: Verify data integrity by reading back
 	t.Logf("\n[DEBUG] Starting verification reads after second flush...")
-	
+
 	// Get current file state for debugging
 	fileObj, err = fs.h.Get(fs.c, bktID, []int64{fileID})
 	if err == nil && len(fileObj) > 0 {
 		t.Logf("  Current file state: fileID=%d, dataID=%d, size=%d", fileID, fileObj[0].DataID, fileObj[0].Size)
-		
+
 		// Get DataInfo for debugging
 		lh, ok := fs.h.(*core.LocalHandler)
 		if ok {
 			dataInfo, err := lh.GetDataInfo(fs.c, bktID, fileObj[0].DataID)
 			if err == nil {
-				t.Logf("  DataInfo: dataID=%d, OrigSize=%d, Size=%d, Kind=0x%x", 
+				t.Logf("  DataInfo: dataID=%d, OrigSize=%d, Size=%d, Kind=0x%x",
 					dataInfo.ID, dataInfo.OrigSize, dataInfo.Size, dataInfo.Kind)
-				t.Logf("    Encryption: %v, Compression: %v", 
+				t.Logf("    Encryption: %v, Compression: %v",
 					dataInfo.Kind&core.DATA_ENDEC_AES256 != 0,
 					dataInfo.Kind&core.DATA_CMPR_ZSTD != 0)
 				if dataInfo.Size == 0 && dataInfo.OrigSize > 0 {
 					t.Logf("    ⚠️  WARNING: DataInfo.Size=0 but OrigSize=%d - this may indicate a problem!", dataInfo.OrigSize)
 					t.Logf("    This could explain why chunk 1 cannot be read properly")
 				}
-				
+
 				// Check chunk count
 				chunkCount := int((dataInfo.OrigSize + fs.chunkSize - 1) / fs.chunkSize)
-				t.Logf("    Expected chunks: %d (file size %d / chunk size %d)", 
+				t.Logf("    Expected chunks: %d (file size %d / chunk size %d)",
 					chunkCount, dataInfo.OrigSize, fs.chunkSize)
-				t.Logf("    Chunk 0: 0-%d, Chunk 1: %d-%d", 
+				t.Logf("    Chunk 0: 0-%d, Chunk 1: %d-%d",
 					fs.chunkSize-1, fs.chunkSize, dataInfo.OrigSize-1)
 			} else {
 				t.Logf("  WARNING: Failed to get DataInfo: %v", err)
 			}
 		}
 	}
-	
+
 	// Read chunk 0 (should still be intact)
 	t.Logf("\n[DEBUG] Reading chunk 0 (offset=0, size=131072)...")
 	readBuf, err = ra.Read(0, 131072)
@@ -6634,17 +6639,17 @@ func TestJournalDecryptionErrorOnSecondFlush(t *testing.T) {
 	t.Logf("\n[DEBUG] Reading chunk 1 (offset=11513856, size=%d)...", int(fileSize-11513856))
 	t.Logf("  This is the critical read that fails in the logs")
 	t.Logf("  Offset 11513856 is in chunk 1 (chunk 0 ends at 10485760)")
-	
+
 	readSize = int(fileSize - 11513856)
 	if readSize > 65536 {
 		readSize = 65536
 	}
-	
+
 	// Get file state before read
 	fileObj, err = fs.h.Get(fs.c, bktID, []int64{fileID})
 	if err == nil && len(fileObj) > 0 {
 		t.Logf("  File state before read: dataID=%d, size=%d", fileObj[0].DataID, fileObj[0].Size)
-		
+
 		// Check if there's a journal (access through GetOrCreate with same parameters)
 		// Note: GetOrCreate will return existing journal if it exists
 		journal := fs.journalMgr.GetOrCreate(fileID, fileObj[0].DataID, fileObj[0].Size)
@@ -6653,14 +6658,14 @@ func TestJournalDecryptionErrorOnSecondFlush(t *testing.T) {
 				journal.dataID, journal.baseSize, len(journal.entries), atomic.LoadInt32(&journal.isDirty) != 0)
 			t.Logf("    Journal baseDataID matches current file dataID: %v", journal.dataID == fileObj[0].DataID)
 			if journal.dataID != fileObj[0].DataID {
-				t.Logf("    ⚠️  WARNING: Journal baseDataID (%d) != current file dataID (%d)", 
+				t.Logf("    ⚠️  WARNING: Journal baseDataID (%d) != current file dataID (%d)",
 					journal.dataID, fileObj[0].DataID)
 				t.Logf("    This means journal is based on old dataID, which may cause decryption issues")
 			}
 		} else {
 			t.Logf("  No active journal")
 		}
-		
+
 		// Try to read chunk 1 directly to see what happens
 		t.Logf("  Attempting direct chunk read for debugging...")
 		lh, ok := fs.h.(*core.LocalHandler)
@@ -6668,11 +6673,11 @@ func TestJournalDecryptionErrorOnSecondFlush(t *testing.T) {
 			// Get DataInfo first
 			dataInfo, err := lh.GetDataInfo(fs.c, bktID, fileObj[0].DataID)
 			if err == nil {
-				t.Logf("    DataInfo for direct read: dataID=%d, OrigSize=%d, Size=%d, Kind=0x%x", 
+				t.Logf("    DataInfo for direct read: dataID=%d, OrigSize=%d, Size=%d, Kind=0x%x",
 					dataInfo.ID, dataInfo.OrigSize, dataInfo.Size, dataInfo.Kind)
 				t.Logf("    Encryption key length: %d", len(fs.EndecKey))
 			}
-			
+
 			// Try to read chunk 1 directly (this uses GetData which handles decryption)
 			chunk1Data, err := lh.GetData(fs.c, bktID, fileObj[0].DataID, 1)
 			if err != nil {
@@ -6686,16 +6691,16 @@ func TestJournalDecryptionErrorOnSecondFlush(t *testing.T) {
 				t.Logf("    This means chunk 1 exists and can be decrypted with current key")
 				t.Logf("    The problem must be in how chunkReader accesses the chunk")
 			}
-			
+
 			// Compare with chunkReader approach
 			t.Logf("  Comparing with chunkReader approach...")
-			t.Logf("    chunkReader uses: dataID=%d, kind=0x%x, endecKey length=%d", 
+			t.Logf("    chunkReader uses: dataID=%d, kind=0x%x, endecKey length=%d",
 				fileObj[0].DataID, dataInfo.Kind, len(fs.EndecKey))
 			t.Logf("    Direct read uses: same dataID, same key (via GetData)")
 			t.Logf("    Difference: chunkReader may use different decryption context")
 		}
 	}
-	
+
 	readBuf, err = ra.Read(11513856, readSize)
 	if err != nil {
 		// This is the expected error from the logs: decryption failed
@@ -6703,7 +6708,7 @@ func TestJournalDecryptionErrorOnSecondFlush(t *testing.T) {
 		t.Logf("    Error type: %T", err)
 		t.Logf("    Error message: %v", err)
 		t.Logf("    Error string: %s", err.Error())
-		
+
 		// Check if it's a decryption error
 		errStr := err.Error()
 		if strings.Contains(errStr, "decryption") || strings.Contains(errStr, "authentication") {
@@ -6711,7 +6716,7 @@ func TestJournalDecryptionErrorOnSecondFlush(t *testing.T) {
 			t.Logf("    The error occurs when trying to decrypt chunk 1 (sn=1)")
 			t.Logf("    Chunk 1 should be read from the base dataID created by first flush")
 		}
-		
+
 		t.Errorf("❌ DECRYPTION ERROR REPRODUCED: Failed to read chunk 1 at offset 11513856 after second flush: %v", err)
 		t.Errorf("   This matches the log error: 'decryption failed: cipher: message authentication failed'")
 		t.Errorf("   The issue occurs when generateChunkData tries to read base data from the first flush")
@@ -6737,14 +6742,14 @@ func TestJournalDecryptionErrorOnSecondFlush(t *testing.T) {
 	t.Logf("\n[DEBUG] Reading written region (offset=11571200, size=4096)...")
 	t.Logf("  This region was written in the second write operation")
 	t.Logf("  It should be in chunk 1, overlapping with the first write")
-	
+
 	readBuf, err = ra.Read(11571200, 4096)
 	if err != nil {
 		t.Logf("  ERROR DETAILS:")
 		t.Logf("    Error type: %T", err)
 		t.Logf("    Error message: %v", err)
 		t.Logf("    Error string: %s", err.Error())
-		
+
 		// Check if it's a decryption error
 		errStr := err.Error()
 		if strings.Contains(errStr, "decryption") || strings.Contains(errStr, "authentication") {
@@ -6752,7 +6757,7 @@ func TestJournalDecryptionErrorOnSecondFlush(t *testing.T) {
 			t.Logf("    The error occurs when trying to read the written region")
 			t.Logf("    This region should be readable from journal entries or base data")
 		}
-		
+
 		t.Errorf("Failed to read written region at offset 11571200: %v", err)
 		t.Errorf("   This read should succeed because the data is in journal entries")
 	} else if len(readBuf) != 4096 {
@@ -6808,11 +6813,11 @@ func TestJournalDecryptionErrorOnSecondFlush(t *testing.T) {
 			t.Logf("  [%d/%d] Skipping offset %d (beyond file size)", i+1, len(readOffsets), ro.offset)
 			continue // Skip if offset is beyond file size
 		}
-		
+
 		// Determine which chunk this offset is in
 		chunkIdx := int(ro.offset / fs.chunkSize)
 		t.Logf("  [%d/%d] Reading offset %d, size %d (chunk %d)...", i+1, len(readOffsets), ro.offset, actualSize, chunkIdx)
-		
+
 		readBuf, err = ra.Read(ro.offset, actualSize)
 		if err != nil {
 			t.Logf("    ERROR: %v", err)
@@ -6851,9 +6856,9 @@ func TestJournalDecryptionErrorOnSecondFlush(t *testing.T) {
 
 	// Summary
 	if t.Failed() {
-		t.Logf("\n" + strings.Repeat("=", 80))
+		t.Log("\n" + strings.Repeat("=", 80))
 		t.Logf("❌ TEST SUMMARY: Decryption error reproduced!")
-		t.Logf(strings.Repeat("=", 80))
+		t.Log(strings.Repeat("=", 80))
 		t.Logf("   The issue occurs when:")
 		t.Logf("   1. First flush creates new dataID (e.g., 440782360150016)")
 		t.Logf("   2. Second write at same offset (11571200)")
@@ -6878,12 +6883,12 @@ func TestJournalDecryptionErrorOnSecondFlush(t *testing.T) {
 		t.Logf("\n   NOTE: This test is designed to reproduce a known bug.")
 		t.Logf("   The test failure indicates the bug is still present.")
 		t.Logf("   Once the bug is fixed, this test should pass.")
-		t.Logf(strings.Repeat("=", 80))
+		t.Log(strings.Repeat("=", 80))
 	} else {
-		t.Logf("\n" + strings.Repeat("=", 80))
+		t.Log("\n" + strings.Repeat("=", 80))
 		t.Logf("✓ TEST PASSED: Decryption error test - all reads succeeded after second flush")
 		t.Logf("   This indicates the bug has been fixed!")
-		t.Logf(strings.Repeat("=", 80))
+		t.Log(strings.Repeat("=", 80))
 	}
 }
 
@@ -7185,9 +7190,9 @@ func TestLargeFileSparseUploadChunkedFlushBug(t *testing.T) {
 	// Use smaller values for faster testing but same ratio
 	// Original: sparseSize=1105911484 (~1GB), chunkSize=10MB, 106 chunks
 	// Test: keep sparseSize small to reduce disk usage
-	fs.chunkSize = 10 << 20                  // 10MB chunks
-	sparseSize := int64(32 << 20)            // 32MB
-	memoryLimit := int64(5 << 20)            // 5MB memory limit (triggers faster)
+	fs.chunkSize = 10 << 20       // 10MB chunks
+	sparseSize := int64(32 << 20) // 32MB
+	memoryLimit := int64(5 << 20) // 5MB memory limit (triggers faster)
 	fs.journalMgr.config.MaxMemoryPerJournal = memoryLimit
 	fs.journalMgr.config.EnableMemoryLimit = true
 
@@ -7326,9 +7331,9 @@ func TestLargeFileSparseUploadDirectJournalFlush(t *testing.T) {
 					fmt.Sscanf(err.Error()[idx:], "chunk %d", &missingChunk)
 				}
 
-				t.Logf("\n" + strings.Repeat("=", 80))
+				t.Log("\n" + strings.Repeat("=", 80))
 				t.Logf("✓ Successfully reproduced the bug during journal write!")
-				t.Logf(strings.Repeat("=", 80))
+				t.Log(strings.Repeat("=", 80))
 				t.Logf("Error: failed to read back chunk %d for hashing", missingChunk)
 				t.Logf("")
 				t.Logf("Bug analysis (same as log):")
@@ -7338,7 +7343,7 @@ func TestLargeFileSparseUploadDirectJournalFlush(t *testing.T) {
 				t.Logf("  4. The unmodified chunk copy loop is skipped because j.dataID == 0")
 				t.Logf("  5. Hash calculation tries to read ALL %d chunks", totalChunks)
 				t.Logf("  6. Chunk %d doesn't exist, causing 'no such file or directory' error", missingChunk)
-				t.Logf(strings.Repeat("=", 80))
+				t.Log(strings.Repeat("=", 80))
 
 				t.Errorf("❌ Bug confirmed: flushLargeFileChunked fails for new sparse files")
 				writeErrorOccurred = true
@@ -7473,9 +7478,9 @@ func TestNewSparseFileChunkedFlushWithEncryption(t *testing.T) {
 					fmt.Sscanf(err.Error()[idx:], "chunk %d", &missingChunk)
 				}
 
-				t.Logf("\n" + strings.Repeat("=", 80))
+				t.Log("\n" + strings.Repeat("=", 80))
 				t.Logf("✓ Successfully reproduced bug from log!")
-				t.Logf(strings.Repeat("=", 80))
+				t.Log(strings.Repeat("=", 80))
 				t.Logf("Error: failed to read back chunk %d for hashing", missingChunk)
 				t.Logf("")
 				t.Logf("Context:")
@@ -7487,7 +7492,7 @@ func TestNewSparseFileChunkedFlushWithEncryption(t *testing.T) {
 				t.Logf("This matches the log error:")
 				t.Logf("  [Journal Flush] ERROR: failed to read back chunk 5 for hashing:")
 				t.Logf("  open .../.zima_encrypted_folders/.../dataID_5: no such file or directory")
-				t.Logf(strings.Repeat("=", 80))
+				t.Log(strings.Repeat("=", 80))
 
 				t.Errorf("❌ Bug confirmed: %v", err)
 				return
@@ -7522,7 +7527,7 @@ func TestNewSparseFileChunkedFlushWithEncryption(t *testing.T) {
 }
 
 // TestFlushLargeFileChunkedBugFix is a regression test to ensure the bug stays fixed
-// The bug was in flushLargeFileChunked: when j.dataID == 0 (new sparse file), 
+// The bug was in flushLargeFileChunked: when j.dataID == 0 (new sparse file),
 // unmodified chunks were never written, but hash calculation tried to read ALL chunks
 //
 // Fix applied in journal.go flushLargeFileChunked():
@@ -8266,7 +8271,7 @@ func TestSMBLargeFileUploadLocallyUnorderedGloballyOrdered(t *testing.T) {
 	// Generate deterministic test data for MD5 verification
 	expectedData := make([]byte, sparseSize)
 	for i := range expectedData {
-		expectedData[i] = byte((i * 7 + 13) % 256) // Deterministic pattern
+		expectedData[i] = byte((i*7 + 13) % 256) // Deterministic pattern
 	}
 
 	// Calculate expected MD5
@@ -8501,7 +8506,7 @@ func TestJournalCOWMechanism(t *testing.T) {
 
 	// Now perform small random writes (should trigger COW snapshot, not full flush)
 	// Write only 10KB at offset 500KB (1% modification)
-	smallWriteOffset := int64(500 << 10) // 500KB
+	smallWriteOffset := int64(500 << 10)   // 500KB
 	smallWriteData := make([]byte, 10<<10) // 10KB
 	for i := range smallWriteData {
 		smallWriteData[i] = byte((i + 100) % 256)
@@ -8583,9 +8588,9 @@ func TestJournalCOWWithMultipleSnapshots(t *testing.T) {
 	defer cleanupFS(fs)
 
 	// Configure journal for testing
-	fs.journalMgr.config.SnapshotEntryCount = 3 // Create snapshot after 3 entries
+	fs.journalMgr.config.SnapshotEntryCount = 3         // Create snapshot after 3 entries
 	fs.journalMgr.config.SnapshotMemorySize = 100 << 10 // 100KB
-	fs.journalMgr.config.FullFlushJournalCount = 20 // High threshold to avoid full flush
+	fs.journalMgr.config.FullFlushJournalCount = 20     // High threshold to avoid full flush
 	fs.journalMgr.config.FullFlushTotalEntries = 200
 
 	// Create test file
@@ -8621,7 +8626,7 @@ func TestJournalCOWWithMultipleSnapshots(t *testing.T) {
 	// Perform multiple small writes at different offsets
 	// Each write should potentially create a journal snapshot
 	writeOffsets := []int64{100 << 10, 200 << 10, 300 << 10, 400 << 10} // 100KB, 200KB, 300KB, 400KB
-	writeSize := 1 << 10 // 1KB each
+	writeSize := 1 << 10                                                // 1KB each
 
 	for i, offset := range writeOffsets {
 		writeData := make([]byte, writeSize)

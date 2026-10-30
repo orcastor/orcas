@@ -508,20 +508,6 @@ func (n *OrcasNode) invalidateObj() {
 	n.obj.Store((*core.ObjectInfo)(nil))
 }
 
-// getDirListCacheMutex gets or creates a mutex for a specific directory cache
-// This ensures thread-safe operations on directory listing cache
-func getDirListCacheMutex(dirID int64) *sync.RWMutex {
-	if mu, ok := dirListCacheMu.Load(dirID); ok {
-		return mu.(*sync.RWMutex)
-	}
-	// Create new mutex if not exists
-	mu := &sync.RWMutex{}
-	if actual, loaded := dirListCacheMu.LoadOrStore(dirID, mu); loaded {
-		return actual.(*sync.RWMutex)
-	}
-	return mu
-}
-
 // invalidateDirListCache invalidates directory listing cache for a directory
 // This should be called whenever directory contents change (Create, Mkdir, Unlink, Rmdir, Rename)
 // Cache will be rebuilt on next readdir/list operation
@@ -748,87 +734,12 @@ func (n *OrcasNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut)
 		return nil, syscall.ENOTDIR
 	}
 
-	// Get directory listing with cache and singleflight
-	children, errno := n.getDirListWithCache(obj.ID)
+	matchedChild, errno := n.getChildByName(obj.ID, name)
 	if errno != 0 {
-		DebugLog("[VFS Lookup] ERROR: Failed to get directory listing: parentID=%d, name=%s, errno=%d", n.objID, name, errno)
 		return nil, errno
 	}
 
-	// Find matching child object
-	// If multiple objects with the same name exist (shouldn't happen, but handle it),
-	// prioritize file over directory
-	var matchedChild *core.ObjectInfo
-	var matchedFile *core.ObjectInfo
-	for _, child := range children {
-		if child.Name == name {
-			if child.Type == core.OBJ_TYPE_FILE {
-				// Found a file with matching name, prioritize it
-				matchedFile = child
-				break
-			} else if child.Type == core.OBJ_TYPE_DIR && matchedChild == nil {
-				// Found a directory with matching name, but prefer file if available
-				matchedChild = child
-			}
-		}
-	}
-
-	// Use file if found, otherwise use directory
-	if matchedFile != nil {
-		matchedChild = matchedFile
-	}
-
-	if matchedChild == nil {
-		return nil, syscall.ENOENT
-	}
-
-	// For file objects, always check global fileObjCache first to get latest size
-	// Directory listing cache may have stale size information
 	cacheKey := matchedChild.ID
-	if matchedChild.Type == core.OBJ_TYPE_FILE {
-		if cached, ok := fileObjCache.Get(cacheKey); ok {
-			if cachedObj, ok := cached.(*core.ObjectInfo); ok && cachedObj != nil {
-				// Verify that cached object ID matches
-				if cachedObj.ID == matchedChild.ID {
-					// Use cached object (has latest size from RandomAccessor/Release updates)
-					matchedChild = cachedObj
-					// DebugLog("[VFS Lookup] Using file object from global cache (latest size): objID=%d, size=%d", matchedChild.ID, matchedChild.Size)
-				} else {
-					// Cache has incorrect ID, invalidate it
-					DebugLog("[VFS Lookup] WARNING: Cached object ID mismatch (expected %d, got %d), invalidating cache", matchedChild.ID, cachedObj.ID)
-					fileObjCache.Del(cacheKey)
-				}
-			}
-		} else {
-			// Global cache miss, fetch from database to get latest size
-			objs, err := n.fs.h.Get(n.fs.c, n.fs.bktID, []int64{matchedChild.ID})
-			if err == nil && len(objs) > 0 {
-				matchedChild = objs[0]
-				// Update cache with latest information
-				fileObjCache.Put(cacheKey, matchedChild)
-				// DebugLog("[VFS Lookup] Fetched file object from database (latest size): objID=%d, size=%d", matchedChild.ID, matchedChild.Size)
-			}
-		}
-	} else {
-		// For directories, verify type matches
-		if cached, ok := fileObjCache.Get(cacheKey); ok {
-			if cachedObj, ok := cached.(*core.ObjectInfo); ok && cachedObj != nil {
-				// If cached object type doesn't match, invalidate cache and fetch from database
-				if cachedObj.Type != matchedChild.Type || cachedObj.ID != matchedChild.ID {
-					DebugLog("[VFS Lookup] WARNING: Cached object type mismatch (cached type=%d, list type=%d), invalidating cache: objID=%d", cachedObj.Type, matchedChild.Type, matchedChild.ID)
-					fileObjCache.Del(cacheKey)
-					// Fetch from database to get correct type
-					objs, err := n.fs.h.Get(n.fs.c, n.fs.bktID, []int64{matchedChild.ID})
-					if err == nil && len(objs) > 0 {
-						matchedChild = objs[0]
-						// Update cache with correct type
-						fileObjCache.Put(cacheKey, matchedChild)
-						// DebugLog("[VFS Lookup] Fetched from database and updated cache: objID=%d, type=%d", matchedChild.ID, matchedChild.Type)
-					}
-				}
-			}
-		}
-	}
 
 	// Create child node
 	childNode := &OrcasNode{
@@ -1056,135 +967,17 @@ func (n *OrcasNode) getDirListCacheKey(dirID int64) int64 {
 
 // getDirListWithCache gets directory listing with cache and singleflight
 // Uses singleflight to prevent duplicate concurrent requests for the same directory
-// Thread-safe: uses per-directory mutex to prevent race conditions with cache updates
+// Published snapshots are immutable; callers receive independent object copies.
 // Note: Cache only reads from database, does not merge pending objects
 func (n *OrcasNode) getDirListWithCache(dirID int64) ([]*core.ObjectInfo, syscall.Errno) {
-	// Check cache first (with lock to prevent race conditions with cache updates)
-	cacheKey := n.getDirListCacheKey(dirID)
-	mu := getDirListCacheMutex(cacheKey)
-	mu.RLock()
-	cached, cacheOk := dirListCache.Get(cacheKey)
-	mu.RUnlock()
-
-	if cacheOk {
-		if children, ok := cached.([]*core.ObjectInfo); ok && children != nil {
-			// CRITICAL: Merge with RandomAccessor to get latest data (even from cache)
-			// This ensures that even if cache is valid, we still get the most recent data
-			// from files that are still in memory (RandomAccessor)
-			// Note: Only merge from fileObjCache and RandomAccessor (already flushed to database),
-			// NOT from pending objects (must be flushed to database first)
-			for i, child := range children {
-				var latestFileObj *core.ObjectInfo
-
-				// Priority 1: Check fileObjCache
-				if cached, ok := fileObjCache.Get(child.ID); ok {
-					if fileObj, ok := cached.(*core.ObjectInfo); ok && fileObj != nil && fileObj.DataID > 0 {
-						latestFileObj = fileObj
-					}
-				}
-
-				// Priority 2: Check RandomAccessor registry
-				if latestFileObj == nil {
-					if ra := n.fs.getRandomAccessorByFileID(child.ID); ra != nil {
-						if fileObj, err := ra.getFileObj(); err == nil && fileObj != nil && fileObj.DataID > 0 {
-							latestFileObj = fileObj
-						}
-					}
-				}
-
-				// Update with latest data if found
-				if latestFileObj != nil {
-					children[i].DataID = latestFileObj.DataID
-					children[i].Size = latestFileObj.Size
-					children[i].MTime = latestFileObj.MTime
-				}
-			}
-
-			// DebugLog("[VFS getDirListWithCache] Found in cache: dirID=%d, count=%d", dirID, len(children))
-			return children, 0
-		}
+	snapshot, errno := n.getDirectorySnapshot(dirID)
+	if errno != 0 {
+		return nil, errno
 	}
-
-	// Use singleflight to prevent duplicate concurrent requests
-	// Convert dirID to string for singleflight key
-	key := fmt.Sprintf("%d", dirID)
-	result, err, _ := globalSingleFlight.Do(key, func() (interface{}, error) {
-		// Double-check cache after acquiring singleflight lock
-		if cached, ok := dirListCache.Get(cacheKey); ok {
-			if children, ok := cached.([]*core.ObjectInfo); ok && children != nil {
-				// DebugLog("[VFS getDirListWithCache] Found in cache (after singleflight): dirID=%d, count=%d", dirID, len(children))
-				return children, nil
-			}
-		}
-
-		// List directory contents from database (fetch all pages)
-		// DebugLog("[VFS getDirListWithCache] Querying database: dirID=%d", dirID)
-		children, err := n.fs.listAllObjects(dirID, core.ListOptions{})
-		if err != nil {
-			DebugLog("[VFS getDirListWithCache] ERROR: Failed to list directory: dirID=%d, error=%v", dirID, err)
-			return nil, err
-		}
-
-		// CRITICAL: Merge with fileObjCache and RandomAccessor to get latest data from database
-		// After Flush(), fileObjCache is immediately updated, and database is also updated
-		// We merge fileObjCache data into directory listing to ensure consistency
-		// ALSO: Check RandomAccessor registry for files that are still in memory (even if cache expired)
-		// Note: Only merge from fileObjCache and RandomAccessor (already flushed to database),
-		// NOT from pending objects (must be flushed to database first)
-		for i, child := range children {
-			var latestFileObj *core.ObjectInfo
-
-			// Priority 1: Check fileObjCache (most recent, includes flushed data)
-			if cached, ok := fileObjCache.Get(child.ID); ok {
-				if fileObj, ok := cached.(*core.ObjectInfo); ok && fileObj != nil && fileObj.DataID > 0 {
-					latestFileObj = fileObj
-					// DebugLog("[VFS getDirListWithCache] Found in fileObjCache: dirID=%d, fileID=%d, name=%s, size=%d, dataID=%d",
-					//	dirID, child.ID, child.Name, fileObj.Size, fileObj.DataID)
-				}
-			}
-
-			// Priority 2: Check RandomAccessor registry (for files still in memory, even if cache expired)
-			// This handles the case where fileObjCache expired (30s TTL) but file is still being accessed
-			if latestFileObj == nil {
-				if ra := n.fs.getRandomAccessorByFileID(child.ID); ra != nil {
-					if fileObj, err := ra.getFileObj(); err == nil && fileObj != nil && fileObj.DataID > 0 {
-						latestFileObj = fileObj
-						// DebugLog("[VFS getDirListWithCache] Found in RandomAccessor: dirID=%d, fileID=%d, name=%s, size=%d, dataID=%d",
-						//	dirID, child.ID, child.Name, fileObj.Size, fileObj.DataID)
-					}
-				}
-			}
-
-			// Update with latest data if found
-			if latestFileObj != nil {
-				// Update all relevant fields
-				children[i].DataID = latestFileObj.DataID
-				children[i].Size = latestFileObj.Size
-				children[i].MTime = latestFileObj.MTime
-				// DebugLog("[VFS getDirListWithCache] Merged latest data into dir list: dirID=%d, fileID=%d, name=%s, size=%d, mtime=%d",
-				//	dirID, child.ID, child.Name, latestFileObj.Size, latestFileObj.MTime)
-			}
-		}
-
-		// Cache the result (from database only, no pending objects) with write lock
-		mu := getDirListCacheMutex(cacheKey)
-		mu.Lock()
-		dirListCache.Put(cacheKey, children)
-		mu.Unlock()
-		// DebugLog("[VFS getDirListWithCache] Cached directory listing: dirID=%d, count=%d", dirID, len(children))
-
-		return children, nil
-	})
-
-	if err != nil {
-		return nil, syscall.EIO
+	children := make([]*core.ObjectInfo, len(snapshot.objects))
+	for i := range snapshot.objects {
+		children[i] = n.latestDirectoryObject(&snapshot.objects[i])
 	}
-
-	children, ok := result.([]*core.ObjectInfo)
-	if !ok {
-		return nil, syscall.EIO
-	}
-
 	return children, 0
 }
 
@@ -1249,56 +1042,15 @@ func (n *OrcasNode) getPendingObjectsForDir(dirID int64) []*core.ObjectInfo {
 // preloadChildDirs asynchronously preloads child directories
 // This improves performance when navigating through directory trees
 func (n *OrcasNode) preloadChildDirs(children []*core.ObjectInfo) {
+	// A directory with thousands of children must not spawn thousands of loaders.
 	for _, child := range children {
-		// Only preload directories, not files
 		if child.Type != core.OBJ_TYPE_DIR {
 			continue
 		}
-
-		// Check if already cached
-		cacheKey := child.ID
-		fileObjCache.Put(cacheKey, child)
-
-		dirListCacheKey := n.getDirListCacheKey(child.ID)
-		if _, ok := dirListCache.Get(dirListCacheKey); ok {
-			// Already cached, skip
-			continue
+		fileObjCache.Put(child.ID, child)
+		if _, errno := n.getDirectorySnapshot(child.ID); errno != 0 {
+			DebugLog("[VFS preloadChildDirs] Failed directory %d: %v", child.ID, errno)
 		}
-
-		// Preload directory listing asynchronously
-		// Use singleflight to prevent duplicate requests
-		key := fmt.Sprintf("%d", child.ID)
-		go func(dirID int64, dirListCacheKey int64, key string) {
-			_, err, _ := globalSingleFlight.Do(key, func() (interface{}, error) {
-				// Double-check cache
-				if _, ok := dirListCache.Get(dirListCacheKey); ok {
-					return nil, nil
-				}
-
-				// List directory contents (fetch all pages)
-				// DebugLog("[VFS preloadChildDirs] Preloading directory: dirID=%d", dirID)
-				children, err := n.fs.listAllObjects(dirID, core.ListOptions{})
-				if err != nil {
-					DebugLog("[VFS preloadChildDirs] ERROR: Failed to preload directory: dirID=%d, error=%v", dirID, err)
-					return nil, err
-				}
-
-				// Cache the result
-				dirListCache.Put(dirListCacheKey, children)
-				// DebugLog("[VFS preloadChildDirs] Preloaded directory: dirID=%d, count=%d", dirID, len(children))
-
-				// Cache child objects for GetAttr optimization
-				for _, grandchild := range children {
-					grandchildCacheKey := grandchild.ID
-					fileObjCache.Put(grandchildCacheKey, grandchild)
-				}
-
-				return nil, nil
-			})
-			if err != nil {
-				DebugLog("[VFS preloadChildDirs] ERROR: Singleflight error: dirID=%d, error=%v", dirID, err)
-			}
-		}(child.ID, dirListCacheKey, key)
 	}
 }
 
@@ -1563,7 +1315,7 @@ func (n *OrcasNode) Create(ctx context.Context, name string, flags uint32, mode 
 
 						// Update cache with filtered children (without .tmp files)
 						if len(updatedChildren) != len(cachedList) {
-							dirListCache.Put(parentCacheKey, updatedChildren)
+							dirListCache.Del(parentCacheKey) // Invalidate rather than republish a stale snapshot.
 							DebugLog("[VFS Create] Updated directory cache, removed .tmp files with same name: removedCount=%d", len(cachedList)-len(updatedChildren))
 						}
 					}
@@ -1958,7 +1710,7 @@ func (n *OrcasNode) Create(ctx context.Context, name string, flags uint32, mode 
 
 						// Update cache with filtered children (without .tmp files)
 						if len(updatedChildren) != len(cachedList) {
-							dirListCache.Put(parentCacheKey, updatedChildren)
+							dirListCache.Del(parentCacheKey) // Invalidate rather than republish a stale snapshot.
 							DebugLog("[VFS Create] Updated directory cache, removed .tmp files with same name: removedCount=%d", len(cachedList)-len(updatedChildren))
 						}
 					}
@@ -2044,7 +1796,7 @@ func (n *OrcasNode) Create(ctx context.Context, name string, flags uint32, mode 
 			}
 			// Update directory listing cache with filtered children (directory removed)
 			if len(updatedChildren) != len(children) {
-				dirListCache.Put(parentCacheKey, updatedChildren)
+				dirListCache.Del(parentCacheKey) // Invalidate rather than republish a stale snapshot.
 				DebugLog("[VFS Create] Updated directory listing cache, removed directory with same name: name=%s", name)
 			}
 		}
@@ -5495,33 +5247,17 @@ func buildRenameCandidateNames(name string) []string {
 // findActiveObjectByNamesFromDirCache checks cached directory listing for matching active object names.
 // Returns the first match in candidate order (exact name should be passed first).
 func (n *OrcasNode) findActiveObjectByNamesFromDirCache(parentID int64, candidateNames []string) (int64, *core.ObjectInfo) {
-	if n == nil || n.fs == nil || parentID == 0 || len(candidateNames) == 0 {
+	if n == nil || n.fs == nil || parentID == 0 {
 		return 0, nil
 	}
-	cacheKey := n.getDirListCacheKey(parentID)
-	cached, ok := dirListCache.Get(cacheKey)
+	snapshot, ok := dirListCache.cache.Get(parentID)
 	if !ok {
 		return 0, nil
 	}
-	children, ok := cached.([]*core.ObjectInfo)
-	if !ok || len(children) == 0 {
-		return 0, nil
-	}
-
-	for _, candidateName := range candidateNames {
-		if candidateName == "" {
-			continue
-		}
-		for _, child := range children {
-			if child == nil || child.PID != parentID || child.Name != candidateName {
-				continue
-			}
-			if cachedObjAny, ok := fileObjCache.Get(child.ID); ok {
-				if cachedObj, ok := cachedObjAny.(*core.ObjectInfo); ok && cachedObj != nil {
-					return cachedObj.ID, cachedObj
-				}
-			}
-			return child.ID, child
+	for _, name := range candidateNames {
+		if index, found := snapshot.byName[name]; found && snapshot.objects[index].PID == parentID {
+			object := n.latestDirectoryObject(&snapshot.objects[index])
+			return object.ID, object
 		}
 	}
 	return 0, nil

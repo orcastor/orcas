@@ -369,8 +369,11 @@ func GetMainDBWithKey(basePathOrKey ...interface{}) (*sql.DB, error) {
 	if key != "" {
 		param += "&key=" + key
 	}
-	os.MkdirAll(basePath, 0o766)
-	db, err := sql.Open("sqlite3", filepath.Join(basePath, ".db")+param)
+	dbPath := filepath.Join(basePath, ".db")
+	if err := prepareDatabaseFile(dbPath); err != nil {
+		return nil, err
+	}
+	db, err := sql.Open("sqlite3", dbPath+param)
 	if err != nil {
 		return nil, err
 	}
@@ -444,51 +447,32 @@ func InitDB(basePath, key string) error {
 		return fmt.Errorf("%w: create index ix_acl_bkt_id: %v", ERR_EXEC_DB, err)
 	}
 
-	// Create default admin user if no admin exists
-	initDefaultAdmin(db)
-
-	return nil
+	return initDefaultAdmin(db)
 }
 
-// initDefaultAdmin creates a default admin user if no admin user exists
-func initDefaultAdmin(db *sql.DB) {
-	// Check if any admin user exists
+// initDefaultAdmin requires an explicit bootstrap password on new databases.
+// Existing accounts are never reset by the environment variable.
+func initDefaultAdmin(db *sql.DB) error {
 	var count int64
-	ctx := context.Background()
-	if _, err := b.TableContext(ctx, db, USR_TBL).Select(&count,
-		b.Fields("count(1)"),
-		b.Where(b.Eq("role", ADMIN))); err != nil {
-		return // If query fails, skip creating default admin
+	if err := db.QueryRow(`SELECT count(*) FROM usr WHERE role = ?`, ADMIN).Scan(&count); err != nil {
+		return fmt.Errorf("query administrators: %w", err)
 	}
-
-	// If no admin exists, create default admin user
-	if count == 0 {
-		// Default admin credentials: username "orcas", password "orcas"
-		hashedPwd, err := HashPassword("orcas")
-		if err != nil {
-			return // If password hashing fails, skip creating default admin
-		}
-
-		// Generate a new ID for the admin user
-		adminID := NewID()
-		if adminID <= 0 {
-			return // If ID generation fails, skip creating default admin
-		}
-
-		// Create default admin user
-		adminUser := &UserInfo{
-			ID:     adminID,
-			Role:   ADMIN,
-			Usr:    "orcas",
-			Pwd:    hashedPwd,
-			Name:   "Administrator",
-			Avatar: "",
-		}
-		if _, err = b.TableContext(ctx, db, USR_TBL).Insert(adminUser); err != nil {
-			// If insert fails (e.g., user already exists), ignore the error
-			return
-		}
+	if count > 0 {
+		return nil
 	}
+	password := os.Getenv("ORCAS_ADMIN_PASSWORD")
+	if password == "" {
+		return fmt.Errorf("no administrator exists: set ORCAS_ADMIN_PASSWORD to bootstrap the orcas account")
+	}
+	hashed, err := HashPassword(password)
+	if err != nil {
+		return fmt.Errorf("hash administrator password: %w", err)
+	}
+	user := &UserInfo{ID: NewID(), Role: ADMIN, Usr: "orcas", Pwd: hashed, Name: "Administrator"}
+	if _, err := b.TableContext(context.Background(), db, USR_TBL).Insert(user); err != nil {
+		return fmt.Errorf("create administrator: %w", err)
+	}
+	return nil
 }
 
 // InitBucketDB initializes a bucket database
@@ -593,6 +577,10 @@ func InitBucketDB(dataPath string, bktID int64, key ...string) error {
 	if err != nil {
 		return fmt.Errorf("%w: create index uk_pid_name: %v", ERR_EXEC_DB, err)
 	}
+	if err := ensureObjectIndexes(db); err != nil {
+		return err
+	}
+
 	_, err = db.Exec(`CREATE INDEX IF NOT EXISTS ix_ref ON data (os, h, x, s0, s1, s2, s3)`)
 	if err != nil {
 		return fmt.Errorf("%w: create index ix_ref: %v", ERR_EXEC_DB, err)
@@ -604,6 +592,19 @@ func InitBucketDB(dataPath string, bktID int64, key ...string) error {
 	_, err = db.Exec(`PRAGMA wal_autocheckpoint = 1000`)
 	if err != nil {
 		return fmt.Errorf("%w: set pragma wal_autocheckpoint: %v", ERR_EXEC_DB, err)
+	}
+	return nil
+}
+
+// ensureObjectIndexes also runs when a preexisting bucket pool is first opened.
+func ensureObjectIndexes(db *sql.DB) error {
+	for _, index := range []string{
+		`CREATE INDEX IF NOT EXISTS ix_obj_pid_id ON obj (pid, id)`,
+		`CREATE INDEX IF NOT EXISTS ix_obj_did_pid ON obj (did, pid)`,
+	} {
+		if _, err := db.Exec(index); err != nil {
+			return fmt.Errorf("%w: create object index: %v", ERR_EXEC_DB, err)
+		}
 	}
 	return nil
 }
@@ -1110,22 +1111,15 @@ func (dba *DefaultBaseMetadataAdapter) CheckPermission(c Ctx, bktID int64, uid i
 	}
 	// Note: Don't close the connection, it's from the pool
 
-	var acls []*BucketACL
-	if _, err = b.TableContext(c, db, ACL_TBL).Select(&acls, b.Where(b.Eq("bkt_id", bktID), b.Eq("uid", uid))); err != nil {
-		return false, fmt.Errorf("%w: CheckPermission failed (bktID=%d, uid=%d): %v", ERR_QUERY_DB, bktID, uid, err)
+	var allowed bool
+	err = db.QueryRowContext(c, `SELECT EXISTS (
+        SELECT 1 FROM acl JOIN usr ON usr.id = acl.uid
+        WHERE acl.bkt_id = ? AND acl.uid = ? AND (acl.perm & ?) = ?
+    )`, bktID, uid, action, action).Scan(&allowed)
+	if err != nil {
+		return false, fmt.Errorf("%w: CheckPermission: %v", ERR_QUERY_DB, err)
 	}
-	if len(acls) == 0 {
-		return false, nil
-	}
-
-	// Check if any ACL entry has permission that covers the required action
-	// Permission covers action if (perm & action) == action
-	for _, acl := range acls {
-		if (acl.Perm & action) == action {
-			return true, nil
-		}
-	}
-	return false, nil
+	return allowed, nil
 }
 
 func (dba *DefaultBaseMetadataAdapter) ListACLByUser(c Ctx, uid int64) ([]*BucketACL, error) {
@@ -1155,11 +1149,16 @@ func (dma *DefaultMetadataAdapter) RefData(c Ctx, bktID int64, d []*DataInfo) ([
 	if err != nil {
 		return nil, ERR_OPEN_DB
 	}
-	// Note: Don't close the connection, it's from the pool
+	// SQLite temporary tables belong to a physical connection, not sql.DB.
+	conn, err := db.Conn(c)
+	if err != nil {
+		return nil, fmt.Errorf("%w: acquire RefData connection: %v", ERR_OPEN_DB, err)
+	}
+	defer conn.Close()
 
 	tbl := fmt.Sprintf("tmp_%x", time.Now().UnixNano())
 	// 创建临时表
-	if _, err = db.Exec(`CREATE TEMPORARY TABLE ` + tbl + ` (os BIGINT NOT NULL,
+	if _, err = conn.ExecContext(c, `CREATE TEMPORARY TABLE `+tbl+` (os BIGINT NOT NULL,
 		h BIGINT NOT NULL,
 		x BIGINT NOT NULL,
 		s0 BIGINT NOT NULL,
@@ -1169,9 +1168,14 @@ func (dma *DefaultMetadataAdapter) RefData(c Ctx, bktID int64, d []*DataInfo) ([
 	)`); err != nil {
 		return nil, fmt.Errorf("%w: create temp table: %v", ERR_EXEC_DB, err)
 	}
+	defer func() {
+		cleanup, cancel := context.WithTimeout(context.WithoutCancel(c), 5*time.Second)
+		defer cancel()
+		conn.ExecContext(cleanup, `DROP TABLE IF EXISTS `+tbl)
+	}()
 	// 把待查询数据放到临时表（使用 INSERT OR IGNORE 避免重复数据导致的错误）
 	// DataInfo 中的 HdrXXH3 和 XXH3 已经是 int64 类型，可以直接使用
-	if _, err = b.TableContext(c, db, tbl).InsertIgnore(&d,
+	if _, err = b.TableContext(c, conn, tbl).InsertIgnore(&d,
 		b.Fields("os", "h", "x", "s0", "s1", "s2", "s3")); err != nil {
 		return nil, fmt.Errorf("%w: insert into temp table: %v", ERR_EXEC_DB, err)
 	}
@@ -1186,19 +1190,17 @@ func (dma *DefaultMetadataAdapter) RefData(c Ctx, bktID int64, d []*DataInfo) ([
 		SHA256_3 int64 `borm:"b.s3"`
 	}
 	// 联表查询
-	if _, err = b.TableContext(c, db, `data a, `+tbl+` b`).Select(&refs,
+	if _, err = b.TableContext(c, conn, `data a, `+tbl+` b`).Select(&refs,
 		b.Join(`on a.os=b.os and a.h=b.h and 
 			(b.x=0 or b.s0=0 or (a.x=b.x and a.s0=b.s0 and a.s1=b.s1 and a.s2=b.s2 and a.s3=b.s3))`),
 		b.GroupBy("b.os", "b.h", "b.x", "b.s0", "b.s1", "b.s2", "b.s3")); err != nil {
 		return nil, fmt.Errorf("%w: RefData join query failed (bktID=%d, tempTable=%s): %v", ERR_QUERY_DB, bktID, tbl, err)
 	}
-	// 删除临时表
-	db.Exec(`DROP TABLE ` + tbl)
 
 	// 构造辅助查询map
-	aux := make(map[string]int64, 0)
+	aux := make(map[[7]int64]int64, len(refs)+len(d))
 	for _, ref := range refs {
-		aux[fmt.Sprintf("%d:%d:%d:%d:%d:%d:%d", ref.OrigSize, ref.HdrXXH3, ref.XXH3, ref.SHA256_0, ref.SHA256_1, ref.SHA256_2, ref.SHA256_3)] = ref.ID
+		aux[[7]int64{ref.OrigSize, ref.HdrXXH3, ref.XXH3, ref.SHA256_0, ref.SHA256_1, ref.SHA256_2, ref.SHA256_3}] = ref.ID
 	}
 
 	res := make([]int64, len(d))
@@ -1208,7 +1210,7 @@ func (dma *DefaultMetadataAdapter) RefData(c Ctx, bktID int64, d []*DataInfo) ([
 			continue
 		}
 
-		key := fmt.Sprintf("%d:%d:%d:%d:%d:%d:%d", x.OrigSize, x.HdrXXH3, x.XXH3, x.SHA256_0, x.SHA256_1, x.SHA256_2, x.SHA256_3)
+		key := [7]int64{x.OrigSize, x.HdrXXH3, x.XXH3, x.SHA256_0, x.SHA256_1, x.SHA256_2, x.SHA256_3}
 		if id, ok := aux[key]; ok {
 			// Found in database or current batch
 			if id < 0 {
@@ -1864,10 +1866,26 @@ func orderToBormTag(order string) string {
 		return "s"
 	case "id":
 		return "id"
-	default:
-		// For unknown fields, return as-is (they might be valid borm tags already)
+	case "n", "m", "t", "s":
 		return order
+	default:
+		return "id"
 	}
+}
+
+// Sort fields become SQL identifiers and cannot be bound as query arguments.
+func validateObjectOrder(order string) error {
+	if order == "" {
+		return nil
+	}
+	if order[0] == '+' || order[0] == '-' {
+		order = order[1:]
+	}
+	switch order {
+	case "id", "name", "mtime", "type", "size", "n", "m", "t", "s":
+		return nil
+	}
+	return fmt.Errorf("invalid object sort order")
 }
 
 func toDelim(field string, o *ObjectInfo) string {
@@ -1989,6 +2007,21 @@ func (dma *DefaultMetadataAdapter) ListObj(c Ctx, bktID, pid int64,
 	wd, delim, order string, count int) (o []*ObjectInfo,
 	cnt int64, d string, err error,
 ) {
+	return dma.listObj(c, bktID, pid, wd, delim, order, count, false)
+}
+
+// ListObjPage omits totals for internal callers that only consume the page.
+func (dma *DefaultMetadataAdapter) ListObjPage(c Ctx, bktID, pid int64,
+	wd, delim, order string, count int) ([]*ObjectInfo, int64, string, error) {
+	return dma.listObj(c, bktID, pid, wd, delim, order, count, true)
+}
+
+func (dma *DefaultMetadataAdapter) listObj(c Ctx, bktID, pid int64,
+	wd, delim, order string, count int, skipCount bool) (o []*ObjectInfo,
+	cnt int64, d string, err error) {
+	if err := validateObjectOrder(order); err != nil {
+		return nil, 0, "", err
+	}
 	// Filter out deleted objects (pid >= 0) to ensure we only return active objects
 	// This prevents issues where deleted directories' children might still appear in listings
 	conds := []interface{}{b.Eq("pid", pid), b.Gte("pid", 0)}
@@ -2020,10 +2053,12 @@ func (dma *DefaultMetadataAdapter) ListObj(c Ctx, bktID, pid int64,
 
 	// Count query should use conditions without pagination (delim)
 	// So we need to do count query before adding pagination conditions
-	if _, err = b.TableContext(c, db, OBJ_TBL).Select(&cnt,
-		b.Fields("count(1)"),
-		b.Where(conds...)); err != nil {
-		return nil, 0, "", fmt.Errorf("%w: ListObj count failed (bktID=%d, pid=%d, wd=%s): %v", ERR_QUERY_DB, bktID, pid, wd, err)
+	if !skipCount {
+		if _, err = b.TableContext(c, db, OBJ_TBL).Select(&cnt,
+			b.Fields("count(1)"),
+			b.Where(conds...)); err != nil {
+			return nil, 0, "", fmt.Errorf("%w: ListObj count failed (bktID=%d, pid=%d, wd=%s): %v", ERR_QUERY_DB, bktID, pid, wd, err)
+		}
 	}
 
 	// Build order conditions and add pagination conditions for data query
@@ -2105,11 +2140,21 @@ func (dba *DefaultBaseMetadataAdapter) SetUsr(c Ctx, fields []string, u *UserInf
 	}
 	// Note: Don't close the connection, it's from the pool
 
-	if _, err = b.TableContext(c, db, USR_TBL).Update(&u,
+	if _, err = b.TableContext(c, db, USR_TBL).Update(u,
 		b.Fields(fields...), b.Where(b.Eq("id", u.ID))); err != nil {
 		return fmt.Errorf("%w: SetUsr failed (userID=%d, fields=%v): %v", ERR_EXEC_DB, u.ID, fields, err)
 	}
 	return nil
+}
+
+// UpgradePassword replaces only the hash verified by the login attempt.
+func (dba *DefaultBaseMetadataAdapter) UpgradePassword(c Ctx, uid int64, previous, next string) error {
+	db, err := GetWriteDB(dba.basePath)
+	if err != nil {
+		return err
+	}
+	_, err = db.ExecContext(c, `UPDATE usr SET pwd = ? WHERE id = ? AND pwd = ?`, next, uid, previous)
+	return err
 }
 
 func (dba *DefaultBaseMetadataAdapter) ListUsers(c Ctx) (o []*UserInfo, err error) {
@@ -2140,10 +2185,18 @@ func (dba *DefaultBaseMetadataAdapter) DeleteUser(c Ctx, userID int64) error {
 	}
 	// Note: Don't close the connection, it's from the pool
 
-	if _, err = b.TableContext(c, db, USR_TBL).Delete(b.Where(b.Eq("id", userID))); err != nil {
-		return fmt.Errorf("%w: DeleteUser failed (userID=%d): %v", ERR_EXEC_DB, userID, err)
+	tx, err := db.BeginTx(c, nil)
+	if err != nil {
+		return err
 	}
-	return nil
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(c, `DELETE FROM acl WHERE uid = ?`, userID); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(c, `DELETE FROM usr WHERE id = ?`, userID); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (dba *DefaultBaseMetadataAdapter) PutBkt(c Ctx, o []*BucketInfo) error {
@@ -2664,6 +2717,9 @@ func (dma *DefaultMetadataAdapter) ListDeletedObjs(c Ctx, bktID int64, beforeTim
 }
 
 func (dma *DefaultMetadataAdapter) ListRecycleBin(c Ctx, bktID int64, opt ListOptions) (o []*ObjectInfo, cnt int64, d string, err error) {
+	if err := validateObjectOrder(opt.Order); err != nil {
+		return nil, 0, "", err
+	}
 	bktDirPath := filepath.Join(dma.DefaultDataMetadataAdapter.dataPath, fmt.Sprint(bktID))
 	db, err := GetReadDB(bktDirPath)
 	if err != nil {

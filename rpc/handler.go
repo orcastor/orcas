@@ -1,6 +1,9 @@
 package main
 
 import (
+	"errors"
+	"net/http"
+
 	"github.com/gin-gonic/gin"
 	"github.com/orcastor/orcas/core"
 	"github.com/orcastor/orcas/rpc/middleware"
@@ -15,10 +18,12 @@ func login(ctx *gin.Context) {
 		UserName string `json:"u"`
 		Password string `json:"p"`
 	}
-	ctx.BindJSON(&req)
+	if !bindRequest(ctx, &req) {
+		return
+	}
 	_, u, b, err := hanlder.Login(ctx.Request.Context(), req.UserName, req.Password)
 	if err != nil {
-		util.AbortResponse(ctx, 100, err.Error())
+		util.AbortResponse(ctx, 100, "incorrect username or password")
 		return
 	}
 	token, _, err := middleware.GenerateToken(u.Usr, u.ID, u.Role)
@@ -39,9 +44,15 @@ func list(ctx *gin.Context) {
 		PID   int64 `json:"p,omitempty"`
 		core.ListOptions
 	}
-	ctx.BindJSON(&req)
+	if !bindRequest(ctx, &req) {
+		return
+	}
 	if req.Count == 0 {
 		req.Count = 1000
+	}
+	if req.Count < 0 || req.Count > 1000 {
+		ctx.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"code": 100, "msg": "Count must be between 1 and 1000"})
+		return
 	}
 	o, cnt, delimiter, err := hanlder.List(ctx.Request.Context(), req.BktID, req.PID, req.ListOptions)
 	if err != nil {
@@ -72,7 +83,9 @@ func get(ctx *gin.Context) {
 		BktID int64 `json:"b,omitempty"`
 		ID    int64 `json:"i,omitempty"`
 	}
-	ctx.BindJSON(&req)
+	if !bindRequest(ctx, &req) {
+		return
+	}
 	o, err := hanlder.Get(ctx.Request.Context(), req.BktID, []int64{req.ID})
 	if err != nil {
 		util.AbortResponse(ctx, 100, err.Error())
@@ -91,4 +104,18 @@ func token(ctx *gin.Context) {
 	util.Response(ctx, gin.H{
 		"u": middleware.GetUID(ctx),
 	})
+}
+
+// bindRequest stops processing malformed JSON before any storage operation.
+func bindRequest(c *gin.Context, request interface{}) bool {
+	if err := c.ShouldBindJSON(request); err != nil {
+		status := http.StatusBadRequest
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			status = http.StatusRequestEntityTooLarge
+		}
+		c.AbortWithStatusJSON(status, gin.H{"code": 100, "msg": "Invalid request body"})
+		return false
+	}
+	return true
 }

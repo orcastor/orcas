@@ -86,21 +86,23 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Validate required parameters
-	if cfg.UserName == "" {
-		fmt.Fprintf(os.Stderr, "Error: Username cannot be empty (use -user parameter or configuration file)\n")
-		os.Exit(1)
-	}
-	if cfg.Password == "" {
-		fmt.Fprintf(os.Stderr, "Error: Password cannot be empty (use -pass parameter or configuration file)\n")
-		os.Exit(1)
+	// Explicit no-auth mounts do not need account credentials.
+	if *action != "mount" || (!*noAuth && !cfg.NoAuth) {
+		if cfg.UserName == "" {
+			fmt.Fprintln(os.Stderr, "Error: Username cannot be empty (use -user parameter or configuration file)")
+			os.Exit(1)
+		}
+		if cfg.Password == "" {
+			fmt.Fprintln(os.Stderr, "Error: Password cannot be empty (use -pass parameter or configuration file)")
+			os.Exit(1)
+		}
 	}
 	if *action == "" {
 		fmt.Fprintf(os.Stderr, "Error: Must specify operation type (use -action upload, download, or mount)\n")
 		flag.Usage()
 		os.Exit(1)
 	}
-	if *action != "mount" && *localPath == "" {
+	if (*action == "upload" || *action == "download") && *localPath == "" {
 		fmt.Fprintf(os.Stderr, "Error: Must specify local path (use -local parameter)\n")
 		flag.Usage()
 		os.Exit(1)
@@ -112,22 +114,25 @@ func main() {
 		if *baseDBKey != "" {
 			dbKeyValue = *baseDBKey
 		}
-		core.InitDB(cfg.BasePath, dbKeyValue)
+		if err := core.InitDB(cfg.BasePath, dbKeyValue); err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to initialize database: %v\n", err)
+			os.Exit(1)
+		}
 	}
 
 	// Handle user management and bucket management commands
 	if *action == "add-user" || *action == "update-user" || *action == "delete-user" || *action == "list-users" {
-		handleUserManagement()
+		handleUserManagement(cfg)
 		return
 	}
 	if *action == "create-bucket" || *action == "delete-bucket" || *action == "list-buckets" || *action == "update-bucket" {
-		handleBucketManagement()
+		handleBucketManagement(cfg)
 		return
 	}
 
 	// Handle mount operation
 	if *action == "mount" {
-		handleMount()
+		handleMount(cfg)
 		return
 	}
 
@@ -218,13 +223,8 @@ func main() {
 	}
 }
 
-func handleMount() {
-	// Load configuration
-	cfg, err := loadConfig()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to load configuration: %v\n", err)
-		os.Exit(1)
-	}
+func handleMount(cfg core.Config) {
+	var err error
 
 	// Check if NoAuth is enabled (from command line or config)
 	if *noAuth {
@@ -560,13 +560,7 @@ func readPassword(prompt string) (string, error) {
 	return password, err
 }
 
-func handleUserManagement() {
-	// Load configuration for admin login
-	cfg, err := loadConfig()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to load configuration: %v\n", err)
-		os.Exit(1)
-	}
+func handleUserManagement(cfg core.Config) {
 
 	// Validate admin credentials
 	if cfg.UserName == "" {
@@ -593,7 +587,7 @@ func handleUserManagement() {
 	}
 
 	// Create admin instance
-	admin := core.NewLocalAdmin(".", ".")
+	admin := core.NewLocalAdmin(cfg.BasePath, cfg.DataPath)
 	defer admin.Close()
 
 	// Execute user management command
@@ -705,13 +699,7 @@ func handleUserManagement() {
 	}
 }
 
-func handleBucketManagement() {
-	// Load configuration for admin login
-	cfg, err := loadConfig()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to load configuration: %v\n", err)
-		os.Exit(1)
-	}
+func handleBucketManagement(cfg core.Config) {
 
 	// Validate admin credentials
 	if cfg.UserName == "" {
@@ -738,7 +726,7 @@ func handleBucketManagement() {
 	}
 
 	// Create admin instance
-	admin := core.NewLocalAdmin(".", ".")
+	admin := core.NewLocalAdmin(cfg.BasePath, cfg.DataPath)
 	defer admin.Close()
 
 	// Execute bucket management command
