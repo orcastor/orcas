@@ -15,7 +15,7 @@ ORCAS_ADMIN_PASSWORD=orcas go test -mod=readonly -race -short -count=1 -timeout=
 go test -mod=readonly -race -count=1 -timeout=5m ./core ./rpc/... ./s3/middleware -run '^TestSecurity'
 go test -mod=readonly -race -count=1 -timeout=5m ./core -run '^TestCompression'
 ORCAS_ADMIN_PASSWORD=orcas go test -mod=readonly -race -count=1 -timeout=5m ./vfs \
-  -run '^(TestGetattr|TestLookupReturnsValidLinkCount|TestStatxReportsObjectType|TestQuiesceWrites|TestSetEndecKeySafe|TestHasPendingWriteState|TestGetEndecKeyForFS|TestReleaseChunkBuffer|TestTmpRenameDetection|TestChunkedFileWriterFlushSkips)'
+  -run '^(TestGetattr|TestLookupReturnsValidLinkCount|TestStatxReportsObjectType|TestQuiesceWrites|TestSetEndecKeySafe|TestHasPendingWriteState|TestGetEndecKeyForFS|TestConcurrentEndecKeyReadsAndSwitches|TestReleaseChunkBuffer|TestTmpRenameDetection|TestChunkedFileWriterFlushSkips)'
 
 # Buffered writes, immutable/budgeted caches, journal overlays, and SQLite paging.
 ORCAS_ADMIN_PASSWORD=orcas go test -mod=readonly -race -count=1 -timeout=5m ./util ./core ./s3 ./vfs \
